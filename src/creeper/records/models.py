@@ -15,6 +15,11 @@ class SourceRecord:
     payload: str
     scope: CandidateSourceScope
     source_year: int | None = None
+    record_type: str = ""
+    source_time: str | None = None
+    artifact_ref: str = ""
+    direct_year_mask: int = 0
+    year_hint_mask: int = 0
 
 
 @dataclass(frozen=True)
@@ -24,6 +29,10 @@ class HostObservation:
     locator: str
     scope: CandidateSourceScope
     source_year: int | None = None
+    record_type: str = ""
+    artifact_ref: str = ""
+    direct_year_mask: int = 0
+    year_hint_mask: int = 0
 
 
 @dataclass(frozen=True)
