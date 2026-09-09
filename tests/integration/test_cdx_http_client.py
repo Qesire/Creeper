@@ -8,6 +8,27 @@ from creeper.evidence.providers.cdx import WaybackCDXClient, query_year
 
 
 class WaybackCDXClientTests(unittest.TestCase):
+    def test_empty_resume_key_page_followed_by_complete_empty_page_is_exhaustive(self):
+        responses = [
+            json.dumps([
+                ["timestamp", "original", "statuscode"],
+                ["19970101000000", "http://other.example/", "200"],
+                [],
+                ["resume-token!"]
+            ]).encode(),
+            json.dumps([
+                ["timestamp", "original", "statuscode"],
+            ]).encode(),
+        ]
+
+        def fetch(url, timeout, headers):
+            return responses.pop(0)
+
+        client = WaybackCDXClient(fetch=fetch, max_retries=0)
+        result = query_year("example.com", 1997, client)
+        self.assertEqual(result.state, CDXQueryState.EMPTY_EXHAUSTIVE)
+        self.assertEqual(result.pages_seen, 2)
+
     def test_gzip_http_body_is_decoded_before_json_parsing(self):
         payload = json.dumps([
             ["timestamp", "original", "statuscode"],

@@ -1,10 +1,37 @@
 import unittest
 
-from creeper.evidence.policies import CDXQueryState
+from creeper.evidence.policies import CDXQueryState, EvidenceQueryKey, TemporalScope
 from creeper.evidence.providers.cdx import query_missing_years, query_year
 
 
 class EvidencePolicyTests(unittest.TestCase):
+    def test_completed_second_empty_page_is_exhaustive(self):
+        result = query_year("example.com", 1997, lambda h, y: [([], False), ([], True)])
+        self.assertEqual(result.state, CDXQueryState.EMPTY_EXHAUSTIVE)
+
+    def test_no_page_transport_is_incomplete(self):
+        result = query_year("example.com", 1997, lambda h, y: [])
+        self.assertEqual(result.state, CDXQueryState.INCOMPLETE)
+
+    def test_query_key_normalizes_and_separates_provider_policy(self):
+        scope = TemporalScope(1997, 1997)
+        key = EvidenceQueryKey(" EXAMPLE.COM ", scope, "wayback", "v1")
+        self.assertEqual(key.hostname, "example.com")
+        self.assertNotEqual(key, EvidenceQueryKey("example.com", scope, "arquivo", "v1"))
+
+    def test_multi_year_probe_propagates_provider_and_policy_to_result_keys(self):
+        results = query_missing_years(
+            "example.com",
+            [1997],
+            lambda h, y: [([], True)],
+            provider="wayback",
+            policy_version="v2",
+        )
+        self.assertEqual(
+            results[0].key,
+            EvidenceQueryKey("example.com", TemporalScope(1997, 1997), "wayback", "v2"),
+        )
+
     def test_exact_host_and_exact_year_are_required(self):
         def transport(hostname, year):
             return [

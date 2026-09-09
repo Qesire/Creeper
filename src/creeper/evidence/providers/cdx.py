@@ -21,7 +21,9 @@ from creeper.evidence.limits import RequestRateLimiter
 from creeper.evidence.policies import (
     CDXQueryState,
     EvidenceCapsule,
+    EvidenceQueryKey,
     EvidenceQueryResult,
+    TemporalScope,
     is_year_timestamp,
 )
 
@@ -166,12 +168,19 @@ def query_year(
     normalized = normalize_official(hostname)
     if normalized is None or year < 1996 or year > 2001:
         return EvidenceQueryResult(hostname, year, CDXQueryState.INVALID)
+    key = EvidenceQueryKey(
+        normalized,
+        TemporalScope(year, year),
+        provider,
+        policy_version,
+    )
     pages_seen = records_seen = 0
-    saw_incomplete_page = False
+    last_page_complete: bool | None = None
     try:
         for page, complete in transport(normalized, year):
             pages_seen += 1
             records_seen += len(page)
+            last_page_complete = complete
             for row in page:
                 timestamp = str(row.get("timestamp", ""))
                 original = str(row.get("original", ""))
@@ -196,16 +205,16 @@ def query_year(
                         normalized,
                         year,
                         CDXQueryState.PASS,
+                        key=key,
                         capsule=capsule,
                         pages_seen=pages_seen,
                         records_seen=records_seen,
                     )
-            if not complete:
-                saw_incomplete_page = True
         return EvidenceQueryResult(
             normalized,
             year,
-            CDXQueryState.INCOMPLETE if saw_incomplete_page else CDXQueryState.EMPTY_EXHAUSTIVE,
+            CDXQueryState.EMPTY_EXHAUSTIVE if last_page_complete is True else CDXQueryState.INCOMPLETE,
+            key=key,
             pages_seen=pages_seen,
             records_seen=records_seen,
         )
@@ -214,6 +223,7 @@ def query_year(
             normalized,
             year,
             CDXQueryState.TRANSIENT_ERROR,
+            key=key,
             pages_seen=pages_seen,
             records_seen=records_seen,
             error=str(exc) or type(exc).__name__,
@@ -223,6 +233,7 @@ def query_year(
             normalized,
             year,
             CDXQueryState.INVALID,
+            key=key,
             pages_seen=pages_seen,
             records_seen=records_seen,
             error=str(exc),
@@ -233,6 +244,18 @@ def query_missing_years(
     hostname: str,
     missing_years: Iterable[int],
     transport: Transport,
+    *,
+    provider: str = "cdx",
+    policy_version: str = "cdx-v1",
 ) -> list[EvidenceQueryResult]:
     """Run one exact-year state machine per missing year."""
-    return [query_year(hostname, year, transport) for year in missing_years]
+    return [
+        query_year(
+            hostname,
+            year,
+            transport,
+            provider=provider,
+            policy_version=policy_version,
+        )
+        for year in missing_years
+    ]
