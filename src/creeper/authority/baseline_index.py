@@ -9,7 +9,8 @@ resumed without discarding completed stages.
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
+from itertools import islice
 import sqlite3
 from pathlib import Path
 
@@ -213,6 +214,29 @@ class BaselineIndex:
             for hostname in batch:
                 result[hostname] = (annual.get(hostname, 0), hostname in candidates)
         return result
+
+    def iter_resolve_batches(
+        self,
+        hostnames: Iterable[str],
+        input_batch_size: int = 50_000,
+        chunk_size: int = 900,
+    ) -> Iterator[dict[str, tuple[int, bool]]]:
+        """Resolve a source iterator in bounded input batches.
+
+        Each input batch is materialized only long enough to preserve the
+        existing ``resolve_batch`` semantics. The next source values are not
+        consumed until the current resolved batch has been yielded.
+        """
+        if input_batch_size < 1:
+            raise ValueError("input_batch_size must be positive")
+        source = iter(hostnames)
+        while True:
+            batch = list(islice(source, input_batch_size))
+            if not batch:
+                return
+            resolved = self.resolve_batch(batch, chunk_size=chunk_size)
+            if resolved:
+                yield resolved
 
     def counts(self) -> dict[str, int]:
         return {
