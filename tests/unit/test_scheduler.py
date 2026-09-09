@@ -15,6 +15,7 @@ class SchedulerTests(unittest.TestCase):
             ]
         )
         self.assertEqual([x.source_id for x in decisions], ["fast", "slow", "saturated"])
+        self.assertTrue(all(x.reason == "engineering_only_baseline_external" for x in decisions))
 
     def test_budget_is_finite(self):
         budget = SourceBudget(max_records=2, max_seconds=10)
