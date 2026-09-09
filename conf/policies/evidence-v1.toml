@@ -1,0 +1,4 @@
+version = "evidence-v1"
+identity = "exact-hostname"
+annual_acceptance = "exact-target-year"
+incomplete_queries = "not-accepted"

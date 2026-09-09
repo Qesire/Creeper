@@ -1,0 +1,5 @@
+version = "candidate-scope-v3"
+common_crawl_corpus = "excluded"
+isc_reference = "separate-collection"
+annual_baseline_overlap = "remove-from-active-candidates"
+unparsed_values = "retain-separately"

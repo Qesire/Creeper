@@ -1,0 +1,3 @@
+version = "eed-v1"
+model_source = "equivalent_english_domain_calculator/q2_tld_top_langs.json"
+common_crawl_usage = "tld-weight-model-only"

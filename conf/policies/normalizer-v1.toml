@@ -1,0 +1,5 @@
+version = "official-calculator-regex-v1"
+case_fold = true
+strip_whitespace = true
+schemes_and_paths = "reject"
+identity = "exact-hostname"

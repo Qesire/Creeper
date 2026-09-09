@@ -1,0 +1,8 @@
+version = 1
+revision = 3
+requires-python = ">=3.12"
+
+[[package]]
+name = "creeper"
+version = "2.1.0.dev0"
+source = { editable = "." }

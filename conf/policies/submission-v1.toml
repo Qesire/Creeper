@@ -1,0 +1,3 @@
+version = "submission-v1"
+archive_pattern = "DomainDataCollectionTask_{SubmissionTime}_{Name}.zip"
+contents = ["manifest.json", "evidence.jsonl", "annual/{year}.txt"]

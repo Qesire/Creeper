@@ -1,0 +1,1 @@
+"""Local, bounded source adapters."""

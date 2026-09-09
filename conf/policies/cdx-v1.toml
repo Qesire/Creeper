@@ -1,0 +1,4 @@
+version = "cdx-v1"
+query_mode = "one-exact-hostname-and-year"
+pagination = "complete-before-empty"
+transient_failures = "retryable-not-empty"

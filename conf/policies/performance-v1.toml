@@ -1,0 +1,9 @@
+version = "performance-gate-v1"
+annual_primary_eed_per_day = 250000
+annual_strong_eed_per_day = 500000
+annual_planning_eed_per_day = 1000000
+batch_resolve_min_hosts_per_second = 100000
+conservative_raw_to_eed_weight = 0.56
+default_candidate_sampling_bucket_cap = 32
+candidate_track_is_separate_until_rule_confirmation = true
+eta_metric = "eta_to_next_five_percent"
