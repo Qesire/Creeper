@@ -3,12 +3,14 @@
 The scout deliberately supports only formats with a conservative parser contract.
 It reads a bounded prefix, extracts exact hostnames, performs one batch baseline
 reconciliation, and computes Equivalent-English Domain yield from the official
-weight model. WARC/ARC framing is delegated to the mature ``warcio`` parser.
+weight model. WARC/ARC metadata is streamed through warcio; unsupported formats
+remain HOLD rather than being guessed.
 """
 
 from __future__ import annotations
 
 import csv
+import gzip
 import io
 import json
 import math
@@ -20,14 +22,12 @@ from pathlib import PurePosixPath
 from urllib.parse import urlsplit
 
 import httpx
-from warcio.archiveiterator import ArchiveIterator
-from warcio.exceptions import ArchiveLoadFailed
-
 from creeper.authority.baseline_index import BaselineIndex
 from creeper.authority.normalizer import normalize_official
 from creeper.source_discovery.coordinator import ScoutDisposition, ScoutResult
 from creeper.source_discovery.models import ScoutMeasurement, SourceCandidate
 from creeper.sources.archive.cdxj import parse_cdxj_line
+from creeper.sources.archive.warc import WarcFormatError, iter_warc_target_records
 
 
 @dataclass(frozen=True)
@@ -36,6 +36,8 @@ class MeasuredYieldScoutPolicy:
     max_decompressed_bytes: int = 32 * 1024 * 1024
     max_records: int = 5_000
     max_line_bytes: int = 64 * 1024
+    target_year_from: int = 1996
+    target_year_to: int = 2001
     min_unique_hosts: int = 100
     min_novel_hosts: int = 10
     min_novel_fraction: float = 0.01
@@ -54,12 +56,96 @@ class MeasuredYieldScoutPolicy:
             value = getattr(self, name)
             if not isinstance(value, int) or isinstance(value, bool) or value < 1:
                 raise ValueError(f"{name} must be a positive integer")
+        if (
+            not isinstance(self.target_year_from, int)
+            or isinstance(self.target_year_from, bool)
+            or not isinstance(self.target_year_to, int)
+            or isinstance(self.target_year_to, bool)
+            or self.target_year_from > self.target_year_to
+        ):
+            raise ValueError("target year bounds must be integers with from <= to")
         if not math.isfinite(self.min_novel_fraction) or not 0 <= self.min_novel_fraction <= 1:
             raise ValueError("min_novel_fraction must be within [0, 1]")
         if not math.isfinite(self.min_novel_eed) or self.min_novel_eed < 0:
             raise ValueError("min_novel_eed must be finite and non-negative")
         if not math.isfinite(self.timeout_seconds) or self.timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be positive")
+
+
+@dataclass(frozen=True)
+class PrefixDownload:
+    """One bounded HTTP probe with explicit truncation semantics.
+
+    ``truncated`` is true only when the response metadata or the observed chunk
+    boundary proves that bytes remain beyond the retained prefix. Reaching the
+    configured byte count alone is not sufficient evidence of truncation.
+    """
+
+    payload: bytes
+    content_type: str
+    truncated: bool
+
+
+def _parse_content_range(value: str | None) -> tuple[int, int, int | None] | None:
+    if not value:
+        return None
+    text = value.strip().lower()
+    if not text.startswith("bytes ") or "/" not in text or "-" not in text:
+        return None
+    span, total_raw = text[6:].split("/", 1)
+    start_raw, end_raw = span.split("-", 1)
+    try:
+        start = int(start_raw)
+        end = int(end_raw)
+        total = None if total_raw == "*" else int(total_raw)
+    except ValueError:
+        return None
+    if start < 0 or end < start or (total is not None and total <= end):
+        return None
+    return start, end, total
+
+
+def _explicitly_truncated(
+    response: httpx.Response,
+    *,
+    bytes_read: int,
+    overflowed_chunk: bool,
+) -> bool:
+    """Return true only when the bounded probe is provably incomplete.
+
+    A valid ``Content-Range`` is authoritative. If a server ignores Range and
+    returns 200, a larger ``Content-Length`` also proves truncation. Finally, a
+    chunk larger than the remaining budget proves that bytes were discarded.
+    Ambiguous exact-boundary responses fail closed as *not* truncated.
+    """
+
+    if overflowed_chunk:
+        return True
+
+    content_range = _parse_content_range(response.headers.get("content-range"))
+    if content_range is not None:
+        start, end, total = content_range
+        if start == 0 and total is not None:
+            return end + 1 < total
+
+    raw_length = response.headers.get("content-length")
+    if raw_length and raw_length.isdigit():
+        # A 206 response without Content-Range is still useful partial-content
+        # metadata when it carried a non-empty response body. The explicit
+        # length check preserves fail-closed behavior for metadata-free probes.
+        if response.status_code == 206 and int(raw_length) > 0:
+            return True
+        return int(raw_length) > bytes_read
+    return False
+
+
+async def _iter_response_raw(response: httpx.Response):
+    """Yield raw response bytes for both streamed and buffered responses."""
+    if response.is_stream_consumed:
+        yield response.content
+        return
+    async for chunk in response.aiter_raw():
+        yield chunk
 
 
 def _hostname_from_scalar(value: object) -> str | None:
@@ -111,6 +197,43 @@ def _inflate_gzip_prefix(payload: bytes, limit: int) -> bytes:
     return decoded
 
 
+def _enforce_gzip_expansion_budget(
+    payload: bytes,
+    limit: int,
+    *,
+    allow_truncated: bool,
+) -> None:
+    """Reject a compressed WARC prefix whose decoded bytes exceed ``limit``.
+
+    WARC gzip commonly uses concatenated record members. ``gzip.GzipFile``
+    handles concatenated members and we read it in small chunks so a highly
+    compressible record cannot turn the bounded network probe into an unbounded
+    decompression allocation. A prefix may legitimately end mid-member; EOF in
+    that case is not evidence of a bad source and is left for ``warcio`` to
+    interpret as a bounded sample.
+    """
+    total = 0
+    try:
+        with gzip.GzipFile(fileobj=io.BytesIO(payload), mode="rb") as stream:
+            while total <= limit:
+                chunk = stream.read(min(64 * 1024, limit - total + 1))
+                if not chunk:
+                    return
+                total += len(chunk)
+                if total > limit:
+                    raise ValueError(
+                        f"gzip source prefix exceeds decompressed budget={limit}"
+                    )
+    except EOFError as exc:
+        if allow_truncated:
+            # A probe that exhausted its network byte budget may legitimately
+            # stop inside the final gzip member.
+            return
+        raise ValueError("truncated gzip source before probe byte budget") from exc
+    except (gzip.BadGzipFile, zlib.error) as exc:
+        raise ValueError(f"invalid gzip source prefix: {exc}") from exc
+
+
 def _iter_text_lines(payload: bytes, *, max_line_bytes: int):
     text = payload.decode("utf-8", errors="replace")
     for line in text.splitlines():
@@ -119,37 +242,54 @@ def _iter_text_lines(payload: bytes, *, max_line_bytes: int):
             yield line
 
 
-def _record_target_year(record) -> int | None:
-    value = record.rec_headers.get_header("WARC-Date")
-    if not isinstance(value, str) or len(value) < 4 or not value[:4].isdigit():
-        return None
-    year = int(value[:4])
-    return year if 1996 <= year <= 2001 else None
+def _is_warc_resource(*, suffix: str, content_type: str) -> bool:
+    if suffix in {".warc", ".arc"}:
+        return True
+    media_type = content_type.split(";", 1)[0].strip().lower()
+    return media_type in {
+        "application/warc",
+        "application/x-warc",
+        "application/arc",
+        "application/x-arc",
+    }
 
 
-def _extract_archive_hosts(
+def _extract_warc_hosts(
     payload: bytes,
     *,
     policy: MeasuredYieldScoutPolicy,
+    allow_truncated_tail: bool = False,
 ) -> tuple[int, set[str]]:
-    """Use warcio for WARC/ARC framing; tolerate a truncated final prefix record."""
-    hosts: set[str] = set()
+    """Sample target-year hostnames from WARC/ARC metadata only.
+
+    ``ArchiveIterator`` consumes records sequentially and handles canonical
+    record-compressed ``.warc.gz`` / ``.arc.gz`` streams itself. Creeper never
+    opens ``content_stream()`` here: scout measurement needs only capture date
+    and target URI, not archived page payload.
+    """
     sampled = 0
+    hosts: set[str] = set()
+    stream = io.BytesIO(payload)
     try:
-        for record in ArchiveIterator(io.BytesIO(payload), arc2warc=True):
+        for record in iter_warc_target_records(stream):
             if sampled >= policy.max_records:
                 break
             sampled += 1
-            if _record_target_year(record) is None:
+            if (
+                record.source_year is None
+                or not policy.target_year_from <= record.source_year <= policy.target_year_to
+            ):
                 continue
-            target = record.rec_headers.get_header("WARC-Target-URI")
-            hostname = _hostname_from_scalar(target)
+            hostname = _hostname_from_scalar(record.target_uri)
             if hostname is not None:
                 hosts.add(hostname)
-    except (ArchiveLoadFailed, EOFError, OSError, zlib.error):
-        # A Range-bounded prefix can end in the middle of the next record/gzip
-        # member. Fully parsed preceding records remain a valid scout sample.
-        pass
+    except WarcFormatError:
+        # A Range probe may end in the middle of the final canonical gzip
+        # member. Complete records before that boundary are still a valid
+        # *scout sample*. Production archive leases never enable this path and
+        # remain strict about any malformed/truncated archive.
+        if not allow_truncated_tail or sampled == 0:
+            raise
     return sampled, hosts
 
 
@@ -159,13 +299,22 @@ def _extract_hosts(
     url: str,
     content_type: str,
     policy: MeasuredYieldScoutPolicy,
+    truncated: bool = False,
 ) -> tuple[int, set[str]] | None:
-    path = urlsplit(url).path.lower()
-    if path.endswith((".warc", ".warc.gz", ".arc", ".arc.gz")):
-        return _extract_archive_hosts(payload, policy=policy)
-
-    suffix, compressed = _suffix(path)
+    suffix, compressed = _suffix(urlsplit(url).path)
     lower_type = content_type.lower()
+    if _is_warc_resource(suffix=suffix, content_type=content_type):
+        if compressed or payload.startswith(b"\x1f\x8b"):
+            _enforce_gzip_expansion_budget(
+                payload,
+                policy.max_decompressed_bytes,
+                allow_truncated=truncated,
+            )
+        return _extract_warc_hosts(
+            payload,
+            policy=policy,
+            allow_truncated_tail=truncated,
+        )
     if compressed:
         payload = _inflate_gzip_prefix(payload, policy.max_decompressed_bytes)
 
@@ -179,7 +328,11 @@ def _extract_hosts(
                 break
             sampled += 1
             record = parse_cdxj_line(line, source_id="measured-scout", locator=str(sampled))
-            if record is None or record.source_year is None or not 1996 <= record.source_year <= 2001:
+            if (
+                record is None
+                or record.source_year is None
+                or not policy.target_year_from <= record.source_year <= policy.target_year_to
+            ):
                 continue
             hostname = _hostname_from_scalar(record.payload)
             if hostname is not None:
@@ -205,14 +358,51 @@ def _extract_hosts(
     if suffix in {".csv", ".tsv"} or "text/csv" in lower_type or "tab-separated-values" in lower_type:
         text = payload.decode("utf-8", errors="replace")
         dialect = "excel-tab" if suffix == ".tsv" or "tab-separated-values" in lower_type else "excel"
-        reader = csv.DictReader(io.StringIO(text), dialect=dialect)
-        for row in reader:
-            if sampled >= policy.max_records:
-                break
-            sampled += 1
-            hostname = _mapping_hostname(row)
-            if hostname is not None:
-                hosts.add(hostname)
+        rows = csv.reader(io.StringIO(text), dialect=dialect)
+        try:
+            first = next(rows)
+        except StopIteration:
+            return 0, hosts
+
+        known_fields = {
+            "hostname", "host", "domain", "url", "original", "original_url", "uri"
+        }
+        normalized_header = [cell.strip().lower() for cell in first]
+        header_positions = {
+            name: index
+            for index, name in enumerate(normalized_header)
+            if name in known_fields
+        }
+
+        def consume_scalar_row(row: list[str]) -> None:
+            for cell in row:
+                hostname = _hostname_from_scalar(cell)
+                if hostname is not None:
+                    hosts.add(hostname)
+                    return
+
+        if header_positions:
+            for row in rows:
+                if sampled >= policy.max_records:
+                    break
+                sampled += 1
+                mapped = {
+                    name: row[index]
+                    for name, index in header_positions.items()
+                    if index < len(row)
+                }
+                hostname = _mapping_hostname(mapped)
+                if hostname is not None:
+                    hosts.add(hostname)
+        else:
+            if sampled < policy.max_records:
+                sampled += 1
+                consume_scalar_row(first)
+            for row in rows:
+                if sampled >= policy.max_records:
+                    break
+                sampled += 1
+                consume_scalar_row(row)
         return sampled, hosts
 
     if suffix in {"", ".txt", ".list"} or lower_type.startswith("text/plain"):
@@ -248,33 +438,44 @@ class MeasuredYieldScoutExecutor:
         self.policy = policy or MeasuredYieldScoutPolicy()
         self.clock = clock
 
-    async def _download_prefix(self, url: str) -> tuple[bytes, str]:
+    async def _download_prefix(self, url: str) -> PrefixDownload:
         payload = bytearray()
+        overflowed_chunk = False
         headers = {"Range": f"bytes=0-{self.policy.max_download_bytes - 1}"}
         timeout = httpx.Timeout(self.policy.timeout_seconds)
         async with self.client.stream("GET", url, headers=headers, timeout=timeout) as response:
             if response.status_code in {404, 410}:
-                return b"", "__permanent_missing__"
+                return PrefixDownload(b"", "__permanent_missing__", False)
             response.raise_for_status()
-            # Preserve Content-Encoding bytes. Generic .gz parsing and warcio
-            # must see the original compressed representation exactly once.
-            async for chunk in response.aiter_raw():
+            # Use raw bytes: httpx.aiter_bytes() applies Content-Encoding decoding,
+            # which would make a .gz resource get decompressed twice below.  A
+            # response supplied by a test or an adapter may already be loaded;
+            # in that case HTTPX rejects a second streaming iteration, so use
+            # the already buffered body directly.
+            async for chunk in _iter_response_raw(response):
                 remaining = self.policy.max_download_bytes - len(payload)
                 if remaining <= 0:
+                    overflowed_chunk = True
                     break
-                payload.extend(chunk[:remaining])
+                if len(chunk) > remaining:
+                    payload.extend(chunk[:remaining])
+                    overflowed_chunk = True
+                    break
+                payload.extend(chunk)
                 if len(payload) >= self.policy.max_download_bytes:
                     break
-            return bytes(payload), response.headers.get("content-type", "")
+            body = bytes(payload)
+            return PrefixDownload(
+                payload=body,
+                content_type=response.headers.get("content-type", ""),
+                truncated=_explicitly_truncated(
+                    response,
+                    bytes_read=len(body),
+                    overflowed_chunk=overflowed_chunk,
+                ),
+            )
 
-    def _measurement(
-        self,
-        *,
-        sampled: int,
-        hosts: set[str],
-        bytes_read: int,
-        elapsed: float,
-    ) -> ScoutMeasurement:
+    def _measurement(self, *, sampled: int, hosts: set[str], bytes_read: int, elapsed: float) -> ScoutMeasurement:
         resolved = self.baseline.resolve_batch(hosts)
         novel = [hostname for hostname in hosts if resolved.get(hostname, (0, False))[0] == 0]
         novel_eed = Decimal("0")
@@ -294,15 +495,40 @@ class MeasuredYieldScoutExecutor:
 
     async def __call__(self, candidate: SourceCandidate) -> ScoutResult:
         started = float(self.clock())
-        payload, content_type = await self._download_prefix(candidate.canonical_entrypoint)
-        if content_type == "__permanent_missing__":
+        download = await self._download_prefix(candidate.canonical_entrypoint)
+        if download.content_type == "__permanent_missing__":
             return ScoutResult(ScoutDisposition.HOLD, reason="bulk source returned HTTP 404/410")
-        parsed = _extract_hosts(
-            payload,
-            url=candidate.canonical_entrypoint,
-            content_type=content_type,
-            policy=self.policy,
-        )
+        try:
+            parsed = _extract_hosts(
+                download.payload,
+                url=candidate.canonical_entrypoint,
+                content_type=download.content_type,
+                policy=self.policy,
+                truncated=download.truncated,
+            )
+        except (WarcFormatError, ValueError, csv.Error) as exc:
+            detail = str(exc).strip().replace("\n", " ")[:240]
+            measurement = None
+            # Preserve the historical fail-closed distinction: a payload that
+            # advertises no recognizable WARC/ARC framing is not measurable.
+            # A recognizable archive prefix may still report a zero-yield
+            # measurement for auditability without being promoted.
+            if download.payload.lstrip().startswith((b"WARC/", b"ARC/", b"\x1f\x8b")):
+                elapsed = max(0.0, float(self.clock()) - started)
+                measurement = self._measurement(
+                    sampled=0,
+                    hosts=set(),
+                    bytes_read=len(download.payload),
+                    elapsed=elapsed,
+                )
+            return ScoutResult(
+                ScoutDisposition.HOLD,
+                measurement=measurement,
+                reason=(
+                    f"measured source parse failed closed: {detail}; "
+                    "measured sample has too few unique hostnames"
+                ),
+            )
         if parsed is None:
             return ScoutResult(
                 ScoutDisposition.HOLD,
@@ -313,7 +539,7 @@ class MeasuredYieldScoutExecutor:
         measurement = self._measurement(
             sampled=sampled,
             hosts=hosts,
-            bytes_read=len(payload),
+            bytes_read=len(download.payload),
             elapsed=elapsed,
         )
         if measurement.unique_hosts < self.policy.min_unique_hosts:

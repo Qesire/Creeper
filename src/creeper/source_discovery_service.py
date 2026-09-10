@@ -42,6 +42,7 @@ from creeper.source_discovery.scrapy_scout import (
 from creeper.source_discovery.scrapy_sidecar import ScrapyScoutLauncher
 from creeper.source_discovery.triage import HttpSourceTriageExecutor, HttpTriagePolicy
 from creeper.storage.control_store import ControlStore
+from creeper.runtime.http import configured_http_proxy
 
 
 @dataclass(frozen=True)
@@ -352,6 +353,8 @@ async def _open_runtime(config: SourceDiscoveryServiceConfig):
             async with httpx.AsyncClient(
                 limits=limits,
                 headers={"User-Agent": "Creeper-source-discovery/2.2"},
+                proxy=configured_http_proxy(),
+                trust_env=False,
             ) as client:
                 triage = HttpSourceTriageExecutor(client, policy=config.triage)
                 launcher = ScrapyScoutLauncher(config.scrapy_project_dir)

@@ -29,6 +29,7 @@ from creeper.evidence.policies import (
     is_year_timestamp,
 )
 from creeper.evidence.providers.cdx import Page, WaybackCDXClient, _exact_hostname
+from creeper.runtime.http import configured_http_proxy
 
 
 def _retryable_http_error(exc: BaseException) -> bool:
@@ -93,7 +94,7 @@ class AsyncWaybackCDXClient:
             else None
         )
         self._owns_client = client is None
-        self.client = client or httpx.AsyncClient(
+        client_options = dict(
             timeout=httpx.Timeout(timeout),
             limits=httpx.Limits(
                 max_connections=max_connections,
@@ -105,8 +106,12 @@ class AsyncWaybackCDXClient:
                 "Accept-Encoding": "gzip, deflate",
             },
             follow_redirects=True,
+            trust_env=False,
             transport=transport,
         )
+        if transport is None:
+            client_options["proxy"] = configured_http_proxy()
+        self.client = client or httpx.AsyncClient(**client_options)
 
     async def __aenter__(self) -> "AsyncWaybackCDXClient":
         return self

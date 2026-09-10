@@ -43,7 +43,7 @@ follow_query = false
 # Remove this whole table to keep concrete sources in HOLD until a measured adapter exists.
 baseline_index = "/path/to/Creeper-data/v3-merged260909-3/baseline.sqlite3"
 eed_model = "/path/to/task-root/equivalent_english_domain/CC-MAIN-2024-10_primary_page_language_percentage.json"
-# Only a bounded prefix is fetched; unknown/WARC formats remain HOLD.
+# Only a bounded prefix is fetched; WARC/ARC use warcio; unsupported formats remain HOLD.
 max_download_bytes = 8388608
 max_decompressed_bytes = 33554432
 max_records = 5000
