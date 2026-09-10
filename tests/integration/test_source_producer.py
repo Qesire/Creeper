@@ -51,7 +51,7 @@ class SourceProducerTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
         task_root = self.root / "task"
-        baseline_root = task_root / "baseline-test"
+        baseline_root = task_root / "merged260909-3"
         baseline_root.mkdir(parents=True)
         for year in range(1996, 2002):
             (baseline_root / f"{year}.txt").write_text("", encoding="utf-8")
