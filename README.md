@@ -1,4 +1,4 @@
-# Creeper V2.1
+# Creeper V2.2 Runtime Foundation
 
 This tree is a local, reproducible implementation scaffold for the V3
 historical Web hostname competition package.
@@ -11,6 +11,8 @@ supports:
 - a year-aware SQLite baseline index with resumable imports;
 - V3 candidate-source provenance and Common Crawl corpus exclusion;
 - exact-host, exact-year CDX evidence acceptance states; and
+- durable `SourceDomain → Reservoir → WorkLease` progress with byte cursors,
+  bounded evidence draining, and restart recovery;
 - immutable submission zip export with evidence provenance.
 
 The fixed Common Crawl TLD model remains available to EED calculation only.
@@ -24,6 +26,7 @@ PYTHONPATH=src python3 scripts/authority_manifest.py <task-root> <manifest.json>
 PYTHONPATH=src python3 scripts/official_eed.py <annual.txt> <q2_tld_top_langs.json> <out-dir>
 PYTHONPATH=src python3 scripts/build_baseline.py <task-root> <index.sqlite3>
 PYTHONPATH=src python3 -m creeper.cli doctor <task-root> <data-root>
+PYTHONPATH=src python3 -m creeper.cli run --once conf/creeper.example.toml
 PYTHONPATH=src python3 scripts/run_evidence_pilot.py <task-root> <index.sqlite3> <report-dir> --limit 3 --year 1997 --requests-per-second 1
 PYTHONPATH=src python3 scripts/run_offline_dry_run.py <task-root> <index.sqlite3> <report-dir> --documentation <methods.docx>
 PYTHONPATH=src python3 scripts/run_lookup_bench.py <task-root> <index.sqlite3> <report.json> --limit 100000
@@ -40,6 +43,13 @@ The real-network pilot is intentionally bounded and single-worker. It records
 synthetic dry-run evidence is never treated as an official competition result.
 The pilot writes a JSONL checkpoint and can resume terminal tasks without
 repeating HTTP requests; transient and incomplete tasks remain retryable.
+
+`run --once` is currently an offline, synchronous production-contract test.
+Each invocation claims one fresh bounded lease, advances the durable Reservoir
+cursor, and never resets an exhausted source. An optional `[submission]` table
+can load local baseline-manifest and EED-report JSON files so the command also
+reports `snapshot_ready` and the current novel-record count; it does not create
+or upload a competition package.
 
 ## Competition throughput gates
 

@@ -91,6 +91,45 @@ evidence_capacity = 1
         finally:
             control.close()
 
+    def test_run_once_loads_optional_submission_context(self):
+        root, config = self._workspace()
+        (root / "baseline-manifest.json").write_text(
+            json.dumps({
+                "baseline_id": "merged260909-3",
+                "annual_file_hashes": {
+                    f"{year}.txt": "a" * 64 for year in range(1996, 2002)
+                },
+            }),
+            encoding="utf-8",
+        )
+        (root / "eed-report.json").write_text(
+            json.dumps({"equivalent_english_domains": "0"}),
+            encoding="utf-8",
+        )
+        with config.open("a", encoding="utf-8") as target:
+            target.write(
+                """
+
+[submission]
+snapshot_id = "offline-1"
+baseline_manifest = "baseline-manifest.json"
+code_revision = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+source_report_set = ["source-report.json"]
+cdx_audit_set = ["cdx-audit.json"]
+eed_report = "eed-report.json"
+novel_eed = "0"
+growth_rate = "0"
+"""
+            )
+
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            self.assertEqual(main(["run", "--once", str(config)]), 0)
+
+        report = json.loads(output.getvalue())
+        self.assertIs(report["snapshot_ready"], True)
+        self.assertEqual(report["novel_records"], 0)
+
     def test_run_once_rejects_non_positive_queue_limit(self):
         _root, config = self._workspace()
         text = config.read_text(encoding="utf-8").replace(

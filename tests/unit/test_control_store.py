@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 
 from creeper.evidence.policies import (
@@ -254,6 +255,95 @@ class ControlStoreTests(unittest.TestCase):
             self.assertEqual(
                 store.get_reservoir(ready.reservoir_id).state,
                 ReservoirState.LEASED,
+            )
+            store.close()
+
+    def test_finalize_lease_atomically_advances_reservoir_progress(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ControlStore(Path(tmp) / "control.sqlite3")
+            ready = self._ready_reservoir(cursor="128")
+            store.save_domain(self._domain())
+            store.save_reservoir(ready)
+            granted = store.grant_fresh_lease(
+                ready.reservoir_id,
+                owner="worker-a",
+                now=100.0,
+                **self._lease_limits(),
+            )
+            running = granted.start()
+            store.save_lease(running)
+
+            store.finalize_lease(running, next_cursor="256", exhausted=False)
+
+            self.assertEqual(
+                store.get_lease(running.lease_id).state,
+                LeaseState.SUCCEEDED,
+            )
+            advanced = store.get_reservoir(ready.reservoir_id)
+            self.assertEqual(
+                (advanced.state, advanced.cursor),
+                (ReservoirState.READY, "256"),
+            )
+            store.close()
+
+    def test_finalize_lease_wrong_owner_rolls_back_both_rows(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ControlStore(Path(tmp) / "control.sqlite3")
+            ready = self._ready_reservoir(cursor="128")
+            store.save_domain(self._domain())
+            store.save_reservoir(ready)
+            granted = store.grant_fresh_lease(
+                ready.reservoir_id,
+                owner="worker-a",
+                now=100.0,
+                **self._lease_limits(),
+            )
+            running = granted.start()
+            store.save_lease(running)
+
+            with self.assertRaises(ValueError):
+                store.finalize_lease(
+                    replace(running, owner="worker-b"),
+                    next_cursor="256",
+                    exhausted=False,
+                )
+
+            self.assertEqual(
+                store.get_lease(running.lease_id).state,
+                LeaseState.RUNNING,
+            )
+            unchanged = store.get_reservoir(ready.reservoir_id)
+            self.assertEqual(
+                (unchanged.state, unchanged.cursor),
+                (ReservoirState.LEASED, "128"),
+            )
+            store.close()
+
+    def test_abort_lease_restores_original_cursor(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ControlStore(Path(tmp) / "control.sqlite3")
+            ready = self._ready_reservoir(cursor="128")
+            store.save_domain(self._domain())
+            store.save_reservoir(ready)
+            granted = store.grant_fresh_lease(
+                ready.reservoir_id,
+                owner="worker-a",
+                now=100.0,
+                **self._lease_limits(),
+            )
+            running = granted.start()
+            store.save_lease(running)
+
+            store.abort_lease(running)
+
+            self.assertEqual(
+                store.get_lease(running.lease_id).state,
+                LeaseState.ABORTED,
+            )
+            restored = store.get_reservoir(ready.reservoir_id)
+            self.assertEqual(
+                (restored.state, restored.cursor),
+                (ReservoirState.READY, "128"),
             )
             store.close()
 

@@ -112,6 +112,14 @@ class EvidenceStore:
         ).fetchall()
         return [EvidenceCapsule(**dict(row)) for row in rows]
 
+    def all_capsules(self) -> list[EvidenceCapsule]:
+        """Return every persisted capsule in a stable, reproducible order."""
+        rows = self.connection.execute(
+            "SELECT * FROM evidence_capsules "
+            "ORDER BY hostname, year, provider, payload_hash, policy_version"
+        ).fetchall()
+        return [EvidenceCapsule(**dict(row)) for row in rows]
+
     def resolve_year_masks(
         self, hostnames: Iterable[str], chunk_size: int = 900
     ) -> dict[str, int]:

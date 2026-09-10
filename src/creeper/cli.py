@@ -14,6 +14,7 @@ from creeper.authority.manifest import build_manifest
 from creeper.evidence.providers.cdx import WaybackCDXClient, query_year
 from creeper.runtime.doctor import run_doctor
 from creeper.runtime.pipeline import SyncRuntime
+from creeper.runtime.submission import RuntimeSubmissionContext
 from creeper.scheduler.credits import CreditLedger
 from creeper.scheduler.global_scheduler import GlobalScheduler
 from creeper.scheduler.priority import LeaseCandidate, ResourceCost
@@ -44,7 +45,29 @@ def _positive_float(value: object, name: str) -> float:
     return float(value)
 
 
-def _run_once(config_path: Path) -> dict[str, int]:
+def _nonempty_string(value: object, name: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{name} must be a non-empty string")
+    return value
+
+
+def _string_tuple(value: object, name: str) -> tuple[str, ...]:
+    if not isinstance(value, list) or any(
+        not isinstance(item, str) or not item.strip() for item in value
+    ):
+        raise ValueError(f"{name} must be a list of non-empty strings")
+    return tuple(value)
+
+
+def _json_object(path: Path, name: str) -> dict[str, object]:
+    with path.open(encoding="utf-8") as source:
+        value = json.load(source)
+    if not isinstance(value, dict):
+        raise ValueError(f"{name} must contain a JSON object")
+    return value
+
+
+def _run_once(config_path: Path) -> dict[str, object]:
     with config_path.open("rb") as source:
         config = tomllib.load(source)
     limits = config.get("limits")
@@ -82,6 +105,43 @@ def _run_once(config_path: Path) -> dict[str, int]:
         raise ValueError("local static source_id and reservoir_id must match")
     if isinstance(source_year, bool) or not isinstance(source_year, int) or not 1996 <= source_year <= 2001:
         raise ValueError("source_year must be between 1996 and 2001")
+
+    submission_context = None
+    snapshot_id = "runtime-snapshot"
+    submission = config.get("submission")
+    if submission is not None:
+        if not isinstance(submission, dict):
+            raise ValueError("submission must be a table")
+        snapshot_id = _nonempty_string(submission.get("snapshot_id"), "snapshot_id")
+        manifest_path = _path(
+            submission.get("baseline_manifest"),
+            config_path=config_path,
+            name="baseline_manifest",
+        )
+        eed_report_path = _path(
+            submission.get("eed_report"),
+            config_path=config_path,
+            name="eed_report",
+        )
+        submission_context = RuntimeSubmissionContext(
+            baseline_manifest=_json_object(manifest_path, "baseline_manifest"),
+            code_revision=_nonempty_string(
+                submission.get("code_revision"), "code_revision"
+            ),
+            source_report_set=_string_tuple(
+                submission.get("source_report_set"), "source_report_set"
+            ),
+            cdx_audit_set=_string_tuple(
+                submission.get("cdx_audit_set"), "cdx_audit_set"
+            ),
+            eed_report=_json_object(eed_report_path, "eed_report"),
+            novel_eed=_nonempty_string(
+                submission.get("novel_eed", "0"), "novel_eed"
+            ),
+            growth_rate=_nonempty_string(
+                submission.get("growth_rate", "0"), "growth_rate"
+            ),
+        )
 
     baseline = BaselineIndex(baseline_path)
     control = ControlStore(runtime_root / "control.sqlite3")
@@ -151,6 +211,8 @@ def _run_once(config_path: Path) -> dict[str, int]:
             evidence_transport=local_empty_transport,
             queue_capacities=queue_capacities,
             evidence_provider="wayback",
+            submission_context=submission_context,
+            snapshot_id=snapshot_id,
         )
         return runtime.run_once().as_dict()
     finally:

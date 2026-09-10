@@ -19,3 +19,16 @@ lease_max_requests = 1000
 lease_max_bytes = 10485760
 lease_max_seconds = 300
 evidence_capacity = 1000
+
+# Optional offline submission-readiness reporting. Paths are relative to this
+# configuration file unless absolute. Uncomment only when these audit assets
+# exist.
+# [submission]
+# snapshot_id = "offline-runtime-1"
+# baseline_manifest = "reports/baseline-manifest.json"
+# code_revision = "<git-commit>"
+# source_report_set = ["source-report.json"]
+# cdx_audit_set = ["cdx-audit.json"]
+# eed_report = "reports/eed-report.json"
+# novel_eed = "0"
+# growth_rate = "0"

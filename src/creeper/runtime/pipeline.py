@@ -18,6 +18,7 @@ from creeper.evidence.policies import EvidenceQueryKey
 from creeper.evidence.providers.cdx import Transport, query_year
 from creeper.records.models import HostObservation, SourceRecord
 from creeper.runtime.queues import BoundedQueues
+from creeper.runtime.submission import RuntimeSubmissionContext, build_runtime_snapshot
 from creeper.scheduler.global_scheduler import GlobalScheduler
 from creeper.scheduler.leases import WorkLease
 from creeper.scheduler.priority import LeaseCandidate
@@ -36,12 +37,14 @@ class SyncRuntimeReport:
     evidence_tasks_enqueued: int = 0
     evidence_tasks_completed: int = 0
     evidence_capsules_committed: int = 0
+    snapshot_ready: bool | None = None
+    novel_records: int = 0
     max_source_record_queue_depth: int = 0
     max_observation_queue_depth: int = 0
     max_evidence_queue_depth: int = 0
     max_commit_queue_depth: int = 0
 
-    def as_dict(self) -> dict[str, int]:
+    def as_dict(self) -> dict[str, object]:
         return self.__dict__.copy()
 
 
@@ -63,6 +66,8 @@ class SyncRuntime:
         evidence_policy_version: str = "cdx-v1",
         owner: str = "sync-runtime",
         baseline_batch_size: int = 50_000,
+        submission_context: RuntimeSubmissionContext | None = None,
+        snapshot_id: str = "runtime-snapshot",
     ) -> None:
         if baseline_batch_size < 1:
             raise ValueError("baseline_batch_size must be positive")
@@ -79,6 +84,10 @@ class SyncRuntime:
         self.owner = owner
         self.baseline_batch_size = baseline_batch_size
         self.evidence_planner = EvidencePlanner()
+        self.submission_context = submission_context
+        if not isinstance(snapshot_id, str) or not snapshot_id.strip():
+            raise ValueError("snapshot_id must be a non-empty string")
+        self.snapshot_id = snapshot_id
 
     def _adapter_for(self, candidate: LeaseCandidate) -> object:
         if candidate.reservoir is None:
@@ -252,6 +261,17 @@ class SyncRuntime:
                 next_cursor=result.next_cursor,
                 exhausted=result.next_cursor is None,
             )
+            snapshot_ready: bool | None = None
+            novel_records = 0
+            if self.submission_context is not None:
+                snapshot = build_runtime_snapshot(
+                    context=self.submission_context,
+                    evidence_store=self.evidence_store,
+                    baseline=self.baseline,
+                    snapshot_id=self.snapshot_id,
+                )
+                snapshot_ready = snapshot.ready
+                novel_records = len(snapshot.novel_records)
             return SyncRuntimeReport(
                 leases_succeeded=1,
                 source_records=source_records,
@@ -259,6 +279,8 @@ class SyncRuntime:
                 evidence_tasks_enqueued=enqueued,
                 evidence_tasks_completed=completed,
                 evidence_capsules_committed=capsules,
+                snapshot_ready=snapshot_ready,
+                novel_records=novel_records,
                 max_source_record_queue_depth=max_source,
                 max_observation_queue_depth=max_observations,
                 max_evidence_queue_depth=max_evidence,
