@@ -2,10 +2,9 @@ name: CI
 
 on:
   push:
-  pull_request:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   test:
@@ -27,6 +26,20 @@ jobs:
         uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
+
+      - name: Resolve root lock with uv
+        run: uv lock
+
+      - name: Persist generated lock on probe branch
+        shell: bash
+        run: |
+          if [[ -n "$(git status --porcelain -- uv.lock)" ]]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add uv.lock
+            git commit -m "probe(deps): materialize warcio uv lock"
+            git push
+          fi
 
       - name: Sync locked environment
         run: uv sync --all-groups --locked
