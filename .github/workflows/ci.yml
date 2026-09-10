@@ -39,3 +39,33 @@ jobs:
 
       - name: Check patch whitespace
         run: git diff --check
+
+  scrapy-sidecar:
+    name: Scrapy acquisition sidecar
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: tools/scrapy_acquisition
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Sync isolated locked environment
+        run: uv sync --locked
+
+      - name: Run sidecar tests
+        run: uv run python -m unittest discover -s tests -v
+
+      - name: Verify Scrapy project settings
+        run: uv run scrapy settings --get BOT_NAME
