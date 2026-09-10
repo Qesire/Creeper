@@ -1,5 +1,11 @@
 """Durable source-discovery control plane."""
 
+from creeper.source_discovery.admission import SearchAdmissionPolicy
+from creeper.source_discovery.agent_search import (
+    CommandAgentSearchExecutor,
+    CommandAgentSearchPolicy,
+    SearchAgentProtocolError,
+)
 from creeper.source_discovery.coordinator import (
     CoordinatorBusyError,
     CoordinatorCycleReport,
@@ -58,6 +64,8 @@ from creeper.source_discovery.triage import (
 )
 
 __all__ = [
+    "CommandAgentSearchExecutor",
+    "CommandAgentSearchPolicy",
     "CoordinatorBusyError",
     "CoordinatorCycleReport",
     "ExpansionResult",
@@ -77,6 +85,8 @@ __all__ = [
     "ScrapyScoutSpec",
     "ScrapyStructuralScoutExecutor",
     "ScrapyStructuralScoutPolicy",
+    "SearchAdmissionPolicy",
+    "SearchAgentProtocolError",
     "SearchBatch",
     "SearchDirective",
     "SearchDirectiveKind",
