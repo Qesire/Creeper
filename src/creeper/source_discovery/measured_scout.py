@@ -3,7 +3,7 @@
 The scout deliberately supports only formats with a conservative parser contract.
 It reads a bounded prefix, extracts exact hostnames, performs one batch baseline
 reconciliation, and computes Equivalent-English Domain yield from the official
-weight model. Unsupported archive formats remain HOLD rather than being guessed.
+weight model. WARC/ARC framing is delegated to the mature ``warcio`` parser.
 """
 
 from __future__ import annotations
@@ -20,6 +20,8 @@ from pathlib import PurePosixPath
 from urllib.parse import urlsplit
 
 import httpx
+from warcio.archiveiterator import ArchiveIterator
+from warcio.exceptions import ArchiveLoadFailed
 
 from creeper.authority.baseline_index import BaselineIndex
 from creeper.authority.normalizer import normalize_official
@@ -117,6 +119,40 @@ def _iter_text_lines(payload: bytes, *, max_line_bytes: int):
             yield line
 
 
+def _record_target_year(record) -> int | None:
+    value = record.rec_headers.get_header("WARC-Date")
+    if not isinstance(value, str) or len(value) < 4 or not value[:4].isdigit():
+        return None
+    year = int(value[:4])
+    return year if 1996 <= year <= 2001 else None
+
+
+def _extract_archive_hosts(
+    payload: bytes,
+    *,
+    policy: MeasuredYieldScoutPolicy,
+) -> tuple[int, set[str]]:
+    """Use warcio for WARC/ARC framing; tolerate a truncated final prefix record."""
+    hosts: set[str] = set()
+    sampled = 0
+    try:
+        for record in ArchiveIterator(io.BytesIO(payload), arc2warc=True):
+            if sampled >= policy.max_records:
+                break
+            sampled += 1
+            if _record_target_year(record) is None:
+                continue
+            target = record.rec_headers.get_header("WARC-Target-URI")
+            hostname = _hostname_from_scalar(target)
+            if hostname is not None:
+                hosts.add(hostname)
+    except (ArchiveLoadFailed, EOFError, OSError, zlib.error):
+        # A Range-bounded prefix can end in the middle of the next record/gzip
+        # member. Fully parsed preceding records remain a valid scout sample.
+        pass
+    return sampled, hosts
+
+
 def _extract_hosts(
     payload: bytes,
     *,
@@ -124,10 +160,12 @@ def _extract_hosts(
     content_type: str,
     policy: MeasuredYieldScoutPolicy,
 ) -> tuple[int, set[str]] | None:
-    suffix, compressed = _suffix(urlsplit(url).path)
+    path = urlsplit(url).path.lower()
+    if path.endswith((".warc", ".warc.gz", ".arc", ".arc.gz")):
+        return _extract_archive_hosts(payload, policy=policy)
+
+    suffix, compressed = _suffix(path)
     lower_type = content_type.lower()
-    if urlsplit(url).path.lower().endswith((".warc", ".warc.gz", ".arc", ".arc.gz")):
-        return None
     if compressed:
         payload = _inflate_gzip_prefix(payload, policy.max_decompressed_bytes)
 
@@ -218,8 +256,8 @@ class MeasuredYieldScoutExecutor:
             if response.status_code in {404, 410}:
                 return b"", "__permanent_missing__"
             response.raise_for_status()
-            # Use raw bytes: httpx.aiter_bytes() applies Content-Encoding decoding,
-            # which would make a .gz resource get decompressed twice below.
+            # Preserve Content-Encoding bytes. Generic .gz parsing and warcio
+            # must see the original compressed representation exactly once.
             async for chunk in response.aiter_raw():
                 remaining = self.policy.max_download_bytes - len(payload)
                 if remaining <= 0:
@@ -229,7 +267,14 @@ class MeasuredYieldScoutExecutor:
                     break
             return bytes(payload), response.headers.get("content-type", "")
 
-    def _measurement(self, *, sampled: int, hosts: set[str], bytes_read: int, elapsed: float) -> ScoutMeasurement:
+    def _measurement(
+        self,
+        *,
+        sampled: int,
+        hosts: set[str],
+        bytes_read: int,
+        elapsed: float,
+    ) -> ScoutMeasurement:
         resolved = self.baseline.resolve_batch(hosts)
         novel = [hostname for hostname in hosts if resolved.get(hostname, (0, False))[0] == 0]
         novel_eed = Decimal("0")
