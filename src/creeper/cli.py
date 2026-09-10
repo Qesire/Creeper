@@ -1,8 +1,9 @@
-"""Small dependency-free command line entry point for local runs."""
+"""Command-line entry points for local Creeper runs."""
 
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 from dataclasses import asdict
 from pathlib import Path
@@ -11,7 +12,9 @@ import tomllib
 from creeper.authority.baseline_index import BaselineIndex
 from creeper.authority.eed import calculate_eed
 from creeper.authority.manifest import build_manifest
-from creeper.evidence.providers.cdx import WaybackCDXClient, query_year
+from creeper.evidence.policies import EvidenceQueryKey, TemporalScope
+from creeper.evidence.providers.async_cdx import AsyncWaybackCDXClient
+from creeper.evidence.worker import AsyncEvidenceWorker
 from creeper.runtime.doctor import run_doctor
 from creeper.runtime.pipeline import SyncRuntime
 from creeper.runtime.submission import RuntimeSubmissionContext
@@ -221,6 +224,57 @@ def _run_once(config_path: Path) -> dict[str, object]:
         baseline.close()
 
 
+async def _query_evidence_async(args: argparse.Namespace):
+    key = EvidenceQueryKey(
+        args.hostname,
+        TemporalScope(args.year, args.year),
+        "wayback",
+        args.policy_version,
+    )
+    async with AsyncWaybackCDXClient(
+        endpoint=args.endpoint,
+        provider="wayback",
+        timeout=args.timeout,
+        max_retries=args.max_retries,
+        requests_per_second=args.requests_per_second,
+        max_connections=args.max_connections,
+        max_keepalive_connections=min(args.max_connections, args.max_keepalive_connections),
+    ) as client:
+        return await client.query_key(key)
+
+
+async def _run_evidence_worker_once(args: argparse.Namespace) -> dict[str, object]:
+    root = args.runtime_data_root
+    control = ControlStore(root / "control.sqlite3")
+    evidence = EvidenceStore(root / "evidence.sqlite3")
+    try:
+        async with AsyncWaybackCDXClient(
+            endpoint=args.endpoint,
+            provider="wayback",
+            timeout=args.timeout,
+            max_retries=args.max_retries,
+            requests_per_second=args.requests_per_second,
+            max_connections=args.max_connections,
+            max_keepalive_connections=min(args.max_connections, args.max_keepalive_connections),
+        ) as provider:
+            worker = AsyncEvidenceWorker(
+                control_store=control,
+                evidence_store=evidence,
+                providers={"wayback": provider},
+                owner=args.owner,
+                claim_batch_size=args.claim_batch_size,
+                lease_seconds=args.lease_seconds,
+                provider_inflight={"wayback": args.max_inflight},
+                retry_base_seconds=args.retry_base_seconds,
+                retry_max_seconds=args.retry_max_seconds,
+            )
+            report = await worker.run_once()
+            return asdict(report)
+    finally:
+        evidence.close()
+        control.close()
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="creeper")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -245,6 +299,26 @@ def main(argv: list[str] | None = None) -> int:
     evidence.add_argument("--endpoint", default="https://web.archive.org/cdx/search/cdx")
     evidence.add_argument("--timeout", type=float, default=30.0)
     evidence.add_argument("--max-retries", type=int, default=3)
+    evidence.add_argument("--requests-per-second", type=float, default=0.0)
+    evidence.add_argument("--max-connections", type=int, default=4)
+    evidence.add_argument("--max-keepalive-connections", type=int, default=4)
+    evidence.add_argument("--policy-version", default="cdx-v1")
+
+    evidence_worker = subparsers.add_parser("evidence-worker")
+    evidence_worker.add_argument("--once", action="store_true", required=True)
+    evidence_worker.add_argument("runtime_data_root", type=Path)
+    evidence_worker.add_argument("--endpoint", default="https://web.archive.org/cdx/search/cdx")
+    evidence_worker.add_argument("--owner", default="evidence-worker")
+    evidence_worker.add_argument("--claim-batch-size", type=int, default=16)
+    evidence_worker.add_argument("--lease-seconds", type=float, default=300.0)
+    evidence_worker.add_argument("--max-inflight", type=int, default=4)
+    evidence_worker.add_argument("--requests-per-second", type=float, default=0.0)
+    evidence_worker.add_argument("--max-connections", type=int, default=8)
+    evidence_worker.add_argument("--max-keepalive-connections", type=int, default=4)
+    evidence_worker.add_argument("--timeout", type=float, default=30.0)
+    evidence_worker.add_argument("--max-retries", type=int, default=3)
+    evidence_worker.add_argument("--retry-base-seconds", type=float, default=30.0)
+    evidence_worker.add_argument("--retry-max-seconds", type=float, default=3_600.0)
 
     doctor = subparsers.add_parser("doctor")
     doctor.add_argument("task_root", type=Path)
@@ -276,13 +350,15 @@ def main(argv: list[str] | None = None) -> int:
         index.close()
         return 0
     if args.command == "evidence-query":
-        client = WaybackCDXClient(
-            endpoint=args.endpoint,
-            timeout=args.timeout,
-            max_retries=args.max_retries,
-        )
-        result = query_year(args.hostname, args.year, client, provider="wayback-cdx")
+        result = asyncio.run(_query_evidence_async(args))
         print(json.dumps(asdict(result), ensure_ascii=False, indent=2))
+        return 0
+    if args.command == "evidence-worker":
+        try:
+            report = asyncio.run(_run_evidence_worker_once(args))
+        except (OSError, ValueError, KeyError) as exc:
+            parser.error(f"invalid evidence worker configuration: {exc}")
+        print(json.dumps(report, ensure_ascii=False, indent=2))
         return 0
     if args.command == "doctor":
         report = run_doctor(
