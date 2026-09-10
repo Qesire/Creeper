@@ -19,6 +19,12 @@ from creeper.source_discovery.models import (
     source_key,
     source_origin,
 )
+from creeper.source_discovery.promotion import (
+    LinkPromotionAccumulator,
+    PromotedSource,
+    PromotionEvidence,
+    PromotionPolicy,
+)
 from creeper.source_discovery.registry import SourceDiscoveryRegistry
 from creeper.source_discovery.scrapy_sidecar import (
     ScrapyLinkDiscovery,
@@ -30,6 +36,10 @@ from creeper.source_discovery.scrapy_sidecar import (
 )
 
 __all__ = [
+    "LinkPromotionAccumulator",
+    "PromotedSource",
+    "PromotionEvidence",
+    "PromotionPolicy",
     "ReservoirPlan",
     "ScoutMeasurement",
     "ScrapyLinkDiscovery",
