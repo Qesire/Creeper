@@ -23,6 +23,7 @@ from creeper.scheduler.admission import CapacityReservation, EvidenceBacklogAdmi
 from creeper.scheduler.global_scheduler import GlobalScheduler
 from creeper.scheduler.leases import WorkLease
 from creeper.scheduler.priority import LeaseCandidate
+from creeper.sources.reservoirs import ReservoirState
 from creeper.storage.control_store import ControlStore
 from creeper.storage.evidence_store import EvidenceStore
 
@@ -147,20 +148,24 @@ class SourceProducer:
                 raise
         return None
 
+    def _has_durable_ready_source(self) -> bool:
+        """Read persisted state instead of stale candidate snapshots."""
+        for candidate in self.candidates:
+            reservoir = self.control_store.get_reservoir(candidate.reservoir_id)
+            if reservoir is not None and reservoir.state is ReservoirState.READY:
+                return True
+        return False
+
     def run_once(self) -> SourceProducerReport:
         queues = BoundedQueues(**self.queue_capacities)
         granted = self._grant_fresh_lease()
         if granted is None:
-            # A READY source can be temporarily ungrantable solely because all
-            # provider backlog capacity is reserved/occupied. Exposing this bit
-            # lets an outer supervisor sleep the producer instead of busy-looping.
-            ready_exists = any(
-                candidate.reservoir is not None
-                and getattr(candidate.reservoir.state, "value", candidate.reservoir.state)
-                == "ready"
-                for candidate in self.candidates
+            # A READY durable source with no grant means admission/backpressure
+            # prevented execution. If no READY source remains, this is ordinary
+            # idle/exhaustion instead of a reason to wait for the evidence queue.
+            return SourceProducerReport(
+                admission_blocked=self._has_durable_ready_source()
             )
-            return SourceProducerReport(admission_blocked=ready_exists)
 
         candidate, lease, reservation = granted
         provider = candidate.evidence_provider
