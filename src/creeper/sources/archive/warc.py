@@ -410,6 +410,21 @@ def _open_warc_source(
             block_size=remote_block_size,
             cache_type="readahead",
         )
+    except ModuleNotFoundError as exc:
+        missing = getattr(exc, "name", None) or str(exc)
+        if scheme == "s3" and ("s3fs" in missing or "s3fs" in str(exc)):
+            raise WarcCursorError(
+                "install s3fs for S3 WARC/ARC access; "
+                "use the project s3 extra (pip install 'creeper[s3]')"
+            ) from exc
+        if "fsspec" in missing or "fsspec" in str(exc):
+            raise WarcCursorError(
+                "install fsspec for remote WARC/ARC access; "
+                "use the project's remote filesystem dependencies"
+            ) from exc
+        raise WarcCursorError(
+            f"unable to open remote WARC/ARC source {source!s}: {exc}"
+        ) from exc
     except Exception as exc:
         raise WarcCursorError(
             f"unable to open remote WARC/ARC source {source!s}: {exc}"

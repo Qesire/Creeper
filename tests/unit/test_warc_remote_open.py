@@ -76,6 +76,42 @@ class _FakeWarcioUtils:
 
 
 class WarcRemoteOpenTests(unittest.TestCase):
+    def test_https_missing_fsspec_has_install_hint(self) -> None:
+        fake_utils = types.ModuleType("warcio.utils")
+
+        def missing_fsspec(*args, **kwargs):
+            raise ModuleNotFoundError("No module named 'fsspec'", name="fsspec")
+
+        fake_utils.fsspec_open = missing_fsspec
+        fake_warcio = types.ModuleType("warcio")
+        old_warcio = sys.modules.get("warcio")
+        old_utils = sys.modules.get("warcio.utils")
+        sys.modules["warcio"] = fake_warcio
+        sys.modules["warcio.utils"] = fake_utils
+        try:
+            with self.assertRaisesRegex(warc.WarcCursorError, "install fsspec"):
+                warc._open_warc_source("https://archive.example/big.warc.gz")
+        finally:
+            _FakeWarcioUtils.restore(old_warcio, old_utils)
+
+    def test_s3_missing_backend_has_s3fs_install_hint(self) -> None:
+        fake_utils = types.ModuleType("warcio.utils")
+
+        def missing_s3fs(*args, **kwargs):
+            raise ModuleNotFoundError("No module named 's3fs'", name="s3fs")
+
+        fake_utils.fsspec_open = missing_s3fs
+        fake_warcio = types.ModuleType("warcio")
+        old_warcio = sys.modules.get("warcio")
+        old_utils = sys.modules.get("warcio.utils")
+        sys.modules["warcio"] = fake_warcio
+        sys.modules["warcio.utils"] = fake_utils
+        try:
+            with self.assertRaisesRegex(warc.WarcCursorError, "install s3fs"):
+                warc._open_warc_source("s3://bucket/path/big.warc.gz")
+        finally:
+            _FakeWarcioUtils.restore(old_warcio, old_utils)
+
     def test_local_path_uses_native_open_without_remote_runtime(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "sample.warc"
