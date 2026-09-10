@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 import tomllib
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -236,7 +237,7 @@ async def run_source_discovery_cycles(
     *,
     cycles: int = 1,
 ) -> list[dict[str, object]]:
-    """Run a finite number of discovery cycles and return JSON-ready reports."""
+    """Run a finite number of discovery ticks and return operational reports."""
     if cycles < 1:
         raise ValueError("cycles must be positive")
     root = config.runtime_data_root
@@ -286,8 +287,13 @@ async def run_source_discovery_cycles(
             )
             reports: list[dict[str, object]] = []
             for cycle in range(1, cycles + 1):
+                started = time.perf_counter()
                 report = asdict(await coordinator.run_once())
                 report["cycle"] = cycle
+                report["elapsed_seconds"] = max(0.0, time.perf_counter() - started)
+                report["inventory"] = {
+                    state.value: count for state, count in registry.inventory().items()
+                }
                 reports.append(report)
             return reports
     finally:
