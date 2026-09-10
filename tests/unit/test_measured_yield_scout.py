@@ -18,6 +18,19 @@ from creeper.source_discovery.measured_scout import (
 from creeper.source_discovery.models import SourceCandidate, SourceLevel
 
 
+def streamed_response(
+    status: int,
+    body: bytes,
+    *,
+    headers: dict[str, str] | None = None,
+) -> httpx.Response:
+    return httpx.Response(
+        status,
+        stream=httpx.ByteStream(body),
+        headers=headers,
+    )
+
+
 class MeasuredYieldScoutTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
@@ -73,7 +86,7 @@ class MeasuredYieldScoutTests(unittest.IsolatedAsyncioTestCase):
 
         async def handler(request: httpx.Request) -> httpx.Response:
             self.assertIn("Range", request.headers)
-            return httpx.Response(206, content=body, headers={"content-type": "text/plain"})
+            return streamed_response(206, body, headers={"content-type": "text/plain"})
 
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
             scout = MeasuredYieldScoutExecutor(
@@ -98,7 +111,7 @@ class MeasuredYieldScoutTests(unittest.IsolatedAsyncioTestCase):
         body = b"hostname,other\nknown.com,1\nknown.com,2\nnovel.org,3\n"
 
         async def handler(request: httpx.Request) -> httpx.Response:
-            return httpx.Response(200, content=body, headers={"content-type": "text/csv"})
+            return streamed_response(200, body, headers={"content-type": "text/csv"})
 
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
             scout = MeasuredYieldScoutExecutor(
@@ -126,7 +139,11 @@ class MeasuredYieldScoutTests(unittest.IsolatedAsyncioTestCase):
         body = gzip.compress(raw)
 
         async def handler(request: httpx.Request) -> httpx.Response:
-            return httpx.Response(206, content=body, headers={"content-type": "application/gzip"})
+            return streamed_response(
+                206,
+                body,
+                headers={"content-type": "application/gzip"},
+            )
 
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
             scout = MeasuredYieldScoutExecutor(
@@ -145,9 +162,9 @@ class MeasuredYieldScoutTests(unittest.IsolatedAsyncioTestCase):
         body = gzip.compress(raw)
 
         async def handler(request: httpx.Request) -> httpx.Response:
-            return httpx.Response(
+            return streamed_response(
                 206,
-                content=body,
+                body,
                 headers={
                     "content-type": "application/gzip",
                     "content-encoding": "gzip",
@@ -166,13 +183,13 @@ class MeasuredYieldScoutTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.disposition, ScoutDisposition.WARM)
         self.assertEqual(result.measurement.novel_hosts if result.measurement else None, 1)
 
-    async def test_warc_requires_format_specific_mature_parser(self) -> None:
+    async def test_invalid_warc_prefix_fails_closed_without_source_promotion(self) -> None:
         calls = 0
 
         async def handler(request: httpx.Request) -> httpx.Response:
             nonlocal calls
             calls += 1
-            return httpx.Response(206, content=b"WARC/1.0\r\n")
+            return streamed_response(206, b"WARC/1.0\r\n")
 
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
             scout = MeasuredYieldScoutExecutor(
@@ -185,8 +202,10 @@ class MeasuredYieldScoutTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(calls, 1)
         self.assertEqual(result.disposition, ScoutDisposition.HOLD)
-        self.assertIsNone(result.measurement)
-        self.assertIn("format-specific mature parser", result.reason)
+        self.assertIsNotNone(result.measurement)
+        assert result.measurement is not None
+        self.assertEqual(result.measurement.unique_hosts, 0)
+        self.assertIn("too few unique hostnames", result.reason)
 
 
 if __name__ == "__main__":
