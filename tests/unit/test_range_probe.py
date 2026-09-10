@@ -49,6 +49,7 @@ class RangeProbeTests(unittest.TestCase):
 
         self.assertEqual(calls, [("new.example", 1996, 1999)])
         self.assertEqual(result.state, CDXQueryState.PASS)
+        self.assertTrue(result.complete)
         self.assertEqual(result.candidate_years, (1997,))
         self.assertEqual((result.pages_seen, result.records_seen), (1, 3))
 
@@ -121,6 +122,50 @@ class RangeProbeTests(unittest.TestCase):
         self.assertEqual(
             [result.state for result in results],
             [CDXQueryState.EMPTY_EXHAUSTIVE, CDXQueryState.EMPTY_EXHAUSTIVE],
+        )
+
+    def test_incomplete_range_with_partial_hit_still_exact_probes_every_year(self):
+        exact_calls = []
+
+        def range_transport(_hostname, _year_from, _year_to):
+            return [
+                (
+                    [{
+                        "timestamp": "19970101000000",
+                        "original": "http://new.example/",
+                        "status": "200",
+                    }],
+                    False,
+                )
+            ]
+
+        probe = probe_range("new.example", 1996, 1998, range_transport)
+        self.assertEqual(probe.state, CDXQueryState.PASS)
+        self.assertFalse(probe.complete)
+        self.assertEqual(probe.candidate_years, (1997,))
+
+        def exact_transport(hostname, year):
+            exact_calls.append((hostname, year))
+            return [([], True)]
+
+        results = query_missing_years(
+            "new.example",
+            [1996, 1997, 1998],
+            exact_transport,
+            range_transport=range_transport,
+        )
+
+        self.assertEqual(
+            exact_calls,
+            [("new.example", 1996), ("new.example", 1997), ("new.example", 1998)],
+        )
+        self.assertEqual(
+            [result.state for result in results],
+            [
+                CDXQueryState.EMPTY_EXHAUSTIVE,
+                CDXQueryState.EMPTY_EXHAUSTIVE,
+                CDXQueryState.EMPTY_EXHAUSTIVE,
+            ],
         )
 
 
