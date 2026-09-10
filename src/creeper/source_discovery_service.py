@@ -1,11 +1,16 @@
-"""Composition root for the finite source-discovery control-plane process."""
+"""Composition root for the source-discovery control-plane process."""
 
 from __future__ import annotations
 
+import argparse
 import asyncio
+import fcntl
 import json
+import os
 import time
 import tomllib
+from collections.abc import Callable
+from contextlib import asynccontextmanager, contextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -17,7 +22,10 @@ from creeper.source_discovery.agent_search import (
     CommandAgentSearchExecutor,
     CommandAgentSearchPolicy,
 )
-from creeper.source_discovery.coordinator import SourceDiscoveryCoordinator
+from creeper.source_discovery.coordinator import (
+    CoordinatorBusyError,
+    SourceDiscoveryCoordinator,
+)
 from creeper.source_discovery.manager import SourcePoolTargets, SourceReservoirManager
 from creeper.source_discovery.registry import SourceDiscoveryRegistry
 from creeper.source_discovery.scout_router import SourceScoutRouter
@@ -283,92 +291,202 @@ def load_source_discovery_config(config_path: Path) -> SourceDiscoveryServiceCon
     )
 
 
-async def run_source_discovery_cycles(
-    config: SourceDiscoveryServiceConfig,
-    *,
-    cycles: int = 1,
-) -> list[dict[str, object]]:
-    """Run a finite number of discovery ticks and return operational reports."""
-    if cycles < 1:
-        raise ValueError("cycles must be positive")
+@contextmanager
+def _service_lock(path: Path):
+    """Hold one lifecycle lock so multiple discovery daemons cannot alternate ticks."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise CoordinatorBusyError(
+                f"source discovery service is already running: {path}"
+            ) from exc
+        yield
+    finally:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
+
+
+@asynccontextmanager
+async def _open_runtime(config: SourceDiscoveryServiceConfig):
     root = config.runtime_data_root
     root.mkdir(parents=True, exist_ok=True)
     discovery_root = root / "source-discovery"
     discovery_root.mkdir(parents=True, exist_ok=True)
 
-    control = ControlStore(root / "control.sqlite3")
-    try:
-        registry = SourceDiscoveryRegistry(control)
-        manager = SourceReservoirManager(
-            registry,
-            targets=config.pool,
-            search_cooldown_seconds=config.coordinator.search_cooldown_seconds,
-        )
-        limits = httpx.Limits(
-            max_connections=max(4, config.coordinator.triage_parallelism * 2),
-            max_keepalive_connections=max(2, config.coordinator.triage_parallelism),
-        )
-        async with httpx.AsyncClient(
-            limits=limits,
-            headers={"User-Agent": "Creeper-source-discovery/2.1"},
-        ) as client:
-            triage = HttpSourceTriageExecutor(client, policy=config.triage)
-            launcher = ScrapyScoutLauncher(config.scrapy_project_dir)
-            structural = ScrapyStructuralScoutExecutor(
-                launcher,
-                discovery_root / "scrapy",
-                policy=config.scrapy,
-            )
-            scout = SourceScoutRouter(structural_executor=structural)
-            search = CommandAgentSearchExecutor(
-                config.agent.command,
-                discovery_root / "agent-invocations",
-                backend=config.agent.backend,
-                actor=config.agent.actor,
-                cwd=config.agent.cwd,
-                policy=config.agent.policy,
-                admission_policy=config.agent.admission,
-            )
-            coordinator = SourceDiscoveryCoordinator(
+    with _service_lock(discovery_root / "service.lock"):
+        control = ControlStore(root / "control.sqlite3")
+        try:
+            registry = SourceDiscoveryRegistry(control)
+            manager = SourceReservoirManager(
                 registry,
-                manager,
-                lock_path=discovery_root / "coordinator.lock",
-                triage_executor=triage,
-                scout_executor=scout,
-                search_executor=search,
-                triage_parallelism=config.coordinator.triage_parallelism,
-                scout_parallelism=config.coordinator.scout_parallelism,
-                search_parallelism=config.coordinator.search_parallelism,
-                failure_retry_seconds=config.coordinator.failure_retry_seconds,
+                targets=config.pool,
+                search_cooldown_seconds=config.coordinator.search_cooldown_seconds,
             )
-            reports: list[dict[str, object]] = []
-            for cycle in range(1, cycles + 1):
-                started = time.perf_counter()
-                report = asdict(await coordinator.run_once())
-                report["cycle"] = cycle
-                report["elapsed_seconds"] = max(0.0, time.perf_counter() - started)
-                report["inventory"] = {
-                    state.value: count for state, count in registry.inventory().items()
-                }
-                reports.append(report)
-            return reports
-    finally:
-        control.close()
+            limits = httpx.Limits(
+                max_connections=max(4, config.coordinator.triage_parallelism * 2),
+                max_keepalive_connections=max(2, config.coordinator.triage_parallelism),
+            )
+            async with httpx.AsyncClient(
+                limits=limits,
+                headers={"User-Agent": "Creeper-source-discovery/2.1"},
+            ) as client:
+                triage = HttpSourceTriageExecutor(client, policy=config.triage)
+                launcher = ScrapyScoutLauncher(config.scrapy_project_dir)
+                structural = ScrapyStructuralScoutExecutor(
+                    launcher,
+                    discovery_root / "scrapy",
+                    policy=config.scrapy,
+                )
+                scout = SourceScoutRouter(structural_executor=structural)
+                search = CommandAgentSearchExecutor(
+                    config.agent.command,
+                    discovery_root / "agent-invocations",
+                    backend=config.agent.backend,
+                    actor=config.agent.actor,
+                    cwd=config.agent.cwd,
+                    policy=config.agent.policy,
+                    admission_policy=config.agent.admission,
+                )
+                coordinator = SourceDiscoveryCoordinator(
+                    registry,
+                    manager,
+                    lock_path=discovery_root / "coordinator.lock",
+                    triage_executor=triage,
+                    scout_executor=scout,
+                    search_executor=search,
+                    triage_parallelism=config.coordinator.triage_parallelism,
+                    scout_parallelism=config.coordinator.scout_parallelism,
+                    search_parallelism=config.coordinator.search_parallelism,
+                    failure_retry_seconds=config.coordinator.failure_retry_seconds,
+                )
+                yield registry, coordinator
+        finally:
+            control.close()
+
+
+def _report_has_progress(report: dict[str, object]) -> bool:
+    """Return whether another near-immediate pipeline tick is useful."""
+    progress_fields = (
+        "recovered_scouts",
+        "activated",
+        "triaged_to_scout",
+        "triaged_hold",
+        "triaged_rejected",
+        "scouted_warm",
+        "scouted_hold",
+        "scouted_rejected",
+        "scout_children_registered",
+        "scout_edges_added",
+        "search_episodes",
+        "search_candidates_registered",
+    )
+    return any(int(report.get(name, 0)) > 0 for name in progress_fields)
+
+
+async def _run_cycle(
+    registry: SourceDiscoveryRegistry,
+    coordinator: SourceDiscoveryCoordinator,
+    *,
+    cycle: int,
+) -> dict[str, object]:
+    started = time.perf_counter()
+    report = asdict(await coordinator.run_once())
+    report["cycle"] = cycle
+    report["elapsed_seconds"] = max(0.0, time.perf_counter() - started)
+    report["inventory"] = {
+        state.value: count for state, count in registry.inventory().items()
+    }
+    return report
+
+
+async def run_source_discovery_cycles(
+    config: SourceDiscoveryServiceConfig,
+    *,
+    cycles: int = 1,
+) -> list[dict[str, object]]:
+    """Run a finite number of discovery ticks without artificial sleeps."""
+    if cycles < 1:
+        raise ValueError("cycles must be positive")
+    reports: list[dict[str, object]] = []
+    async with _open_runtime(config) as (registry, coordinator):
+        for cycle in range(1, cycles + 1):
+            reports.append(await _run_cycle(registry, coordinator, cycle=cycle))
+    return reports
+
+
+async def run_source_discovery_watch(
+    config: SourceDiscoveryServiceConfig,
+    *,
+    emit: Callable[[dict[str, object]], None],
+    busy_sleep_seconds: float = 0.1,
+    idle_sleep_seconds: float = 5.0,
+    max_cycles: int | None = None,
+    sleep: Callable[[float], Any] = asyncio.sleep,
+) -> None:
+    """Run a paced long-lived discovery service with one persistent runtime.
+
+    ``max_cycles`` and injected ``sleep`` exist for deterministic tests; production
+    watch mode leaves ``max_cycles`` unset. A productive tick gets a short delay so
+    downstream stages drain quickly, while idle/backoff ticks sleep longer.
+    """
+    if busy_sleep_seconds < 0 or idle_sleep_seconds <= 0:
+        raise ValueError("watch sleep intervals must be non-negative/positive")
+    if max_cycles is not None and max_cycles < 1:
+        raise ValueError("max_cycles must be positive when provided")
+
+    async with _open_runtime(config) as (registry, coordinator):
+        cycle = 0
+        while max_cycles is None or cycle < max_cycles:
+            cycle += 1
+            report = await _run_cycle(registry, coordinator, cycle=cycle)
+            emit(report)
+            if max_cycles is not None and cycle >= max_cycles:
+                break
+            delay = busy_sleep_seconds if _report_has_progress(report) else idle_sleep_seconds
+            await sleep(delay)
 
 
 def main(argv: list[str] | None = None) -> int:
-    import argparse
-
     parser = argparse.ArgumentParser(prog="creeper-source-discovery")
     parser.add_argument("config", type=Path)
-    parser.add_argument("--cycles", type=int, default=1)
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--cycles", type=int)
+    mode.add_argument("--watch", action="store_true")
+    parser.add_argument("--busy-sleep-seconds", type=float, default=0.1)
+    parser.add_argument("--idle-sleep-seconds", type=float, default=5.0)
     args = parser.parse_args(argv)
+
     try:
         config = load_source_discovery_config(args.config)
-        reports = asyncio.run(run_source_discovery_cycles(config, cycles=args.cycles))
+        if args.watch:
+            def emit(report: dict[str, object]) -> None:
+                print(
+                    json.dumps(report, ensure_ascii=False, separators=(",", ":")),
+                    flush=True,
+                )
+
+            asyncio.run(
+                run_source_discovery_watch(
+                    config,
+                    emit=emit,
+                    busy_sleep_seconds=args.busy_sleep_seconds,
+                    idle_sleep_seconds=args.idle_sleep_seconds,
+                )
+            )
+        else:
+            reports = asyncio.run(
+                run_source_discovery_cycles(config, cycles=args.cycles or 1)
+            )
+            print(json.dumps(reports, ensure_ascii=False, indent=2))
+    except KeyboardInterrupt:
+        return 130
     except (OSError, tomllib.TOMLDecodeError, ValueError, KeyError) as exc:
         parser.error(f"invalid source discovery configuration: {exc}")
-    print(json.dumps(reports, ensure_ascii=False, indent=2))
     return 0
 
 
