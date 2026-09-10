@@ -119,6 +119,9 @@ class MeasuredYieldWarcioTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(measurement.unique_hosts, 2)
         self.assertEqual(measurement.novel_hosts, 1)
         self.assertEqual(measurement.novel_eed, 1.0)
+        self.assertEqual(measurement.observed_host_year_pairs, 2)
+        self.assertEqual(measurement.novel_host_year_pairs, 2)
+        self.assertEqual(measurement.novel_pair_eed, 2.0)
         self.assertEqual(measurement.direct_host_years, 0)
 
     async def test_truncated_final_gzip_member_keeps_complete_prefix_sample(self) -> None:

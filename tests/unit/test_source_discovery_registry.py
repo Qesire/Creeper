@@ -6,6 +6,7 @@ from pathlib import Path
 
 from creeper.scheduler.leases import StateTransitionError
 from creeper.source_discovery import (
+    MeasurementMode,
     ScoutMeasurement,
     SourceCandidate,
     SourceDiscoveryRegistry,
@@ -163,6 +164,34 @@ class SourceDiscoveryRegistryTests(unittest.TestCase):
         assert stored_measurement is not None
         self.assertAlmostEqual(stored_measurement.measured_baseline_overlap, 0.75)
         self.assertEqual(stored_measurement.novel_eed_per_second, 6.0)
+
+    def test_year_aware_scout_measurement_round_trips_through_registry(self) -> None:
+        candidate = self._to_scout_ready(self.candidate("dated/"))
+        self.registry.transition(candidate.source_key, SourceState.SCOUTING)
+        measurement = ScoutMeasurement(
+            sampled_records=100,
+            unique_hosts=40,
+            novel_hosts=0,
+            direct_host_years=0,
+            requests=1,
+            bytes_read=1_024,
+            elapsed_seconds=2.0,
+            novel_eed=0.0,
+            measurement_mode=MeasurementMode.HOST_YEAR,
+            observed_host_year_pairs=4,
+            novel_host_year_pairs=3,
+            novel_pair_eed=2.5,
+        )
+        self.registry.record_scout_measurement(candidate.source_key, measurement)
+
+        restored = self.registry.get_scout_measurement(candidate.source_key)
+        self.assertIsNotNone(restored)
+        assert restored is not None
+        self.assertEqual(restored.measurement_mode, MeasurementMode.HOST_YEAR)
+        self.assertEqual(restored.observed_host_year_pairs, 4)
+        self.assertEqual(restored.novel_host_year_pairs, 3)
+        self.assertEqual(restored.novel_eed_for_ranking, 2.5)
+        self.assertAlmostEqual(restored.measured_baseline_overlap, 0.25)
 
     def test_source_family_negative_knowledge_removes_candidate_from_scout_ranking(self) -> None:
         meta = self.candidate(

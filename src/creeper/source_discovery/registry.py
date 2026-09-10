@@ -9,6 +9,7 @@ from collections.abc import Iterable
 
 from creeper.scheduler.leases import StateTransitionError
 from creeper.source_discovery.models import (
+    MeasurementMode,
     ScoutMeasurement,
     SearchEpisode,
     SourceCandidate,
@@ -152,6 +153,10 @@ class SourceDiscoveryRegistry:
                 bytes_read INTEGER NOT NULL,
                 elapsed_seconds REAL NOT NULL,
                 novel_eed REAL NOT NULL,
+                measurement_mode TEXT NOT NULL DEFAULT 'HOST_ONLY',
+                observed_host_year_pairs INTEGER NOT NULL DEFAULT 0,
+                novel_host_year_pairs INTEGER NOT NULL DEFAULT 0,
+                novel_pair_eed REAL NOT NULL DEFAULT 0,
                 measured_at REAL NOT NULL,
                 FOREIGN KEY(source_key) REFERENCES source_candidates(source_key)
             ) WITHOUT ROWID;
@@ -168,6 +173,21 @@ class SourceDiscoveryRegistry:
                 ON source_suppressions(expires_at);
             """
         )
+        columns = {
+            str(row[1])
+            for row in self.connection.execute(
+                "PRAGMA table_info(source_scout_metrics)"
+            ).fetchall()
+        }
+        migrations = {
+            "measurement_mode": "ALTER TABLE source_scout_metrics ADD COLUMN measurement_mode TEXT NOT NULL DEFAULT 'HOST_ONLY'",
+            "observed_host_year_pairs": "ALTER TABLE source_scout_metrics ADD COLUMN observed_host_year_pairs INTEGER NOT NULL DEFAULT 0",
+            "novel_host_year_pairs": "ALTER TABLE source_scout_metrics ADD COLUMN novel_host_year_pairs INTEGER NOT NULL DEFAULT 0",
+            "novel_pair_eed": "ALTER TABLE source_scout_metrics ADD COLUMN novel_pair_eed REAL NOT NULL DEFAULT 0",
+        }
+        for name, statement in migrations.items():
+            if name not in columns:
+                self.connection.execute(statement)
         self.connection.commit()
 
     @staticmethod
@@ -202,6 +222,10 @@ class SourceDiscoveryRegistry:
             bytes_read=int(row["bytes_read"]),
             elapsed_seconds=float(row["elapsed_seconds"]),
             novel_eed=float(row["novel_eed"]),
+            measurement_mode=MeasurementMode(str(row["measurement_mode"])),
+            observed_host_year_pairs=int(row["observed_host_year_pairs"]),
+            novel_host_year_pairs=int(row["novel_host_year_pairs"]),
+            novel_pair_eed=float(row["novel_pair_eed"]),
         )
 
     def begin_search_episode(
@@ -485,8 +509,9 @@ class SourceDiscoveryRegistry:
                 INSERT INTO source_scout_metrics(
                     source_key, sampled_records, unique_hosts, novel_hosts,
                     direct_host_years, requests, bytes_read, elapsed_seconds,
-                    novel_eed, measured_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    novel_eed, measurement_mode, observed_host_year_pairs,
+                    novel_host_year_pairs, novel_pair_eed, measured_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(source_key) DO UPDATE SET
                     sampled_records = excluded.sampled_records,
                     unique_hosts = excluded.unique_hosts,
@@ -496,6 +521,10 @@ class SourceDiscoveryRegistry:
                     bytes_read = excluded.bytes_read,
                     elapsed_seconds = excluded.elapsed_seconds,
                     novel_eed = excluded.novel_eed,
+                    measurement_mode = excluded.measurement_mode,
+                    observed_host_year_pairs = excluded.observed_host_year_pairs,
+                    novel_host_year_pairs = excluded.novel_host_year_pairs,
+                    novel_pair_eed = excluded.novel_pair_eed,
                     measured_at = excluded.measured_at
                 """,
                 (
@@ -508,6 +537,10 @@ class SourceDiscoveryRegistry:
                     measurement.bytes_read,
                     measurement.elapsed_seconds,
                     measurement.novel_eed,
+                    measurement.measurement_mode.value,
+                    measurement.observed_host_year_pairs,
+                    measurement.novel_host_year_pairs,
+                    measurement.novel_pair_eed,
                     now,
                 ),
             )

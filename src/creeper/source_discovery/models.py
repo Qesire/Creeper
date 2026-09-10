@@ -36,6 +36,13 @@ class SuppressionScope(StrEnum):
     ORIGIN = "ORIGIN"
 
 
+class MeasurementMode(StrEnum):
+    """Granularity at which a scout can prove baseline novelty."""
+
+    HOST_ONLY = "HOST_ONLY"
+    HOST_YEAR = "HOST_YEAR"
+
+
 def canonicalize_source_entrypoint(value: str) -> str:
     """Return a conservative stable identity for an HTTP(S) source resource.
 
@@ -188,8 +195,13 @@ class ScoutMeasurement:
     bytes_read: int
     elapsed_seconds: float
     novel_eed: float = 0.0
+    measurement_mode: MeasurementMode = MeasurementMode.HOST_ONLY
+    observed_host_year_pairs: int = 0
+    novel_host_year_pairs: int = 0
+    novel_pair_eed: float = 0.0
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "measurement_mode", MeasurementMode(self.measurement_mode))
         for name in (
             "sampled_records",
             "unique_hosts",
@@ -197,27 +209,55 @@ class ScoutMeasurement:
             "direct_host_years",
             "requests",
             "bytes_read",
+            "observed_host_year_pairs",
+            "novel_host_year_pairs",
         ):
             if getattr(self, name) < 0:
                 raise ValueError(f"{name} must be non-negative")
         if self.novel_hosts > self.unique_hosts:
             raise ValueError("novel_hosts cannot exceed unique_hosts")
+        if self.novel_host_year_pairs > self.observed_host_year_pairs:
+            raise ValueError("novel_host_year_pairs cannot exceed observed_host_year_pairs")
         if not math.isfinite(self.elapsed_seconds) or self.elapsed_seconds < 0:
             raise ValueError("elapsed_seconds must be finite and non-negative")
         if not math.isfinite(self.novel_eed) or self.novel_eed < 0:
             raise ValueError("novel_eed must be finite and non-negative")
+        if not math.isfinite(self.novel_pair_eed) or self.novel_pair_eed < 0:
+            raise ValueError("novel_pair_eed must be finite and non-negative")
 
     @property
     def measured_baseline_overlap(self) -> float:
+        if self.measurement_mode is MeasurementMode.HOST_YEAR:
+            if self.observed_host_year_pairs == 0:
+                return 1.0
+            return 1.0 - (self.novel_host_year_pairs / self.observed_host_year_pairs)
         if self.unique_hosts == 0:
             return 1.0
         return 1.0 - (self.novel_hosts / self.unique_hosts)
 
     @property
+    def observed_count_for_threshold(self) -> int:
+        if self.measurement_mode is MeasurementMode.HOST_YEAR:
+            return self.observed_host_year_pairs
+        return self.unique_hosts
+
+    @property
+    def novel_count_for_threshold(self) -> int:
+        if self.measurement_mode is MeasurementMode.HOST_YEAR:
+            return self.novel_host_year_pairs
+        return self.novel_hosts
+
+    @property
+    def novel_eed_for_ranking(self) -> float:
+        if self.measurement_mode is MeasurementMode.HOST_YEAR:
+            return self.novel_pair_eed
+        return self.novel_eed
+
+    @property
     def novel_eed_per_second(self) -> float:
         if self.elapsed_seconds <= 0:
             return 0.0
-        return self.novel_eed / self.elapsed_seconds
+        return self.novel_eed_for_ranking / self.elapsed_seconds
 
 
 @dataclass(frozen=True)

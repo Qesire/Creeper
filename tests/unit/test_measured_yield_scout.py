@@ -15,7 +15,7 @@ from creeper.source_discovery.measured_scout import (
     MeasuredYieldScoutExecutor,
     MeasuredYieldScoutPolicy,
 )
-from creeper.source_discovery.models import SourceCandidate, SourceLevel
+from creeper.source_discovery.models import MeasurementMode, SourceCandidate, SourceLevel
 
 
 def streamed_response(
@@ -105,7 +105,35 @@ class MeasuredYieldScoutTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(measurement.unique_hosts, 2)
         self.assertEqual(measurement.novel_hosts, 1)
         self.assertEqual(measurement.novel_eed, 1.0)
+        self.assertEqual(measurement.measurement_mode, MeasurementMode.HOST_YEAR)
+        self.assertEqual(measurement.observed_host_year_pairs, 2)
+        self.assertEqual(measurement.novel_host_year_pairs, 2)
+        self.assertEqual(measurement.novel_pair_eed, 2.0)
         self.assertEqual(measurement.direct_host_years, 0)
+
+    async def test_dated_source_keeps_new_year_for_partially_known_hostname(self) -> None:
+        body = b'com,known)/ 19980101000000 {"url":"https://known.com/new"}\n'
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            return streamed_response(206, body, headers={"content-type": "text/plain"})
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            scout = MeasuredYieldScoutExecutor(
+                client,
+                self.baseline,
+                {"com": Decimal("1")},
+                policy=self.policy(min_unique_hosts=1, min_novel_hosts=1),
+            )
+            result = await scout(self.candidate("https://archive.example/index.cdxj"))
+
+        self.assertEqual(result.disposition, ScoutDisposition.WARM)
+        self.assertIsNotNone(result.measurement)
+        measurement = result.measurement
+        assert measurement is not None
+        self.assertEqual(measurement.novel_hosts, 0)
+        self.assertEqual(measurement.novel_host_year_pairs, 1)
+        self.assertEqual(measurement.novel_pair_eed, 1.0)
+        self.assertEqual(measurement.novel_eed_for_ranking, 1.0)
 
     async def test_csv_sample_is_measured_but_low_novelty_holds(self) -> None:
         body = b"hostname,other\nknown.com,1\nknown.com,2\nnovel.org,3\n"

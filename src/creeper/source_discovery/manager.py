@@ -145,7 +145,7 @@ class SourceReservoirManager:
                 continue
             eed, elapsed = totals.get(candidate.source_family, (0.0, 0.0))
             totals[candidate.source_family] = (
-                eed + measurement.novel_eed,
+                eed + measurement.novel_eed_for_ranking,
                 elapsed + measurement.elapsed_seconds,
             )
         scored = [

@@ -22,10 +22,14 @@ from pathlib import PurePosixPath
 from urllib.parse import urlsplit
 
 import httpx
-from creeper.authority.baseline_index import BaselineIndex
+from creeper.authority.baseline_index import BaselineIndex, YEAR_BITS
 from creeper.authority.normalizer import normalize_official
 from creeper.source_discovery.coordinator import ScoutDisposition, ScoutResult
-from creeper.source_discovery.models import ScoutMeasurement, SourceCandidate
+from creeper.source_discovery.models import (
+    MeasurementMode,
+    ScoutMeasurement,
+    SourceCandidate,
+)
 from creeper.sources.archive.cdxj import parse_cdxj_line
 from creeper.sources.archive.warc import WarcFormatError, iter_warc_target_records
 
@@ -84,6 +88,26 @@ class PrefixDownload:
     payload: bytes
     content_type: str
     truncated: bool
+
+
+@dataclass(frozen=True)
+class ParsedHostSample:
+    """Bounded host sample plus optional exact source-year observations.
+
+    ``__iter__`` intentionally preserves the historical ``sampled, hosts =
+    _extract_hosts(...)`` helper contract used by older callers and tests.
+    New callers should use the explicit fields so year-aware measurements are
+    not accidentally reduced to hostname-only novelty.
+    """
+
+    sampled_records: int
+    hosts: set[str]
+    host_year_pairs: set[tuple[str, int]]
+    measurement_mode: MeasurementMode
+
+    def __iter__(self):
+        yield self.sampled_records
+        yield self.hosts
 
 
 def _parse_content_range(value: str | None) -> tuple[int, int, int | None] | None:
@@ -178,6 +202,66 @@ def _mapping_hostname(payload: object) -> str | None:
     return None
 
 
+def _year_from_scalar(value: object, *, policy: MeasuredYieldScoutPolicy) -> int | None:
+    """Extract a bounded source year from common date/timestamp fields."""
+    if isinstance(value, bool):
+        return None
+    text = str(value).strip() if isinstance(value, (int, float, str)) else ""
+    if not text:
+        return None
+    prefix = text[:4]
+    if len(prefix) != 4 or not prefix.isdigit():
+        return None
+    year = int(prefix)
+    if not policy.target_year_from <= year <= policy.target_year_to:
+        return None
+    return year
+
+
+def _mapping_host_year(
+    payload: object,
+    *,
+    policy: MeasuredYieldScoutPolicy,
+) -> tuple[str | None, int | None]:
+    if not isinstance(payload, dict):
+        return None, None
+    lowered = {str(key).strip().lower(): value for key, value in payload.items()}
+    hostname = _mapping_hostname(payload)
+    for key in (
+        "year",
+        "source_year",
+        "capture_year",
+        "timestamp",
+        "date",
+        "warc_date",
+        "crawl_date",
+    ):
+        if key not in lowered:
+            continue
+        raw_value = lowered[key]
+        year = _year_from_scalar(lowered.get(key), policy=policy)
+        if year is not None:
+            return hostname, year
+        raw_text = str(raw_value).strip()
+        if len(raw_text) >= 4 and raw_text[:4].isdigit():
+            # A recognized date outside the competition window is not an
+            # undated hostname and must not enter the sample as HOST_ONLY.
+            return None, None
+    return hostname, None
+
+
+def _structured_measurement_mode(
+    *,
+    host_year_pairs: set[tuple[str, int]],
+    saw_undated_host: bool,
+) -> MeasurementMode:
+    # Mixed records are deliberately conservative: do not rank undated hosts
+    # as if they carried the dated source's year semantics.
+    if host_year_pairs and not saw_undated_host:
+        return MeasurementMode.HOST_YEAR
+    return MeasurementMode.HOST_ONLY
+
+
 def _suffix(path: str) -> tuple[str, bool]:
     name = PurePosixPath(path).name.lower()
     compressed = name.endswith(".gz")
@@ -259,7 +343,7 @@ def _extract_warc_hosts(
     *,
     policy: MeasuredYieldScoutPolicy,
     allow_truncated_tail: bool = False,
-) -> tuple[int, set[str]]:
+) -> ParsedHostSample:
     """Sample target-year hostnames from WARC/ARC metadata only.
 
     ``ArchiveIterator`` consumes records sequentially and handles canonical
@@ -269,6 +353,7 @@ def _extract_warc_hosts(
     """
     sampled = 0
     hosts: set[str] = set()
+    host_year_pairs: set[tuple[str, int]] = set()
     stream = io.BytesIO(payload)
     try:
         for record in iter_warc_target_records(stream):
@@ -283,6 +368,8 @@ def _extract_warc_hosts(
             hostname = _hostname_from_scalar(record.target_uri)
             if hostname is not None:
                 hosts.add(hostname)
+                assert record.source_year is not None
+                host_year_pairs.add((hostname, record.source_year))
     except WarcFormatError:
         # A Range probe may end in the middle of the final canonical gzip
         # member. Complete records before that boundary are still a valid
@@ -290,7 +377,12 @@ def _extract_warc_hosts(
         # remain strict about any malformed/truncated archive.
         if not allow_truncated_tail or sampled == 0:
             raise
-    return sampled, hosts
+    return ParsedHostSample(
+        sampled_records=sampled,
+        hosts=hosts,
+        host_year_pairs=host_year_pairs,
+        measurement_mode=MeasurementMode.HOST_YEAR,
+    )
 
 
 def _extract_hosts(
@@ -300,7 +392,7 @@ def _extract_hosts(
     content_type: str,
     policy: MeasuredYieldScoutPolicy,
     truncated: bool = False,
-) -> tuple[int, set[str]] | None:
+) -> ParsedHostSample | None:
     suffix, compressed = _suffix(urlsplit(url).path)
     lower_type = content_type.lower()
     if _is_warc_resource(suffix=suffix, content_type=content_type):
@@ -320,6 +412,8 @@ def _extract_hosts(
 
     lines = _iter_text_lines(payload, max_line_bytes=policy.max_line_bytes)
     hosts: set[str] = set()
+    host_year_pairs: set[tuple[str, int]] = set()
+    saw_undated_host = False
     sampled = 0
 
     if suffix == ".cdxj":
@@ -337,7 +431,13 @@ def _extract_hosts(
             hostname = _hostname_from_scalar(record.payload)
             if hostname is not None:
                 hosts.add(hostname)
-        return sampled, hosts
+                host_year_pairs.add((hostname, record.source_year))
+        return ParsedHostSample(
+            sampled_records=sampled,
+            hosts=hosts,
+            host_year_pairs=host_year_pairs,
+            measurement_mode=MeasurementMode.HOST_YEAR,
+        )
 
     if suffix in {".jsonl", ".ndjson"} or "ndjson" in lower_type:
         for line in lines:
@@ -350,10 +450,22 @@ def _extract_hosts(
                 value = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            hostname = _mapping_hostname(value)
+            hostname, year = _mapping_host_year(value, policy=policy)
             if hostname is not None:
                 hosts.add(hostname)
-        return sampled, hosts
+                if year is None:
+                    saw_undated_host = True
+                else:
+                    host_year_pairs.add((hostname, year))
+        return ParsedHostSample(
+            sampled_records=sampled,
+            hosts=hosts,
+            host_year_pairs=host_year_pairs,
+            measurement_mode=_structured_measurement_mode(
+                host_year_pairs=host_year_pairs,
+                saw_undated_host=saw_undated_host,
+            ),
+        )
 
     if suffix in {".csv", ".tsv"} or "text/csv" in lower_type or "tab-separated-values" in lower_type:
         text = payload.decode("utf-8", errors="replace")
@@ -362,10 +474,17 @@ def _extract_hosts(
         try:
             first = next(rows)
         except StopIteration:
-            return 0, hosts
+            return ParsedHostSample(
+                sampled_records=0,
+                hosts=hosts,
+                host_year_pairs=host_year_pairs,
+                measurement_mode=MeasurementMode.HOST_ONLY,
+            )
 
         known_fields = {
-            "hostname", "host", "domain", "url", "original", "original_url", "uri"
+            "hostname", "host", "domain", "url", "original", "original_url", "uri",
+            "year", "source_year", "capture_year", "timestamp", "date", "warc_date",
+            "crawl_date",
         }
         normalized_header = [cell.strip().lower() for cell in first]
         header_positions = {
@@ -375,10 +494,12 @@ def _extract_hosts(
         }
 
         def consume_scalar_row(row: list[str]) -> None:
+            nonlocal saw_undated_host
             for cell in row:
                 hostname = _hostname_from_scalar(cell)
                 if hostname is not None:
                     hosts.add(hostname)
+                    saw_undated_host = True
                     return
 
         if header_positions:
@@ -391,9 +512,13 @@ def _extract_hosts(
                     for name, index in header_positions.items()
                     if index < len(row)
                 }
-                hostname = _mapping_hostname(mapped)
+                hostname, year = _mapping_host_year(mapped, policy=policy)
                 if hostname is not None:
                     hosts.add(hostname)
+                    if year is None:
+                        saw_undated_host = True
+                    else:
+                        host_year_pairs.add((hostname, year))
         else:
             if sampled < policy.max_records:
                 sampled += 1
@@ -403,7 +528,15 @@ def _extract_hosts(
                     break
                 sampled += 1
                 consume_scalar_row(row)
-        return sampled, hosts
+        return ParsedHostSample(
+            sampled_records=sampled,
+            hosts=hosts,
+            host_year_pairs=host_year_pairs,
+            measurement_mode=_structured_measurement_mode(
+                host_year_pairs=host_year_pairs,
+                saw_undated_host=saw_undated_host,
+            ),
+        )
 
     if suffix in {"", ".txt", ".list"} or lower_type.startswith("text/plain"):
         for line in lines:
@@ -415,7 +548,12 @@ def _extract_hosts(
             hostname = _hostname_from_scalar(line)
             if hostname is not None:
                 hosts.add(hostname)
-        return sampled, hosts
+        return ParsedHostSample(
+            sampled_records=sampled,
+            hosts=hosts,
+            host_year_pairs=set(),
+            measurement_mode=MeasurementMode.HOST_ONLY,
+        )
 
     return None
 
@@ -475,22 +613,46 @@ class MeasuredYieldScoutExecutor:
                 ),
             )
 
-    def _measurement(self, *, sampled: int, hosts: set[str], bytes_read: int, elapsed: float) -> ScoutMeasurement:
-        resolved = self.baseline.resolve_batch(hosts)
-        novel = [hostname for hostname in hosts if resolved.get(hostname, (0, False))[0] == 0]
+    def _measurement(
+        self,
+        *,
+        parsed: ParsedHostSample,
+        bytes_read: int,
+        elapsed: float,
+    ) -> ScoutMeasurement:
+        resolved = self.baseline.resolve_batch(parsed.hosts)
+        novel = [
+            hostname
+            for hostname in parsed.hosts
+            if resolved.get(hostname, (0, False))[0] == 0
+        ]
         novel_eed = Decimal("0")
         for hostname in novel:
             tld = hostname.rsplit(".", 1)[-1]
             novel_eed += self.english_weights.get(tld, Decimal("0"))
+        novel_pairs = {
+            (hostname, year)
+            for hostname, year in parsed.host_year_pairs
+            if YEAR_BITS.get(year, 0)
+            and not resolved.get(hostname, (0, False))[0] & YEAR_BITS[year]
+        }
+        novel_pair_eed = Decimal("0")
+        for hostname, _year in novel_pairs:
+            tld = hostname.rsplit(".", 1)[-1]
+            novel_pair_eed += self.english_weights.get(tld, Decimal("0"))
         return ScoutMeasurement(
-            sampled_records=sampled,
-            unique_hosts=len(hosts),
+            sampled_records=parsed.sampled_records,
+            unique_hosts=len(parsed.hosts),
             novel_hosts=len(novel),
             direct_host_years=0,
             requests=1,
             bytes_read=bytes_read,
             elapsed_seconds=elapsed,
             novel_eed=float(novel_eed),
+            measurement_mode=parsed.measurement_mode,
+            observed_host_year_pairs=len(parsed.host_year_pairs),
+            novel_host_year_pairs=len(novel_pairs),
+            novel_pair_eed=float(novel_pair_eed),
         )
 
     async def __call__(self, candidate: SourceCandidate) -> ScoutResult:
@@ -516,8 +678,12 @@ class MeasuredYieldScoutExecutor:
             if download.payload.lstrip().startswith((b"WARC/", b"ARC/", b"\x1f\x8b")):
                 elapsed = max(0.0, float(self.clock()) - started)
                 measurement = self._measurement(
-                    sampled=0,
-                    hosts=set(),
+                    parsed=ParsedHostSample(
+                        sampled_records=0,
+                        hosts=set(),
+                        host_year_pairs=set(),
+                        measurement_mode=MeasurementMode.HOST_ONLY,
+                    ),
                     bytes_read=len(download.payload),
                     elapsed=elapsed,
                 )
@@ -534,25 +700,25 @@ class MeasuredYieldScoutExecutor:
                 ScoutDisposition.HOLD,
                 reason="unsupported measured source format; requires a format-specific mature parser",
             )
-        sampled, hosts = parsed
         elapsed = max(0.0, float(self.clock()) - started)
         measurement = self._measurement(
-            sampled=sampled,
-            hosts=hosts,
+            parsed=parsed,
             bytes_read=len(download.payload),
             elapsed=elapsed,
         )
-        if measurement.unique_hosts < self.policy.min_unique_hosts:
+        observed_count = measurement.observed_count_for_threshold
+        novel_count = measurement.novel_count_for_threshold
+        if observed_count < self.policy.min_unique_hosts:
             return ScoutResult(
                 ScoutDisposition.HOLD,
                 measurement=measurement,
                 reason="measured sample has too few unique hostnames",
             )
-        novel_fraction = measurement.novel_hosts / measurement.unique_hosts
+        novel_fraction = novel_count / observed_count
         if (
-            measurement.novel_hosts < self.policy.min_novel_hosts
+            novel_count < self.policy.min_novel_hosts
             or novel_fraction < self.policy.min_novel_fraction
-            or measurement.novel_eed < self.policy.min_novel_eed
+            or measurement.novel_eed_for_ranking < self.policy.min_novel_eed
         ):
             return ScoutResult(
                 ScoutDisposition.HOLD,

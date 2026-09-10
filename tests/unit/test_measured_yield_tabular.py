@@ -6,6 +6,7 @@ from creeper.source_discovery.measured_scout import (
     MeasuredYieldScoutPolicy,
     _extract_hosts,
 )
+from creeper.source_discovery.models import MeasurementMode
 
 
 class MeasuredYieldTabularTests(unittest.TestCase):
@@ -67,6 +68,30 @@ class MeasuredYieldTabularTests(unittest.TestCase):
     def test_invalid_target_year_bounds_fail_closed_at_configuration(self) -> None:
         with self.assertRaisesRegex(ValueError, "target year bounds"):
             self.policy(target_year_from=2001, target_year_to=1996)
+
+    def test_dated_csv_exposes_unique_host_year_pairs(self) -> None:
+        parsed = _extract_hosts(
+            b"hostname,year\nknown.com,1997\nknown.com,1998\n",
+            url="https://data.example/hosts.csv",
+            content_type="text/csv",
+            policy=self.policy(),
+        )
+        self.assertIsNotNone(parsed)
+        assert parsed is not None
+        self.assertEqual(parsed.measurement_mode, MeasurementMode.HOST_YEAR)
+        self.assertEqual(parsed.host_year_pairs, {("known.com", 1997), ("known.com", 1998)})
+
+    def test_undated_jsonl_does_not_fabricate_year_pairs(self) -> None:
+        parsed = _extract_hosts(
+            b'{"hostname":"known.com"}\n',
+            url="https://data.example/hosts.jsonl",
+            content_type="application/x-ndjson",
+            policy=self.policy(),
+        )
+        self.assertIsNotNone(parsed)
+        assert parsed is not None
+        self.assertEqual(parsed.measurement_mode, MeasurementMode.HOST_ONLY)
+        self.assertEqual(parsed.host_year_pairs, set())
 
 
 if __name__ == "__main__":

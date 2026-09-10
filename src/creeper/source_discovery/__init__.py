@@ -29,6 +29,7 @@ from creeper.source_discovery.measured_scout import (
     MeasuredYieldScoutPolicy,
 )
 from creeper.source_discovery.models import (
+    MeasurementMode,
     ScoutMeasurement,
     SearchEpisode,
     SourceCandidate,
@@ -78,6 +79,7 @@ __all__ = [
     "LinkPromotionAccumulator",
     "MeasuredYieldScoutExecutor",
     "MeasuredYieldScoutPolicy",
+    "MeasurementMode",
     "PromotedSource",
     "PromotionEvidence",
     "PromotionPolicy",
