@@ -169,7 +169,7 @@ class RuntimeSubmissionIntegrationTests(unittest.TestCase):
                 cdx_audit_set=("cdx-audit.json",),
                 eed_report={"equivalent_english_domains": "1"},
                 novel_eed="1",
-                growth_rate="0.01",
+                growth_rate="0.05",
             )
 
             def transport(hostname, year):
@@ -205,6 +205,47 @@ class RuntimeSubmissionIntegrationTests(unittest.TestCase):
             finally:
                 evidence.close()
                 control.close()
+                baseline.close()
+
+    def test_runtime_snapshot_below_formal_growth_gate_is_not_ready(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task_root = root / "task"
+            baseline_dir = task_root / "next-baseline"
+            baseline_dir.mkdir(parents=True)
+            for year in range(1996, 2002):
+                (baseline_dir / f"{year}.txt").write_text("", encoding="utf-8")
+            (baseline_dir / "candidate_pool.txt").write_text("", encoding="utf-8")
+            baseline = BaselineIndex.build(task_root, root / "baseline.sqlite3")
+            evidence = EvidenceStore(root / "evidence.sqlite3")
+            evidence.put(
+                EvidenceCapsule(
+                    "alpha.example", 1997, "wayback-cdx", "capture_timestamp_year",
+                    "19970101000000", "http://alpha.example/", "a" * 64, "evidence-v1",
+                )
+            )
+            context = RuntimeSubmissionContext(
+                baseline_manifest={
+                    "baseline_id": "next-baseline",
+                    "annual_file_hashes": {f"{year}.txt": "b" * 64 for year in range(1996, 2002)},
+                },
+                code_revision="c" * 64,
+                source_report_set=("source-report.json",),
+                cdx_audit_set=("cdx-audit.json",),
+                eed_report={"equivalent_english_domains": "1"},
+                novel_eed="1",
+                growth_rate="0.049999",
+            )
+            try:
+                snapshot = build_runtime_snapshot(
+                    context=context,
+                    evidence_store=evidence,
+                    baseline=baseline,
+                    snapshot_id="runtime-snapshot-low-growth",
+                )
+                self.assertFalse(snapshot.ready)
+            finally:
+                evidence.close()
                 baseline.close()
 
 
