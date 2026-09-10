@@ -6,15 +6,14 @@ access. A transport returns pages of dictionaries and a completion flag.
 
 from __future__ import annotations
 
+import gzip
 import hashlib
 import json
-import gzip
 import time
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode
-from urllib.parse import urlsplit
+from urllib.parse import urlencode, urlsplit
 from urllib.request import Request, urlopen
 
 from creeper.authority.normalizer import normalize_official
@@ -36,7 +35,12 @@ RangeTransport = Callable[[str, int, int], Iterable[Page]]
 
 @dataclass(frozen=True)
 class RangeProbeResult:
-    """A bounded range probe without claiming exact-year evidence."""
+    """A bounded range probe without claiming exact-year evidence.
+
+    ``state`` reports whether any accepted exact-host rows were observed, while
+    ``complete`` separately records whether the range traversal was exhaustive.
+    Negative exact-year inference is allowed only when ``complete`` is true.
+    """
 
     hostname: str
     year_from: int
@@ -46,6 +50,7 @@ class RangeProbeResult:
     pages_seen: int = 0
     records_seen: int = 0
     error: str | None = None
+    complete: bool = False
 
 
 class WaybackCDXClient:
@@ -255,6 +260,7 @@ def probe_range(
             tuple(sorted(candidate_years)),
             pages_seen,
             records_seen,
+            complete=last_page_complete is True,
         )
     except (TimeoutError, ConnectionError) as exc:
         return RangeProbeResult(
@@ -372,9 +378,10 @@ def query_missing_years(
 ) -> list[EvidenceQueryResult]:
     """Probe ranges first, then run exact probes only where useful.
 
-    A complete range probe can safely infer ``EMPTY_EXHAUSTIVE`` for years
-    without an accepted row. Any non-complete range result falls back to all
-    exact-year queries in that range, preserving the negative-evidence rule.
+    A range probe may infer negative exact-year evidence only after an
+    exhaustive traversal. If a range ends incomplete, every year in that
+    range falls back to an exact-year query even when earlier pages contained
+    accepted rows.
     """
     years = tuple(sorted(set(missing_years)))
     ranges = contiguous_year_ranges(years)
@@ -394,14 +401,18 @@ def query_missing_years(
     results: dict[int, EvidenceQueryResult] = {}
     for year_from, year_to in ranges:
         probe = probe_range(hostname, year_from, year_to, range_transport)
-        if probe.state is CDXQueryState.EMPTY_EXHAUSTIVE:
+        if probe.complete and probe.state is CDXQueryState.EMPTY_EXHAUSTIVE:
             for year in range(year_from, year_to + 1):
-                key = EvidenceQueryKey(
-                    normalized or hostname,
-                    TemporalScope(year, year),
-                    provider,
-                    policy_version,
-                ) if normalized is not None else None
+                key = (
+                    EvidenceQueryKey(
+                        normalized or hostname,
+                        TemporalScope(year, year),
+                        provider,
+                        policy_version,
+                    )
+                    if normalized is not None
+                    else None
+                )
                 results[year] = EvidenceQueryResult(
                     hostname,
                     year,
@@ -409,16 +420,20 @@ def query_missing_years(
                     key=key,
                 )
             continue
-        if probe.state is CDXQueryState.PASS:
+        if probe.complete and probe.state is CDXQueryState.PASS:
             exact_years = set(probe.candidate_years)
             for year in range(year_from, year_to + 1):
                 if year not in exact_years:
-                    key = EvidenceQueryKey(
-                        normalized or hostname,
-                        TemporalScope(year, year),
-                        provider,
-                        policy_version,
-                    ) if normalized is not None else None
+                    key = (
+                        EvidenceQueryKey(
+                            normalized or hostname,
+                            TemporalScope(year, year),
+                            provider,
+                            policy_version,
+                        )
+                        if normalized is not None
+                        else None
+                    )
                     results[year] = EvidenceQueryResult(
                         hostname,
                         year,
