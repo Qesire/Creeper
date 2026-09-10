@@ -31,6 +31,9 @@ jobs:
       - name: Sync environment
         run: uv sync --all-groups
 
+      - name: Check lockfile is committed
+        run: git diff --exit-code -- uv.lock
+
       - name: Run offline test suite
         run: uv run python -m unittest discover -s tests -v
 
