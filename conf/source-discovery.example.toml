@@ -38,6 +38,23 @@ max_seconds = 120
 max_memory_mb = 512
 follow_query = false
 
+[measurement]
+# Optional deterministic yield gate for concrete SOURCE/BULK_ARTIFACT nodes.
+# Remove this whole table to keep concrete sources in HOLD until a measured adapter exists.
+baseline_index = "/path/to/Creeper-data/v3-merged260909-3/baseline.sqlite3"
+eed_model = "/path/to/task-root/equivalent_english_domain/CC-MAIN-2024-10_primary_page_language_percentage.json"
+# Only a bounded prefix is fetched; unknown/WARC formats remain HOLD.
+max_download_bytes = 8388608
+max_decompressed_bytes = 33554432
+max_records = 5000
+max_line_bytes = 65536
+# These are scout promotion thresholds, not submission acceptance thresholds.
+min_unique_hosts = 100
+min_novel_hosts = 10
+min_novel_fraction = 0.01
+min_novel_eed = 1.0
+timeout_seconds = 30.0
+
 [admission]
 # Search-time prior gate. This is intentionally before baseline/CDX verification:
 # the Agent must already bring large, enumerable, 1996-2001-relevant resources.
