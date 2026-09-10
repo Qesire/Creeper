@@ -181,7 +181,12 @@ class CommandAgentSearchExecutor:
         path: Path,
         *,
         strategy: str,
-    ) -> tuple[str, tuple[SourceCandidate, ...], tuple[dict[str, str], ...]]:
+    ) -> tuple[
+        str,
+        tuple[SourceCandidate, ...],
+        tuple[dict[str, str], ...],
+        int,
+    ]:
         try:
             size = path.stat().st_size
         except FileNotFoundError as exc:
@@ -235,7 +240,7 @@ class CommandAgentSearchExecutor:
                         "reason": reason,
                     }
                 )
-        return query, tuple(accepted), tuple(rejected)
+        return query, tuple(accepted), tuple(rejected), len(candidates)
 
     @staticmethod
     def _write_admission_audit(
@@ -308,15 +313,13 @@ class CommandAgentSearchExecutor:
         if returncode != 0:
             raise RuntimeError(f"source search agent failed rc={returncode}")
 
-        raw_payload = json.loads(response_path.read_text(encoding="utf-8"))
-        raw_candidates = raw_payload.get("candidates", []) if isinstance(raw_payload, dict) else []
-        query, candidates, rejected = self._read_response(
+        query, candidates, rejected, raw_candidate_count = self._read_response(
             response_path,
             strategy=directive.strategy,
         )
         self._write_admission_audit(
             admission_path,
-            raw_candidate_count=len(raw_candidates) if isinstance(raw_candidates, list) else 0,
+            raw_candidate_count=raw_candidate_count,
             accepted=candidates,
             rejected=rejected,
         )
