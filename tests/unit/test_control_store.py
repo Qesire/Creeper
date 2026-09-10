@@ -97,6 +97,33 @@ class ControlStoreTests(unittest.TestCase):
             evidence_mode="direct_year",
         )
 
+    def _ready_reservoir(self, *, cursor="0"):
+        reservoir = self._reservoir()
+        return Reservoir(
+            reservoir_id=reservoir.reservoir_id,
+            domain_id=reservoir.domain_id,
+            adapter_id=reservoir.adapter_id,
+            root_locator=reservoir.root_locator,
+            enumeration_kind=reservoir.enumeration_kind,
+            capacity_lower=reservoir.capacity_lower,
+            capacity_upper=reservoir.capacity_upper,
+            evidence_mode=reservoir.evidence_mode,
+            cursor=cursor,
+            state=ReservoirState.READY,
+        )
+
+    @staticmethod
+    def _lease_limits():
+        return {
+            "max_records": 10,
+            "max_requests": 2,
+            "max_bytes": 4096,
+            "max_seconds": 10,
+            "resource_class": "general",
+            "expected_evidence_tasks": 2,
+            "expected_novel_eed": 1.5,
+        }
+
     def test_domain_reservoir_and_lease_round_trip_requires_domain_first(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = ControlStore(Path(tmp) / "control.sqlite3")
@@ -196,6 +223,66 @@ class ControlStoreTests(unittest.TestCase):
             self.assertEqual(store.recover_expired_leases(now=200.0), 1)
             self.assertEqual(store.get_lease(expired.lease_id).state, LeaseState.EXPIRED)
             self.assertEqual(store.get_lease(completed.lease_id).state, LeaseState.SUCCEEDED)
+            store.close()
+
+    def test_fresh_grant_uses_cursor_and_prevents_second_claim(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ControlStore(Path(tmp) / "control.sqlite3")
+            domain = self._domain()
+            ready = self._ready_reservoir(cursor="128")
+            store.save_domain(domain)
+            store.save_reservoir(ready)
+
+            first = store.grant_fresh_lease(
+                ready.reservoir_id,
+                owner="worker-a",
+                now=100.0,
+                **self._lease_limits(),
+            )
+            second = store.grant_fresh_lease(
+                ready.reservoir_id,
+                owner="worker-b",
+                now=100.0,
+                **self._lease_limits(),
+            )
+
+            self.assertIsNotNone(first)
+            self.assertEqual(first.cursor_start, "128")
+            self.assertEqual(first.state, LeaseState.GRANTED)
+            self.assertIsNone(second)
+            self.assertEqual(
+                store.get_reservoir(ready.reservoir_id).state,
+                ReservoirState.LEASED,
+            )
+            store.close()
+
+    def test_expired_lease_restores_reservoir_at_prior_cursor(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ControlStore(Path(tmp) / "control.sqlite3")
+            domain = self._domain()
+            ready = self._ready_reservoir(cursor="256")
+            store.save_domain(domain)
+            store.save_reservoir(ready)
+            granted = store.grant_fresh_lease(
+                ready.reservoir_id,
+                owner="worker-a",
+                now=0.0,
+                **self._lease_limits(),
+            )
+            store.save_lease(granted.start())
+
+            changed = store.recover_expired_leases(now=11.0)
+
+            self.assertEqual(changed, 1)
+            self.assertEqual(
+                store.get_lease(granted.lease_id).state,
+                LeaseState.EXPIRED,
+            )
+            restored = store.get_reservoir(granted.reservoir_id)
+            self.assertEqual(
+                (restored.state, restored.cursor),
+                (ReservoirState.READY, "256"),
+            )
             store.close()
 
 

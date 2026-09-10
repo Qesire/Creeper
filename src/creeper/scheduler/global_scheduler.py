@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import time
 from typing import Iterable, Mapping
 
 from creeper.scheduler.credits import CreditLedger
-from creeper.scheduler.leases import LeaseState, WorkLease
+from creeper.scheduler.leases import WorkLease
 from creeper.scheduler.priority import LeaseCandidate
 from creeper.sources.reservoirs import ReservoirState
 
@@ -22,12 +23,11 @@ class RankedCandidate:
 
 
 class GlobalScheduler:
-    """Rank and grant one bounded lease at a time.
+    """Rank candidates and reserve bounded evidence credits.
 
-    The scheduler intentionally has no network or persistence side effects. A
-    caller owns persistence of the returned lease; this class only accounts
-    for evidence reservation and tracks the in-memory reservoir state needed
-    by the phase-1 scheduling boundary.
+    Reservoir and lease ownership belong to ControlStore.  The compatibility
+    ``grant_next`` method only performs ranking, credit reservation, and
+    construction of a fresh lease for older callers.
     """
 
     def __init__(
@@ -38,7 +38,6 @@ class GlobalScheduler:
     ) -> None:
         self.ledger = ledger
         self.resource_capacities = dict(resource_capacities or {})
-        self._reservoir_states: dict[str, ReservoirState] = {}
 
     def score(self, candidate: LeaseCandidate) -> float:
         denominator = candidate.costs.normalized(self.resource_capacities)
@@ -56,17 +55,32 @@ class GlobalScheduler:
             mode = candidate.reservoir.evidence_mode
         return mode == "direct_year"
 
-    def _lease_for(self, candidate: LeaseCandidate) -> WorkLease:
-        if candidate.lease is not None:
-            return candidate.lease
+    @staticmethod
+    def _fresh_lease(candidate: LeaseCandidate, *, owner: str) -> WorkLease:
+        template = candidate.lease
         capacity = candidate.reservoir.capacity_lower if candidate.reservoir is not None else 1
-        return WorkLease.create(
+        lease = WorkLease.create(
             reservoir_id=candidate.reservoir_id,
-            max_records=max(1, capacity),
-            max_requests=max(1, candidate.expected_evidence_tasks),
-            max_bytes=max(1, capacity),
-            max_seconds=1.0,
+            cursor_start=(
+                template.cursor_start
+                if template is not None
+                else candidate.reservoir.cursor if candidate.reservoir is not None else None
+            ),
+            cursor_end=template.cursor_end if template is not None else None,
+            max_records=template.max_records if template is not None else max(1, capacity),
+            max_requests=(
+                template.max_requests
+                if template is not None
+                else max(1, candidate.expected_evidence_tasks)
+            ),
+            max_bytes=template.max_bytes if template is not None else max(1, capacity),
+            max_seconds=template.max_seconds if template is not None else 1.0,
+            resource_class=template.resource_class if template is not None else "default",
+            expected_evidence_tasks=candidate.expected_evidence_tasks,
+            expected_novel_eed=candidate.expected_novel_eed,
+            now=time.time(),
         )
+        return lease.grant(owner=owner)
 
     def grant_next(
         self,
@@ -77,24 +91,17 @@ class GlobalScheduler:
         for candidate in self.rank(candidates):
             if candidate.reservoir is not None and candidate.reservoir.state is not ReservoirState.READY:
                 continue
-            if candidate.reservoir is not None:
-                self._reservoir_states[candidate.reservoir_id] = candidate.reservoir.state
             tasks = 0 if self._is_direct(candidate) else candidate.expected_evidence_tasks
             reserved = False
             if tasks:
                 reserved = self.ledger.reserve_evidence(candidate.evidence_provider, tasks)
                 if not reserved:
                     continue
-            lease = self._lease_for(candidate)
             try:
-                granted = lease.grant(owner=owner) if lease.state is LeaseState.CREATED else lease
+                granted = self._fresh_lease(candidate, owner=owner)
             except Exception:
                 if reserved:
                     self.ledger.release_evidence(candidate.evidence_provider, tasks)
                 raise
-            self._reservoir_states[candidate.reservoir_id] = ReservoirState.LEASED
             return granted
         return None
-
-    def reservoir_state(self, reservoir_id: str) -> ReservoirState | None:
-        return self._reservoir_states.get(reservoir_id)

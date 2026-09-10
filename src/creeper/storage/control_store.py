@@ -463,6 +463,91 @@ class ControlStore:
                 ),
             )
 
+    def grant_fresh_lease(
+        self,
+        reservoir_id: str,
+        *,
+        owner: str,
+        max_records: int,
+        max_requests: int,
+        max_bytes: int,
+        max_seconds: float,
+        resource_class: str,
+        expected_evidence_tasks: int,
+        expected_novel_eed: float,
+        now: float,
+    ) -> Any | None:
+        """Atomically claim a READY reservoir with a new cursor-backed lease."""
+        from creeper.scheduler.leases import LeaseState, WorkLease
+        from creeper.sources.reservoirs import ReservoirState
+
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            reservoir = self.connection.execute(
+                "SELECT * FROM reservoirs WHERE reservoir_id = ?",
+                (reservoir_id,),
+            ).fetchone()
+            if reservoir is None or reservoir["state"] != ReservoirState.READY.value:
+                self.connection.commit()
+                return None
+
+            lease = WorkLease.create(
+                reservoir_id=reservoir_id,
+                cursor_start=reservoir["cursor"],
+                max_records=max_records,
+                max_requests=max_requests,
+                max_bytes=max_bytes,
+                max_seconds=max_seconds,
+                resource_class=resource_class,
+                expected_evidence_tasks=expected_evidence_tasks,
+                expected_novel_eed=expected_novel_eed,
+                now=float(now),
+            ).grant(owner=owner)
+            self.connection.execute(
+                """
+                INSERT INTO work_leases(
+                    lease_id, reservoir_id, cursor_start, cursor_end, max_records,
+                    max_requests, max_bytes, max_seconds, resource_class,
+                    expected_evidence_tasks, expected_novel_eed, owner,
+                    expires_at, state
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    lease.lease_id,
+                    lease.reservoir_id,
+                    lease.cursor_start,
+                    lease.cursor_end,
+                    lease.max_records,
+                    lease.max_requests,
+                    lease.max_bytes,
+                    lease.max_seconds,
+                    lease.resource_class,
+                    lease.expected_evidence_tasks,
+                    lease.expected_novel_eed,
+                    lease.owner,
+                    lease.expires_at,
+                    LeaseState.GRANTED.value,
+                ),
+            )
+            changed = self.connection.execute(
+                """
+                UPDATE reservoirs SET state = ?
+                WHERE reservoir_id = ? AND state = ?
+                """,
+                (
+                    ReservoirState.LEASED.value,
+                    reservoir_id,
+                    ReservoirState.READY.value,
+                ),
+            ).rowcount
+            if changed != 1:
+                raise RuntimeError("reservoir changed while granting lease")
+            self.connection.commit()
+            return lease
+        except BaseException:
+            self.connection.rollback()
+            raise
+
     def get_lease(self, lease_id: str) -> Any | None:
         row = self.connection.execute(
             "SELECT * FROM work_leases WHERE lease_id = ?", (lease_id,)
@@ -484,23 +569,50 @@ class ControlStore:
 
     def recover_expired_leases(self, *, now: float | None = None) -> int:
         from creeper.scheduler.leases import LeaseState
+        from creeper.sources.reservoirs import ReservoirState
 
         if now is None:
             now = float(self.clock())
-        with self.connection:
-            cursor = self.connection.execute(
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            rows = self.connection.execute(
                 """
-                UPDATE work_leases SET state = ?
-                WHERE expires_at < ? AND state IN (?, ?)
+                SELECT lease_id, reservoir_id, cursor_start
+                FROM work_leases
+                WHERE expires_at <= ? AND state IN (?, ?)
                 """,
                 (
-                    LeaseState.EXPIRED.value,
                     float(now),
                     LeaseState.GRANTED.value,
                     LeaseState.RUNNING.value,
                 ),
-            )
-        return cursor.rowcount
+            ).fetchall()
+            for row in rows:
+                self.connection.execute(
+                    "UPDATE work_leases SET state = ? WHERE lease_id = ?",
+                    (LeaseState.EXPIRED.value, row["lease_id"]),
+                )
+                self.connection.execute(
+                    """
+                    UPDATE reservoirs
+                    SET state = ?, cursor = ?
+                    WHERE reservoir_id = ? AND state IN (?, ?, ?, ?)
+                    """,
+                    (
+                        ReservoirState.READY.value,
+                        row["cursor_start"],
+                        row["reservoir_id"],
+                        ReservoirState.LEASED.value,
+                        ReservoirState.RUNNING.value,
+                        ReservoirState.PAUSED.value,
+                        ReservoirState.PREEMPTED.value,
+                    ),
+                )
+            self.connection.commit()
+            return len(rows)
+        except BaseException:
+            self.connection.rollback()
+            raise
 
     def close(self) -> None:
         self.connection.close()

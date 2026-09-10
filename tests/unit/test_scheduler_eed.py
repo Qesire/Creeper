@@ -70,6 +70,44 @@ class SchedulerEEDTests(unittest.TestCase):
 
         self.assertEqual([c.reservoir_id for c in scheduler.rank(candidates)], ["alpha", "zeta"])
 
+    def test_rank_is_pure_and_does_not_claim_or_mutate_candidates(self):
+        scheduler = GlobalScheduler(CreditLedger({"wayback": 10}))
+        lease = make_lease("pure")
+        candidate = LeaseCandidate(
+            reservoir_id="pure",
+            reservoir=make_reservoir("pure"),
+            lease=lease,
+            expected_novel_eed=10,
+            costs=ResourceCost(1, 1, 1, 1),
+        )
+
+        first = scheduler.rank([candidate])
+        second = scheduler.rank([candidate])
+
+        self.assertIs(first[0], candidate)
+        self.assertIs(second[0], candidate)
+        self.assertEqual(candidate.lease.lease_id, lease.lease_id)
+        self.assertEqual(candidate.lease.state, LeaseState.CREATED)
+        self.assertEqual(candidate.reservoir.state, ReservoirState.READY)
+
+    def test_compatibility_grant_helper_creates_fresh_lease_id(self):
+        scheduler = GlobalScheduler(CreditLedger({"wayback": 10}))
+        candidate_lease = make_lease("fresh")
+        candidate = LeaseCandidate(
+            reservoir_id="fresh",
+            reservoir=make_reservoir("fresh"),
+            lease=candidate_lease,
+            expected_novel_eed=10,
+            costs=ResourceCost(1, 1, 1, 1),
+        )
+
+        granted = scheduler.grant_next([candidate], owner="worker-1")
+
+        self.assertIsNotNone(granted)
+        self.assertNotEqual(granted.lease_id, candidate_lease.lease_id)
+        self.assertEqual(candidate_lease.state, LeaseState.CREATED)
+        self.assertEqual(candidate.reservoir.state, ReservoirState.READY)
+
     def test_direct_year_grant_does_not_reserve_evidence_credit(self):
         ledger = CreditLedger({"wayback": 1})
         scheduler = GlobalScheduler(ledger)
@@ -88,7 +126,6 @@ class SchedulerEEDTests(unittest.TestCase):
         self.assertIsNotNone(granted)
         self.assertEqual(granted.state, LeaseState.GRANTED)
         self.assertEqual(ledger.balance("wayback").reserved, 0)
-        self.assertEqual(scheduler.reservoir_state("direct"), ReservoirState.LEASED)
 
     def test_discovery_only_grant_is_rejected_when_credit_reservation_fails(self):
         ledger = CreditLedger({"wayback": 1})
@@ -104,7 +141,6 @@ class SchedulerEEDTests(unittest.TestCase):
 
         self.assertIsNone(scheduler.grant_next([candidate], owner="worker-1"))
         self.assertEqual(ledger.balance("wayback").reserved, 0)
-        self.assertEqual(scheduler.reservoir_state("discovery"), ReservoirState.READY)
 
 
 if __name__ == "__main__":
