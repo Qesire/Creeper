@@ -6,6 +6,8 @@ from dataclasses import dataclass
 import re
 from urllib.parse import urljoin, urlsplit
 
+from selectolax.lexbor import LexborHTMLParser, LexborNode
+
 
 @dataclass(frozen=True)
 class CdxjCatalogEntry:
@@ -15,12 +17,17 @@ class CdxjCatalogEntry:
     size_text: str
 
 
-_LINK_RE = re.compile(
-    r'<a\b[^>]*\bhref=["\']([^"\']+\.cdxj)["\'][^>]*>(.*?)</a>(.*?)(?=<a\b|</tr>|$)',
-    flags=re.IGNORECASE | re.DOTALL,
+_SIZE_RE = re.compile(
+    r"(?<![\w.])(\d+(?:\.\d+)?)\s*([KMGT]?)\s*(?:B)?(?![\w])",
+    re.IGNORECASE,
 )
-_SIZE_RE = re.compile(r"(?<![\w.])(\d+(?:\.\d+)?)\s*([KMGT]?)\s*(?:B)?(?![\w])", re.IGNORECASE)
-_MULTIPLIERS = {"": 1, "K": 1_000, "M": 1_000_000, "G": 1_000_000_000, "T": 1_000_000_000_000}
+_MULTIPLIERS = {
+    "": 1,
+    "K": 1_000,
+    "M": 1_000_000,
+    "G": 1_000_000_000,
+    "T": 1_000_000_000_000,
+}
 
 
 def _parse_size(text: str) -> tuple[int, str] | None:
@@ -32,23 +39,88 @@ def _parse_size(text: str) -> tuple[int, str] | None:
     return round(float(number) * _MULTIPLIERS[unit]), f"{number}{unit}"
 
 
+def _nearest_row(node: LexborNode) -> LexborNode | None:
+    """Return the nearest table row without walking outside the link container."""
+    current = node.parent
+    for _ in range(8):
+        if current is None:
+            return None
+        if current.tag == "tr":
+            return current
+        if current.tag in {"table", "body", "html"}:
+            return None
+        current = current.parent
+    return None
+
+
+def _following_listing_text(anchor: LexborNode) -> str:
+    """Collect the local text that follows one link in Apache-style listings.
+
+    Lexbor exposes text nodes in the sibling chain. Stopping at the next anchor
+    or a row boundary prevents one file from accidentally inheriting another
+    file's size when the listing is wrapped in a single ``<pre>`` element.
+    """
+    parts: list[str] = []
+    current = anchor.next
+    for _ in range(16):
+        if current is None:
+            break
+        tag = current.tag
+        if tag == "a":
+            break
+        if tag in {"tr", "table"}:
+            break
+        if tag == "-text":
+            value = current.text_content
+            if value:
+                parts.append(value)
+        elif tag == "br":
+            break
+        else:
+            text = current.text(deep=True, separator=" ", strip=True)
+            if text:
+                parts.append(text)
+        current = current.next
+    return " ".join(parts)
+
+
+def _size_context(anchor: LexborNode) -> str:
+    row = _nearest_row(anchor)
+    if row is not None:
+        return row.text(deep=True, separator=" ", strip=True)
+    return _following_listing_text(anchor)
+
+
 def parse_cdxj_catalog(html: str, *, base_url: str) -> list[CdxjCatalogEntry]:
-    """Parse only same-directory ``.cdxj`` links with a usable size."""
+    """Parse same-directory ``.cdxj`` links with a usable adjacent size.
+
+    HTML tree construction and malformed-markup recovery are delegated to the
+    Lexbor HTML5 parser. Creeper retains only catalog-specific URL and size
+    policy so directory markup changes do not become handwritten HTML parsing.
+    """
     base = urlsplit(base_url)
+    base_directory = base.path.rstrip("/")
+    tree = LexborHTMLParser(html)
     entries: list[CdxjCatalogEntry] = []
-    for match in _LINK_RE.finditer(html):
-        href, raw_name, tail = match.groups()
+
+    for anchor in tree.css("a[href]"):
+        href = anchor.attributes.get("href")
+        if not href:
+            continue
         url = urljoin(base_url, href)
         parsed = urlsplit(url)
         if parsed.scheme not in {"http", "https"} or parsed.netloc != base.netloc:
             continue
-        if parsed.path.rsplit("/", 1)[0] != base.path.rstrip("/"):
+        if not parsed.path.lower().endswith(".cdxj"):
             continue
-        parsed_size = _parse_size(tail)
+        if parsed.path.rsplit("/", 1)[0] != base_directory:
+            continue
+
+        parsed_size = _parse_size(_size_context(anchor))
         if parsed_size is None:
             continue
         size_bytes, size_text = parsed_size
-        name = re.sub(r"<[^>]+>", "", raw_name).strip()
+        name = anchor.text(deep=True, separator=" ", strip=True) or parsed.path.rsplit("/", 1)[-1]
         entries.append(CdxjCatalogEntry(name, url, size_bytes, size_text))
     return entries
 
