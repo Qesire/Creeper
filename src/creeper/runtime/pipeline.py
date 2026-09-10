@@ -152,7 +152,7 @@ class SyncRuntime:
             scheduled_keys: set[EvidenceQueryKey] = set()
 
             def drain_evidence_tasks() -> None:
-                nonlocal completed, capsules, max_commits
+                nonlocal completed, max_commits
                 nonlocal ledger_queued, ledger_claimed
                 keys: list[EvidenceQueryKey] = []
                 while not queues.evidence_task_queue.empty():
@@ -182,8 +182,6 @@ class SyncRuntime:
                     queues.commits.get_nowait()
                     writer.submit(query_result.capsule, query_result)
                     completed += 1
-                    if query_result.capsule is not None:
-                        capsules += 1
                     self.scheduler.ledger.complete_evidence(provider)
                     ledger_claimed -= 1
 
@@ -224,6 +222,10 @@ class SyncRuntime:
                     hostnames, input_batch_size=self.baseline_batch_size
                 ):
                     resolved.update(batch)
+                allow_direct = (
+                    candidate.reservoir is not None
+                    and candidate.reservoir.evidence_mode == "direct_year"
+                )
                 for item in pending:
                     annual_mask, _candidate = resolved.get(item.hostname, (0, False))
                     plan = self.evidence_planner.plan(
@@ -232,6 +234,7 @@ class SyncRuntime:
                         local_mask=local_masks.get(item.hostname, 0),
                         provider=provider,
                         policy_version=self.evidence_policy_version,
+                        allow_direct=allow_direct,
                     )
                     direct_capsules.extend(plan.direct_capsules)
                     enqueue_external_keys(plan.external_keys)
@@ -253,6 +256,7 @@ class SyncRuntime:
 
             drain_evidence_tasks()
             writer.close()
+            capsules += writer.inserted_capsules
             if direct_capsules:
                 capsules += self.evidence_store.put_many(direct_capsules)
             assert result is not None
