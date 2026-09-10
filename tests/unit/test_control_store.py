@@ -458,6 +458,36 @@ class ControlStoreTests(unittest.TestCase):
             self.assertEqual(task.retry_at, 123.5)
             store.close()
 
+    def test_finish_range_task_atomically_fans_out_exact_followups(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ControlStore(Path(tmp) / "control.sqlite3")
+            range_key = EvidenceQueryKey(
+                "example.com", TemporalScope(1996, 1998), "wayback", "v1"
+            )
+            exact_keys = [
+                EvidenceQueryKey(
+                    "example.com", TemporalScope(year, year), "wayback", "v1"
+                )
+                for year in (1996, 1998)
+            ]
+            store.enqueue_evidence_tasks([range_key])
+            store.claim_evidence_tasks(owner="worker-1", limit=1)
+
+            created = store.finish_range_task(
+                range_key,
+                CDXQueryState.PASS,
+                followup_keys=exact_keys,
+                owner="worker-1",
+            )
+
+            self.assertEqual(created, 2)
+            self.assertEqual(store.get_evidence_task(range_key).state, CDXQueryState.PASS)
+            self.assertEqual(
+                {task.key for task in store.list_evidence_tasks()},
+                {range_key, *exact_keys},
+            )
+            store.close()
+
 
 if __name__ == "__main__":
     unittest.main()

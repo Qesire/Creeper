@@ -274,3 +274,52 @@ class SourceProducer:
                 self.control_store.abort_lease(running)
             self.admission.release(reservation)
             raise
+
+    def run_forever(
+        self,
+        *,
+        stop_event,
+        idle_backoff_seconds: float = 1.0,
+        max_idle_backoff_seconds: float = 60.0,
+        sleep_fn=time.sleep,
+    ) -> SourceProducerReport:
+        """Continuously consume durable source leases until a stop is requested."""
+        if idle_backoff_seconds <= 0:
+            raise ValueError("idle_backoff_seconds must be positive")
+        if max_idle_backoff_seconds < idle_backoff_seconds:
+            raise ValueError(
+                "max_idle_backoff_seconds must not be below idle_backoff_seconds"
+            )
+
+        total = SourceProducerReport()
+        idle = float(idle_backoff_seconds)
+        while not stop_event.is_set():
+            report = self.run_once()
+            total = SourceProducerReport(
+                leases_succeeded=total.leases_succeeded + report.leases_succeeded,
+                source_records=total.source_records + report.source_records,
+                observations=total.observations + report.observations,
+                evidence_tasks_enqueued=(
+                    total.evidence_tasks_enqueued + report.evidence_tasks_enqueued
+                ),
+                direct_capsules_committed=(
+                    total.direct_capsules_committed + report.direct_capsules_committed
+                ),
+                admission_blocked=total.admission_blocked or report.admission_blocked,
+                max_source_record_queue_depth=max(
+                    total.max_source_record_queue_depth,
+                    report.max_source_record_queue_depth,
+                ),
+                max_observation_queue_depth=max(
+                    total.max_observation_queue_depth,
+                    report.max_observation_queue_depth,
+                ),
+            )
+            if report.leases_succeeded:
+                idle = float(idle_backoff_seconds)
+                continue
+            if stop_event.is_set():
+                break
+            sleep_fn(idle)
+            idle = min(float(max_idle_backoff_seconds), idle * 2.0)
+        return total

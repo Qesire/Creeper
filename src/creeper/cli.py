@@ -145,6 +145,14 @@ def _run_once(config_path: Path) -> dict[str, object]:
             growth_rate=_nonempty_string(
                 submission.get("growth_rate", "0"), "growth_rate"
             ),
+            eed_model_path=(
+                _path(submission["eed_model"], config_path=config_path, name="eed_model")
+                if submission.get("eed_model") is not None
+                else None
+            ),
+            baseline_eed=_nonempty_string(
+                submission.get("baseline_eed", "0"), "baseline_eed"
+            ),
         )
 
     baseline = BaselineIndex(baseline_path)

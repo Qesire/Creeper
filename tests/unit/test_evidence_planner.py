@@ -93,9 +93,29 @@ class EvidencePlannerTests(unittest.TestCase):
 
         self.assertEqual(
             [(key.hostname, key.temporal_scope.year_from) for key in plan.external_keys],
-            [("new.example", 1998), ("new.example", 1999)],
+            [("new.example", 1998)],
         )
+        self.assertEqual(plan.external_keys[0].temporal_scope.year_to, 1999)
         self.assertEqual(plan.direct_capsules, ())
+
+    def test_contiguous_missing_years_are_one_range_and_gaps_are_separate(self):
+        from creeper.evidence.planner import EvidencePlanner
+
+        plan = EvidencePlanner().plan(
+            self.observation(year_hint_mask=YEAR_BITS[1996] | YEAR_BITS[1997] | YEAR_BITS[2000] | YEAR_BITS[2001]),
+            official_mask=0,
+            local_mask=0,
+            provider="wayback",
+            policy_version="v1",
+        )
+
+        self.assertEqual(
+            [
+                (key.temporal_scope.year_from, key.temporal_scope.year_to)
+                for key in plan.external_keys
+            ],
+            [(1996, 1997), (2000, 2001)],
+        )
 
     def test_authorized_direct_year_takes_precedence_over_same_year_hint(self):
         from creeper.evidence.planner import EvidencePlanner

@@ -20,6 +20,8 @@ from creeper.evidence.policies import (
     CDXQueryState,
     EvidenceQueryKey,
     EvidenceQueryResult,
+    RangeEvidenceQueryResult,
+    TemporalScope,
 )
 from creeper.storage.commit_writer import CommitWriter
 from creeper.storage.control_store import ControlStore, EvidenceTask
@@ -30,6 +32,9 @@ from creeper.storage.evidence_store import EvidenceStore
 class AsyncEvidenceProvider(Protocol):
     async def query_key(self, key: EvidenceQueryKey) -> EvidenceQueryResult:
         """Execute one already-claimed durable query key."""
+
+    async def query_range(self, key: EvidenceQueryKey) -> RangeEvidenceQueryResult:
+        """Probe a multi-year scope without committing annual evidence."""
 
 
 @dataclass(frozen=True)
@@ -106,8 +111,17 @@ class AsyncEvidenceWorker:
         return float(self.clock()) + delay
 
     @staticmethod
-    def _transient_for(task: EvidenceTask, error: str) -> EvidenceQueryResult:
+    def _transient_for(
+        task: EvidenceTask, error: str
+    ) -> EvidenceQueryResult | RangeEvidenceQueryResult:
         scope = task.key.temporal_scope
+        if scope.year_from != scope.year_to:
+            return RangeEvidenceQueryResult(
+                hostname=task.key.hostname,
+                key=task.key,
+                state=CDXQueryState.TRANSIENT_ERROR,
+                error=error,
+            )
         return EvidenceQueryResult(
             hostname=task.key.hostname,
             year=scope.year_from,
@@ -121,6 +135,14 @@ class AsyncEvidenceWorker:
         semaphore = self._semaphores[task.key.provider]
         async with semaphore:
             try:
+                scope = task.key.temporal_scope
+                if scope.year_from != scope.year_to:
+                    query_range = getattr(provider, "query_range", None)
+                    if query_range is None:
+                        raise ValueError(
+                            f"provider {task.key.provider!r} does not support range probes"
+                        )
+                    return await query_range(task.key)
                 return await provider.query_key(task.key)
             except asyncio.CancelledError:
                 raise
@@ -184,6 +206,46 @@ class AsyncEvidenceWorker:
             for result in results:
                 if result.key is None:
                     raise ValueError("provider result must preserve EvidenceQueryKey")
+                if isinstance(result, RangeEvidenceQueryResult):
+                    if result.state in {
+                        CDXQueryState.PASS,
+                        CDXQueryState.EMPTY_EXHAUSTIVE,
+                        CDXQueryState.INVALID,
+                    }:
+                        followups = ()
+                        if result.state is CDXQueryState.PASS:
+                            scope = result.key.temporal_scope
+                            followups = tuple(
+                                EvidenceQueryKey(
+                                    result.hostname,
+                                    TemporalScope(year, year),
+                                    result.key.provider,
+                                    result.key.policy_version,
+                                )
+                                for year in result.candidate_years
+                            )
+                        self.control_store.finish_range_task(
+                            result.key,
+                            result.state,
+                            followup_keys=followups,
+                            owner=self.owner,
+                        )
+                        terminal += 1
+                        continue
+                    if result.state not in {
+                        CDXQueryState.INCOMPLETE,
+                        CDXQueryState.TRANSIENT_ERROR,
+                    }:
+                        raise ValueError(f"unsupported provider state: {result.state}")
+                    task = task_by_key[result.key]
+                    self.control_store.finish_evidence_task(
+                        result.key,
+                        result.state,
+                        owner=self.owner,
+                        retry_at=self._retry_at(task.attempt),
+                    )
+                    retryable += 1
+                    continue
                 if result.state in {
                     CDXQueryState.PASS,
                     CDXQueryState.EMPTY_EXHAUSTIVE,

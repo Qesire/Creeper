@@ -66,5 +66,27 @@ class EvidenceQueryResult:
     key: EvidenceQueryKey | None = None
 
 
+@dataclass(frozen=True)
+class RangeEvidenceQueryResult:
+    """A temporal range probe that discovers candidate years only."""
+
+    hostname: str
+    key: EvidenceQueryKey
+    state: CDXQueryState
+    candidate_years: tuple[int, ...] = ()
+    pages_seen: int = 0
+    records_seen: int = 0
+    error: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.key.hostname != self.hostname:
+            raise ValueError("range result hostname must match query key")
+        scope = self.key.temporal_scope
+        if scope.year_from == scope.year_to:
+            raise ValueError("range result requires a multi-year temporal scope")
+        if any(year not in range(scope.year_from, scope.year_to + 1) for year in self.candidate_years):
+            raise ValueError("range candidate years must be inside the query scope")
+
+
 def is_year_timestamp(timestamp: str, year: int) -> bool:
     return len(timestamp) >= 4 and timestamp[:4].isdigit() and int(timestamp[:4]) == year

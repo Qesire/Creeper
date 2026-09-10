@@ -26,6 +26,7 @@ from creeper.evidence.policies import (
     EvidenceCapsule,
     EvidenceQueryKey,
     EvidenceQueryResult,
+    RangeEvidenceQueryResult,
     is_year_timestamp,
 )
 from creeper.evidence.providers.cdx import Page, WaybackCDXClient, _exact_hostname
@@ -190,6 +191,79 @@ class AsyncWaybackCDXClient:
                 continue
             yield rows, True
             return
+
+    async def query_range(self, key: EvidenceQueryKey) -> RangeEvidenceQueryResult:
+        """Probe a multi-year range without authorizing annual evidence."""
+        if key.provider != self.provider:
+            raise ValueError(
+                f"provider mismatch: key={key.provider!r}, client={self.provider!r}"
+            )
+        scope = key.temporal_scope
+        if scope.year_from == scope.year_to:
+            raise ValueError("range provider requires a multi-year task")
+        candidate_years: set[int] = set()
+        pages_seen = records_seen = 0
+        last_page_complete: bool | None = None
+        try:
+            async for page, complete in self.iter_range_pages(
+                key.hostname, scope.year_from, scope.year_to
+            ):
+                pages_seen += 1
+                records_seen += len(page)
+                last_page_complete = complete
+                for row in page:
+                    timestamp = str(row.get("timestamp", ""))
+                    original = str(row.get("original", ""))
+                    status = str(row.get("status", row.get("statuscode", "")))
+                    if (
+                        len(timestamp) >= 4
+                        and timestamp[:4].isdigit()
+                        and scope.year_from <= int(timestamp[:4]) <= scope.year_to
+                        and _exact_hostname(original, key.hostname)
+                        and status[:1] in {"2", "3"}
+                    ):
+                        candidate_years.add(int(timestamp[:4]))
+            complete_years = tuple(sorted(candidate_years)) if last_page_complete else ()
+            return RangeEvidenceQueryResult(
+                hostname=key.hostname,
+                key=key,
+                state=(
+                    CDXQueryState.PASS
+                    if complete_years
+                    else (
+                        CDXQueryState.EMPTY_EXHAUSTIVE
+                        if last_page_complete is True
+                        else CDXQueryState.INCOMPLETE
+                    )
+                ),
+                candidate_years=complete_years,
+                pages_seen=pages_seen,
+                records_seen=records_seen,
+                error=None,
+            )
+        except ValueError as exc:
+            return RangeEvidenceQueryResult(
+                hostname=key.hostname,
+                key=key,
+                state=CDXQueryState.INVALID,
+                pages_seen=pages_seen,
+                records_seen=records_seen,
+                error=str(exc),
+            )
+        except (
+            httpx.TimeoutException,
+            httpx.TransportError,
+            httpx.HTTPStatusError,
+            ConnectionError,
+        ) as exc:
+            return RangeEvidenceQueryResult(
+                hostname=key.hostname,
+                key=key,
+                state=CDXQueryState.TRANSIENT_ERROR,
+                pages_seen=pages_seen,
+                records_seen=records_seen,
+                error=str(exc) or type(exc).__name__,
+            )
 
     async def query_key(self, key: EvidenceQueryKey) -> EvidenceQueryResult:
         """Execute one exact-year durable EvidenceQueryKey."""

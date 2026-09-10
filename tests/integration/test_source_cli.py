@@ -2,14 +2,58 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from threading import Event
+from unittest.mock import patch
 
 from creeper.authority.baseline_index import BaselineIndex
 from creeper.evidence.policies import EvidenceQueryKey, TemporalScope
-from creeper.source_cli import run_once
+from creeper.source_cli import run_once, run_watch
 from creeper.storage.control_store import ControlStore
 
 
 class SourceProducerCliTests(unittest.TestCase):
+    def test_watch_reuses_durable_once_runner_until_stop(self):
+        stop = Event()
+        reports = iter(
+            [
+                {
+                    "leases_succeeded": 1,
+                    "source_records": 2,
+                    "observations": 2,
+                    "evidence_tasks_enqueued": 2,
+                    "direct_capsules_committed": 0,
+                    "admission_blocked": False,
+                    "max_source_record_queue_depth": 1,
+                    "max_observation_queue_depth": 1,
+                },
+                {
+                    "leases_succeeded": 0,
+                    "source_records": 0,
+                    "observations": 0,
+                    "evidence_tasks_enqueued": 0,
+                    "direct_capsules_committed": 0,
+                    "admission_blocked": True,
+                    "max_source_record_queue_depth": 0,
+                    "max_observation_queue_depth": 0,
+                },
+            ]
+        )
+
+        def fake_once(config, *, owner):
+            return next(reports)
+
+        with patch("creeper.source_cli.run_once", side_effect=fake_once):
+            result = run_watch(
+                Path("unused.toml"),
+                owner="test",
+                stop_event=stop,
+                sleep_fn=lambda _: stop.set(),
+            )
+
+        self.assertEqual(result["leases_succeeded"], 1)
+        self.assertEqual(result["source_records"], 2)
+        self.assertTrue(result["admission_blocked"])
+
     def test_once_mode_stops_at_durable_evidence_task(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

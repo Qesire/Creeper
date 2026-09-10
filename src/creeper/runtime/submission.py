@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from decimal import Decimal
+from pathlib import Path
 
 from creeper.authority.baseline_index import YEAR_BITS, BaselineIndex
+from creeper.authority.eed import calculate_eed_values
 from creeper.storage.evidence_store import EvidenceStore
 from creeper.submission.builder import build_snapshot
 from creeper.submission.snapshot import SubmissionSnapshot
@@ -25,6 +28,8 @@ class RuntimeSubmissionContext:
     unparsed: tuple[str, ...] = ()
     novel_eed: str = "0"
     growth_rate: str = "0"
+    eed_model_path: Path | None = None
+    baseline_eed: str = "0"
 
 
 def build_runtime_snapshot(
@@ -41,6 +46,22 @@ def build_runtime_snapshot(
         if capsule.year in YEAR_BITS
         and not baseline.year_mask(capsule.hostname) & YEAR_BITS[capsule.year]
     ]
+    eed_report = context.eed_report
+    novel_eed = context.novel_eed
+    growth_rate = context.growth_rate
+    if context.eed_model_path is not None:
+        eed_report, _ = calculate_eed_values(
+            (capsule.hostname for capsule in novel_capsules),
+            Path(context.eed_model_path),
+            input_file="<runtime-evidence-store>",
+        )
+        novel_eed = str(eed_report["equivalent_english_domains"])
+        baseline_eed = Decimal(str(context.baseline_eed))
+        growth_rate = (
+            format(Decimal(novel_eed) / baseline_eed, "f")
+            if baseline_eed > 0
+            else "0"
+        )
     return build_snapshot(
         snapshot_id,
         novel_capsules,
@@ -49,11 +70,11 @@ def build_runtime_snapshot(
         code_revision=context.code_revision,
         source_report_set=context.source_report_set,
         cdx_audit_set=context.cdx_audit_set,
-        eed_report=context.eed_report,
+        eed_report=eed_report,
         active_candidates=context.active_candidates,
         active_candidate_scopes=context.active_candidate_scopes,
         isc_reference=context.isc_reference,
         unparsed=context.unparsed,
-        novel_eed=context.novel_eed,
-        growth_rate=context.growth_rate,
+        novel_eed=novel_eed,
+        growth_rate=growth_rate,
     )

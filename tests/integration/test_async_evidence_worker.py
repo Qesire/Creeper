@@ -9,6 +9,7 @@ from creeper.evidence.policies import (
     EvidenceCapsule,
     EvidenceQueryKey,
     EvidenceQueryResult,
+    RangeEvidenceQueryResult,
     TemporalScope,
 )
 from creeper.evidence.worker import AsyncEvidenceWorker
@@ -54,6 +55,21 @@ class FakeProvider:
             )
         finally:
             self.active -= 1
+
+
+class FakeRangeProvider(FakeProvider):
+    def __init__(self):
+        super().__init__(state=CDXQueryState.PASS)
+        self.range_keys = []
+
+    async def query_range(self, key):
+        self.range_keys.append(key)
+        return RangeEvidenceQueryResult(
+            hostname=key.hostname,
+            key=key,
+            state=CDXQueryState.PASS,
+            candidate_years=(1997, 1999),
+        )
 
 
 class AsyncEvidenceWorkerTests(unittest.IsolatedAsyncioTestCase):
@@ -191,6 +207,35 @@ class AsyncEvidenceWorkerTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreater(visible.lease_until, time.time())
         report = await task
         self.assertEqual(report.terminal, 1)
+
+    async def test_range_task_fans_out_exact_year_tasks_without_writing_capsules(self):
+        key = EvidenceQueryKey(
+            "range.example", TemporalScope(1996, 2000), "wayback", "cdx-v1"
+        )
+        self.control.enqueue_evidence_tasks([key])
+        provider = FakeRangeProvider()
+        worker = AsyncEvidenceWorker(
+            control_store=self.control,
+            evidence_store=self.evidence,
+            providers={"wayback": provider},
+            owner="worker-range",
+        )
+
+        report = await worker.run_once()
+
+        self.assertEqual(report.claimed, 1)
+        self.assertEqual(report.terminal, 1)
+        self.assertEqual(report.inserted_capsules, 0)
+        self.assertEqual(provider.range_keys, [key])
+        followups = self.control.list_evidence_tasks()
+        self.assertEqual(
+            [(item.key.temporal_scope.year_from, item.key.temporal_scope.year_to) for item in followups],
+            [(1996, 2000), (1997, 1997), (1999, 1999)],
+        )
+        exact_report = await worker.run_until_idle()
+        self.assertEqual(exact_report.claimed, 2)
+        self.assertEqual(exact_report.inserted_capsules, 2)
+        self.assertEqual(len(self.evidence.all_capsules()), 2)
 
 
 if __name__ == "__main__":

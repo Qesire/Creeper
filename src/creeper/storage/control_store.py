@@ -104,6 +104,20 @@ class ControlStore:
             ) WITHOUT ROWID;
             CREATE INDEX IF NOT EXISTS idx_reservoirs_domain
                 ON reservoirs(domain_id, state);
+            CREATE TABLE IF NOT EXISTS source_activations (
+                source_key TEXT PRIMARY KEY,
+                domain_id TEXT NOT NULL,
+                reservoir_id TEXT NOT NULL UNIQUE,
+                adapter_id TEXT NOT NULL,
+                adapter_kind TEXT NOT NULL,
+                root_locator TEXT NOT NULL,
+                config_hash TEXT NOT NULL,
+                activation_state TEXT NOT NULL,
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL,
+                FOREIGN KEY(domain_id) REFERENCES source_domains(domain_id),
+                FOREIGN KEY(reservoir_id) REFERENCES reservoirs(reservoir_id)
+            ) WITHOUT ROWID;
             CREATE TABLE IF NOT EXISTS work_leases (
                 lease_id TEXT PRIMARY KEY,
                 reservoir_id TEXT NOT NULL,
@@ -261,6 +275,72 @@ class ControlStore:
         if not owner:
             raise ValueError("owner is required")
         return self._finish_evidence_results(results, owner=owner, retry_at=None)
+
+    def finish_range_task(
+        self,
+        key: EvidenceQueryKey,
+        state: CDXQueryState | str,
+        *,
+        followup_keys: Iterable[EvidenceQueryKey] = (),
+        owner: str,
+    ) -> int:
+        """Finish a terminal range task and enqueue exact-year follow-ups atomically."""
+        if not owner:
+            raise ValueError("owner is required")
+        if key.temporal_scope.year_from == key.temporal_scope.year_to:
+            raise ValueError("range task must span multiple years")
+        value = state.value if isinstance(state, CDXQueryState) else str(state)
+        if value not in TERMINAL_STATES:
+            raise ValueError("range task can only finish in a terminal state")
+        exact = list(followup_keys)
+        for followup in exact:
+            scope = followup.temporal_scope
+            if scope.year_from != scope.year_to:
+                raise ValueError("range follow-up tasks must be exact-year keys")
+            if (
+                followup.hostname != key.hostname
+                or followup.provider != key.provider
+                or followup.policy_version != key.policy_version
+                or not key.temporal_scope.year_from <= scope.year_from <= key.temporal_scope.year_to
+            ):
+                raise ValueError("range follow-up key does not match parent range")
+
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            row = self.connection.execute(
+                """
+                SELECT state FROM evidence_tasks
+                WHERE hostname = ? AND year_from = ? AND year_to = ?
+                  AND provider = ? AND policy_version = ? AND lease_owner = ?
+                """,
+                (*self._values(key), owner),
+            ).fetchone()
+            if row is None:
+                raise KeyError("range task not found or not owned by caller")
+            self.connection.execute(
+                """
+                UPDATE evidence_tasks
+                SET state = ?, retry_at = NULL, lease_owner = NULL, lease_until = NULL
+                WHERE hostname = ? AND year_from = ? AND year_to = ?
+                  AND provider = ? AND policy_version = ? AND lease_owner = ?
+                """,
+                (value, *self._values(key), owner),
+            )
+            before = self.connection.total_changes
+            self.connection.executemany(
+                """
+                INSERT OR IGNORE INTO evidence_tasks(
+                    hostname, year_from, year_to, provider, policy_version, state
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                [(*self._values(followup), CDXQueryState.PENDING.value) for followup in exact],
+            )
+            created = self.connection.total_changes - before
+            self.connection.commit()
+            return created
+        except BaseException:
+            self.connection.rollback()
+            raise
 
     def _finish_evidence_results(
         self,
@@ -461,6 +541,92 @@ class ControlStore:
                     self._value(self._field(reservoir, "state"), "discovered"),
                 ),
             )
+
+    def save_activation(
+        self,
+        *,
+        source_key: str,
+        domain: Any,
+        reservoir: Any,
+        adapter_kind: str,
+        config_hash: str,
+        activation_state: str = "ACTIVE",
+    ) -> None:
+        """Atomically persist discovery-to-production activation lineage."""
+        if not source_key.strip() or not adapter_kind.strip() or not config_hash.strip():
+            raise ValueError("activation identity fields are required")
+        temporal = self._field(domain, "temporal_scope")
+        if temporal is None or len(temporal) != 2:
+            raise ValueError("domain temporal_scope must be a (from, to) pair")
+        now = float(self.clock())
+        with self.connection:
+            self.connection.execute(
+                """
+                INSERT INTO source_domains(
+                    domain_id, family, discovery_mechanism,
+                    temporal_from, temporal_to, state
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(domain_id) DO NOTHING
+                """,
+                (
+                    self._field(domain, "domain_id"),
+                    self._value(self._field(domain, "family"), ""),
+                    self._field(domain, "discovery_mechanism"),
+                    temporal[0], temporal[1],
+                    self._value(self._field(domain, "state"), "UNEXPLORED"),
+                ),
+            )
+            self.connection.execute(
+                """
+                INSERT INTO reservoirs(
+                    reservoir_id, domain_id, adapter_id, root_locator,
+                    enumeration_kind, capacity_lower, capacity_upper, cursor,
+                    evidence_mode, state
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(reservoir_id) DO NOTHING
+                """,
+                (
+                    self._field(reservoir, "reservoir_id"),
+                    self._field(reservoir, "domain_id"),
+                    self._field(reservoir, "adapter_id"),
+                    self._field(reservoir, "root_locator"),
+                    self._value(self._field(reservoir, "enumeration_kind"), ""),
+                    self._field(reservoir, "capacity_lower"),
+                    self._field(reservoir, "capacity_upper"),
+                    self._field(reservoir, "cursor"),
+                    self._value(self._field(reservoir, "evidence_mode"), "discovery_only"),
+                    self._value(self._field(reservoir, "state"), "DISCOVERED"),
+                ),
+            )
+            self.connection.execute(
+                """
+                INSERT INTO source_activations(
+                    source_key, domain_id, reservoir_id, adapter_id, adapter_kind,
+                    root_locator, config_hash, activation_state, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(source_key) DO UPDATE SET
+                    updated_at=excluded.updated_at,
+                    activation_state=excluded.activation_state
+                """,
+                (
+                    source_key,
+                    self._field(domain, "domain_id"),
+                    self._field(reservoir, "reservoir_id"),
+                    self._field(reservoir, "adapter_id"),
+                    adapter_kind,
+                    self._field(reservoir, "root_locator"),
+                    config_hash,
+                    activation_state,
+                    now,
+                    now,
+                ),
+            )
+
+    def get_activation(self, source_key: str) -> dict[str, Any] | None:
+        row = self.connection.execute(
+            "SELECT * FROM source_activations WHERE source_key = ?", (source_key,)
+        ).fetchone()
+        return None if row is None else {key: row[key] for key in row.keys()}
 
     def get_reservoir(self, reservoir_id: str) -> Any | None:
         row = self.connection.execute(

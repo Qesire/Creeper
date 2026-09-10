@@ -58,15 +58,21 @@ class EvidencePlanner:
             for year, bit in YEAR_BITS.items()
             if direct_mask & bit
         )
+        years = [year for year, bit in YEAR_BITS.items() if hint_mask & bit]
+        ranges: list[tuple[int, int]] = []
+        for year in years:
+            if not ranges or year != ranges[-1][1] + 1:
+                ranges.append((year, year))
+            else:
+                ranges[-1] = (ranges[-1][0], year)
         external_keys = tuple(
             EvidenceQueryKey(
                 hostname=hostname,
-                temporal_scope=TemporalScope(year, year),
+                temporal_scope=TemporalScope(year_from, year_to),
                 provider=provider,
                 policy_version=policy_version,
             )
-            for year, bit in YEAR_BITS.items()
-            if hint_mask & bit
+            for year_from, year_to in ranges
         )
         return EvidencePlan(direct_capsules, external_keys)
 

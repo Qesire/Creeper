@@ -1,5 +1,6 @@
 import json
 import unittest
+from unittest.mock import patch
 
 import httpx
 
@@ -109,6 +110,44 @@ class AsyncWaybackCDXClientTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result.state, CDXQueryState.TRANSIENT_ERROR)
         self.assertEqual(calls, 2)
+
+    async def test_range_probe_reports_candidate_years_without_capsules(self):
+        async def handler(request):
+            payload = [
+                ["timestamp", "original", "statuscode"],
+                ["19970102030405", "http://example.com/", "200"],
+                ["19990102030405", "http://example.com/", "200"],
+            ]
+            return httpx.Response(200, content=json.dumps(payload).encode(), request=request)
+
+        range_key = EvidenceQueryKey(
+            "example.com", TemporalScope(1996, 2000), "wayback", "cdx-v1"
+        )
+        async with AsyncWaybackCDXClient(
+            transport=httpx.MockTransport(handler), max_retries=0
+        ) as client:
+            result = await client.query_range(range_key)
+
+        self.assertEqual(result.state, CDXQueryState.PASS)
+        self.assertEqual(result.candidate_years, (1997, 1999))
+        self.assertEqual(result.key, range_key)
+
+    async def test_range_probe_empty_requires_complete_final_page(self):
+        range_key = EvidenceQueryKey(
+            "example.com", TemporalScope(1996, 1998), "wayback", "cdx-v1"
+        )
+        async with AsyncWaybackCDXClient(
+            transport=httpx.MockTransport(lambda request: httpx.Response(200, request=request)),
+            max_retries=0,
+        ) as client:
+            async def incomplete_pages(hostname, year_from, year_to):
+                yield ([], False)
+
+            with patch.object(client, "iter_range_pages", incomplete_pages):
+                result = await client.query_range(range_key)
+
+        self.assertEqual(result.state, CDXQueryState.INCOMPLETE)
+        self.assertEqual(result.candidate_years, ())
 
 
 if __name__ == "__main__":

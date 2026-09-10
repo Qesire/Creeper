@@ -11,6 +11,9 @@ import argparse
 import json
 import os
 from pathlib import Path
+import signal
+from threading import Event
+import time
 import tomllib
 
 from creeper.authority.baseline_index import BaselineIndex
@@ -21,7 +24,10 @@ from creeper.scheduler.leases import WorkLease
 from creeper.scheduler.priority import LeaseCandidate, ResourceCost
 from creeper.sources.domains import DomainState, SourceDomain
 from creeper.sources.local.static_dataset import StaticDatasetAdapter
+from creeper.sources.production import ProductionAdapterFactory
 from creeper.sources.reservoirs import Reservoir, ReservoirState
+from creeper.source_discovery.activation import SourceActivationCompiler
+from creeper.source_discovery.registry import SourceDiscoveryRegistry
 from creeper.storage.control_store import ControlStore
 from creeper.storage.evidence_store import EvidenceStore
 
@@ -51,6 +57,9 @@ def run_once(config_path: Path, *, owner: str) -> dict[str, object]:
     limits = config.get("limits")
     if not isinstance(limits, dict):
         raise ValueError("limits table is required")
+
+    if config.get("source_mode", "static") == "activated":
+        return _run_activated_once(config_path, config=config, limits=limits, owner=owner)
 
     backlog_capacity = _positive_int(
         limits.get("evidence_backlog_capacity"),
@@ -181,14 +190,158 @@ def run_once(config_path: Path, *, owner: str) -> dict[str, object]:
         baseline.close()
 
 
+def _run_activated_once(
+    config_path: Path,
+    *,
+    config: dict[str, object],
+    limits: dict[str, object],
+    owner: str,
+) -> dict[str, object]:
+    """Run one lease from discovery ACTIVE candidates compiled in ControlStore."""
+    backlog_capacity = _positive_int(
+        limits.get("evidence_backlog_capacity"), "evidence_backlog_capacity"
+    )
+    queue_capacities = {
+        "source_records": _positive_int(limits.get("queue_source_records"), "queue_source_records"),
+        "observations": _positive_int(limits.get("queue_observations"), "queue_observations"),
+        "evidence_tasks": _positive_int(limits.get("queue_evidence_tasks"), "queue_evidence_tasks"),
+        "commits": _positive_int(limits.get("queue_commits"), "queue_commits"),
+    }
+    max_records = _positive_int(limits.get("lease_max_records"), "lease_max_records")
+    max_requests = _positive_int(limits.get("lease_max_requests"), "lease_max_requests")
+    max_bytes = _positive_int(limits.get("lease_max_bytes"), "lease_max_bytes")
+    max_seconds = _positive_float(limits.get("lease_max_seconds"), "lease_max_seconds")
+    baseline_path = _path(config.get("baseline_index"), config_path=config_path, name="baseline_index")
+    runtime_root = _path(config.get("runtime_data_root"), config_path=config_path, name="runtime_data_root")
+
+    baseline = BaselineIndex(baseline_path)
+    control = ControlStore(runtime_root / "control.sqlite3")
+    evidence = EvidenceStore(runtime_root / "evidence.sqlite3")
+    try:
+        registry = SourceDiscoveryRegistry(control)
+        compiler = SourceActivationCompiler(control, registry=registry)
+        candidates: list[LeaseCandidate] = []
+        adapters: dict[str, object] = {}
+        for spec in compiler.compile_active():
+            reservoir = control.get_reservoir(spec.reservoir_id)
+            if reservoir is None:
+                raise ValueError(f"activated reservoir disappeared: {spec.reservoir_id}")
+            adapter = ProductionAdapterFactory.open(reservoir)
+            adapters[reservoir.adapter_id] = adapter
+            expected_tasks = max_records if reservoir.evidence_mode != "direct_year" else 0
+            template = WorkLease.create(
+                reservoir_id=reservoir.reservoir_id,
+                cursor_start=reservoir.cursor,
+                max_records=max_records,
+                max_requests=max_requests,
+                max_bytes=max_bytes,
+                max_seconds=max_seconds,
+                expected_evidence_tasks=expected_tasks,
+                expected_novel_eed=float(max_records),
+            )
+            candidates.append(
+                LeaseCandidate(
+                    reservoir_id=reservoir.reservoir_id,
+                    expected_novel_eed=float(max_records),
+                    costs=ResourceCost(general_network=1, evidence_network=1, cpu=1, ssd=1),
+                    reservoir=reservoir,
+                    lease=template,
+                    evidence_mode=reservoir.evidence_mode,
+                    expected_evidence_tasks=expected_tasks,
+                )
+            )
+        if not candidates:
+            return {"leases_succeeded": 0, "source_records": 0, "observations": 0,
+                    "evidence_tasks_enqueued": 0, "direct_capsules_committed": 0,
+                    "admission_blocked": False, "max_source_record_queue_depth": 0,
+                    "max_observation_queue_depth": 0}
+        producer = SourceProducer(
+            baseline=baseline,
+            control_store=control,
+            evidence_store=evidence,
+            scheduler=GlobalScheduler(CreditLedger({"wayback": backlog_capacity})),
+            candidates=candidates,
+            adapters=adapters,
+            backlog_capacities={"wayback": backlog_capacity},
+            queue_capacities=queue_capacities,
+            owner=owner,
+        )
+        return producer.run_once().as_dict()
+    finally:
+        evidence.close()
+        control.close()
+        baseline.close()
+
+
+def run_watch(
+    config_path: Path,
+    *,
+    owner: str,
+    stop_event: Event | None = None,
+    idle_backoff_seconds: float = 1.0,
+    max_idle_backoff_seconds: float = 60.0,
+    sleep_fn=time.sleep,
+) -> dict[str, object]:
+    """Keep the source producer process alive while durable work remains."""
+    if idle_backoff_seconds <= 0:
+        raise ValueError("idle_backoff_seconds must be positive")
+    if max_idle_backoff_seconds < idle_backoff_seconds:
+        raise ValueError(
+            "max_idle_backoff_seconds must not be below idle_backoff_seconds"
+        )
+    stop_event = stop_event or Event()
+    total: dict[str, object] = {
+        "leases_succeeded": 0,
+        "source_records": 0,
+        "observations": 0,
+        "evidence_tasks_enqueued": 0,
+        "direct_capsules_committed": 0,
+        "admission_blocked": False,
+        "max_source_record_queue_depth": 0,
+        "max_observation_queue_depth": 0,
+    }
+    idle = float(idle_backoff_seconds)
+    while not stop_event.is_set():
+        report = run_once(config_path, owner=owner)
+        for key in (
+            "leases_succeeded",
+            "source_records",
+            "observations",
+            "evidence_tasks_enqueued",
+            "direct_capsules_committed",
+        ):
+            total[key] = int(total[key]) + int(report[key])
+        total["admission_blocked"] = bool(total["admission_blocked"]) or bool(
+            report["admission_blocked"]
+        )
+        for key in ("max_source_record_queue_depth", "max_observation_queue_depth"):
+            total[key] = max(int(total[key]), int(report[key]))
+        if report["leases_succeeded"]:
+            idle = float(idle_backoff_seconds)
+            continue
+        if stop_event.is_set():
+            break
+        sleep_fn(idle)
+        idle = min(float(max_idle_backoff_seconds), idle * 2.0)
+    return total
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="creeper-source-producer")
-    parser.add_argument("--once", action="store_true", required=True)
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--once", action="store_true")
+    mode.add_argument("--watch", action="store_true")
     parser.add_argument("config", type=Path)
     parser.add_argument("--owner", default=f"source-producer-{os.getpid()}")
     args = parser.parse_args(argv)
     try:
-        report = run_once(args.config, owner=args.owner)
+        if args.once:
+            report = run_once(args.config, owner=args.owner)
+        else:
+            stop = Event()
+            for signum in (signal.SIGINT, signal.SIGTERM):
+                signal.signal(signum, lambda _signal, _frame: stop.set())
+            report = run_watch(args.config, owner=args.owner, stop_event=stop)
     except (OSError, tomllib.TOMLDecodeError, ValueError, KeyError) as exc:
         parser.error(f"invalid source producer configuration: {exc}")
     print(json.dumps(report, ensure_ascii=False, indent=2))

@@ -40,5 +40,7 @@ evidence_capacity = 1000
 # source_report_set = ["source-report.json"]
 # cdx_audit_set = ["cdx-audit.json"]
 # eed_report = "reports/eed-report.json"
+# eed_model = "equivalent_english_domain_calculator/q2_tld_top_langs.json"
+# baseline_eed = "0"
 # novel_eed = "0"
 # growth_rate = "0"

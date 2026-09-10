@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from collections import Counter
 from decimal import Decimal
+from collections.abc import Iterable
 from pathlib import Path
 
 from .normalizer import normalize_official
@@ -24,17 +25,28 @@ def load_english_weights(path: Path) -> dict[str, Decimal]:
 
 
 def calculate_eed(path: Path, model_path: Path) -> tuple[dict, list[dict]]:
-    weights = load_english_weights(model_path)
     values: set[str] = set()
     with path.open("r", encoding="utf-8", errors="replace", newline="") as source:
         for line in source:
             value = line.strip().lower()
             if value:
                 values.add(value)
+    return calculate_eed_values(values, model_path, input_file=str(path.resolve()))
+
+
+def calculate_eed_values(
+    values: Iterable[str],
+    model_path: Path,
+    *,
+    input_file: str | None = None,
+) -> tuple[dict, list[dict]]:
+    """Calculate official EED semantics from an in-memory hostname stream."""
+    weights = load_english_weights(model_path)
+    unique_values = {value.strip().lower() for value in values if value.strip()}
 
     tld_counts: Counter[str] = Counter()
     invalid_records = 0
-    for value in values:
+    for value in unique_values:
         normalized = normalize_official(value)
         if normalized is None:
             invalid_records += 1
@@ -61,15 +73,15 @@ def calculate_eed(path: Path, model_path: Path) -> tuple[dict, list[dict]]:
             }
         )
 
-    valid_records = len(values) - invalid_records
+    valid_records = len(unique_values) - invalid_records
     summary = {
         "method": (
             "Each unique normalized valid hostname contributes the English primary-page-"
             "language share of its right-most TLD from the CC-MAIN-2024-10 model. "
             "Invalid and unmatched records contribute zero."
         ),
-        "input_file": str(path.resolve()),
-        "unique_nonempty_records": len(values),
+        "input_file": input_file or "<in-memory>",
+        "unique_nonempty_records": len(unique_values),
         "unique_valid_domains": valid_records,
         "invalid_records": invalid_records,
         "model_matched_records": matched_records,
