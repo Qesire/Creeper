@@ -12,6 +12,7 @@ from typing import Any
 
 import httpx
 
+from creeper.source_discovery.admission import SearchAdmissionPolicy
 from creeper.source_discovery.agent_search import (
     CommandAgentSearchExecutor,
     CommandAgentSearchPolicy,
@@ -44,6 +45,7 @@ class AgentConfig:
     actor: str
     cwd: Path | None
     policy: CommandAgentSearchPolicy
+    admission: SearchAdmissionPolicy
 
 
 @dataclass(frozen=True)
@@ -96,6 +98,15 @@ def _positive_float(value: Any, *, name: str) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
         raise ValueError(f"{name} must be a positive number")
     return float(value)
+
+
+def _unit_float(value: Any, *, name: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{name} must be a number within [0, 1]")
+    value = float(value)
+    if not 0.0 <= value <= 1.0:
+        raise ValueError(f"{name} must be within [0, 1]")
+    return value
 
 
 def _strict_bool(value: Any, *, name: str) -> bool:
@@ -190,6 +201,33 @@ def load_source_discovery_config(config_path: Path) -> SourceDiscoveryServiceCon
         raise ValueError("agent.backend must be a non-empty string")
     if not isinstance(actor, str) or not actor.strip():
         raise ValueError("agent.actor must be a non-empty string")
+
+    admission_raw = _table(root, "admission")
+    admission = SearchAdmissionPolicy(
+        target_year_from=_nonnegative_int(
+            admission_raw.get("target_year_from", 1996), name="admission.target_year_from"
+        ),
+        target_year_to=_nonnegative_int(
+            admission_raw.get("target_year_to", 2001), name="admission.target_year_to"
+        ),
+        min_expected_volume=_positive_int(
+            admission_raw.get("min_expected_volume", 100_000),
+            name="admission.min_expected_volume",
+        ),
+        min_enumerability_prior=_unit_float(
+            admission_raw.get("min_enumerability_prior", 0.5),
+            name="admission.min_enumerability_prior",
+        ),
+        min_confidence=_unit_float(
+            admission_raw.get("min_confidence", 0.35),
+            name="admission.min_confidence",
+        ),
+        require_year_bounds=_strict_bool(
+            admission_raw.get("require_year_bounds", True),
+            name="admission.require_year_bounds",
+        ),
+    )
+
     agent = AgentConfig(
         command=tuple(raw_command),
         backend=backend,
@@ -217,6 +255,7 @@ def load_source_discovery_config(config_path: Path) -> SourceDiscoveryServiceCon
                 name="agent.max_returned_candidates",
             ),
         ),
+        admission=admission,
     )
 
     if not scrapy_project_dir.is_dir():
@@ -272,6 +311,7 @@ async def run_source_discovery_cycles(
                 actor=config.agent.actor,
                 cwd=config.agent.cwd,
                 policy=config.agent.policy,
+                admission_policy=config.agent.admission,
             )
             coordinator = SourceDiscoveryCoordinator(
                 registry,
