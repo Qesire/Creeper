@@ -90,6 +90,7 @@ class EvidenceStore:
             )
         if not rows:
             return 0
+        before = self.connection.total_changes
         with self.connection:
             self.connection.executemany(
                 """
@@ -100,7 +101,7 @@ class EvidenceStore:
                 """,
                 rows,
             )
-        return len(rows)
+        return self.connection.total_changes - before
 
     def for_hostname(self, hostname: str) -> list[EvidenceCapsule]:
         value = normalize_official(hostname)
