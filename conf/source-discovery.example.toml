@@ -35,9 +35,20 @@ max_seconds = 120
 max_memory_mb = 512
 follow_query = false
 
+[admission]
+# Search-time prior gate. This is intentionally before baseline/CDX verification:
+# the Agent must already bring large, enumerable, 1996-2001-relevant resources.
+target_year_from = 1996
+target_year_to = 2001
+min_expected_volume = 100000
+min_enumerability_prior = 0.50
+min_confidence = 0.35
+require_year_bounds = true
+
 [agent]
 # Contract: <command...> --request REQUEST.json --response RESPONSE.json
 # The process may propose SourceCandidate metadata only; it never receives SQLite authority.
+# The request contains the [admission] thresholds so the Agent can search toward them.
 command = ["python", "/path/to/creeper_source_search_agent.py"]
 backend = "configured-search-agent"
 actor = "agent:source-search"
