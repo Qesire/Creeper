@@ -114,6 +114,13 @@ class RuntimeLeaseBoundaryTests(unittest.TestCase):
         )
         return baseline, control, evidence, runtime
 
+    @staticmethod
+    def _only_lease_state(control: ControlStore) -> str:
+        row = control.connection.execute("SELECT state FROM work_leases LIMIT 1").fetchone()
+        if row is None:
+            raise AssertionError("expected one persisted work lease")
+        return str(row["state"])
+
     def test_provider_observes_source_lease_already_finalized(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -123,10 +130,10 @@ class RuntimeLeaseBoundaryTests(unittest.TestCase):
                 control = holder["control"]
                 reservoir = control.get_reservoir("lease-boundary-reservoir")
                 self.assertEqual(reservoir.state, ReservoirState.EXHAUSTED)
-                row = control.connection.execute(
-                    "SELECT state FROM work_leases ORDER BY rowid DESC LIMIT 1"
-                ).fetchone()
-                self.assertEqual(row["state"], LeaseState.SUCCEEDED.value)
+                self.assertEqual(
+                    self._only_lease_state(control),
+                    LeaseState.SUCCEEDED.value,
+                )
                 return [([], True)]
 
             baseline, control, evidence, runtime = self._fixture(
@@ -159,10 +166,10 @@ class RuntimeLeaseBoundaryTests(unittest.TestCase):
                     control.get_reservoir("lease-boundary-reservoir").state,
                     ReservoirState.EXHAUSTED,
                 )
-                lease_state = control.connection.execute(
-                    "SELECT state FROM work_leases ORDER BY rowid DESC LIMIT 1"
-                ).fetchone()["state"]
-                self.assertEqual(lease_state, LeaseState.SUCCEEDED.value)
+                self.assertEqual(
+                    self._only_lease_state(control),
+                    LeaseState.SUCCEEDED.value,
+                )
                 task = control.list_evidence_tasks()[0]
                 self.assertEqual(task.state, CDXQueryState.PENDING.value)
             finally:
