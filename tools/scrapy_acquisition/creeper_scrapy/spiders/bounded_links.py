@@ -83,6 +83,22 @@ class BoundedLinksSpider(scrapy.Spider):
         # emitted as source candidates even though they are not followed.
         self.link_extractor = LinkExtractor(unique=True, deny_extensions=())
 
+    async def start(self):
+        """Emit the seed once per JOBDIR lifecycle.
+
+        Scrapy's default ``Spider.start()`` marks start requests ``dont_filter``.
+        For a resumable bounded scout that would refetch the root on every
+        process restart.  SpiderState is a built-in JOBDIR extension, so use it
+        as the durable seed marker and let the seed pass through the native
+        scheduler/dupefilter like every other request.
+        """
+        state = getattr(self, "state", None)
+        if state is not None and state.get("seed_emitted"):
+            return
+        if state is not None:
+            state["seed_emitted"] = True
+        yield scrapy.Request(self.start_urls[0], callback=self.parse, dont_filter=False)
+
     def _same_site(self, url: str) -> bool:
         parsed = urlsplit(url)
         if parsed.scheme.lower() not in {"http", "https"}:
