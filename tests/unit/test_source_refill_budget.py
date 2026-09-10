@@ -19,7 +19,8 @@ class SourceRefillBudgetTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
         self.control = ControlStore(Path(self.tmp.name) / "control.sqlite3")
-        self.registry = SourceDiscoveryRegistry(self.control)
+        self.now = [1_000.0]
+        self.registry = SourceDiscoveryRegistry(self.control, clock=lambda: self.now[0])
 
     def tearDown(self) -> None:
         self.control.close()
@@ -54,9 +55,8 @@ class SourceRefillBudgetTests(unittest.TestCase):
         )
         self.registry.transition(candidate.source_key, SourceState.WARM)
 
-    def test_parallel_directives_share_one_cold_deficit(self) -> None:
-        self._warm()
-        manager = SourceReservoirManager(
+    def manager(self, *, search_cooldown_seconds: float = 0.0) -> SourceReservoirManager:
+        return SourceReservoirManager(
             self.registry,
             targets=SourcePoolTargets(
                 active_min=0,
@@ -67,7 +67,12 @@ class SourceRefillBudgetTests(unittest.TestCase):
                 cold_target=4,
                 max_search_directives=3,
             ),
+            search_cooldown_seconds=search_cooldown_seconds,
         )
+
+    def test_parallel_directives_share_one_cold_deficit(self) -> None:
+        self._warm()
+        manager = self.manager()
 
         plan = manager.plan()
 
@@ -108,6 +113,45 @@ class SourceRefillBudgetTests(unittest.TestCase):
         self.assertEqual(plan.cold_count, 2)
         self.assertEqual(len(plan.search_directives), 1)
         self.assertEqual(plan.search_directives[0].desired_candidates, 1)
+
+    def test_recent_completed_strategy_is_cooled_down_without_blocking_other_arms(self) -> None:
+        episode = self.registry.begin_search_episode(
+            strategy="META_SOURCE_SEARCH",
+            backend="test",
+            query="empty result",
+            actor="test",
+        )
+        self.registry.finish_search_episode(episode.episode_id, search_cost_seconds=1.0)
+        manager = self.manager(search_cooldown_seconds=60.0)
+
+        plan = manager.plan()
+        strategies = {item.strategy for item in plan.search_directives}
+
+        self.assertNotIn("META_SOURCE_SEARCH", strategies)
+        self.assertIn("EXPLORE_NEW_FAMILY", strategies)
+
+        self.now[0] += 61.0
+        refreshed = manager.plan()
+        self.assertIn(
+            "META_SOURCE_SEARCH",
+            {item.strategy for item in refreshed.search_directives},
+        )
+
+    def test_zero_cooldown_preserves_immediate_planning_for_finite_tests(self) -> None:
+        episode = self.registry.begin_search_episode(
+            strategy="META_SOURCE_SEARCH",
+            backend="test",
+            query="one",
+            actor="test",
+        )
+        self.registry.finish_search_episode(episode.episode_id, search_cost_seconds=0.1)
+
+        plan = self.manager(search_cooldown_seconds=0.0).plan()
+
+        self.assertIn(
+            "META_SOURCE_SEARCH",
+            {item.strategy for item in plan.search_directives},
+        )
 
 
 if __name__ == "__main__":
