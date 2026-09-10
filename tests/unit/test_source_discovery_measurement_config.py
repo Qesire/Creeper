@@ -23,10 +23,10 @@ class SourceDiscoveryMeasurementConfigTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.tmp.cleanup()
 
-    def _config(self, *, extra_measurement: str = "") -> Path:
+    def _config(self) -> Path:
         path = self.root / "discovery.toml"
         path.write_text(
-            f'''runtime_data_root = "runtime"
+            '''runtime_data_root = "runtime"
 scrapy_project_dir = "scrapy"
 
 [pool]
@@ -62,7 +62,6 @@ baseline_index = "baseline.sqlite3"
 eed_model = "eed.json"
 max_records = 321
 min_novel_fraction = 0.125
-{extra_measurement}
 
 [admission]
 target_year_from = 1996
@@ -97,7 +96,12 @@ actor = "agent:test"
             load_source_discovery_config(self._config())
 
     def test_invalid_measurement_fraction_fails_closed(self) -> None:
-        path = self._config(extra_measurement="min_novel_fraction = 1.5")
+        path = self._config()
+        text = path.read_text(encoding="utf-8").replace(
+            "min_novel_fraction = 0.125",
+            "min_novel_fraction = 1.5",
+        )
+        path.write_text(text, encoding="utf-8")
         with self.assertRaisesRegex(ValueError, "measurement.min_novel_fraction"):
             load_source_discovery_config(path)
 
