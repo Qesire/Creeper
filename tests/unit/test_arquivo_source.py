@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import unittest
+import os
 from urllib.parse import parse_qs, urlsplit
+from unittest.mock import patch
 
 import httpx
 
@@ -10,6 +12,19 @@ from creeper.sources.archive.arquivo import ArquivoCDXClient, ArquivoCDXSource
 
 
 class ArquivoSourceTests(unittest.TestCase):
+    def test_default_client_ignores_unsupported_socks_all_proxy(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "HTTPS_PROXY": "http://127.0.0.1:7897",
+                "HTTP_PROXY": "http://127.0.0.1:7897",
+                "ALL_PROXY": "socks://127.0.0.1:7897",
+            },
+            clear=True,
+        ):
+            client = ArquivoCDXClient(timeout=1, max_retries=0)
+            client.close()
+
     def test_arquivo_cdx_client_builds_bounded_year_filtered_json_query(self) -> None:
         captured: list[str] = []
 

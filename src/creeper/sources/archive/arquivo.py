@@ -20,6 +20,7 @@ from tenacity import Retrying, retry_if_exception, stop_after_attempt, wait_none
 from creeper.authority.normalizer import normalize_official
 from creeper.records.candidates import CandidateSourceScope
 from creeper.records.models import HostObservation, SourceRecord
+from creeper.runtime.http import configured_http_proxy
 
 
 Fetch = Callable[[str, float, dict[str, str]], bytes]
@@ -85,20 +86,29 @@ class ArquivoCDXClient:
         self.last_request_url: str | None = None
         self.http_requests = 0
         self._owns_client = fetch is None and client is None
-        self.client = None if fetch is not None else client or httpx.Client(
-            timeout=httpx.Timeout(timeout),
-            limits=httpx.Limits(
-                max_connections=max_connections,
-                max_keepalive_connections=max_keepalive_connections,
-            ),
-            headers={
-                "User-Agent": user_agent,
-                "Accept": "application/json",
-                "Accept-Encoding": "gzip, deflate",
-            },
-            follow_redirects=True,
-            transport=transport,
-        )
+        if fetch is not None:
+            self.client = None
+        elif client is not None:
+            self.client = client
+        else:
+            client_options = {
+                "timeout": httpx.Timeout(timeout),
+                "limits": httpx.Limits(
+                    max_connections=max_connections,
+                    max_keepalive_connections=max_keepalive_connections,
+                ),
+                "headers": {
+                    "User-Agent": user_agent,
+                    "Accept": "application/json",
+                    "Accept-Encoding": "gzip, deflate",
+                },
+                "follow_redirects": True,
+                "transport": transport,
+                "trust_env": False,
+            }
+            if transport is None:
+                client_options["proxy"] = configured_http_proxy()
+            self.client = httpx.Client(**client_options)
 
     def __enter__(self) -> "ArquivoCDXClient":
         return self
