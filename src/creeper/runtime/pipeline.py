@@ -1,9 +1,11 @@
 """Synchronous, bounded V2.2 production-runtime foundation.
 
-The first runtime intentionally executes one lease at a time.  It is the
-correctness boundary for later provider pools: every unit of work is granted
-by :class:`GlobalScheduler`, queues have explicit capacities, and evidence
-task state is durable before network work starts.
+The runtime deliberately keeps source acquisition and provider evidence as
+separate ownership domains. A source lease ends after its observations have
+been reconciled, direct evidence committed, and external EvidenceTasks made
+durable. Slow provider queries therefore cannot expire or reopen a Reservoir
+lease. The synchronous implementation may execute those durable tasks in the
+same ``run_once`` call, but only after source progress is committed.
 """
 
 from __future__ import annotations
@@ -16,7 +18,7 @@ from creeper.authority.baseline_index import BaselineIndex
 from creeper.evidence.planner import EvidencePlanner
 from creeper.evidence.policies import EvidenceQueryKey
 from creeper.evidence.providers.cdx import Transport, query_year
-from creeper.records.models import HostObservation, SourceRecord
+from creeper.records.models import HostObservation
 from creeper.runtime.queues import BoundedQueues
 from creeper.runtime.submission import RuntimeSubmissionContext, build_runtime_snapshot
 from creeper.scheduler.global_scheduler import GlobalScheduler
@@ -49,7 +51,7 @@ class SyncRuntimeReport:
 
 
 class SyncRuntime:
-    """Execute a single finite lease without unbounded in-memory backlogs."""
+    """Execute one finite source lease and then its newly durable evidence work."""
 
     def __init__(
         self,
@@ -102,6 +104,16 @@ class SyncRuntime:
         queue.put_nowait(value)
         return queue.qsize()
 
+    @staticmethod
+    def _query_sort_key(key: EvidenceQueryKey) -> tuple[object, ...]:
+        return (
+            key.provider,
+            key.hostname,
+            key.temporal_scope.year_from,
+            key.temporal_scope.year_to,
+            key.policy_version,
+        )
+
     def _grant_fresh_lease(self, *, owner: str) -> tuple[LeaseCandidate, WorkLease] | None:
         """Rank candidates, then atomically claim a fresh persisted lease."""
         self.control_store.recover_expired_leases()
@@ -125,6 +137,73 @@ class SyncRuntime:
                 return candidate, lease
         return None
 
+    def _execute_scheduled_evidence(
+        self,
+        *,
+        keys: set[EvidenceQueryKey],
+        provider: str,
+        queues: BoundedQueues,
+    ) -> tuple[int, int, int, int]:
+        """Execute newly scheduled durable tasks after source progress commits.
+
+        Returns ``(completed, inserted_capsules, max_evidence_depth,
+        max_commit_depth)``. Provider capacity is interpreted as the maximum
+        synchronous claim batch; a zero-capacity provider leaves all tasks
+        durable for a later evidence worker.
+        """
+        if not keys:
+            return 0, 0, 0, 0
+        capacity = self.scheduler.ledger.balance(provider).capacity
+        if capacity < 1:
+            return 0, 0, 0, 0
+
+        completed = max_evidence = max_commits = 0
+        writer = CommitWriter(
+            self.evidence_store,
+            self.control_store,
+            owner=self.owner,
+            flush_count=max(1, min(capacity, 128)),
+        )
+        ordered = sorted(keys, key=self._query_sort_key)
+        batch_size = max(1, min(queues.evidence_task_queue.maxsize, capacity, 128))
+        try:
+            for start in range(0, len(ordered), batch_size):
+                batch = ordered[start : start + batch_size]
+                for key in batch:
+                    max_evidence = max(
+                        max_evidence,
+                        self._put(queues.evidence_task_queue, key),
+                    )
+                claim_keys: list[EvidenceQueryKey] = []
+                while not queues.evidence_task_queue.empty():
+                    claim_keys.append(queues.evidence_task_queue.get_nowait())
+                claimed = self.control_store.claim_evidence_tasks(
+                    owner=self.owner,
+                    limit=len(claim_keys),
+                    keys=claim_keys,
+                )
+                claimed_by_key = {task.key for task in claimed}
+                for key in claim_keys:
+                    if key not in claimed_by_key:
+                        continue
+                    query_result = query_year(
+                        key.hostname,
+                        key.temporal_scope.year_from,
+                        self.evidence_transport,
+                        provider=key.provider,
+                        policy_version=key.policy_version,
+                    )
+                    max_commits = max(
+                        max_commits,
+                        self._put(queues.commits, query_result),
+                    )
+                    queues.commits.get_nowait()
+                    writer.submit(query_result.capsule, query_result)
+                    completed += 1
+        finally:
+            writer.close()
+        return completed, writer.inserted_capsules, max_evidence, max_commits
+
     def run_once(self) -> SyncRuntimeReport:
         queues = BoundedQueues(**self.queue_capacities)
         granted = self._grant_fresh_lease(owner=self.owner)
@@ -137,79 +216,30 @@ class SyncRuntime:
         source_records = observations = enqueued = completed = capsules = 0
         max_source = max_observations = max_evidence = max_commits = 0
         direct_capsules = []
-        writer = CommitWriter(self.evidence_store, self.control_store, owner=self.owner)
+        scheduled_keys: set[EvidenceQueryKey] = set()
         result = None
-        ledger_queued = ledger_claimed = ledger_reserved = 0
+        source_finalized = False
 
         try:
             adapter = self._adapter_for(candidate)
             execute = getattr(adapter, "execute")
             extract_hosts = getattr(adapter, "extract_hosts")
             records, result = execute(running)
-            if result.records == 0 and result.next_cursor == running.cursor_start and result.next_cursor is not None:
+            if (
+                result.records == 0
+                and result.next_cursor == running.cursor_start
+                and result.next_cursor is not None
+            ):
                 raise RuntimeError("lease made no cursor progress")
             pending: list[HostObservation] = []
-            scheduled_keys: set[EvidenceQueryKey] = set()
-
-            def drain_evidence_tasks() -> None:
-                nonlocal completed, max_commits
-                nonlocal ledger_queued, ledger_claimed
-                keys: list[EvidenceQueryKey] = []
-                while not queues.evidence_task_queue.empty():
-                    keys.append(queues.evidence_task_queue.get_nowait())
-                if not keys:
-                    return
-                claimed = self.control_store.claim_evidence_tasks(
-                    owner=self.owner, limit=len(keys), keys=keys
-                )
-                self.scheduler.ledger.claim_evidence(provider, len(keys))
-                ledger_queued -= len(keys)
-                ledger_claimed += len(keys)
-                claimed_by_key = {task.key for task in claimed}
-                for key in keys:
-                    if key not in claimed_by_key:
-                        self.scheduler.ledger.complete_evidence(provider)
-                        ledger_claimed -= 1
-                        continue
-                    query_result = query_year(
-                        key.hostname,
-                        key.temporal_scope.year_from,
-                        self.evidence_transport,
-                        provider=key.provider,
-                        policy_version=key.policy_version,
-                    )
-                    max_commits = max(max_commits, self._put(queues.commits, query_result))
-                    queues.commits.get_nowait()
-                    writer.submit(query_result.capsule, query_result)
-                    completed += 1
-                    self.scheduler.ledger.complete_evidence(provider)
-                    ledger_claimed -= 1
 
             def enqueue_external_keys(keys: Iterable[EvidenceQueryKey]) -> None:
-                nonlocal enqueued, max_evidence
-                nonlocal ledger_queued, ledger_reserved
-                remaining = [key for key in keys if key not in scheduled_keys]
-                scheduled_keys.update(remaining)
-                cursor = 0
-                while cursor < len(remaining):
-                    if queues.evidence_task_queue.full():
-                        drain_evidence_tasks()
-                    free_slots = queues.evidence_task_queue.maxsize - queues.evidence_task_queue.qsize()
-                    balance = self.scheduler.ledger.balance(provider)
-                    grant = min(len(remaining) - cursor, free_slots, balance.available)
-                    if grant < 1:
-                        raise RuntimeError("evidence credits exhausted before lease completion")
-                    chunk = remaining[cursor : cursor + grant]
-                    self.scheduler.ledger.reserve_evidence(provider, grant)
-                    ledger_reserved += grant
-                    self.control_store.enqueue_evidence_tasks(chunk)
-                    self.scheduler.ledger.note_queued(provider, grant)
-                    ledger_reserved -= grant
-                    ledger_queued += grant
-                    for key in chunk:
-                        max_evidence = max(max_evidence, self._put(queues.evidence_task_queue, key))
-                    enqueued += grant
-                    cursor += grant
+                nonlocal enqueued
+                fresh = [key for key in keys if key not in scheduled_keys]
+                if not fresh:
+                    return
+                scheduled_keys.update(fresh)
+                enqueued += self.control_store.enqueue_evidence_tasks(fresh)
 
             def resolve_pending() -> None:
                 nonlocal direct_capsules
@@ -241,12 +271,16 @@ class SyncRuntime:
                 pending.clear()
 
             for record in records:
-                max_source = max(max_source, self._put(queues.source_record_queue, record))
+                max_source = max(
+                    max_source,
+                    self._put(queues.source_record_queue, record),
+                )
                 current = queues.source_record_queue.get_nowait()
                 source_records += 1
                 for observation in extract_hosts(current):
                     max_observations = max(
-                        max_observations, self._put(queues.observation_queue, observation)
+                        max_observations,
+                        self._put(queues.observation_queue, observation),
                     )
                     pending.append(queues.observation_queue.get_nowait())
                     observations += 1
@@ -254,9 +288,6 @@ class SyncRuntime:
                         resolve_pending()
             resolve_pending()
 
-            drain_evidence_tasks()
-            writer.close()
-            capsules += writer.inserted_capsules
             if direct_capsules:
                 capsules += self.evidence_store.put_many(direct_capsules)
             assert result is not None
@@ -265,6 +296,20 @@ class SyncRuntime:
                 next_cursor=result.next_cursor,
                 exhausted=result.next_cursor is None,
             )
+            source_finalized = True
+
+            (
+                completed,
+                external_capsules,
+                max_evidence,
+                max_commits,
+            ) = self._execute_scheduled_evidence(
+                keys=scheduled_keys,
+                provider=provider,
+                queues=queues,
+            )
+            capsules += external_capsules
+
             snapshot_ready: bool | None = None
             novel_records = 0
             if self.submission_context is not None:
@@ -291,14 +336,6 @@ class SyncRuntime:
                 max_commit_queue_depth=max_commits,
             )
         except BaseException:
-            try:
-                writer.close()
-            finally:
-                if ledger_reserved:
-                    self.scheduler.ledger.release_evidence(provider, ledger_reserved)
-                if ledger_queued:
-                    self.scheduler.ledger.release_queued(provider, ledger_queued)
-                if ledger_claimed:
-                    self.scheduler.ledger.release_claimed(provider, ledger_claimed)
+            if not source_finalized:
                 self.control_store.abort_lease(running)
             raise
