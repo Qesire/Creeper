@@ -1,5 +1,15 @@
 """Durable source-discovery control plane."""
 
+from creeper.source_discovery.coordinator import (
+    CoordinatorBusyError,
+    CoordinatorCycleReport,
+    ScoutDisposition,
+    ScoutResult,
+    SearchBatch,
+    SourceDiscoveryCoordinator,
+    TriageDisposition,
+    TriageResult,
+)
 from creeper.source_discovery.expander import ExpansionResult, expand_scrapy_spool
 from creeper.source_discovery.manager import (
     ReservoirPlan,
@@ -37,21 +47,27 @@ from creeper.source_discovery.scrapy_sidecar import (
 )
 
 __all__ = [
+    "CoordinatorBusyError",
+    "CoordinatorCycleReport",
     "ExpansionResult",
     "LinkPromotionAccumulator",
     "PromotedSource",
     "PromotionEvidence",
     "PromotionPolicy",
     "ReservoirPlan",
+    "ScoutDisposition",
     "ScoutMeasurement",
+    "ScoutResult",
     "ScrapyLinkDiscovery",
     "ScrapyScoutLauncher",
     "ScrapyScoutRun",
     "ScrapyScoutSpec",
+    "SearchBatch",
     "SearchDirective",
     "SearchDirectiveKind",
     "SearchEpisode",
     "SourceCandidate",
+    "SourceDiscoveryCoordinator",
     "SourceDiscoveryRegistry",
     "SourceLevel",
     "SourcePoolTargets",
@@ -59,6 +75,8 @@ __all__ = [
     "SourceState",
     "StrategyReward",
     "SuppressionScope",
+    "TriageDisposition",
+    "TriageResult",
     "canonicalize_source_entrypoint",
     "expand_scrapy_spool",
     "iter_scrapy_link_discoveries",
