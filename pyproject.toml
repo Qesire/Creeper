@@ -12,6 +12,7 @@ dependencies = [
 [project.scripts]
 creeper = "creeper.cli:main"
 creeper-source-producer = "creeper.source_cli:main"
+creeper-evidence-worker = "creeper.evidence_cli:main"
 
 [build-system]
 requires = ["setuptools>=68"]
