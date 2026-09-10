@@ -37,6 +37,7 @@ from creeper.source_discovery.promotion import (
     PromotionPolicy,
 )
 from creeper.source_discovery.registry import SourceDiscoveryRegistry
+from creeper.source_discovery.scout_router import SourceScoutRouter, SourceScoutRouterPolicy
 from creeper.source_discovery.scrapy_scout import (
     ScrapyStructuralScoutExecutor,
     ScrapyStructuralScoutPolicy,
@@ -50,11 +51,18 @@ from creeper.source_discovery.scrapy_sidecar import (
     prepare_append_spool,
     prepare_jobdir_binding,
 )
+from creeper.source_discovery.triage import (
+    HttpSourceTriageExecutor,
+    HttpTriagePolicy,
+    TriageTransientError,
+)
 
 __all__ = [
     "CoordinatorBusyError",
     "CoordinatorCycleReport",
     "ExpansionResult",
+    "HttpSourceTriageExecutor",
+    "HttpTriagePolicy",
     "LinkPromotionAccumulator",
     "PromotedSource",
     "PromotionEvidence",
@@ -79,11 +87,14 @@ __all__ = [
     "SourceLevel",
     "SourcePoolTargets",
     "SourceReservoirManager",
+    "SourceScoutRouter",
+    "SourceScoutRouterPolicy",
     "SourceState",
     "StrategyReward",
     "SuppressionScope",
     "TriageDisposition",
     "TriageResult",
+    "TriageTransientError",
     "canonicalize_source_entrypoint",
     "expand_scrapy_spool",
     "iter_scrapy_link_discoveries",
