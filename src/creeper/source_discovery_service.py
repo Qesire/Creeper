@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import tomllib
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -98,6 +97,12 @@ def _positive_float(value: Any, *, name: str) -> float:
     return float(value)
 
 
+def _strict_bool(value: Any, *, name: str) -> bool:
+    if not isinstance(value, bool):
+        raise ValueError(f"{name} must be a boolean")
+    return value
+
+
 def load_source_discovery_config(config_path: Path) -> SourceDiscoveryServiceConfig:
     config_path = Path(config_path).resolve()
     with config_path.open("rb") as stream:
@@ -167,7 +172,9 @@ def load_source_discovery_config(config_path: Path) -> SourceDiscoveryServiceCon
         max_memory_mb=_positive_int(
             scrapy_raw.get("max_memory_mb", 512), name="scrapy.max_memory_mb"
         ),
-        follow_query=bool(scrapy_raw.get("follow_query", False)),
+        follow_query=_strict_bool(
+            scrapy_raw.get("follow_query", False), name="scrapy.follow_query"
+        ),
     )
 
     agent_raw = _table(root, "agent")
