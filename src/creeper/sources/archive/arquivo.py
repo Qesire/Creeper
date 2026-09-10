@@ -2,6 +2,10 @@
 
 Arquivo.pt rows are discovery observations only. They are not annual authority
 records and do not become accepted evidence without the existing evidence gate.
+
+HTTP connection pooling, timeout handling, redirects, and transport errors are
+delegated to HTTPX. Bounded retry/backoff is delegated to Tenacity. Creeper
+retains only source-specific query construction and record semantics.
 """
 
 from __future__ import annotations
@@ -9,7 +13,9 @@ from __future__ import annotations
 import json
 from collections.abc import Callable, Iterable, Iterator
 from urllib.parse import urlencode, urlsplit
-from urllib.request import Request, urlopen
+
+import httpx
+from tenacity import Retrying, retry_if_exception, stop_after_attempt, wait_none, wait_random_exponential
 
 from creeper.authority.normalizer import normalize_official
 from creeper.records.candidates import CandidateSourceScope
@@ -19,8 +25,22 @@ from creeper.records.models import HostObservation, SourceRecord
 Fetch = Callable[[str, float, dict[str, str]], bytes]
 
 
+def _retryable_http_error(exc: BaseException) -> bool:
+    if isinstance(exc, (httpx.TimeoutException, httpx.TransportError)):
+        return True
+    if isinstance(exc, httpx.HTTPStatusError):
+        status = exc.response.status_code
+        return status == 429 or status >= 500
+    return False
+
+
 class ArquivoCDXClient:
-    """Query the public Arquivo.pt CDX endpoint with an explicit row limit."""
+    """Query Arquivo.pt CDX through a reusable mature HTTP transport.
+
+    ``fetch`` remains injectable for deterministic/offline tests. Production
+    callers should reuse one client instance (or provide one shared
+    ``httpx.Client``) so keep-alive and connection pooling remain effective.
+    """
 
     def __init__(
         self,
@@ -28,23 +48,101 @@ class ArquivoCDXClient:
         *,
         limit: int = 1_000,
         timeout: float = 30.0,
+        max_retries: int = 3,
+        backoff: float = 0.5,
+        max_backoff: float = 30.0,
+        max_connections: int = 8,
+        max_keepalive_connections: int = 4,
         fetch: Fetch | None = None,
-        user_agent: str = "Creeper/2.1 (research; contact administrator)",
+        client: httpx.Client | None = None,
+        transport: httpx.BaseTransport | None = None,
+        user_agent: str = "Creeper/2.2 (research; contact administrator)",
     ):
-        if not endpoint.strip() or limit < 1 or timeout <= 0:
+        if (
+            not endpoint.strip()
+            or limit < 1
+            or timeout <= 0
+            or max_retries < 0
+            or backoff < 0
+            or max_backoff < 0
+            or max_connections < 1
+            or max_keepalive_connections < 0
+            or max_keepalive_connections > max_connections
+        ):
             raise ValueError("invalid Arquivo.pt CDX client limits")
+        if fetch is not None and (client is not None or transport is not None):
+            raise ValueError("fetch cannot be combined with client/transport")
+        if client is not None and transport is not None:
+            raise ValueError("pass either client or transport, not both")
         self.endpoint = endpoint
         self.limit = limit
         self.timeout = timeout
-        self.fetch = fetch or self._fetch
+        self.max_retries = max_retries
+        self.backoff = backoff
+        self.max_backoff = max_backoff
         self.user_agent = user_agent
+        self.fetch = fetch
         self.last_request_url: str | None = None
+        self.http_requests = 0
+        self._owns_client = fetch is None and client is None
+        self.client = None if fetch is not None else client or httpx.Client(
+            timeout=httpx.Timeout(timeout),
+            limits=httpx.Limits(
+                max_connections=max_connections,
+                max_keepalive_connections=max_keepalive_connections,
+            ),
+            headers={
+                "User-Agent": user_agent,
+                "Accept": "application/json",
+                "Accept-Encoding": "gzip, deflate",
+            },
+            follow_redirects=True,
+            transport=transport,
+        )
 
-    @staticmethod
-    def _fetch(url: str, timeout: float, headers: dict[str, str]) -> bytes:
-        request = Request(url, headers=headers)
-        with urlopen(request, timeout=timeout) as response:
-            return response.read()
+    def __enter__(self) -> "ArquivoCDXClient":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        self.close()
+
+    def close(self) -> None:
+        if self._owns_client and self.client is not None:
+            self.client.close()
+
+    def _wait_policy(self):
+        if self.backoff == 0 or self.max_backoff == 0:
+            return wait_none()
+        return wait_random_exponential(
+            multiplier=self.backoff,
+            max=max(self.backoff, self.max_backoff),
+        )
+
+    def _request(self, request_url: str) -> bytes:
+        headers = {"User-Agent": self.user_agent, "Accept": "application/json"}
+        if self.fetch is not None:
+            self.http_requests += 1
+            return self.fetch(request_url, self.timeout, headers)
+
+        assert self.client is not None
+        retrying = Retrying(
+            stop=stop_after_attempt(self.max_retries + 1),
+            wait=self._wait_policy(),
+            retry=retry_if_exception(_retryable_http_error),
+            reraise=True,
+        )
+        for attempt in retrying:
+            with attempt:
+                self.http_requests += 1
+                response = self.client.get(request_url)
+                if response.status_code == 429 or response.status_code >= 500:
+                    response.raise_for_status()
+                if response.status_code >= 400:
+                    raise ValueError(
+                        f"Arquivo.pt CDX rejected request with HTTP {response.status_code}"
+                    )
+                return response.content
+        raise AssertionError("unreachable")
 
     def query(
         self,
@@ -69,12 +167,7 @@ class ArquivoCDXClient:
         }
         request_url = f"{self.endpoint}?{urlencode(params)}"
         self.last_request_url = request_url
-        payload = self.fetch(
-            request_url,
-            self.timeout,
-            {"User-Agent": self.user_agent, "Accept": "application/json"},
-        )
-        return self._parse_payload(payload)
+        return self._parse_payload(self._request(request_url))
 
     @staticmethod
     def _parse_payload(payload: bytes) -> list[dict[str, object]]:
@@ -174,4 +267,3 @@ class ArquivoCDXSource:
                 scope=record.scope,
                 source_year=record.source_year,
             )
-

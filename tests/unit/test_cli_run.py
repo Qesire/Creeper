@@ -91,7 +91,7 @@ evidence_capacity = 1
         finally:
             control.close()
 
-    def test_run_once_loads_optional_submission_context(self):
+    def test_run_once_loads_optional_submission_context_but_zero_growth_is_not_ready(self):
         root, config = self._workspace()
         (root / "baseline-manifest.json").write_text(
             json.dumps({
@@ -127,7 +127,7 @@ growth_rate = "0"
             self.assertEqual(main(["run", "--once", str(config)]), 0)
 
         report = json.loads(output.getvalue())
-        self.assertIs(report["snapshot_ready"], True)
+        self.assertIs(report["snapshot_ready"], False)
         self.assertEqual(report["novel_records"], 0)
 
     def test_run_once_rejects_non_positive_queue_limit(self):

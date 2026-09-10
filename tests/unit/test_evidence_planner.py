@@ -2,7 +2,7 @@ import hashlib
 import unittest
 
 from creeper.authority.baseline_index import YEAR_BITS
-from creeper.evidence.policies import EvidenceCapsule, EvidenceQueryKey
+from creeper.evidence.policies import EvidenceQueryKey
 from creeper.records.candidates import CandidateSourceScope
 from creeper.records.models import HostObservation
 
@@ -18,7 +18,7 @@ class EvidencePlannerTests(unittest.TestCase):
         values.update(changes)
         return HostObservation(**values)
 
-    def test_direct_year_creates_capsule_without_external_query(self):
+    def test_authorized_direct_year_creates_capsule_without_external_query(self):
         from creeper.evidence.planner import EvidencePlanner
 
         plan = EvidencePlanner().plan(
@@ -27,6 +27,7 @@ class EvidencePlannerTests(unittest.TestCase):
             local_mask=0,
             provider="wayback",
             policy_version="v1",
+            allow_direct=True,
         )
 
         self.assertEqual([item.year for item in plan.direct_capsules], [1997])
@@ -38,7 +39,26 @@ class EvidencePlannerTests(unittest.TestCase):
         self.assertEqual(capsule.source_locator, "source-a:17")
         self.assertEqual(
             capsule.payload_hash,
-            hashlib.sha256(b"new.example\x001997\x00source-a\x00source-a:17").hexdigest(),
+            hashlib.sha256(
+                b"new.example\x001997\x00source-a\x00source-a:17\x00\x00"
+            ).hexdigest(),
+        )
+
+    def test_unauthorized_direct_claim_is_demoted_to_external_hint(self):
+        from creeper.evidence.planner import EvidencePlanner
+
+        plan = EvidencePlanner().plan(
+            self.observation(direct_year_mask=YEAR_BITS[1997]),
+            official_mask=0,
+            local_mask=0,
+            provider="wayback",
+            policy_version="v1",
+        )
+
+        self.assertEqual(plan.direct_capsules, ())
+        self.assertEqual(
+            [(key.hostname, key.temporal_scope.year_from) for key in plan.external_keys],
+            [("new.example", 1997)],
         )
 
     def test_official_and_local_masks_suppress_direct_and_external_outputs(self):
@@ -54,6 +74,7 @@ class EvidencePlannerTests(unittest.TestCase):
             local_mask=YEAR_BITS[1998] | YEAR_BITS[1999],
             provider="wayback",
             policy_version="v1",
+            allow_direct=True,
         )
 
         self.assertEqual(plan.direct_capsules, ())
@@ -76,7 +97,7 @@ class EvidencePlannerTests(unittest.TestCase):
         )
         self.assertEqual(plan.direct_capsules, ())
 
-    def test_direct_year_takes_precedence_over_same_year_hint(self):
+    def test_authorized_direct_year_takes_precedence_over_same_year_hint(self):
         from creeper.evidence.planner import EvidencePlanner
 
         plan = EvidencePlanner().plan(
@@ -89,6 +110,7 @@ class EvidencePlannerTests(unittest.TestCase):
             local_mask=0,
             provider="arquivo",
             policy_version="v2",
+            allow_direct=True,
         )
 
         self.assertEqual([item.year for item in plan.direct_capsules], [1997])

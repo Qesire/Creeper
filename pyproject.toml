@@ -4,11 +4,18 @@ version = "2.1.0.dev0"
 description = "Baseline-aware historical Web hostname discovery"
 requires-python = ">=3.12"
 dependencies = [
+    "aiolimiter>=1.2,<2",
+    "httpx>=0.28,<1",
+    "selectolax>=0.4.11,<0.5",
+    "tenacity>=9,<10",
     "warcio>=1.8.1,<2",
 ]
 
 [project.scripts]
 creeper = "creeper.cli:main"
+creeper-source-discovery = "creeper.source_discovery_service:main"
+creeper-source-producer = "creeper.source_cli:main"
+creeper-evidence-worker = "creeper.evidence_cli:main"
 
 [build-system]
 requires = ["setuptools>=68"]

@@ -37,7 +37,7 @@ class SubmissionPackageTests(unittest.TestCase):
                 eed_policy_version="eed-v1",
                 novel_records=(capsule,),
                 novel_eed="0.5000",
-                growth_rate="0.000014",
+                growth_rate="0.050000",
                 evidence_coverage="1.000000",
                 invalid_count=0,
                 overlap_count=0,
@@ -101,6 +101,32 @@ class SubmissionPackageTests(unittest.TestCase):
         self.assertFalse(report.ready)
         self.assertIn("incomplete queries cannot be submitted as negative evidence", report.reasons)
         self.assertIn("Common Crawl candidate is present in active candidates", report.reasons)
+        self.assertIn("formal submission requires at least 5% EED growth", report.reasons)
+
+    def test_precheck_accepts_dynamic_baseline_identity_and_rejects_eed_mismatch(self):
+        snapshot = SubmissionSnapshot(
+            submission_snapshot_id="s-3",
+            created_at="2026-09-10T00:00:00+00:00",
+            baseline_id="merged-next-round",
+            baseline_hashes={str(year): "c" * 64 for year in range(1996, 2002)},
+            normalizer_version="normalizer-v1",
+            evidence_policy_version="evidence-v1",
+            eed_policy_version="eed-v1",
+            novel_records=(),
+            novel_eed="10",
+            growth_rate="0.05",
+            evidence_coverage="1",
+            invalid_count=0,
+            overlap_count=0,
+            source_report_set=("source.json",),
+            cdx_audit_set=("audit.json",),
+            code_revision="d" * 64,
+            eed_report={"equivalent_english_domains": "9"},
+        )
+        report = precheck_submission(snapshot)
+        self.assertFalse(report.ready)
+        self.assertNotIn("baseline_id must be merged260909-3", report.reasons)
+        self.assertIn("novel_eed must match the exact EED report", report.reasons)
 
 
 if __name__ == "__main__":

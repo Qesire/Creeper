@@ -1,0 +1,79 @@
+# Creeper source-discovery control-plane example.
+# Paths are resolved relative to this file unless absolute.
+
+runtime_data_root = "/path/to/Creeper-data/v3-merged260909-3"
+scrapy_project_dir = "../tools/scrapy_acquisition"
+
+[pool]
+# Reservoir watermarks. Search only runs when usable cold inventory is below cold_min.
+active_min = 2
+active_target = 3
+warm_min = 10
+warm_target = 20
+cold_min = 50
+cold_target = 100
+triage_batch = 16
+scout_parallelism = 4
+max_search_directives = 3
+
+[coordinator]
+# External I/O overlaps; SQLite authority commits remain serialized.
+triage_parallelism = 8
+scout_parallelism = 4
+search_parallelism = 3
+# Transient executor failures are retried after this process-local backoff.
+failure_retry_seconds = 30.0
+# Completed strategies, including valid empty-result searches, are durably cooled down.
+search_cooldown_seconds = 30.0
+
+[triage]
+# HEAD first, then a tiny ranged GET only when the server rejects HEAD.
+timeout_seconds = 10.0
+
+[scrapy]
+# Structural scout only. Link volume never becomes a yield measurement.
+max_pages = 100
+max_depth = 2
+max_seconds = 120
+max_memory_mb = 512
+follow_query = false
+
+[measurement]
+# Optional deterministic yield gate for concrete SOURCE/BULK_ARTIFACT nodes.
+# Remove this whole table to keep concrete sources in HOLD until a measured adapter exists.
+baseline_index = "/path/to/Creeper-data/v3-merged260909-3/baseline.sqlite3"
+eed_model = "/path/to/task-root/equivalent_english_domain/CC-MAIN-2024-10_primary_page_language_percentage.json"
+# Only a bounded prefix is fetched; WARC/ARC use warcio; unsupported formats remain HOLD.
+max_download_bytes = 8388608
+max_decompressed_bytes = 33554432
+max_records = 5000
+max_line_bytes = 65536
+# These are scout promotion thresholds, not submission acceptance thresholds.
+min_unique_hosts = 100
+min_novel_hosts = 10
+min_novel_fraction = 0.01
+min_novel_eed = 1.0
+timeout_seconds = 30.0
+
+[admission]
+# Search-time prior gate. This is intentionally before baseline/CDX verification:
+# the Agent must already bring large, enumerable, 1996-2001-relevant resources.
+target_year_from = 1996
+target_year_to = 2001
+min_expected_volume = 100000
+min_enumerability_prior = 0.50
+min_confidence = 0.35
+require_year_bounds = true
+
+[agent]
+# Contract: <command...> --request REQUEST.json --response RESPONSE.json
+# The process may propose SourceCandidate metadata only; it never receives SQLite authority.
+# The request contains the [admission] thresholds so the Agent can search toward them.
+command = ["python", "/path/to/creeper_source_search_agent.py"]
+backend = "configured-search-agent"
+actor = "agent:source-search"
+# cwd = "/optional/agent/working/directory"
+timeout_seconds = 120.0
+termination_grace_seconds = 2.0
+max_response_bytes = 2097152
+max_returned_candidates = 2000

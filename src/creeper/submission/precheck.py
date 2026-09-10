@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 import re
 
 from creeper.authority.normalizer import normalize_official
 from creeper.submission.snapshot import SubmissionSnapshot
+
+
+MINIMUM_GROWTH_RATE = Decimal("0.05")
 
 
 @dataclass(frozen=True)
@@ -15,10 +19,22 @@ class PrecheckReport:
     reasons: tuple[str, ...]
 
 
+def _decimal(value: object, name: str, reasons: list[str]) -> Decimal | None:
+    try:
+        parsed = Decimal(str(value))
+    except (InvalidOperation, ValueError):
+        reasons.append(f"{name} must be a finite decimal")
+        return None
+    if not parsed.is_finite():
+        reasons.append(f"{name} must be a finite decimal")
+        return None
+    return parsed
+
+
 def precheck_submission(snapshot: SubmissionSnapshot) -> PrecheckReport:
     reasons: list[str] = []
-    if snapshot.baseline_id != "merged260909-3":
-        reasons.append("baseline_id must be merged260909-3")
+    if not snapshot.baseline_id:
+        reasons.append("baseline_id is required")
     expected_years = {str(year) for year in range(1996, 2002)}
     if set(snapshot.baseline_hashes) != expected_years:
         reasons.append("all six annual baseline hashes are required")
@@ -44,6 +60,26 @@ def precheck_submission(snapshot: SubmissionSnapshot) -> PrecheckReport:
         reasons.append("incomplete queries cannot be submitted as negative evidence")
     if len(snapshot.active_candidates) != len(snapshot.active_candidate_scopes):
         reasons.append("every active candidate requires a source scope")
+
+    novel_eed = _decimal(snapshot.novel_eed, "novel_eed", reasons)
+    growth_rate = _decimal(snapshot.growth_rate, "growth_rate", reasons)
+    if novel_eed is not None and novel_eed < 0:
+        reasons.append("novel_eed cannot be negative")
+    if growth_rate is not None:
+        if growth_rate < 0:
+            reasons.append("growth_rate cannot be negative")
+        elif growth_rate < MINIMUM_GROWTH_RATE:
+            reasons.append("formal submission requires at least 5% EED growth")
+
+    if snapshot.eed_report is not None and "equivalent_english_domains" in snapshot.eed_report:
+        reported_eed = _decimal(
+            snapshot.eed_report["equivalent_english_domains"],
+            "eed_report.equivalent_english_domains",
+            reasons,
+        )
+        if novel_eed is not None and reported_eed is not None and reported_eed != novel_eed:
+            reasons.append("novel_eed must match the exact EED report")
+
     for capsule in snapshot.novel_records:
         if normalize_official(capsule.hostname) is None:
             reasons.append(f"invalid evidence hostname: {capsule.hostname}")
