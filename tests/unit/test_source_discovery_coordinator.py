@@ -255,6 +255,51 @@ class SourceDiscoveryCoordinatorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(retried.state, SourceState.SCOUT_READY)
         self.assertIn("temporary provider failure", self.registry.suppression_reason(retried) or "")
 
+    async def test_scout_children_are_committed_after_io_with_dedup_and_lineage(self) -> None:
+        parent = self.candidate("parent")
+        self.to_scout_ready(parent)
+        child = SourceCandidate(
+            canonical_entrypoint="https://resources.example/catalog/",
+            source_family="RESOURCE_CATALOG",
+            level=SourceLevel.COLLECTION,
+            discovered_by="scrapy_sidecar",
+            discovery_strategy="DETERMINISTIC_LINK_EXPANSION",
+            confidence=0.8,
+        )
+
+        async def triage(_candidate: SourceCandidate) -> TriageResult:
+            return TriageResult(TriageDisposition.SCOUT)
+
+        async def scout(_candidate: SourceCandidate) -> ScoutResult:
+            return ScoutResult(
+                ScoutDisposition.HOLD,
+                discovered_candidates=(child, child, parent),
+                edge_relation="links_to_resource",
+            )
+
+        async def search(_directive) -> SearchBatch:
+            return SearchBatch(backend="test", query="unused", actor="test")
+
+        coordinator = SourceDiscoveryCoordinator(
+            self.registry,
+            self.manager(),
+            lock_path=self.lock_path,
+            triage_executor=triage,
+            scout_executor=scout,
+            search_executor=search,
+        )
+
+        report = await coordinator.run_once()
+
+        self.assertEqual(self.registry.get_candidate(parent.source_key).state, SourceState.HOLD)
+        stored_child = self.registry.get_candidate(child.source_key)
+        self.assertIsNotNone(stored_child)
+        self.assertEqual(stored_child.state, SourceState.DISCOVERED)
+        self.assertEqual(self.registry.children(parent.source_key), [child.source_key])
+        self.assertEqual(report.scout_children_registered, 1)
+        self.assertEqual(report.scout_edges_added, 1)
+        self.assertEqual(report.scout_children_dropped, 2)
+
     async def test_search_executor_cannot_overfill_directive_budget(self) -> None:
         async def triage(_candidate: SourceCandidate) -> TriageResult:
             return TriageResult(TriageDisposition.SCOUT)
