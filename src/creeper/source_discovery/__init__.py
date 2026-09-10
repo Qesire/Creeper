@@ -37,6 +37,10 @@ from creeper.source_discovery.promotion import (
     PromotionPolicy,
 )
 from creeper.source_discovery.registry import SourceDiscoveryRegistry
+from creeper.source_discovery.scrapy_scout import (
+    ScrapyStructuralScoutExecutor,
+    ScrapyStructuralScoutPolicy,
+)
 from creeper.source_discovery.scrapy_sidecar import (
     ScrapyLinkDiscovery,
     ScrapyScoutLauncher,
@@ -63,6 +67,8 @@ __all__ = [
     "ScrapyScoutLauncher",
     "ScrapyScoutRun",
     "ScrapyScoutSpec",
+    "ScrapyStructuralScoutExecutor",
+    "ScrapyStructuralScoutPolicy",
     "SearchBatch",
     "SearchDirective",
     "SearchDirectiveKind",
