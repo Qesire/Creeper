@@ -1,0 +1,48 @@
+# Creeper source-discovery control-plane example.
+# Paths are resolved relative to this file unless absolute.
+
+runtime_data_root = "/path/to/Creeper-data/v3-merged260909-3"
+scrapy_project_dir = "../tools/scrapy_acquisition"
+
+[pool]
+# Reservoir watermarks. Search only runs when usable cold inventory is below cold_min.
+active_min = 2
+active_target = 3
+warm_min = 10
+warm_target = 20
+cold_min = 50
+cold_target = 100
+triage_batch = 16
+scout_parallelism = 4
+max_search_directives = 3
+
+[coordinator]
+# External I/O overlaps; SQLite authority commits remain serialized.
+triage_parallelism = 8
+scout_parallelism = 4
+search_parallelism = 3
+failure_retry_seconds = 30.0
+
+[triage]
+# HEAD first, then a tiny ranged GET only when the server rejects HEAD.
+timeout_seconds = 10.0
+
+[scrapy]
+# Structural scout only. Link volume never becomes a yield measurement.
+max_pages = 100
+max_depth = 2
+max_seconds = 120
+max_memory_mb = 512
+follow_query = false
+
+[agent]
+# Contract: <command...> --request REQUEST.json --response RESPONSE.json
+# The process may propose SourceCandidate metadata only; it never receives SQLite authority.
+command = ["python", "/path/to/creeper_source_search_agent.py"]
+backend = "configured-search-agent"
+actor = "agent:source-search"
+# cwd = "/optional/agent/working/directory"
+timeout_seconds = 120.0
+termination_grace_seconds = 2.0
+max_response_bytes = 2097152
+max_returned_candidates = 2000
