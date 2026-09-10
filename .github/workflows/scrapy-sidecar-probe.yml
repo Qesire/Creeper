@@ -34,7 +34,7 @@ jobs:
       - name: Sync locked environment
         run: uv sync --locked
 
-      - name: Run sidecar unit tests
+      - name: Run sidecar tests
         run: uv run python -m unittest discover -s tests -v
 
       - name: Verify Scrapy settings resolve
@@ -43,7 +43,7 @@ jobs:
       - name: Commit generated lockfile when changed
         working-directory: .
         run: |
-          if git diff --quiet -- tools/scrapy_acquisition/uv.lock; then
+          if [ -z "$(git status --porcelain -- tools/scrapy_acquisition/uv.lock)" ]; then
             echo "sidecar uv.lock already current"
             exit 0
           fi
