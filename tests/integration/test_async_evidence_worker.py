@@ -1,5 +1,6 @@
 import asyncio
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -138,7 +139,6 @@ class AsyncEvidenceWorkerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(task.state, CDXQueryState.TRANSIENT_ERROR.value)
         self.assertEqual(task.retry_at, 1_030.0)
 
-        # The persistent queue does not immediately reclaim future retry work.
         self.assertEqual((await worker.run_once()).claimed, 0)
         self.now = 1_031.0
         second = await worker.run_once()
@@ -146,7 +146,7 @@ class AsyncEvidenceWorkerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(second.claimed, 1)
         self.assertEqual(task.retry_at, 1_091.0)
 
-    async def test_missing_provider_is_operational_retry_not_evidence_invalid(self):
+    async def test_unconfigured_provider_remains_unclaimed_for_its_own_worker(self):
         key = self.key("missing.example", provider="arquivo")
         self.control.enqueue_evidence_tasks([key])
         worker = AsyncEvidenceWorker(
@@ -160,9 +160,37 @@ class AsyncEvidenceWorkerTests(unittest.IsolatedAsyncioTestCase):
         report = await worker.run_once()
         task = self.control.get_evidence_task(key)
 
-        self.assertEqual(report.unknown_provider, 1)
-        self.assertEqual(task.state, CDXQueryState.TRANSIENT_ERROR.value)
-        self.assertGreater(task.retry_at, self.now)
+        self.assertEqual(report.claimed, 0)
+        self.assertEqual(report.unknown_provider, 0)
+        self.assertEqual(task.state, CDXQueryState.PENDING.value)
+        self.assertIsNone(task.lease_owner)
+
+    async def test_visibility_is_renewed_while_slow_provider_is_in_flight(self):
+        # Use a real monotonic wall-clock store so the heartbeat can extend the
+        # visibility deadline during this short integration test.
+        root = Path(self.tmp.name)
+        self.control.close()
+        self.control = ControlStore(root / "heartbeat.sqlite3", clock=time.time)
+        key = self.key("slow.example")
+        self.control.enqueue_evidence_tasks([key])
+        provider = FakeProvider(delay=0.12)
+        worker = AsyncEvidenceWorker(
+            control_store=self.control,
+            evidence_store=self.evidence,
+            providers={"wayback": provider},
+            owner="worker-heartbeat",
+            claim_batch_size=1,
+            lease_seconds=0.09,
+            heartbeat_interval=0.03,
+        )
+
+        task = asyncio.create_task(worker.run_once())
+        await asyncio.sleep(0.07)
+        visible = self.control.get_evidence_task(key)
+        self.assertEqual(visible.lease_owner, "worker-heartbeat")
+        self.assertGreater(visible.lease_until, time.time())
+        report = await task
+        self.assertEqual(report.terminal, 1)
 
 
 if __name__ == "__main__":
