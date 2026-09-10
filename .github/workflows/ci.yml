@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Python 3.12
+    runs-on: ubuntu-latest
+    env:
+      CREEPER_NETWORK_TESTS: "0"
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Sync environment
+        run: uv sync --all-groups
+
+      - name: Run offline test suite
+        run: uv run python -m unittest discover -s tests -v
+
+      - name: Build package
+        run: uv build
+
+      - name: Check patch whitespace
+        run: git diff --check

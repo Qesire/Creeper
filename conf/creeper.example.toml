@@ -2,5 +2,20 @@ baseline_id = "merged260909-3"
 task_root = "/path/to/Domain_Data_Collection_Task"
 runtime_data_root = "/path/to/Creeper-data/v3-merged260909-3"
 baseline_index = "indexes/baseline-fast.sqlite3"
-common_crawl_candidate_discovery = false
-required_python = "3.12"
+dataset = "sources/local-hosts.txt"
+source_id = "local_dataset"
+domain_id = "local_static_dataset"
+reservoir_id = "local_dataset"
+source_year = 1997
+
+[limits]
+# All queue and lease limits are positive and bound one offline run.
+queue_source_records = 1000
+queue_observations = 1000
+queue_evidence_tasks = 1000
+queue_commits = 1000
+lease_max_records = 1000
+lease_max_requests = 1000
+lease_max_bytes = 10485760
+lease_max_seconds = 300
+evidence_capacity = 1000

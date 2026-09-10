@@ -6,9 +6,93 @@ from creeper.authority.baseline_index import BaselineIndex
 from creeper.records.candidates import CandidateSourceScope
 from creeper.sources.auxiliary_audit import audit_v3_auxiliary
 from creeper.sources.local.auxiliary import V3AuxiliaryURLAdapter
+from creeper.sources.local.static_dataset import StaticDatasetAdapter
+from creeper.scheduler.leases import WorkLease
 
 
 class AuxiliarySourceTests(unittest.TestCase):
+    def _static_adapter_and_lease(self, contents, **limits):
+        tmp = tempfile.TemporaryDirectory()
+        path = Path(tmp.name) / "dataset.txt"
+        path.write_bytes(contents)
+        adapter = StaticDatasetAdapter(path, source_id="test_dataset")
+        lease = WorkLease.create(
+            reservoir_id="test_dataset",
+            max_records=limits.get("max_records", 10),
+            max_requests=limits.get("max_requests", 1),
+            max_bytes=limits.get("max_bytes", 10_000),
+            max_seconds=limits.get("max_seconds", 10),
+            cursor_start=limits.get("cursor_start"),
+            cursor_end=limits.get("cursor_end"),
+        )
+        return tmp, adapter, lease
+
+    def test_static_dataset_execute_respects_inclusive_line_cursor_and_returns_next_cursor(self):
+        tmp, adapter, lease = self._static_adapter_and_lease(
+            b"one.example\ntwo.example\nthree.example\nfour.example\n",
+            cursor_start="2",
+            cursor_end="3",
+        )
+        try:
+            records, result = adapter.execute(lease)
+            records = list(records)
+            self.assertEqual([record.payload for record in records], ["two.example", "three.example"])
+            self.assertEqual([record.locator.rsplit(":", 1)[-1] for record in records], ["2", "3"])
+            self.assertEqual(result.lease_id, lease.lease_id)
+            self.assertEqual(result.records, 2)
+            self.assertEqual(result.requests, 1)
+            self.assertEqual(result.next_cursor, "4")
+        finally:
+            tmp.cleanup()
+
+    def test_static_dataset_execute_stops_at_max_records(self):
+        tmp, adapter, lease = self._static_adapter_and_lease(
+            b"one.example\ntwo.example\nthree.example\n", max_records=2
+        )
+        try:
+            records, result = adapter.execute(lease)
+            self.assertEqual(len(list(records)), 2)
+            self.assertEqual(result.records, 2)
+            self.assertEqual(result.next_cursor, "3")
+        finally:
+            tmp.cleanup()
+
+    def test_static_dataset_execute_stops_before_max_bytes(self):
+        tmp, adapter, lease = self._static_adapter_and_lease(
+            b"one.example\ntwo.example\n", max_bytes=len(b"one.example\n")
+        )
+        try:
+            records, result = adapter.execute(lease)
+            self.assertEqual([record.payload for record in records], ["one.example"])
+            self.assertEqual(result.bytes_read, len(b"one.example\n"))
+            self.assertEqual(result.next_cursor, "2")
+        finally:
+            tmp.cleanup()
+
+    def test_static_dataset_execute_stops_at_max_seconds(self):
+        tmp, adapter, lease = self._static_adapter_and_lease(
+            b"one.example\n", max_seconds=0
+        )
+        try:
+            records, result = adapter.execute(lease)
+            self.assertEqual(list(records), [])
+            self.assertEqual(result.records, 0)
+            self.assertEqual(result.next_cursor, "1")
+        finally:
+            tmp.cleanup()
+
+    def test_static_dataset_propagates_configured_source_year(self):
+        tmp, adapter, lease = self._static_adapter_and_lease(b"one.example\n")
+        adapter = StaticDatasetAdapter(adapter.path, source_id=adapter.source_id, source_year=1997)
+        try:
+            records, _result = adapter.execute(lease)
+            record = next(records)
+            observation = next(adapter.extract_hosts(record))
+            self.assertEqual(record.source_year, 1997)
+            self.assertEqual(observation.source_year, 1997)
+        finally:
+            tmp.cleanup()
+
     def test_enumerates_auxiliary_files_with_line_provenance(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
