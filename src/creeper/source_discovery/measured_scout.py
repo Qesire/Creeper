@@ -218,7 +218,9 @@ class MeasuredYieldScoutExecutor:
             if response.status_code in {404, 410}:
                 return b"", "__permanent_missing__"
             response.raise_for_status()
-            async for chunk in response.aiter_bytes():
+            # Use raw bytes: httpx.aiter_bytes() applies Content-Encoding decoding,
+            # which would make a .gz resource get decompressed twice below.
+            async for chunk in response.aiter_raw():
                 remaining = self.policy.max_download_bytes - len(payload)
                 if remaining <= 0:
                     break
