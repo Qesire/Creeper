@@ -104,9 +104,13 @@ class SourceReservoirManager:
         registry: SourceDiscoveryRegistry,
         *,
         targets: SourcePoolTargets | None = None,
+        search_cooldown_seconds: float = 0.0,
     ) -> None:
+        if search_cooldown_seconds < 0:
+            raise ValueError("search_cooldown_seconds must be non-negative")
         self.registry = registry
         self.targets = targets or SourcePoolTargets()
+        self.search_cooldown_seconds = float(search_cooldown_seconds)
 
     def _usable(self, candidates: list[SourceCandidate]) -> list[SourceCandidate]:
         return [
@@ -168,6 +172,23 @@ class SourceReservoirManager:
             key=lambda reward: (reward.reward_per_cost, reward.strategy),
         ).strategy
 
+    def _strategy_available(self, strategy: str) -> bool:
+        """Rate-limit completed search strategies without adding another broker."""
+        if self.search_cooldown_seconds <= 0:
+            return True
+        row = self.registry.connection.execute(
+            """
+            SELECT MAX(finished_at) AS finished_at
+            FROM source_search_episodes
+            WHERE strategy = ? AND finished_at IS NOT NULL
+            """,
+            (strategy,),
+        ).fetchone()
+        if row is None or row["finished_at"] is None:
+            return True
+        elapsed = float(self.registry.clock()) - float(row["finished_at"])
+        return elapsed >= self.search_cooldown_seconds
+
     def _search_directives(
         self,
         *,
@@ -178,7 +199,7 @@ class SourceReservoirManager:
         if cold_count >= self.targets.cold_min:
             return ()
 
-        # Every parallel search shares one finite refill budget.  Building the
+        # Every parallel search shares one finite refill budget. Building the
         # strategy set first and allocating the deficit second prevents N
         # concurrent search workers from each assuming they own the full gap.
         gap = self.targets.cold_target - cold_count
@@ -197,7 +218,7 @@ class SourceReservoirManager:
             if len(specs) >= self.targets.max_search_directives:
                 return
             dedup_key = f"{strategy}:{subject or '*'}"
-            if dedup_key in seen:
+            if dedup_key in seen or not self._strategy_available(strategy):
                 return
             seen.add(dedup_key)
             specs.append((kind, strategy, subject, reason))
