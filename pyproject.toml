@@ -8,6 +8,7 @@ dependencies = [
     "httpx>=0.28,<1",
     "selectolax>=0.4.11,<0.5",
     "tenacity>=9,<10",
+    "warcio>=1.8.1,<2",
 ]
 
 [project.scripts]
