@@ -3,8 +3,9 @@
 The queue authority remains Creeper's ControlStore because EvidenceQueryKey and
 its terminal states are competition semantics, not generic job metadata. The
 worker follows the mature ACK/visibility-timeout pattern used by persistent
-queues: claim a bounded batch, execute provider work concurrently, then either
-commit a terminal result or release retryable work with a durable retry time.
+queues: claim a bounded supported-provider batch, renew visibility while slow
+network work is in flight, then either commit a terminal result or release
+retryable work with a durable retry time.
 """
 
 from __future__ import annotations
@@ -22,6 +23,7 @@ from creeper.evidence.policies import (
 )
 from creeper.storage.commit_writer import CommitWriter
 from creeper.storage.control_store import ControlStore, EvidenceTask
+from creeper.storage.evidence_queue import DurableEvidenceQueue
 from creeper.storage.evidence_store import EvidenceStore
 
 
@@ -54,6 +56,7 @@ class AsyncEvidenceWorker:
         provider_inflight: Mapping[str, int] | None = None,
         retry_base_seconds: float = 30.0,
         retry_max_seconds: float = 3_600.0,
+        heartbeat_interval: float | None = None,
         clock: Callable[[], float] = time.time,
     ) -> None:
         if not owner:
@@ -64,6 +67,13 @@ class AsyncEvidenceWorker:
             raise ValueError("lease_seconds must be positive")
         if retry_base_seconds < 0 or retry_max_seconds < retry_base_seconds:
             raise ValueError("invalid persistent retry bounds")
+        if not providers:
+            raise ValueError("at least one evidence provider is required")
+        if heartbeat_interval is None:
+            heartbeat_interval = max(1.0, min(60.0, lease_seconds / 3.0))
+        if heartbeat_interval <= 0 or heartbeat_interval >= lease_seconds:
+            raise ValueError("heartbeat_interval must be positive and below lease_seconds")
+
         self.control_store = control_store
         self.evidence_store = evidence_store
         self.providers = dict(providers)
@@ -72,7 +82,9 @@ class AsyncEvidenceWorker:
         self.lease_seconds = lease_seconds
         self.retry_base_seconds = retry_base_seconds
         self.retry_max_seconds = retry_max_seconds
+        self.heartbeat_interval = float(heartbeat_interval)
         self.clock = clock
+        self.queue = DurableEvidenceQueue(control_store)
 
         limits = dict(provider_inflight or {})
         unknown_limits = set(limits) - set(self.providers)
@@ -105,12 +117,7 @@ class AsyncEvidenceWorker:
         )
 
     async def _execute(self, task: EvidenceTask) -> EvidenceQueryResult:
-        provider = self.providers.get(task.key.provider)
-        if provider is None:
-            return self._transient_for(
-                task,
-                f"provider is not configured: {task.key.provider}",
-            )
+        provider = self.providers[task.key.provider]
         semaphore = self._semaphores[task.key.provider]
         async with semaphore:
             try:
@@ -120,28 +127,58 @@ class AsyncEvidenceWorker:
             except Exception as exc:  # operational failure, never evidence INVALID
                 return self._transient_for(task, str(exc) or type(exc).__name__)
 
+    async def _heartbeat(
+        self,
+        keys: tuple[EvidenceQueryKey, ...],
+        stop: asyncio.Event,
+    ) -> None:
+        """Keep visibility alive while a claimed network batch is running."""
+        while True:
+            try:
+                await asyncio.wait_for(stop.wait(), timeout=self.heartbeat_interval)
+                return
+            except TimeoutError:
+                renewed = self.queue.renew(
+                    keys,
+                    owner=self.owner,
+                    lease_seconds=self.lease_seconds,
+                )
+                if renewed != len(keys):
+                    raise RuntimeError("lost ownership while renewing evidence visibility")
+
     async def run_once(self) -> EvidenceWorkerReport:
         """Claim and process one bounded durable batch.
 
         Existing PENDING/INCOMPLETE/TRANSIENT_ERROR rows are eligible, so this
         worker can resume backlog created by an earlier process or SourceLease.
+        Tasks for unconfigured providers remain untouched for the appropriate
+        provider worker instead of being claimed and churned through retries.
         """
-        tasks = self.control_store.claim_evidence_tasks(
+        tasks = self.queue.claim(
             owner=self.owner,
             limit=self.claim_batch_size,
+            providers=self.providers,
             lease_seconds=self.lease_seconds,
         )
         if not tasks:
             return EvidenceWorkerReport()
 
-        results = await asyncio.gather(*(self._execute(task) for task in tasks))
+        keys = tuple(task.key for task in tasks)
+        stop_heartbeat = asyncio.Event()
+        heartbeat = asyncio.create_task(self._heartbeat(keys, stop_heartbeat))
+        try:
+            results = await asyncio.gather(*(self._execute(task) for task in tasks))
+        finally:
+            stop_heartbeat.set()
+            await heartbeat
+
         writer = CommitWriter(
             self.evidence_store,
             self.control_store,
             owner=self.owner,
             flush_count=max(1, min(self.claim_batch_size, 128)),
         )
-        terminal = retryable = unknown_provider = 0
+        terminal = retryable = 0
         task_by_key = {task.key: task for task in tasks}
         try:
             for result in results:
@@ -161,8 +198,6 @@ class AsyncEvidenceWorker:
                 }:
                     raise ValueError(f"unsupported provider state: {result.state}")
                 task = task_by_key[result.key]
-                if result.error and result.error.startswith("provider is not configured:"):
-                    unknown_provider += 1
                 self.control_store.finish_evidence_task(
                     result.key,
                     result.state,
@@ -178,7 +213,7 @@ class AsyncEvidenceWorker:
             terminal=terminal,
             retryable=retryable,
             inserted_capsules=writer.inserted_capsules,
-            unknown_provider=unknown_provider,
+            unknown_provider=0,
         )
 
     async def run_until_idle(self, *, max_batches: int | None = None) -> EvidenceWorkerReport:
