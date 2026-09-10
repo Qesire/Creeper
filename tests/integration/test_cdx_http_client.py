@@ -8,6 +8,20 @@ from creeper.evidence.providers.cdx import WaybackCDXClient, query_year
 
 
 class WaybackCDXClientTests(unittest.TestCase):
+    def test_query_range_uses_inclusive_year_bounds(self):
+        urls = []
+
+        def fetch(url, timeout, headers):
+            urls.append(url)
+            return json.dumps([["timestamp", "original", "statuscode"]]).encode()
+
+        client = WaybackCDXClient(fetch=fetch, max_retries=0)
+        pages = list(client.query_range("example.com", 1996, 1998))
+
+        self.assertEqual(pages, [([], True)])
+        self.assertIn("from=19960101000000", urls[0])
+        self.assertIn("to=19981231235959", urls[0])
+
     def test_empty_resume_key_page_followed_by_complete_empty_page_is_exhaustive(self):
         responses = [
             json.dumps([

@@ -11,6 +11,7 @@ import json
 import gzip
 import time
 from collections.abc import Callable, Iterable
+from dataclasses import dataclass
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.parse import urlsplit
@@ -30,6 +31,21 @@ from creeper.evidence.policies import (
 
 Page = tuple[list[dict[str, object]], bool]
 Transport = Callable[[str, int], Iterable[Page]]
+RangeTransport = Callable[[str, int, int], Iterable[Page]]
+
+
+@dataclass(frozen=True)
+class RangeProbeResult:
+    """A bounded range probe without claiming exact-year evidence."""
+
+    hostname: str
+    year_from: int
+    year_to: int
+    state: CDXQueryState
+    candidate_years: tuple[int, ...] = ()
+    pages_seen: int = 0
+    records_seen: int = 0
+    error: str | None = None
 
 
 class WaybackCDXClient:
@@ -92,11 +108,17 @@ class WaybackCDXClient:
         raise AssertionError("unreachable")
 
     def __call__(self, hostname: str, year: int) -> Iterable[Page]:
+        return self.query_range(hostname, year, year)
+
+    def query_range(self, hostname: str, year_from: int, year_to: int) -> Iterable[Page]:
+        """Yield CDX pages for one inclusive year range."""
+        if not 1996 <= year_from <= year_to <= 2001:
+            raise ValueError("year range must be within 1996-2001")
         query = {
             "url": f"http://{hostname}/",
             "matchType": "host",
-            "from": f"{year}0101000000",
-            "to": f"{year}1231235959",
+            "from": f"{year_from}0101000000",
+            "to": f"{year_to}1231235959",
             "output": "json",
             "fl": "timestamp,original,statuscode,mimetype,digest,length",
             "gzip": "false",
@@ -155,6 +177,105 @@ def _exact_hostname(original: str, hostname: str) -> bool:
     except ValueError:
         return False
     return normalize_official(parsed.hostname or "") == hostname
+
+
+def contiguous_year_ranges(years: Iterable[int]) -> tuple[tuple[int, int], ...]:
+    """Convert competition years into sorted, deduplicated closed ranges."""
+    values = sorted(set(years))
+    if any(year < 1996 or year > 2001 for year in values):
+        raise ValueError("years must be within 1996-2001")
+    if not values:
+        return ()
+    ranges: list[tuple[int, int]] = []
+    start = previous = values[0]
+    for year in values[1:]:
+        if year != previous + 1:
+            ranges.append((start, previous))
+            start = year
+        previous = year
+    ranges.append((start, previous))
+    return tuple(ranges)
+
+
+def _successful_years(
+    page: Iterable[dict[str, object]],
+    hostname: str,
+    year_from: int,
+    year_to: int,
+) -> set[int]:
+    years: set[int] = set()
+    for row in page:
+        timestamp = str(row.get("timestamp", ""))
+        original = str(row.get("original", ""))
+        status = str(row.get("status", row.get("statuscode", "")))
+        if (
+            len(timestamp) >= 4
+            and timestamp[:4].isdigit()
+            and year_from <= int(timestamp[:4]) <= year_to
+            and _exact_hostname(original, hostname)
+            and status[:1] in {"2", "3"}
+        ):
+            years.add(int(timestamp[:4]))
+    return years
+
+
+def probe_range(
+    hostname: str,
+    year_from: int,
+    year_to: int,
+    transport: RangeTransport,
+) -> RangeProbeResult:
+    """Probe a closed year range and report years needing exact probes."""
+    normalized = normalize_official(hostname)
+    if normalized is None or not 1996 <= year_from <= year_to <= 2001:
+        return RangeProbeResult(hostname, year_from, year_to, CDXQueryState.INVALID)
+    pages_seen = records_seen = 0
+    last_page_complete: bool | None = None
+    candidate_years: set[int] = set()
+    try:
+        for page, complete in transport(normalized, year_from, year_to):
+            pages_seen += 1
+            records_seen += len(page)
+            last_page_complete = complete
+            candidate_years.update(
+                _successful_years(page, normalized, year_from, year_to)
+            )
+        state = (
+            CDXQueryState.PASS
+            if candidate_years
+            else CDXQueryState.EMPTY_EXHAUSTIVE
+            if last_page_complete is True
+            else CDXQueryState.INCOMPLETE
+        )
+        return RangeProbeResult(
+            normalized,
+            year_from,
+            year_to,
+            state,
+            tuple(sorted(candidate_years)),
+            pages_seen,
+            records_seen,
+        )
+    except (TimeoutError, ConnectionError) as exc:
+        return RangeProbeResult(
+            normalized,
+            year_from,
+            year_to,
+            CDXQueryState.TRANSIENT_ERROR,
+            pages_seen=pages_seen,
+            records_seen=records_seen,
+            error=str(exc) or type(exc).__name__,
+        )
+    except ValueError as exc:
+        return RangeProbeResult(
+            normalized,
+            year_from,
+            year_to,
+            CDXQueryState.INVALID,
+            pages_seen=pages_seen,
+            records_seen=records_seen,
+            error=str(exc),
+        )
 
 
 def query_year(
@@ -247,15 +368,78 @@ def query_missing_years(
     *,
     provider: str = "cdx",
     policy_version: str = "cdx-v1",
+    range_transport: RangeTransport | None = None,
 ) -> list[EvidenceQueryResult]:
-    """Run one exact-year state machine per missing year."""
-    return [
-        query_year(
-            hostname,
-            year,
-            transport,
-            provider=provider,
-            policy_version=policy_version,
-        )
-        for year in missing_years
-    ]
+    """Probe ranges first, then run exact probes only where useful.
+
+    A complete range probe can safely infer ``EMPTY_EXHAUSTIVE`` for years
+    without an accepted row. Any non-complete range result falls back to all
+    exact-year queries in that range, preserving the negative-evidence rule.
+    """
+    years = tuple(sorted(set(missing_years)))
+    ranges = contiguous_year_ranges(years)
+    if range_transport is None:
+        return [
+            query_year(
+                hostname,
+                year,
+                transport,
+                provider=provider,
+                policy_version=policy_version,
+            )
+            for year in years
+        ]
+
+    normalized = normalize_official(hostname)
+    results: dict[int, EvidenceQueryResult] = {}
+    for year_from, year_to in ranges:
+        probe = probe_range(hostname, year_from, year_to, range_transport)
+        if probe.state is CDXQueryState.EMPTY_EXHAUSTIVE:
+            for year in range(year_from, year_to + 1):
+                key = EvidenceQueryKey(
+                    normalized or hostname,
+                    TemporalScope(year, year),
+                    provider,
+                    policy_version,
+                ) if normalized is not None else None
+                results[year] = EvidenceQueryResult(
+                    hostname,
+                    year,
+                    CDXQueryState.INVALID if key is None else CDXQueryState.EMPTY_EXHAUSTIVE,
+                    key=key,
+                )
+            continue
+        if probe.state is CDXQueryState.PASS:
+            exact_years = set(probe.candidate_years)
+            for year in range(year_from, year_to + 1):
+                if year not in exact_years:
+                    key = EvidenceQueryKey(
+                        normalized or hostname,
+                        TemporalScope(year, year),
+                        provider,
+                        policy_version,
+                    ) if normalized is not None else None
+                    results[year] = EvidenceQueryResult(
+                        hostname,
+                        year,
+                        CDXQueryState.INVALID if key is None else CDXQueryState.EMPTY_EXHAUSTIVE,
+                        key=key,
+                    )
+                else:
+                    results[year] = query_year(
+                        hostname,
+                        year,
+                        transport,
+                        provider=provider,
+                        policy_version=policy_version,
+                    )
+            continue
+        for year in range(year_from, year_to + 1):
+            results[year] = query_year(
+                hostname,
+                year,
+                transport,
+                provider=provider,
+                policy_version=policy_version,
+            )
+    return [results[year] for year in years]
