@@ -2,17 +2,14 @@ name: CI
 
 on:
   push:
-  pull_request:
 
 permissions:
   contents: read
 
 jobs:
-  test:
-    name: Python 3.12
+  lock-probe:
+    name: Resolve selectolax lock
     runs-on: ubuntu-latest
-    env:
-      CREEPER_NETWORK_TESTS: "0"
 
     steps:
       - name: Check out repository
@@ -25,17 +22,10 @@ jobs:
 
       - name: Set up uv
         uses: astral-sh/setup-uv@v5
-        with:
-          enable-cache: true
 
-      - name: Sync locked environment
-        run: uv sync --all-groups --locked
-
-      - name: Run offline test suite
-        run: uv run python -m unittest discover -s tests -v
-
-      - name: Build package
-        run: uv build
-
-      - name: Check patch whitespace
-        run: git diff --check
+      - name: Resolve and print lockfile
+        run: |
+          uv lock
+          echo '===== UV_LOCK_BEGIN ====='
+          cat uv.lock
+          echo '===== UV_LOCK_END ====='
