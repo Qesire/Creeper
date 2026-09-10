@@ -7,14 +7,16 @@ job, launches the locked sidecar process, and validates its JSONL feed.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
-from dataclasses import dataclass
-from pathlib import Path
 import re
+import signal
 import subprocess
 import time
 from collections.abc import Iterator
+from dataclasses import dataclass
+from pathlib import Path
 from urllib.parse import urlsplit
 
 from creeper.source_discovery.models import canonicalize_source_entrypoint
@@ -158,7 +160,8 @@ class ScrapyScoutLauncher:
         project_dir: Path,
         *,
         uv_executable: str = "uv",
-        hard_timeout_grace_seconds: int = 30,
+        hard_timeout_grace_seconds: float = 30.0,
+        termination_grace_seconds: float = 5.0,
         clock=time.monotonic,
     ) -> None:
         self.project_dir = Path(project_dir).resolve()
@@ -166,13 +169,17 @@ class ScrapyScoutLauncher:
             raise ValueError("Scrapy sidecar project_dir must contain pyproject.toml")
         if not (self.project_dir / "uv.lock").is_file():
             raise ValueError("Scrapy sidecar project_dir must contain uv.lock")
-        if hard_timeout_grace_seconds < 1:
+        if hard_timeout_grace_seconds <= 0:
             raise ValueError("hard_timeout_grace_seconds must be positive")
+        if termination_grace_seconds <= 0:
+            raise ValueError("termination_grace_seconds must be positive")
         self.uv_executable = uv_executable
-        self.hard_timeout_grace_seconds = hard_timeout_grace_seconds
+        self.hard_timeout_grace_seconds = float(hard_timeout_grace_seconds)
+        self.termination_grace_seconds = float(termination_grace_seconds)
         self.clock = clock
 
     def run(self, spec: ScrapyScoutSpec) -> ScrapyScoutRun:
+        """Synchronous smoke/CLI path; production coordinators use run_async."""
         prepare_jobdir_binding(spec)
         spec.spool_path.resolve().parent.mkdir(parents=True, exist_ok=True)
         started = float(self.clock())
@@ -193,6 +200,69 @@ class ScrapyScoutLauncher:
             )
         return ScrapyScoutRun(
             returncode=int(completed.returncode),
+            elapsed_seconds=max(0.0, float(self.clock()) - started),
+            timed_out=False,
+            spool_path=spec.spool_path,
+            jobdir=spec.jobdir,
+        )
+
+    @staticmethod
+    def _signal_process_group(process: asyncio.subprocess.Process, sig: signal.Signals) -> None:
+        if process.returncode is not None:
+            return
+        try:
+            os.killpg(process.pid, sig)
+        except ProcessLookupError:
+            pass
+
+    async def _terminate_process_group(self, process: asyncio.subprocess.Process) -> None:
+        """Terminate uv and every descendant in the sidecar process group."""
+        if process.returncode is not None:
+            return
+        self._signal_process_group(process, signal.SIGTERM)
+        try:
+            await asyncio.wait_for(process.wait(), timeout=self.termination_grace_seconds)
+            return
+        except TimeoutError:
+            pass
+        self._signal_process_group(process, signal.SIGKILL)
+        await process.wait()
+
+    async def run_async(self, spec: ScrapyScoutSpec) -> ScrapyScoutRun:
+        """Run one sidecar without blocking the source-discovery event loop.
+
+        The child starts a new POSIX session so cancellation and hard timeout can
+        terminate the complete ``uv -> scrapy`` process tree rather than leaving
+        Twisted workers behind after the coordinator moves on.
+        """
+        prepare_jobdir_binding(spec)
+        spec.spool_path.resolve().parent.mkdir(parents=True, exist_ok=True)
+        started = float(self.clock())
+        process = await asyncio.create_subprocess_exec(
+            *spec.argv(uv_executable=self.uv_executable),
+            cwd=self.project_dir,
+            start_new_session=True,
+        )
+        try:
+            try:
+                returncode = await asyncio.wait_for(
+                    process.wait(),
+                    timeout=spec.max_seconds + self.hard_timeout_grace_seconds,
+                )
+            except TimeoutError:
+                await self._terminate_process_group(process)
+                return ScrapyScoutRun(
+                    returncode=None,
+                    elapsed_seconds=max(0.0, float(self.clock()) - started),
+                    timed_out=True,
+                    spool_path=spec.spool_path,
+                    jobdir=spec.jobdir,
+                )
+        except asyncio.CancelledError:
+            await self._terminate_process_group(process)
+            raise
+        return ScrapyScoutRun(
+            returncode=int(returncode),
             elapsed_seconds=max(0.0, float(self.clock()) - started),
             timed_out=False,
             spool_path=spec.spool_path,
