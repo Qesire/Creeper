@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from creeper.source_discovery.admission import SearchAdmissionPolicy
 from creeper.source_discovery.coordinator import SearchBatch
 from creeper.source_discovery.manager import SearchDirective
 from creeper.source_discovery.models import SourceCandidate, SourceLevel, SourceState
@@ -95,10 +96,10 @@ class CommandAgentSearchExecutor:
 
         <command...> --request REQUEST.json --response RESPONSE.json
 
-    It must exit zero and atomically or eventually write one JSON object with
-    ``query`` and ``candidates``. ``backend`` and ``actor`` are fixed by Creeper
-    configuration, not trusted from the child process. Invocation directories are
-    retained for reproducibility and forensic inspection.
+    It must exit zero and write one JSON object with ``query`` and ``candidates``.
+    ``backend`` and ``actor`` are fixed by Creeper configuration, not trusted from
+    the child process. Invocation directories are retained for reproducibility and
+    forensic inspection.
     """
 
     def __init__(
@@ -110,6 +111,7 @@ class CommandAgentSearchExecutor:
         actor: str,
         cwd: Path | None = None,
         policy: CommandAgentSearchPolicy | None = None,
+        admission_policy: SearchAdmissionPolicy | None = None,
         clock=time.monotonic,
     ) -> None:
         command = tuple(command)
@@ -123,11 +125,11 @@ class CommandAgentSearchExecutor:
         self.actor = actor
         self.cwd = None if cwd is None else Path(cwd).resolve()
         self.policy = policy or CommandAgentSearchPolicy()
+        self.admission_policy = admission_policy
         self.clock = clock
 
-    @staticmethod
-    def _request_payload(directive: SearchDirective) -> dict[str, object]:
-        return {
+    def _request_payload(self, directive: SearchDirective) -> dict[str, object]:
+        payload: dict[str, object] = {
             "contract": "creeper.search-agent.v1",
             "kind": directive.kind.value,
             "strategy": directive.strategy,
@@ -142,6 +144,17 @@ class CommandAgentSearchExecutor:
                 "evidence_claims_are_not_authorized": True,
             },
         }
+        if self.admission_policy is not None:
+            admission = self.admission_policy
+            payload["admission"] = {
+                "min_expected_volume": admission.min_expected_volume,
+                "min_enumerability_prior": admission.min_enumerability_prior,
+                "min_confidence": admission.min_confidence,
+                "require_year_bounds": admission.require_year_bounds,
+                "target_year_from": admission.target_year_from,
+                "target_year_to": admission.target_year_to,
+            }
+        return payload
 
     async def _terminate_group(self, process: asyncio.subprocess.Process) -> None:
         if process.returncode is not None:
@@ -163,7 +176,12 @@ class CommandAgentSearchExecutor:
             pass
         await process.wait()
 
-    def _read_response(self, path: Path, *, strategy: str) -> tuple[str, tuple[SourceCandidate, ...]]:
+    def _read_response(
+        self,
+        path: Path,
+        *,
+        strategy: str,
+    ) -> tuple[str, tuple[SourceCandidate, ...], tuple[dict[str, str], ...]]:
         try:
             size = path.stat().st_size
         except FileNotFoundError as exc:
@@ -193,11 +211,54 @@ class CommandAgentSearchExecutor:
             raise SearchAgentProtocolError(
                 "agent returned more candidates than max_returned_candidates"
             )
-        parsed = tuple(
-            _candidate_from_payload(item, strategy=strategy, actor=self.actor)
-            for item in candidates
+
+        accepted: list[SourceCandidate] = []
+        rejected: list[dict[str, str]] = []
+        for item in candidates:
+            candidate = _candidate_from_payload(
+                item,
+                strategy=strategy,
+                actor=self.actor,
+            )
+            reason = (
+                None
+                if self.admission_policy is None
+                else self.admission_policy.rejection_reason(candidate)
+            )
+            if reason is None:
+                accepted.append(candidate)
+            else:
+                rejected.append(
+                    {
+                        "source_key": candidate.source_key,
+                        "canonical_entrypoint": candidate.canonical_entrypoint,
+                        "reason": reason,
+                    }
+                )
+        return query, tuple(accepted), tuple(rejected)
+
+    @staticmethod
+    def _write_admission_audit(
+        path: Path,
+        *,
+        raw_candidate_count: int,
+        accepted: tuple[SourceCandidate, ...],
+        rejected: tuple[dict[str, str], ...],
+    ) -> None:
+        payload = {
+            "contract": "creeper.search-admission.v1",
+            "raw_candidate_count": raw_candidate_count,
+            "accepted_count": len(accepted),
+            "rejected_count": len(rejected),
+            "accepted_source_keys": [candidate.source_key for candidate in accepted],
+            "rejected": list(rejected),
+        }
+        temporary = path.with_suffix(path.suffix + ".tmp")
+        temporary.write_text(
+            json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
+            encoding="utf-8",
         )
-        return query, parsed
+        os.replace(temporary, path)
 
     async def __call__(self, directive: SearchDirective) -> SearchBatch:
         invocation_id = uuid.uuid4().hex
@@ -205,6 +266,7 @@ class CommandAgentSearchExecutor:
         invocation_dir.mkdir(parents=True, exist_ok=False)
         request_path = invocation_dir / "request.json"
         response_path = invocation_dir / "response.json"
+        admission_path = invocation_dir / "admission.json"
         request_path.write_text(
             json.dumps(
                 self._request_payload(directive),
@@ -245,9 +307,18 @@ class CommandAgentSearchExecutor:
 
         if returncode != 0:
             raise RuntimeError(f"source search agent failed rc={returncode}")
-        query, candidates = self._read_response(
+
+        raw_payload = json.loads(response_path.read_text(encoding="utf-8"))
+        raw_candidates = raw_payload.get("candidates", []) if isinstance(raw_payload, dict) else []
+        query, candidates, rejected = self._read_response(
             response_path,
             strategy=directive.strategy,
+        )
+        self._write_admission_audit(
+            admission_path,
+            raw_candidate_count=len(raw_candidates) if isinstance(raw_candidates, list) else 0,
+            accepted=candidates,
+            rejected=rejected,
         )
         elapsed = max(0.0, float(self.clock()) - started)
         return SearchBatch(
