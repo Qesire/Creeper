@@ -2,7 +2,7 @@
 
 The coordinator deliberately keeps durable authority in ``SourceDiscoveryRegistry``.
 Search, triage, and scout executors may perform network/subprocess I/O concurrently,
-but every SQLite mutation is applied serially by the coordinator task.  A POSIX
+but every SQLite mutation is applied serially by the coordinator task. A POSIX
 ``flock`` prevents multiple local coordinators from making competing plans.
 """
 
@@ -54,11 +54,21 @@ class ScoutResult:
     disposition: ScoutDisposition
     measurement: ScoutMeasurement | None = None
     reason: str = ""
+    discovered_candidates: tuple[SourceCandidate, ...] = ()
+    edge_relation: str = "enumerates"
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "disposition", ScoutDisposition(self.disposition))
+        object.__setattr__(self, "discovered_candidates", tuple(self.discovered_candidates))
         if self.disposition is ScoutDisposition.WARM and self.measurement is None:
             raise ValueError("WARM scout result requires a deterministic measurement")
+        if not self.edge_relation.strip():
+            raise ValueError("scout child edge_relation is required")
+        if any(
+            candidate.state is not SourceState.DISCOVERED
+            for candidate in self.discovered_candidates
+        ):
+            raise ValueError("scout-discovered child candidates must enter as DISCOVERED")
 
 
 @dataclass(frozen=True)
@@ -66,7 +76,7 @@ class SearchBatch:
     """One completed search episode returned by an injected search backend.
 
     Ordinary no-result/provider failures should be returned as an empty batch so
-    their cost is still attributed to the strategy.  Unexpected executor crashes
+    their cost is still attributed to the strategy. Unexpected executor crashes
     are isolated by the coordinator and reported separately.
     """
 
@@ -95,6 +105,9 @@ class CoordinatorCycleReport:
     scouted_hold: int = 0
     scouted_rejected: int = 0
     scout_failures: int = 0
+    scout_children_registered: int = 0
+    scout_edges_added: int = 0
+    scout_children_dropped: int = 0
     search_episodes: int = 0
     search_candidates_registered: int = 0
     search_candidates_dropped: int = 0
@@ -261,6 +274,43 @@ class SourceDiscoveryCoordinator:
                 self.registry.transition(candidate.source_key, SourceState.REJECTED)
                 counts["triaged_rejected"] += 1
 
+    def _commit_scout_children(
+        self,
+        parent: SourceCandidate,
+        result: ScoutResult,
+        counts: dict[str, int],
+    ) -> None:
+        seen: set[str] = set()
+        for proposed in result.discovered_candidates:
+            if proposed.source_key in seen or proposed.source_key == parent.source_key:
+                counts["scout_children_dropped"] += 1
+                continue
+            seen.add(proposed.source_key)
+
+            existing = self.registry.get_candidate(proposed.source_key)
+            effective = existing or proposed
+            if self.registry.suppression_reason(effective) is not None:
+                counts["scout_children_dropped"] += 1
+                continue
+
+            inserted = False
+            if existing is None:
+                effective, inserted = self.registry.register_proposal(proposed)
+                counts["scout_children_registered"] += int(inserted)
+
+            try:
+                added = self.registry.add_edge(
+                    parent.source_key,
+                    effective.source_key,
+                    relation=result.edge_relation,
+                )
+            except ValueError:
+                counts["scout_children_dropped"] += 1
+                if inserted:
+                    self.registry.transition(effective.source_key, SourceState.REJECTED)
+                continue
+            counts["scout_edges_added"] += int(added)
+
     def _commit_scouts(
         self,
         candidates: list[SourceCandidate],
@@ -279,6 +329,7 @@ class SourceDiscoveryCoordinator:
             assert result is not None
             if result.measurement is not None:
                 self.registry.record_scout_measurement(candidate.source_key, result.measurement)
+            self._commit_scout_children(current, result, counts)
             if result.disposition is ScoutDisposition.WARM:
                 self.registry.transition(candidate.source_key, SourceState.WARM)
                 counts["scouted_warm"] += 1
@@ -362,6 +413,9 @@ class SourceDiscoveryCoordinator:
                 "scouted_hold": 0,
                 "scouted_rejected": 0,
                 "scout_failures": 0,
+                "scout_children_registered": 0,
+                "scout_edges_added": 0,
+                "scout_children_dropped": 0,
                 "search_episodes": 0,
                 "search_candidates_registered": 0,
                 "search_candidates_dropped": 0,
@@ -384,7 +438,7 @@ class SourceDiscoveryCoordinator:
             scout_candidates = self._claim_scouts(plan.scout_source_keys)
 
             # Search, triage, and scout I/O are independent pipeline stages and
-            # run concurrently.  No executor receives the SQLite connection.
+            # run concurrently. No executor receives the SQLite connection.
             triage_task = self._bounded_batch(
                 triage_candidates,
                 self.triage_executor,
@@ -406,7 +460,7 @@ class SourceDiscoveryCoordinator:
                 search_task,
             )
 
-            # All durable mutations return to this coordinator task.  This keeps
+            # All durable mutations return to this coordinator task. This keeps
             # the sqlite3 connection thread-confined while external I/O remains concurrent.
             self._commit_triage(triage_candidates, triage_outcomes, counts)
             self._commit_scouts(scout_candidates, scout_outcomes, counts)
