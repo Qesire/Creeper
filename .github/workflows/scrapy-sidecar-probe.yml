@@ -1,0 +1,54 @@
+name: Scrapy Sidecar Probe
+
+on:
+  push:
+    branches:
+      - probe/scrapy-sidecar
+
+permissions:
+  contents: write
+
+jobs:
+  sidecar:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: tools/scrapy_acquisition
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          ref: probe/scrapy-sidecar
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Resolve lockfile
+        run: uv lock
+
+      - name: Sync locked environment
+        run: uv sync --locked
+
+      - name: Run sidecar unit tests
+        run: uv run python -m unittest discover -s tests -v
+
+      - name: Verify Scrapy settings resolve
+        run: uv run scrapy settings --get BOT_NAME
+
+      - name: Commit generated lockfile when changed
+        working-directory: .
+        run: |
+          if git diff --quiet -- tools/scrapy_acquisition/uv.lock; then
+            echo "sidecar uv.lock already current"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add tools/scrapy_acquisition/uv.lock
+          git commit -m "build(sidecar): lock Scrapy acquisition environment"
+          git push origin HEAD:probe/scrapy-sidecar
