@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass
 from enum import StrEnum
 
@@ -178,35 +177,35 @@ class SourceReservoirManager:
     ) -> tuple[SearchDirective, ...]:
         if cold_count >= self.targets.cold_min:
             return ()
-        gap = max(1, self.targets.cold_target - cold_count)
-        directives: list[SearchDirective] = []
+
+        # Every parallel search shares one finite refill budget.  Building the
+        # strategy set first and allocating the deficit second prevents N
+        # concurrent search workers from each assuming they own the full gap.
+        gap = self.targets.cold_target - cold_count
+        if gap <= 0:
+            return ()
+
+        specs: list[tuple[SearchDirectiveKind, str, str | None, str]] = []
         seen: set[str] = set()
 
-        def add(
+        def add_spec(
             kind: SearchDirectiveKind,
             strategy: str,
             subject: str | None,
             reason: str,
         ) -> None:
-            if len(directives) >= self.targets.max_search_directives:
+            if len(specs) >= self.targets.max_search_directives:
                 return
             dedup_key = f"{strategy}:{subject or '*'}"
             if dedup_key in seen:
                 return
             seen.add(dedup_key)
-            remaining_slots = max(
-                1,
-                self.targets.max_search_directives - len(directives),
-            )
-            desired = max(1, math.ceil(gap / remaining_slots))
-            directives.append(
-                SearchDirective(kind, strategy, desired, subject, reason)
-            )
+            specs.append((kind, strategy, subject, reason))
 
         best_family = self._best_measured_family(candidates)
         if projected_warm < self.targets.warm_min and best_family is not None:
             family, value = best_family
-            add(
+            add_spec(
                 SearchDirectiveKind.EXPLOIT_SOURCE_FAMILY,
                 "EXPLOIT_SUCCESS",
                 family,
@@ -214,18 +213,36 @@ class SourceReservoirManager:
             )
 
         best_strategy = self._best_observed_search_strategy()
-        add(
+        add_spec(
             SearchDirectiveKind.REFILL_RESERVOIR,
             best_strategy,
             None,
             f"usable cold reserve {cold_count} below minimum {self.targets.cold_min}",
         )
-        add(
+        add_spec(
             SearchDirectiveKind.DISCOVER_NEW_FAMILY,
             "EXPLORE_NEW_FAMILY",
             None,
             "retain explicit exploration while refilling the candidate reserve",
         )
+
+        # If the remaining gap is smaller than the strategy set, fewer searches
+        # are launched rather than assigning a fake minimum of one to every arm.
+        selected = specs[: min(len(specs), gap)]
+        if not selected:
+            return ()
+        base, remainder = divmod(gap, len(selected))
+        directives = [
+            SearchDirective(
+                kind=kind,
+                strategy=strategy,
+                desired_candidates=base + (1 if index < remainder else 0),
+                subject=subject,
+                reason=reason,
+            )
+            for index, (kind, strategy, subject, reason) in enumerate(selected)
+        ]
+        assert sum(item.desired_candidates for item in directives) == gap
         return tuple(directives)
 
     def plan(self) -> ReservoirPlan:
