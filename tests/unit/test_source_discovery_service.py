@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-import json
 import sys
 import tempfile
 import unittest
 from pathlib import Path
 
+from creeper.source_discovery.admission import SearchAdmissionPolicy
 from creeper.source_discovery.agent_search import CommandAgentSearchPolicy
 from creeper.source_discovery.manager import SourcePoolTargets
 from creeper.source_discovery.scrapy_scout import ScrapyStructuralScoutPolicy
@@ -66,6 +66,12 @@ max_seconds = 30
 max_memory_mb = 256
 follow_query = {follow_query}
 
+[admission]
+min_expected_volume = 123456
+min_enumerability_prior = 0.6
+min_confidence = 0.4
+require_year_bounds = true
+
 [agent]
 command = ["python", "agent.py"]
 backend = "test-backend"
@@ -91,6 +97,8 @@ max_returned_candidates = 17
         self.assertFalse(config.scrapy.follow_query)
         self.assertEqual(config.agent.command, ("python", "agent.py"))
         self.assertEqual(config.agent.policy.max_returned_candidates, 17)
+        self.assertEqual(config.agent.admission.min_expected_volume, 123456)
+        self.assertEqual(config.agent.admission.min_enumerability_prior, 0.6)
 
     def test_follow_query_rejects_string_truthiness(self) -> None:
         with self.assertRaisesRegex(ValueError, "scrapy.follow_query must be a boolean"):
@@ -195,6 +203,11 @@ Path(a.response).write_text(json.dumps(payload), encoding="utf-8")
                         max_response_bytes=64 * 1024,
                         max_returned_candidates=8,
                     ),
+                    admission=SearchAdmissionPolicy(
+                        min_expected_volume=100000,
+                        min_enumerability_prior=0.5,
+                        min_confidence=0.35,
+                    ),
                 ),
             )
 
@@ -208,7 +221,18 @@ Path(a.response).write_text(json.dumps(payload), encoding="utf-8")
             self.assertEqual(report["search_candidates_registered"], 2)
             self.assertEqual(report["inventory"]["DISCOVERED"], 2)
             invocation_root = root / "runtime" / "source-discovery" / "agent-invocations"
-            self.assertEqual(len([path for path in invocation_root.iterdir() if path.is_dir()]), 2)
+            invocation_dirs = [path for path in invocation_root.iterdir() if path.is_dir()]
+            self.assertEqual(len(invocation_dirs), 2)
+            for invocation in invocation_dirs:
+                request = __import__("json").loads(
+                    (invocation / "request.json").read_text(encoding="utf-8")
+                )
+                self.assertEqual(request["admission"]["min_expected_volume"], 100000)
+                audit = __import__("json").loads(
+                    (invocation / "admission.json").read_text(encoding="utf-8")
+                )
+                self.assertEqual(audit["accepted_count"], 1)
+                self.assertEqual(audit["rejected_count"], 0)
 
 
 if __name__ == "__main__":
