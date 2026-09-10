@@ -15,12 +15,28 @@ class EvidenceStoreTests(unittest.TestCase):
                 "Example.COM", 1997, "cdx", "capture_timestamp_year",
                 "19970101000000", "http://example.com/", "a" * 64, "cdx-v1"
             )
-            store.put(capsule)
-            store.put(capsule)
+            self.assertEqual(store.put_many([capsule]), 1)
+            self.assertEqual(store.put_many([capsule]), 0)
             rows = store.for_hostname("example.com")
             self.assertEqual(len(rows), 1)
             self.assertEqual(rows[0].hostname, "example.com")
             self.assertEqual(rows[0].payload_hash, "a" * 64)
+            store.close()
+
+    def test_put_many_reports_only_new_rows(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = EvidenceStore(Path(tmp) / "evidence.sqlite3")
+            first = EvidenceCapsule(
+                "alpha.example.com", 1997, "cdx", "capture_timestamp_year",
+                "19970101000000", "http://alpha.example.com/", "a" * 64, "cdx-v1"
+            )
+            second = EvidenceCapsule(
+                "beta.example.com", 1997, "cdx", "capture_timestamp_year",
+                "19970101000000", "http://beta.example.com/", "b" * 64, "cdx-v1"
+            )
+            self.assertEqual(store.put_many([first]), 1)
+            self.assertEqual(store.put_many([first, second]), 1)
+            self.assertEqual(store.count(), 2)
             store.close()
 
     def test_put_many_preserves_policy_version_in_identity(self):
@@ -35,7 +51,7 @@ class EvidenceStoreTests(unittest.TestCase):
                 "19970101000000", "http://example.com/", "b" * 64, "cdx-v2"
             )
 
-            store.put_many([capsule_v1, capsule_v2])
+            self.assertEqual(store.put_many([capsule_v1, capsule_v2]), 2)
 
             self.assertEqual(store.count(), 2)
             self.assertEqual(
