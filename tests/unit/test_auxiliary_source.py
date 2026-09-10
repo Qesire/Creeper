@@ -27,21 +27,27 @@ class AuxiliarySourceTests(unittest.TestCase):
         )
         return tmp, adapter, lease
 
-    def test_static_dataset_execute_respects_inclusive_line_cursor_and_returns_next_cursor(self):
+    def test_static_dataset_execute_uses_byte_offset_cursor_and_returns_first_unconsumed_offset(self):
+        contents = b"one.example\ntwo.example\nthree.example\nfour.example\n"
+        second_line = len(b"one.example\n")
+        third_line = second_line + len(b"two.example\n")
         tmp, adapter, lease = self._static_adapter_and_lease(
-            b"one.example\ntwo.example\nthree.example\nfour.example\n",
-            cursor_start="2",
-            cursor_end="3",
+            contents,
+            cursor_start=str(second_line),
+            cursor_end=str(third_line + len(b"three.example\n")),
         )
         try:
             records, result = adapter.execute(lease)
             records = list(records)
             self.assertEqual([record.payload for record in records], ["two.example", "three.example"])
-            self.assertEqual([record.locator.rsplit(":", 1)[-1] for record in records], ["2", "3"])
+            self.assertEqual(
+                [record.locator.rsplit(":", 1)[-1] for record in records],
+                [str(second_line), str(third_line)],
+            )
             self.assertEqual(result.lease_id, lease.lease_id)
             self.assertEqual(result.records, 2)
             self.assertEqual(result.requests, 1)
-            self.assertEqual(result.next_cursor, "4")
+            self.assertEqual(result.next_cursor, str(third_line + len(b"three.example\n")))
         finally:
             tmp.cleanup()
 
@@ -53,7 +59,7 @@ class AuxiliarySourceTests(unittest.TestCase):
             records, result = adapter.execute(lease)
             self.assertEqual(len(list(records)), 2)
             self.assertEqual(result.records, 2)
-            self.assertEqual(result.next_cursor, "3")
+            self.assertEqual(result.next_cursor, str(len(b"one.example\ntwo.example\n")))
         finally:
             tmp.cleanup()
 
@@ -65,7 +71,7 @@ class AuxiliarySourceTests(unittest.TestCase):
             records, result = adapter.execute(lease)
             self.assertEqual([record.payload for record in records], ["one.example"])
             self.assertEqual(result.bytes_read, len(b"one.example\n"))
-            self.assertEqual(result.next_cursor, "2")
+            self.assertEqual(result.next_cursor, str(len(b"one.example\n")))
         finally:
             tmp.cleanup()
 
@@ -77,7 +83,33 @@ class AuxiliarySourceTests(unittest.TestCase):
             records, result = adapter.execute(lease)
             self.assertEqual(list(records), [])
             self.assertEqual(result.records, 0)
-            self.assertEqual(result.next_cursor, "1")
+            self.assertEqual(result.next_cursor, "0")
+        finally:
+            tmp.cleanup()
+
+    def test_static_dataset_returns_none_after_consuming_final_line(self):
+        contents = b"one.example\n"
+        tmp, adapter, lease = self._static_adapter_and_lease(
+            contents, cursor_start="0"
+        )
+        try:
+            records, result = adapter.execute(lease)
+            self.assertEqual([record.payload for record in records], ["one.example"])
+            self.assertIsNone(result.next_cursor)
+        finally:
+            tmp.cleanup()
+
+    def test_static_dataset_does_not_consume_oversized_line(self):
+        oversized = b"oversized.example\n"
+        contents = oversized + b"ok.example\n"
+        tmp, adapter, lease = self._static_adapter_and_lease(
+            contents, max_bytes=len(b"ok.example\n")
+        )
+        try:
+            records, result = adapter.execute(lease)
+            self.assertEqual(list(records), [])
+            self.assertEqual(result.bytes_read, 0)
+            self.assertEqual(result.next_cursor, "0")
         finally:
             tmp.cleanup()
 

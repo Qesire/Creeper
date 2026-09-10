@@ -7,6 +7,7 @@ from pathlib import Path
 
 from creeper.authority.baseline_index import BaselineIndex
 from creeper.cli import main
+from creeper.storage.control_store import ControlStore
 
 
 class RunOnceCliTests(unittest.TestCase):
@@ -61,6 +62,14 @@ evidence_capacity = 1
         self.assertEqual(report["max_evidence_queue_depth"], 1)
         self.assertTrue((root / "runtime" / "control.sqlite3").exists())
         self.assertTrue((root / "runtime" / "evidence.sqlite3").exists())
+        control = ControlStore(root / "runtime" / "control.sqlite3")
+        try:
+            self.assertEqual(
+                [task.key.hostname for task in control.list_evidence_tasks()],
+                ["new.example"],
+            )
+        finally:
+            control.close()
 
     def test_run_once_rejects_non_positive_queue_limit(self):
         _root, config = self._workspace()

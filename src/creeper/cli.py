@@ -110,7 +110,7 @@ def _run_once(config_path: Path) -> dict[str, int]:
         )
         lease = WorkLease.create(
             reservoir_id=reservoir_id,
-            cursor_start="1",
+            cursor_start=None,
             max_records=max_records,
             max_requests=max_requests,
             max_bytes=max_bytes,

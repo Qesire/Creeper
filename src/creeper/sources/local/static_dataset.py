@@ -31,52 +31,58 @@ class StaticDatasetAdapter:
         if lease.reservoir_id != self.source_id:
             raise ValueError("lease reservoir_id does not match adapter source_id")
 
-        start = int(lease.cursor_start or "1")
+        start = int(lease.cursor_start or "0")
         end = int(lease.cursor_end) if lease.cursor_end is not None else None
-        if start < 1 or (end is not None and end < start):
-            raise ValueError("line cursor must be a positive inclusive range")
+        if start < 0 or (end is not None and end < start):
+            raise ValueError("byte cursor must be a non-negative range")
 
         records: list[SourceRecord] = []
         bytes_read = 0
         started = time.monotonic()
         next_cursor: str | None = str(start)
+        request_allowed = lease.max_requests > 0 and lease.max_seconds > 0
 
-        if lease.max_requests > 0 and lease.max_seconds > 0:
+        if request_allowed:
             with self.path.open("rb") as source:
-                for current, raw_line in enumerate(source, 1):
-                    if current < start:
-                        continue
-                    if end is not None and current > end:
-                        next_cursor = str(current)
+                source.seek(start)
+                while True:
+                    offset = source.tell()
+                    if end is not None and offset >= end:
+                        next_cursor = str(offset)
                         break
                     if len(records) >= lease.max_records:
-                        next_cursor = str(current)
-                        break
-                    if bytes_read + len(raw_line) > lease.max_bytes:
-                        next_cursor = str(current)
                         break
                     if time.monotonic() - started >= lease.max_seconds:
-                        next_cursor = str(current)
                         break
+
+                    raw_line = source.readline()
+                    if not raw_line:
+                        next_cursor = None
+                        break
+
+                    if bytes_read + len(raw_line) > lease.max_bytes:
+                        # Leave the cursor at this record so the caller can
+                        # handle an unrepresentable lease explicitly.
+                        next_cursor = str(offset)
+                        break
+
                     records.append(
                         SourceRecord(
                             source_id=self.source_id,
-                            locator=f"{self.path}:{current}",
+                            locator=f"{self.path}:{offset}",
                             payload=raw_line.decode("utf-8", errors="replace").rstrip("\r\n"),
                             scope=CandidateSourceScope.LOCAL_DISCOVERY,
                             source_year=self.source_year,
                         )
                     )
                     bytes_read += len(raw_line)
-                    next_cursor = str(current + 1)
-                else:
-                    next_cursor = None
+                    next_cursor = str(source.tell())
 
         elapsed = time.monotonic() - started
         return iter(records), LeaseResult(
             lease_id=lease.lease_id,
             records=len(records),
-            requests=1 if records or lease.max_requests > 0 and lease.max_seconds > 0 else 0,
+            requests=1 if request_allowed else 0,
             bytes_read=bytes_read,
             elapsed_seconds=elapsed,
             next_cursor=next_cursor,
