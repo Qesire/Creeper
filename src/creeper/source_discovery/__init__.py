@@ -46,6 +46,10 @@ from creeper.source_discovery.scrapy_sidecar import (
     prepare_append_spool,
     prepare_jobdir_binding,
 )
+from creeper.source_discovery.scrapy_scout import (
+    ScrapyStructuralScoutExecutor,
+    ScrapyStructuralScoutPolicy,
+)
 
 __all__ = [
     "CoordinatorBusyError",
@@ -63,6 +67,8 @@ __all__ = [
     "ScrapyScoutLauncher",
     "ScrapyScoutRun",
     "ScrapyScoutSpec",
+    "ScrapyStructuralScoutExecutor",
+    "ScrapyStructuralScoutPolicy",
     "SearchBatch",
     "SearchDirective",
     "SearchDirectiveKind",
