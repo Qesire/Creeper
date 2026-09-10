@@ -1,8 +1,8 @@
 """Dependency-free bridge to the isolated Scrapy acquisition sidecar.
 
 Scrapy owns URL scheduling, duplicate filtering, retries, politeness and JOBDIR
-persistence.  This module only binds one Creeper source identity to one Scrapy
-job, launches the locked sidecar process, and validates its JSONL feed.
+persistence. This module binds one Creeper source identity to one Scrapy job,
+launches the locked sidecar process, and validates its append-only JSONL feed.
 """
 
 from __future__ import annotations
@@ -69,8 +69,8 @@ class ScrapyScoutSpec:
             f"source_key={self.source_key}",
             "-a",
             f"follow_query={'true' if self.follow_query else 'false'}",
-            # Lowercase -o intentionally appends.  A resumed JOBDIR must not
-            # destroy link records emitted by an earlier bounded batch.
+            # Lowercase -o intentionally appends. The bridge repairs an
+            # uncommitted crash tail before every resumed invocation.
             "-o",
             f"{spool}:jsonlines",
             "-s",
@@ -95,6 +95,8 @@ class ScrapyScoutRun:
     timed_out: bool
     spool_path: Path
     jobdir: Path
+    spool_start_offset: int = 0
+    spool_end_offset: int = 0
 
     @property
     def succeeded(self) -> bool:
@@ -120,11 +122,7 @@ def _binding_payload(spec: ScrapyScoutSpec) -> dict[str, str]:
 
 
 def prepare_jobdir_binding(spec: ScrapyScoutSpec) -> Path:
-    """Bind a JOBDIR to exactly one Creeper source and one append spool.
-
-    Scrapy documents JOBDIR as per-crawl persistent state.  Reusing it for a
-    different source can mix scheduler and dupefilter state, so fail closed.
-    """
+    """Bind a JOBDIR to exactly one Creeper source and one append spool."""
     jobdir = spec.jobdir.resolve()
     existed = jobdir.exists()
     jobdir.mkdir(parents=True, exist_ok=True)
@@ -150,6 +148,52 @@ def prepare_jobdir_binding(spec: ScrapyScoutSpec) -> Path:
     )
     os.replace(temporary, binding_path)
     return binding_path
+
+
+def prepare_append_spool(path: Path, *, scan_chunk_bytes: int = 64 * 1024) -> int:
+    """Return the committed append offset after dropping one crash-partial tail.
+
+    A newline is the JSONL commit marker. If a killed feed exporter leaves bytes
+    after the final newline, only those uncommitted bytes are truncated. The
+    operation scans backward in bounded chunks instead of loading a large spool.
+    """
+    if scan_chunk_bytes < 1:
+        raise ValueError("scan_chunk_bytes must be positive")
+    path = Path(path).resolve()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if not path.exists():
+        return 0
+    with path.open("r+b") as stream:
+        stream.seek(0, os.SEEK_END)
+        size = stream.tell()
+        if size == 0:
+            return 0
+        stream.seek(size - 1)
+        if stream.read(1) == b"\n":
+            return size
+
+        position = size
+        committed = 0
+        while position > 0:
+            start = max(0, position - scan_chunk_bytes)
+            stream.seek(start)
+            chunk = stream.read(position - start)
+            newline = chunk.rfind(b"\n")
+            if newline >= 0:
+                committed = start + newline + 1
+                break
+            position = start
+        stream.truncate(committed)
+        stream.flush()
+        os.fsync(stream.fileno())
+        return committed
+
+
+def _spool_size(path: Path, *, floor: int = 0) -> int:
+    try:
+        return max(floor, Path(path).stat().st_size)
+    except FileNotFoundError:
+        return floor
 
 
 class ScrapyScoutLauncher:
@@ -178,45 +222,67 @@ class ScrapyScoutLauncher:
         self.termination_grace_seconds = float(termination_grace_seconds)
         self.clock = clock
 
+    @staticmethod
+    def _signal_pid_group(pid: int, sig: signal.Signals) -> None:
+        try:
+            os.killpg(pid, sig)
+        except ProcessLookupError:
+            pass
+
+    def _terminate_sync_process_group(self, process: subprocess.Popen) -> None:
+        if process.poll() is not None:
+            return
+        self._signal_pid_group(process.pid, signal.SIGTERM)
+        try:
+            process.wait(timeout=self.termination_grace_seconds)
+            return
+        except subprocess.TimeoutExpired:
+            pass
+        self._signal_pid_group(process.pid, signal.SIGKILL)
+        process.wait()
+
     def run(self, spec: ScrapyScoutSpec) -> ScrapyScoutRun:
         """Synchronous smoke/CLI path; production coordinators use run_async."""
         prepare_jobdir_binding(spec)
-        spec.spool_path.resolve().parent.mkdir(parents=True, exist_ok=True)
+        start_offset = prepare_append_spool(spec.spool_path)
         started = float(self.clock())
+        process = subprocess.Popen(
+            spec.argv(uv_executable=self.uv_executable),
+            cwd=self.project_dir,
+            start_new_session=True,
+        )
         try:
-            completed = subprocess.run(
-                spec.argv(uv_executable=self.uv_executable),
-                cwd=self.project_dir,
-                check=False,
-                timeout=spec.max_seconds + self.hard_timeout_grace_seconds,
+            returncode = process.wait(
+                timeout=spec.max_seconds + self.hard_timeout_grace_seconds
             )
         except subprocess.TimeoutExpired:
+            self._terminate_sync_process_group(process)
             return ScrapyScoutRun(
                 returncode=None,
                 elapsed_seconds=max(0.0, float(self.clock()) - started),
                 timed_out=True,
                 spool_path=spec.spool_path,
                 jobdir=spec.jobdir,
+                spool_start_offset=start_offset,
+                spool_end_offset=_spool_size(spec.spool_path, floor=start_offset),
             )
         return ScrapyScoutRun(
-            returncode=int(completed.returncode),
+            returncode=int(returncode),
             elapsed_seconds=max(0.0, float(self.clock()) - started),
             timed_out=False,
             spool_path=spec.spool_path,
             jobdir=spec.jobdir,
+            spool_start_offset=start_offset,
+            spool_end_offset=_spool_size(spec.spool_path, floor=start_offset),
         )
 
     @staticmethod
     def _signal_process_group(process: asyncio.subprocess.Process, sig: signal.Signals) -> None:
         if process.returncode is not None:
             return
-        try:
-            os.killpg(process.pid, sig)
-        except ProcessLookupError:
-            pass
+        ScrapyScoutLauncher._signal_pid_group(process.pid, sig)
 
     async def _terminate_process_group(self, process: asyncio.subprocess.Process) -> None:
-        """Terminate uv and every descendant in the sidecar process group."""
         if process.returncode is not None:
             return
         self._signal_process_group(process, signal.SIGTERM)
@@ -229,14 +295,9 @@ class ScrapyScoutLauncher:
         await process.wait()
 
     async def run_async(self, spec: ScrapyScoutSpec) -> ScrapyScoutRun:
-        """Run one sidecar without blocking the source-discovery event loop.
-
-        The child starts a new POSIX session so cancellation and hard timeout can
-        terminate the complete ``uv -> scrapy`` process tree rather than leaving
-        Twisted workers behind after the coordinator moves on.
-        """
+        """Run one sidecar without blocking the source-discovery event loop."""
         prepare_jobdir_binding(spec)
-        spec.spool_path.resolve().parent.mkdir(parents=True, exist_ok=True)
+        start_offset = prepare_append_spool(spec.spool_path)
         started = float(self.clock())
         process = await asyncio.create_subprocess_exec(
             *spec.argv(uv_executable=self.uv_executable),
@@ -257,6 +318,8 @@ class ScrapyScoutLauncher:
                     timed_out=True,
                     spool_path=spec.spool_path,
                     jobdir=spec.jobdir,
+                    spool_start_offset=start_offset,
+                    spool_end_offset=_spool_size(spec.spool_path, floor=start_offset),
                 )
         except asyncio.CancelledError:
             await self._terminate_process_group(process)
@@ -267,6 +330,8 @@ class ScrapyScoutLauncher:
             timed_out=False,
             spool_path=spec.spool_path,
             jobdir=spec.jobdir,
+            spool_start_offset=start_offset,
+            spool_end_offset=_spool_size(spec.spool_path, floor=start_offset),
         )
 
 
@@ -284,21 +349,35 @@ def iter_scrapy_link_discoveries(
     *,
     expected_source_key: str,
     max_line_bytes: int = 1 << 20,
+    start_offset: int = 0,
+    end_offset: int | None = None,
 ) -> Iterator[ScrapyLinkDiscovery]:
-    """Stream and validate Scrapy JSONL output with bounded line memory.
-
-    A process crash can leave one incomplete final JSON line.  Only that final
-    unterminated invalid row is ignored; malformed committed rows fail closed.
-    """
+    """Stream a committed JSONL byte range with bounded line memory."""
     if not _SOURCE_KEY_RE.fullmatch(expected_source_key):
         raise ValueError("expected_source_key is invalid")
     if max_line_bytes < 1:
         raise ValueError("max_line_bytes must be positive")
+    if start_offset < 0 or (end_offset is not None and end_offset < start_offset):
+        raise ValueError("invalid Scrapy JSONL byte range")
 
-    with Path(path).open("rb") as stream:
+    path = Path(path)
+    size = path.stat().st_size
+    limit = size if end_offset is None else end_offset
+    if limit > size:
+        raise ValueError("Scrapy JSONL end_offset exceeds file size")
+
+    with path.open("rb") as stream:
+        if start_offset:
+            if start_offset > size:
+                raise ValueError("Scrapy JSONL start_offset exceeds file size")
+            stream.seek(start_offset - 1)
+            if stream.read(1) != b"\n":
+                raise ValueError("Scrapy JSONL start_offset is not a committed line boundary")
+        stream.seek(start_offset)
         line_number = 0
-        while True:
-            raw = stream.readline(max_line_bytes + 1)
+        while stream.tell() < limit:
+            remaining = limit - stream.tell()
+            raw = stream.readline(min(max_line_bytes + 1, remaining))
             if not raw:
                 break
             line_number += 1
@@ -307,11 +386,14 @@ def iter_scrapy_link_discoveries(
             if not raw.strip():
                 continue
             terminated = raw.endswith(b"\n")
+            at_segment_end = stream.tell() >= limit
+            # Newline is the commit marker; even a syntactically complete final
+            # object without it is treated as an uncommitted crash tail.
+            if not terminated and at_segment_end:
+                break
             try:
                 payload = json.loads(raw.decode("utf-8"))
             except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-                if not terminated and stream.read(1) == b"":
-                    break
                 raise ValueError(f"invalid Scrapy JSONL row {line_number}") from exc
             if not isinstance(payload, dict) or payload.get("record_type") != "LINK_DISCOVERY":
                 raise ValueError(f"unexpected Scrapy record at line {line_number}")

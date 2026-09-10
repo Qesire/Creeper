@@ -43,6 +43,7 @@ from creeper.source_discovery.scrapy_sidecar import (
     ScrapyScoutRun,
     ScrapyScoutSpec,
     iter_scrapy_link_discoveries,
+    prepare_append_spool,
     prepare_jobdir_binding,
 )
 
@@ -80,6 +81,7 @@ __all__ = [
     "canonicalize_source_entrypoint",
     "expand_scrapy_spool",
     "iter_scrapy_link_discoveries",
+    "prepare_append_spool",
     "prepare_jobdir_binding",
     "source_key",
     "source_origin",
