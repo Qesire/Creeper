@@ -3,7 +3,11 @@ name = "creeper"
 version = "2.1.0.dev0"
 description = "Baseline-aware historical Web hostname discovery"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "aiolimiter>=1.2,<2",
+    "httpx>=0.28,<1",
+    "tenacity>=9,<10",
+]
 
 [project.scripts]
 creeper = "creeper.cli:main"
