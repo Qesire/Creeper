@@ -53,22 +53,38 @@ def _nearest_row(node: LexborNode) -> LexborNode | None:
     return None
 
 
-def _following_listing_text(anchor: LexborNode) -> str:
-    """Collect the local text that follows one link in Apache-style listings.
+def _prefix_text_before_nested_anchor(node: LexborNode) -> tuple[str, bool]:
+    """Return descendant text preceding the first nested anchor.
 
-    Lexbor exposes text nodes in the sibling chain. Stopping at the next anchor
-    or a row boundary prevents one file from accidentally inheriting another
-    file's size when the listing is wrapped in a single ``<pre>`` element.
+    HTML5 error recovery can wrap later links in a formatting element belonging
+    to malformed earlier markup. Flattening that whole element would associate
+    the later link's size with the earlier file, so traversal stops exactly at
+    the first nested ``a`` element.
     """
+    parts: list[str] = []
+    first = True
+    for item in node.traverse(include_text=True):
+        if first:
+            first = False
+            continue
+        if item.tag == "a":
+            return " ".join(parts), True
+        if item.tag == "-text":
+            value = item.text_content
+            if value:
+                parts.append(value)
+    return " ".join(parts), False
+
+
+def _following_listing_text(anchor: LexborNode) -> str:
+    """Collect only local text following one Apache-style listing link."""
     parts: list[str] = []
     current = anchor.next
     for _ in range(16):
         if current is None:
             break
         tag = current.tag
-        if tag == "a":
-            break
-        if tag in {"tr", "table"}:
+        if tag == "a" or tag in {"tr", "table"}:
             break
         if tag == "-text":
             value = current.text_content
@@ -77,9 +93,11 @@ def _following_listing_text(anchor: LexborNode) -> str:
         elif tag == "br":
             break
         else:
-            text = current.text(deep=True, separator=" ", strip=True)
+            text, hit_anchor = _prefix_text_before_nested_anchor(current)
             if text:
                 parts.append(text)
+            if hit_anchor:
+                break
         current = current.next
     return " ".join(parts)
 
