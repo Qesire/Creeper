@@ -140,6 +140,32 @@ class MeasuredYieldScoutTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.disposition, ScoutDisposition.WARM)
         self.assertEqual(result.measurement.novel_hosts if result.measurement else None, 1)
 
+    async def test_gzip_content_encoding_is_not_double_decoded(self) -> None:
+        raw = b'{"hostname":"known.com"}\n{"hostname":"novel.com"}\n'
+        body = gzip.compress(raw)
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                206,
+                content=body,
+                headers={
+                    "content-type": "application/gzip",
+                    "content-encoding": "gzip",
+                },
+            )
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            scout = MeasuredYieldScoutExecutor(
+                client,
+                self.baseline,
+                {"com": Decimal("1")},
+                policy=self.policy(),
+            )
+            result = await scout(self.candidate("https://data.example/hosts.jsonl.gz"))
+
+        self.assertEqual(result.disposition, ScoutDisposition.WARM)
+        self.assertEqual(result.measurement.novel_hosts if result.measurement else None, 1)
+
     async def test_warc_requires_format_specific_mature_parser(self) -> None:
         calls = 0
 
