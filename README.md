@@ -31,6 +31,7 @@ PYTHONPATH=src python3 scripts/run_evidence_pilot.py <task-root> <index.sqlite3>
 PYTHONPATH=src python3 scripts/run_offline_dry_run.py <task-root> <index.sqlite3> <report-dir> --documentation <methods.docx>
 PYTHONPATH=src python3 scripts/run_lookup_bench.py <task-root> <index.sqlite3> <report.json> --limit 100000
 PYTHONPATH=src python3 scripts/evaluate_performance.py <performance-gate.json> --lookup-report <lookup.json> --efficiency-report <efficiency_v1.json>
+PYTHONPATH=src python3 scripts/run_eed_readiness.py <report-dir> --accepted-dir <annual-results> --baseline-dir <annual-baseline> --model <q2_tld_top_langs.json> --baseline-eed <value> --elapsed-seconds <seconds> --run-id <id>
 ```
 
 The full V3 index trial on the reference workspace produced 41,007,905
@@ -50,6 +51,13 @@ cursor, and never resets an exhausted source. An optional `[submission]` table
 can load local baseline-manifest and EED-report JSON files so the command also
 reports `snapshot_ready` and the current novel-record count; it does not create
 or upload a competition package.
+
+`run_eed_readiness.py` is the measurement entry point for E0/E5 readiness
+reports. It calculates annual novel EED only after subtracting the matching
+baseline year files, then writes `eed-report.json` and `run.json` with the
+five-percent delta and ETA. Its input annual files must be committed evidence
+outputs; synthetic fixture results are valid for correctness tests only and
+must not be reported as competition throughput.
 
 ## Competition throughput gates
 
