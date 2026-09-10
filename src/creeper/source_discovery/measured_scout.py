@@ -579,7 +579,13 @@ class MeasuredYieldScoutExecutor:
     async def _download_prefix(self, url: str) -> PrefixDownload:
         payload = bytearray()
         overflowed_chunk = False
-        headers = {"Range": f"bytes=0-{self.policy.max_download_bytes - 1}"}
+        headers = {
+            "Range": f"bytes=0-{self.policy.max_download_bytes - 1}",
+            # The parser consumes the bounded prefix as WARC/CDXJ text. Do not
+            # hand it a content-encoded transfer body while using a raw-byte
+            # iterator; transparent decoding would otherwise be bypassed.
+            "Accept-Encoding": "identity",
+        }
         timeout = httpx.Timeout(self.policy.timeout_seconds)
         async with self.client.stream("GET", url, headers=headers, timeout=timeout) as response:
             if response.status_code in {404, 410}:

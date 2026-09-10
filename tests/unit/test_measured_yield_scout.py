@@ -86,6 +86,7 @@ class MeasuredYieldScoutTests(unittest.IsolatedAsyncioTestCase):
 
         async def handler(request: httpx.Request) -> httpx.Response:
             self.assertIn("Range", request.headers)
+            self.assertEqual(request.headers.get("Accept-Encoding"), "identity")
             return streamed_response(206, body, headers={"content-type": "text/plain"})
 
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
