@@ -24,6 +24,10 @@ from creeper.source_discovery.manager import (
     SourcePoolTargets,
     SourceReservoirManager,
 )
+from creeper.source_discovery.measured_scout import (
+    MeasuredYieldScoutExecutor,
+    MeasuredYieldScoutPolicy,
+)
 from creeper.source_discovery.models import (
     ScoutMeasurement,
     SearchEpisode,
@@ -72,6 +76,8 @@ __all__ = [
     "HttpSourceTriageExecutor",
     "HttpTriagePolicy",
     "LinkPromotionAccumulator",
+    "MeasuredYieldScoutExecutor",
+    "MeasuredYieldScoutPolicy",
     "PromotedSource",
     "PromotionEvidence",
     "PromotionPolicy",
