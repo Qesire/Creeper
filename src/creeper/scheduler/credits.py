@@ -43,11 +43,18 @@ class CreditBalance:
 
     @property
     def available(self) -> int:
-        return self.capacity - self.queued - self.claimed - self.reserved
+        # Durable backlog can legitimately exceed a newly lowered capacity.
+        # In that state the scheduler must grant zero new work, not expose a
+        # negative credit count.
+        return max(0, self.capacity - self.queued - self.claimed - self.reserved)
 
 
 class CreditLedger:
-    """Track bounded queued, claimed, and reserved work per provider."""
+    """Track bounded queued, claimed, and reserved work per provider.
+
+    The ledger is an in-memory scheduling cache. Durable queue state belongs to
+    ControlStore and should be restored into this object after process restart.
+    """
 
     def __init__(self, capacities: Mapping[str, int]):
         self._capacity = self._validate_capacities(capacities)
@@ -64,6 +71,9 @@ class CreditLedger:
         ):
             raise ValueError("provider capacities must be non-negative integers")
         return result
+
+    def providers(self) -> tuple[str, ...]:
+        return tuple(self._capacity)
 
     def _check_provider(self, provider: str) -> None:
         if provider not in self._capacity:
@@ -83,6 +93,27 @@ class CreditLedger:
             claimed=self._claimed[provider],
             reserved=self._reserved[provider],
         )
+
+    def restore_backlog(
+        self,
+        provider: str,
+        *,
+        queued: int,
+        claimed: int,
+        reserved: int = 0,
+    ) -> None:
+        """Replace volatile counters from the durable queue snapshot.
+
+        Restored backlog may exceed configured capacity when limits are lowered
+        between runs. This is safe: ``available`` becomes zero until workers
+        drain below the new high-water mark.
+        """
+        self._check_provider(provider)
+        for amount in (queued, claimed, reserved):
+            self._check_amount(amount)
+        self._queued[provider] = queued
+        self._claimed[provider] = claimed
+        self._reserved[provider] = reserved
 
     def note_queued(self, provider: str, amount: int = 1) -> None:
         self._check_provider(provider)
