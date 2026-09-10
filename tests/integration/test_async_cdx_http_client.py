@@ -132,6 +132,27 @@ class AsyncWaybackCDXClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.candidate_years, (1997, 1999))
         self.assertEqual(result.key, range_key)
 
+    async def test_sub_one_request_per_second_limit_allows_single_request(self):
+        async def handler(request):
+            payload = [
+                ["timestamp", "original", "statuscode"],
+                ["19970102030405", "http://example.com/", "200"],
+            ]
+            return httpx.Response(200, content=json.dumps(payload).encode(), request=request)
+
+        range_key = EvidenceQueryKey(
+            "example.com", TemporalScope(1996, 2000), "wayback", "cdx-v1"
+        )
+        async with AsyncWaybackCDXClient(
+            transport=httpx.MockTransport(handler),
+            max_retries=0,
+            requests_per_second=0.5,
+        ) as client:
+            result = await client.query_range(range_key)
+
+        self.assertEqual(result.state, CDXQueryState.PASS)
+        self.assertEqual(result.candidate_years, (1997,))
+
     async def test_range_probe_empty_requires_complete_final_page(self):
         range_key = EvidenceQueryKey(
             "example.com", TemporalScope(1996, 1998), "wayback", "cdx-v1"

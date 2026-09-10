@@ -89,11 +89,20 @@ class AsyncWaybackCDXClient:
         self.backoff = backoff
         self.max_backoff = max_backoff
         self.http_requests = 0
-        self._limiter = (
-            AsyncLimiter(requests_per_second, time_period=1.0)
-            if requests_per_second > 0
-            else None
-        )
+        if requests_per_second > 0:
+            # aiolimiter.acquire() always requests one token, so a sub-one
+            # rate cannot be represented as ``max_rate < 1``. Use a longer
+            # window with one token instead (for example, 0.5 req/s becomes
+            # one request per two seconds).
+            if requests_per_second < 1:
+                self._limiter = AsyncLimiter(
+                    1,
+                    time_period=1.0 / requests_per_second,
+                )
+            else:
+                self._limiter = AsyncLimiter(requests_per_second, time_period=1.0)
+        else:
+            self._limiter = None
         self._owns_client = client is None
         client_options = dict(
             timeout=httpx.Timeout(timeout),
