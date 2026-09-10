@@ -104,16 +104,6 @@ class SyncRuntime:
         queue.put_nowait(value)
         return queue.qsize()
 
-    @staticmethod
-    def _query_sort_key(key: EvidenceQueryKey) -> tuple[object, ...]:
-        return (
-            key.provider,
-            key.hostname,
-            key.temporal_scope.year_from,
-            key.temporal_scope.year_to,
-            key.policy_version,
-        )
-
     def _grant_fresh_lease(self, *, owner: str) -> tuple[LeaseCandidate, WorkLease] | None:
         """Rank candidates, then atomically claim a fresh persisted lease."""
         self.control_store.recover_expired_leases()
@@ -140,7 +130,7 @@ class SyncRuntime:
     def _execute_scheduled_evidence(
         self,
         *,
-        keys: set[EvidenceQueryKey],
+        keys: Iterable[EvidenceQueryKey],
         provider: str,
         queues: BoundedQueues,
     ) -> tuple[int, int, int, int]:
@@ -151,7 +141,8 @@ class SyncRuntime:
         synchronous claim batch; a zero-capacity provider leaves all tasks
         durable for a later evidence worker.
         """
-        if not keys:
+        ordered = list(keys)
+        if not ordered:
             return 0, 0, 0, 0
         capacity = self.scheduler.ledger.balance(provider).capacity
         if capacity < 1:
@@ -164,7 +155,6 @@ class SyncRuntime:
             owner=self.owner,
             flush_count=max(1, min(capacity, 128)),
         )
-        ordered = sorted(keys, key=self._query_sort_key)
         batch_size = max(1, min(queues.evidence_task_queue.maxsize, capacity, 128))
         try:
             for start in range(0, len(ordered), batch_size):
@@ -216,7 +206,7 @@ class SyncRuntime:
         source_records = observations = enqueued = completed = capsules = 0
         max_source = max_observations = max_evidence = max_commits = 0
         direct_capsules = []
-        scheduled_keys: set[EvidenceQueryKey] = set()
+        scheduled_keys: dict[EvidenceQueryKey, None] = {}
         result = None
         source_finalized = False
 
@@ -238,7 +228,8 @@ class SyncRuntime:
                 fresh = [key for key in keys if key not in scheduled_keys]
                 if not fresh:
                     return
-                scheduled_keys.update(fresh)
+                for key in fresh:
+                    scheduled_keys[key] = None
                 enqueued += self.control_store.enqueue_evidence_tasks(fresh)
 
             def resolve_pending() -> None:
