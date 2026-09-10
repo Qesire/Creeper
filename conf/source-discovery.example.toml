@@ -21,7 +21,10 @@ max_search_directives = 3
 triage_parallelism = 8
 scout_parallelism = 4
 search_parallelism = 3
+# Transient executor failures are retried after this process-local backoff.
 failure_retry_seconds = 30.0
+# Completed strategies, including valid empty-result searches, are durably cooled down.
+search_cooldown_seconds = 30.0
 
 [triage]
 # HEAD first, then a tiny ranged GET only when the server rejects HEAD.
