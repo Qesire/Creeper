@@ -18,6 +18,7 @@ from creeper.evidence.worker import AsyncEvidenceWorker
 from creeper.runtime.doctor import run_doctor
 from creeper.runtime.pipeline import SyncRuntime
 from creeper.runtime.submission import RuntimeSubmissionContext
+from creeper.scheduler.backlog import restore_credit_ledger
 from creeper.scheduler.credits import CreditLedger
 from creeper.scheduler.global_scheduler import GlobalScheduler
 from creeper.scheduler.priority import LeaseCandidate, ResourceCost
@@ -204,11 +205,13 @@ def _run_once(config_path: Path) -> dict[str, object]:
         def local_empty_transport(_hostname: str, _year: int):
             return [([], True)]
 
+        ledger = CreditLedger({"wayback": evidence_capacity})
+        restore_credit_ledger(ledger, control)
         runtime = SyncRuntime(
             baseline=baseline,
             control_store=control,
             evidence_store=evidence,
-            scheduler=GlobalScheduler(CreditLedger({"wayback": evidence_capacity})),
+            scheduler=GlobalScheduler(ledger),
             candidates=[candidate],
             adapters={adapter.adapter_id: adapter},
             evidence_transport=local_empty_transport,
