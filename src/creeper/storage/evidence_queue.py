@@ -23,6 +23,16 @@ class DurableEvidenceQueue:
     def __init__(self, control_store: ControlStore):
         self.control_store = control_store
         self.connection = control_store.connection
+        # Provider workers normally claim a tiny batch out of a potentially
+        # multi-million-row backlog. Keep the hot index narrow: duplicating the
+        # hostname/policy primary key here would materially increase SSD cost.
+        with self.connection:
+            self.connection.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_evidence_tasks_provider_claim
+                ON evidence_tasks(provider, state, retry_at, lease_until)
+                """
+            )
 
     @staticmethod
     def _key(row) -> EvidenceQueryKey:
