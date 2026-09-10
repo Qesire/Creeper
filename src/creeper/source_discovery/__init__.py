@@ -1,5 +1,6 @@
 """Durable source-discovery control plane."""
 
+from creeper.source_discovery.expander import ExpansionResult, expand_scrapy_spool
 from creeper.source_discovery.manager import (
     ReservoirPlan,
     SearchDirective,
@@ -36,6 +37,7 @@ from creeper.source_discovery.scrapy_sidecar import (
 )
 
 __all__ = [
+    "ExpansionResult",
     "LinkPromotionAccumulator",
     "PromotedSource",
     "PromotionEvidence",
@@ -58,6 +60,7 @@ __all__ = [
     "StrategyReward",
     "SuppressionScope",
     "canonicalize_source_entrypoint",
+    "expand_scrapy_spool",
     "iter_scrapy_link_discoveries",
     "prepare_jobdir_binding",
     "source_key",
