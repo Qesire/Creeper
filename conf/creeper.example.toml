@@ -9,15 +9,25 @@ reservoir_id = "local_dataset"
 source_year = 1997
 
 [limits]
-# All queue and lease limits are positive and bound one offline run.
+# In-memory queues bound one process. They are not the cross-process backlog.
 queue_source_records = 1000
 queue_observations = 1000
 queue_evidence_tasks = 1000
 queue_commits = 1000
+
+# One finite SourceLease.
 lease_max_records = 1000
 lease_max_requests = 1000
 lease_max_bytes = 10485760
 lease_max_seconds = 300
+
+# Durable producer high-water. SourceProducer reserves from this capacity before
+# opening a SourceLease. It is deliberately independent from EvidenceWorker
+# max_inflight/RPS/HTTP connection limits.
+evidence_backlog_capacity = 10000
+
+# Legacy synchronous `creeper run --once` evidence execution bound. Production
+# source/evidence processes do not use this as network concurrency.
 evidence_capacity = 1000
 
 # Optional offline submission-readiness reporting. Paths are relative to this
