@@ -2,7 +2,13 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from creeper.evidence.policies import EvidenceCapsule, EvidenceQueryKey, EvidenceQueryResult, TemporalScope, CDXQueryState
+from creeper.evidence.policies import (
+    CDXQueryState,
+    EvidenceCapsule,
+    EvidenceQueryKey,
+    EvidenceQueryResult,
+    TemporalScope,
+)
 from creeper.storage.commit_writer import CommitWriter
 from creeper.storage.control_store import ControlStore
 from creeper.storage.evidence_store import EvidenceStore
@@ -74,6 +80,8 @@ class CommitWriterTests(unittest.TestCase):
             self.assertEqual(len(recording.put_many_calls), 1)
             self.assertEqual(len(recording.put_many_calls[0]), 2)
             self.assertEqual(evidence.count(), 2)
+            self.assertEqual(writer.inserted_capsules, 2)
+            self.assertEqual(writer.finished_tasks, 2)
             self.assertEqual(
                 [task for task in control.list_evidence_tasks() if task.state != CDXQueryState.PASS.value],
                 [],
@@ -114,6 +122,92 @@ class CommitWriterTests(unittest.TestCase):
             self.assertEqual(len(control.batch_calls), 1)
             self.assertEqual(control.batch_calls[0][0], results)
             self.assertEqual(control.batch_calls[0][1], "worker-1")
+            evidence.close()
+
+    def test_submit_flushes_at_count_bound(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            evidence = EvidenceStore(root / "evidence.sqlite3")
+            recording = RecordingEvidenceStore(evidence)
+            control = RecordingControlStore()
+            writer = CommitWriter(
+                recording,
+                control,
+                owner="worker-1",
+                flush_count=2,
+                flush_interval_seconds=60,
+                clock=lambda: 0.0,
+            )
+            results = [
+                EvidenceQueryResult(
+                    f"host-{index}.example.com",
+                    1997,
+                    CDXQueryState.EMPTY_EXHAUSTIVE,
+                    key=EvidenceQueryKey(
+                        f"host-{index}.example.com",
+                        TemporalScope(1997, 1997),
+                        "wayback",
+                        "v1",
+                    ),
+                )
+                for index in range(3)
+            ]
+
+            writer.submit(None, results[0])
+            self.assertEqual(writer.pending_count, 1)
+            writer.submit(None, results[1])
+            self.assertEqual(writer.pending_count, 0)
+            self.assertEqual(len(control.batch_calls), 1)
+            writer.submit(None, results[2])
+            self.assertEqual(writer.pending_count, 1)
+            writer.close()
+            self.assertEqual(writer.pending_count, 0)
+            self.assertEqual(len(control.batch_calls), 2)
+            evidence.close()
+
+    def test_submit_flushes_after_interval(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            evidence = EvidenceStore(root / "evidence.sqlite3")
+            recording = RecordingEvidenceStore(evidence)
+            control = RecordingControlStore()
+            now = [0.0]
+            writer = CommitWriter(
+                recording,
+                control,
+                owner="worker-1",
+                flush_count=100,
+                flush_interval_seconds=1.0,
+                clock=lambda: now[0],
+            )
+            result = EvidenceQueryResult(
+                "host.example.com",
+                1997,
+                CDXQueryState.EMPTY_EXHAUSTIVE,
+                key=EvidenceQueryKey(
+                    "host.example.com",
+                    TemporalScope(1997, 1997),
+                    "wayback",
+                    "v1",
+                ),
+            )
+
+            writer.submit(None, result)
+            self.assertEqual(writer.pending_count, 1)
+            now[0] = 1.1
+            writer.submit(None, EvidenceQueryResult(
+                "host-2.example.com",
+                1997,
+                CDXQueryState.EMPTY_EXHAUSTIVE,
+                key=EvidenceQueryKey(
+                    "host-2.example.com",
+                    TemporalScope(1997, 1997),
+                    "wayback",
+                    "v1",
+                ),
+            ))
+            self.assertEqual(writer.pending_count, 0)
+            self.assertEqual(len(control.batch_calls), 1)
             evidence.close()
 
 
