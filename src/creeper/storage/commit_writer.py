@@ -29,13 +29,9 @@ class CommitWriter:
         capsules = [capsule for capsule, _ in pending if capsule is not None]
         if capsules:
             self.evidence_store.put_many(capsules)
-        for _, result in pending:
-            if result.key is not None:
-                self.control_store.finish_evidence_task(
-                    result.key,
-                    result.state,
-                    owner=self.owner,
-                )
+        results = [result for _, result in pending if result.key is not None]
+        if results:
+            self.control_store.finish_evidence_tasks(results, owner=self.owner)
         self._pending = []
         return len(pending)
 

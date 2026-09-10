@@ -19,6 +19,19 @@ class RecordingEvidenceStore:
         return self.store.put_many(batch)
 
 
+class RecordingControlStore:
+    def __init__(self):
+        self.batch_calls = []
+
+    def finish_evidence_tasks(self, results, *, owner):
+        batch = list(results)
+        self.batch_calls.append((batch, owner))
+        return len(batch)
+
+    def finish_evidence_task(self, *args, **kwargs):
+        raise AssertionError("CommitWriter must use the batch completion API")
+
+
 class CommitWriterTests(unittest.TestCase):
     def test_flush_batches_capsules_and_repeated_flush_is_idempotent(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -71,6 +84,36 @@ class CommitWriterTests(unittest.TestCase):
             ))
             writer.close()
             control.close()
+            evidence.close()
+
+    def test_flush_finishes_all_results_with_one_batch_control_call(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            evidence = EvidenceStore(root / "evidence.sqlite3")
+            recording = RecordingEvidenceStore(evidence)
+            control = RecordingControlStore()
+            results = [
+                EvidenceQueryResult(
+                    f"host-{index}.example.com",
+                    1997,
+                    CDXQueryState.EMPTY_EXHAUSTIVE,
+                    key=EvidenceQueryKey(
+                        f"host-{index}.example.com",
+                        TemporalScope(1997, 1997),
+                        "wayback",
+                        "v1",
+                    ),
+                )
+                for index in (1, 2)
+            ]
+            writer = CommitWriter(recording, control, owner="worker-1")
+            for result in results:
+                writer.submit(None, result)
+
+            self.assertEqual(writer.flush(), 2)
+            self.assertEqual(len(control.batch_calls), 1)
+            self.assertEqual(control.batch_calls[0][0], results)
+            self.assertEqual(control.batch_calls[0][1], "worker-1")
             evidence.close()
 
 

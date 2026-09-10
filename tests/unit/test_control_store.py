@@ -5,6 +5,7 @@ from pathlib import Path
 from creeper.evidence.policies import (
     CDXQueryState,
     EvidenceQueryKey,
+    EvidenceQueryResult,
     TemporalScope,
 )
 from creeper.storage.control_store import ControlStore
@@ -283,6 +284,88 @@ class ControlStoreTests(unittest.TestCase):
                 (restored.state, restored.cursor),
                 (ReservoirState.READY, "256"),
             )
+            store.close()
+
+    def test_finish_evidence_tasks_batches_terminal_and_retryable_updates(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ControlStore(Path(tmp) / "control.sqlite3")
+            keys = [self._key("wayback", "v1"), self._key("arquivo", "v1")]
+            store.enqueue_evidence_tasks(keys)
+            store.claim_evidence_tasks(owner="worker-1", limit=10)
+
+            results = [
+                EvidenceQueryResult("example.com", 1997, CDXQueryState.PASS, key=keys[0]),
+                EvidenceQueryResult("example.com", 1997, CDXQueryState.TRANSIENT_ERROR, key=keys[1]),
+            ]
+
+            self.assertEqual(
+                store.finish_evidence_tasks(results, owner="worker-1"),
+                2,
+            )
+            self.assertEqual(store.get_evidence_task(keys[0]).state, CDXQueryState.PASS)
+            self.assertEqual(
+                store.get_evidence_task(keys[1]).state,
+                CDXQueryState.TRANSIENT_ERROR,
+            )
+            store.close()
+
+    def test_finish_evidence_tasks_enforces_ownership_atomically(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ControlStore(Path(tmp) / "control.sqlite3")
+            keys = [self._key("wayback", "v1"), self._key("arquivo", "v1")]
+            store.enqueue_evidence_tasks(keys)
+            store.claim_evidence_tasks(owner="worker-1", limit=1, keys=[keys[0]])
+            store.claim_evidence_tasks(owner="worker-2", limit=1, keys=[keys[1]])
+
+            results = [
+                EvidenceQueryResult("example.com", 1997, CDXQueryState.PASS, key=keys[0]),
+                EvidenceQueryResult("example.com", 1997, CDXQueryState.PASS, key=keys[1]),
+            ]
+            with self.assertRaises(KeyError):
+                store.finish_evidence_tasks(results, owner="worker-1")
+
+            self.assertEqual(store.get_evidence_task(keys[0]).state, CDXQueryState.PENDING)
+            self.assertEqual(store.get_evidence_task(keys[1]).state, CDXQueryState.PENDING)
+            store.close()
+
+    def test_finish_evidence_tasks_rejects_unsupported_state_without_mutation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ControlStore(Path(tmp) / "control.sqlite3")
+            key = self._key()
+            store.enqueue_evidence_tasks([key])
+            store.claim_evidence_tasks(owner="worker-1", limit=1)
+
+            result = EvidenceQueryResult("example.com", 1997, CDXQueryState.PENDING, key=key)
+            with self.assertRaises(ValueError):
+                store.finish_evidence_tasks([result], owner="worker-1")
+            self.assertEqual(store.get_evidence_task(key).state, CDXQueryState.PENDING)
+            store.close()
+
+    def test_finish_evidence_task_remains_one_item_compatibility_wrapper(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ControlStore(Path(tmp) / "control.sqlite3")
+            key = self._key()
+            store.enqueue_evidence_tasks([key])
+            store.claim_evidence_tasks(owner="worker-1", limit=1)
+            store.finish_evidence_task(key, CDXQueryState.PASS, owner="worker-1")
+            self.assertEqual(store.get_evidence_task(key).state, CDXQueryState.PASS)
+            store.close()
+
+    def test_finish_evidence_task_wrapper_preserves_retry_at(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ControlStore(Path(tmp) / "control.sqlite3")
+            key = self._key()
+            store.enqueue_evidence_tasks([key])
+            store.claim_evidence_tasks(owner="worker-1", limit=1)
+            store.finish_evidence_task(
+                key,
+                CDXQueryState.TRANSIENT_ERROR,
+                owner="worker-1",
+                retry_at=123.5,
+            )
+            task = store.get_evidence_task(key)
+            self.assertEqual(task.state, CDXQueryState.TRANSIENT_ERROR)
+            self.assertEqual(task.retry_at, 123.5)
             store.close()
 
 

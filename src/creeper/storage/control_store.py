@@ -8,7 +8,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
 
-from creeper.evidence.policies import CDXQueryState, EvidenceQueryKey, TemporalScope
+from creeper.evidence.policies import (
+    CDXQueryState,
+    EvidenceQueryKey,
+    EvidenceQueryResult,
+    TemporalScope,
+)
 
 
 TERMINAL_STATES = frozenset({
@@ -246,6 +251,73 @@ class ControlStore:
             for row in rows
         ]
 
+    def finish_evidence_tasks(
+        self,
+        results: Iterable[EvidenceQueryResult],
+        *,
+        owner: str,
+    ) -> int:
+        """Finish a batch of claimed evidence tasks atomically."""
+        if not owner:
+            raise ValueError("owner is required")
+        return self._finish_evidence_results(results, owner=owner, retry_at=None)
+
+    def _finish_evidence_results(
+        self,
+        results: Iterable[EvidenceQueryResult],
+        *,
+        owner: str | None,
+        retry_at: float | None,
+    ) -> int:
+        keyed_results = [result for result in results if result.key is not None]
+        if not keyed_results:
+            return 0
+        updates: list[tuple[str, None, object, ...]] = []
+        seen: set[EvidenceQueryKey] = set()
+        for result in keyed_results:
+            key = result.key
+            assert key is not None
+            if key in seen:
+                raise ValueError(f"duplicate evidence task key: {key}")
+            seen.add(key)
+            value = result.state.value if isinstance(result.state, CDXQueryState) else str(result.state)
+            if value not in TERMINAL_STATES | RETRYABLE_STATES:
+                raise ValueError(f"unsupported evidence task state: {value}")
+            updates.append((value, retry_at, *self._values(key)))
+
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            for result in keyed_results:
+                key = result.key
+                assert key is not None
+                ownership = " AND lease_owner = ?" if owner is not None else ""
+                params = (*self._values(key), owner) if owner is not None else self._values(key)
+                row = self.connection.execute(
+                    """
+                    SELECT 1 FROM evidence_tasks
+                    WHERE hostname = ? AND year_from = ? AND year_to = ?
+                      AND provider = ? AND policy_version = ?
+                    """ + ownership,
+                    params,
+                ).fetchone()
+                if row is None:
+                    raise KeyError("evidence task not found or not owned by caller")
+            ownership = " AND lease_owner = ?" if owner is not None else ""
+            self.connection.executemany(
+                """
+                UPDATE evidence_tasks
+                SET state = ?, retry_at = ?, lease_owner = NULL, lease_until = NULL
+                WHERE hostname = ? AND year_from = ? AND year_to = ?
+                  AND provider = ? AND policy_version = ?
+                """ + ownership,
+                [(*update, owner) if owner is not None else update for update in updates],
+            )
+            self.connection.commit()
+        except BaseException:
+            self.connection.rollback()
+            raise
+        return len(updates)
+
     def finish_evidence_task(
         self,
         key: EvidenceQueryKey,
@@ -254,29 +326,13 @@ class ControlStore:
         owner: str | None = None,
         retry_at: float | None = None,
     ) -> None:
-        value = state.value if isinstance(state, CDXQueryState) else str(state)
-        if value not in TERMINAL_STATES | RETRYABLE_STATES:
-            raise ValueError(f"unsupported evidence task state: {value}")
-        where_owner = ""
-        params: list[object] = [value, retry_at]
-        if owner is not None:
-            where_owner = " AND lease_owner = ?"
-            params.append(owner)
-        params.extend(self._values(key))
-        with self.connection:
-            cursor = self.connection.execute(
-                """
-                UPDATE evidence_tasks
-                SET state = ?, retry_at = ?, lease_owner = NULL, lease_until = NULL
-                WHERE hostname = ? AND year_from = ? AND year_to = ?
-                  AND provider = ? AND policy_version = ?
-                """.replace(
-                    "WHERE hostname", f"WHERE 1 = 1{where_owner} AND hostname"
-                ),
-                params,
-            )
-        if cursor.rowcount != 1:
-            raise KeyError("evidence task not found or not owned by caller")
+        result = EvidenceQueryResult(
+            hostname=key.hostname,
+            year=key.temporal_scope.year_from,
+            state=state if isinstance(state, CDXQueryState) else CDXQueryState(str(state)),
+            key=key,
+        )
+        self._finish_evidence_results([result], owner=owner, retry_at=retry_at)
 
     def get_evidence_task(self, key: EvidenceQueryKey) -> EvidenceTask | None:
         row = self.connection.execute(

@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Iterable
 from pathlib import Path
 
+from creeper.authority.baseline_index import YEAR_BITS
 from creeper.authority.normalizer import normalize_official
 from creeper.evidence.policies import EvidenceCapsule
 
@@ -109,6 +111,35 @@ class EvidenceStore:
             (value,),
         ).fetchall()
         return [EvidenceCapsule(**dict(row)) for row in rows]
+
+    def resolve_year_masks(
+        self, hostnames: Iterable[str], chunk_size: int = 900
+    ) -> dict[str, int]:
+        if chunk_size <= 0:
+            raise ValueError("chunk_size must be positive")
+
+        normalized = {}
+        for raw_hostname in hostnames:
+            if not isinstance(raw_hostname, str):
+                continue
+            hostname = normalize_official(raw_hostname)
+            if hostname is not None:
+                normalized.setdefault(hostname, 0)
+
+        result = dict(normalized)
+        limit = min(chunk_size, 900)
+        values = list(normalized)
+        for start in range(0, len(values), limit):
+            chunk = values[start:start + limit]
+            placeholders = ",".join("?" for _ in chunk)
+            rows = self.connection.execute(
+                f"SELECT hostname, year FROM evidence_capsules "
+                f"WHERE hostname IN ({placeholders})",
+                chunk,
+            ).fetchall()
+            for row in rows:
+                result[row["hostname"]] |= YEAR_BITS.get(row["year"], 0)
+        return result
 
     def count(self) -> int:
         return self.connection.execute("SELECT COUNT(*) FROM evidence_capsules").fetchone()[0]

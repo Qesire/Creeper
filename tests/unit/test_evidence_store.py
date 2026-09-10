@@ -2,6 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from creeper.authority.baseline_index import YEAR_BITS
 from creeper.evidence.policies import EvidenceCapsule
 from creeper.storage.evidence_store import EvidenceStore
 
@@ -41,6 +42,59 @@ class EvidenceStoreTests(unittest.TestCase):
                 {row.policy_version for row in store.for_hostname("example.com")},
                 {"cdx-v1", "cdx-v2"},
             )
+            store.close()
+
+    def test_resolve_year_masks_normalizes_deduplicates_and_returns_zero_for_missing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = EvidenceStore(Path(tmp) / "evidence.sqlite3")
+            store.put_many([
+                EvidenceCapsule(
+                    "alpha.example.com", 1996, "cdx", "capture_timestamp_year",
+                    "19960101000000", "http://alpha.example.com/", "c" * 64, "cdx-v1"
+                ),
+                EvidenceCapsule(
+                    "alpha.example.com", 2001, "cdx", "capture_timestamp_year",
+                    "20010101000000", "http://alpha.example.com/", "d" * 64, "cdx-v1"
+                ),
+                EvidenceCapsule(
+                    "beta.example.com", 1998, "cdx", "capture_timestamp_year",
+                    "19980101000000", "http://beta.example.com/", "e" * 64, "cdx-v1"
+                ),
+            ])
+
+            masks = store.resolve_year_masks([
+                " Alpha.Example.COM ", "alpha.example.com", "beta.example.com",
+                "missing.example.com", "not-a-host", "",
+            ])
+
+            self.assertEqual(masks, {
+                "alpha.example.com": YEAR_BITS[1996] | YEAR_BITS[2001],
+                "beta.example.com": YEAR_BITS[1998],
+                "missing.example.com": 0,
+            })
+            store.close()
+
+    def test_resolve_year_masks_limits_hostname_in_chunks_to_900(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = EvidenceStore(Path(tmp) / "evidence.sqlite3")
+            hostnames = [f"host-{index}.example.com" for index in range(1801)]
+            store.put_many([
+                EvidenceCapsule(
+                    hostname, 1997, "cdx", "capture_timestamp_year",
+                    "19970101000000", f"http://{hostname}/", f"{index:064x}", "cdx-v1"
+                )
+                for index, hostname in enumerate(hostnames)
+            ])
+            statements = []
+            store.connection.set_trace_callback(statements.append)
+
+            masks = store.resolve_year_masks(hostnames, chunk_size=1000)
+
+            selects = [statement for statement in statements if "WHERE hostname IN (" in statement]
+            self.assertEqual(len(selects), 3)
+            self.assertTrue(all(statement.count("'") // 2 <= 900 for statement in selects))
+            self.assertEqual(len(masks), len(hostnames))
+            self.assertTrue(all(mask == YEAR_BITS[1997] for mask in masks.values()))
             store.close()
 
 
