@@ -604,6 +604,126 @@ class ControlStore:
             self.connection.rollback()
             raise
 
+    def finalize_lease(
+        self,
+        lease: Any,
+        *,
+        next_cursor: str | None,
+        exhausted: bool,
+    ) -> None:
+        """Atomically finish a running lease and advance its reservoir.
+
+        The lease row and reservoir row form one progress unit.  A successful
+        non-EOF execution returns the reservoir to READY at ``next_cursor``;
+        an EOF execution makes it EXHAUSTED.  Both updates are guarded by the
+        persisted lease owner/state so a stale worker cannot advance a source.
+        """
+        from creeper.scheduler.leases import LeaseState
+        from creeper.sources.reservoirs import ReservoirState
+
+        lease_id = self._field(lease, "lease_id")
+        reservoir_id = self._field(lease, "reservoir_id")
+        owner = self._field(lease, "owner")
+        if not lease_id or not reservoir_id or not owner:
+            raise ValueError("a running lease with an owner is required")
+        if not exhausted and next_cursor is None:
+            raise ValueError("a non-exhausted lease must provide next_cursor")
+
+        target = ReservoirState.EXHAUSTED if exhausted else ReservoirState.READY
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            lease_row = self.connection.execute(
+                "SELECT state, owner, reservoir_id FROM work_leases WHERE lease_id = ?",
+                (lease_id,),
+            ).fetchone()
+            if (
+                lease_row is None
+                or lease_row["state"] != LeaseState.RUNNING.value
+                or lease_row["owner"] != owner
+                or lease_row["reservoir_id"] != reservoir_id
+            ):
+                raise ValueError("lease is not running or is not owned by caller")
+            lease_changed = self.connection.execute(
+                "UPDATE work_leases SET state = ? WHERE lease_id = ? AND state = ? AND owner = ?",
+                (LeaseState.SUCCEEDED.value, lease_id, LeaseState.RUNNING.value, owner),
+            ).rowcount
+            if lease_changed != 1:
+                raise RuntimeError("lease changed while finalizing")
+            reservoir_changed = self.connection.execute(
+                """
+                UPDATE reservoirs SET state = ?, cursor = ?
+                WHERE reservoir_id = ? AND state IN (?, ?)
+                """,
+                (
+                    target.value,
+                    next_cursor,
+                    reservoir_id,
+                    ReservoirState.LEASED.value,
+                    ReservoirState.RUNNING.value,
+                ),
+            ).rowcount
+            if reservoir_changed != 1:
+                raise ValueError("reservoir is not owned by running lease")
+            self.connection.commit()
+        except BaseException:
+            self.connection.rollback()
+            raise
+
+    def abort_lease(self, lease: Any) -> None:
+        """Abort a lease and restore its reservoir to the original cursor."""
+        from creeper.scheduler.leases import LeaseState
+        from creeper.sources.reservoirs import ReservoirState
+
+        lease_id = self._field(lease, "lease_id")
+        reservoir_id = self._field(lease, "reservoir_id")
+        owner = self._field(lease, "owner")
+        if not lease_id or not reservoir_id or not owner:
+            raise ValueError("an owned lease is required")
+
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            lease_row = self.connection.execute(
+                "SELECT state, owner, reservoir_id, cursor_start FROM work_leases "
+                "WHERE lease_id = ?",
+                (lease_id,),
+            ).fetchone()
+            if lease_row is None:
+                raise KeyError(f"unknown lease: {lease_id}")
+            if lease_row["owner"] != owner or lease_row["reservoir_id"] != reservoir_id:
+                raise ValueError("lease is not owned by caller")
+            if lease_row["state"] not in {
+                LeaseState.GRANTED.value,
+                LeaseState.RUNNING.value,
+                LeaseState.PAUSED.value,
+                LeaseState.PREEMPTED.value,
+            }:
+                raise ValueError("lease is not active")
+            self.connection.execute(
+                "UPDATE work_leases SET state = ? WHERE lease_id = ?",
+                (LeaseState.ABORTED.value, lease_id),
+            )
+            changed = self.connection.execute(
+                """
+                UPDATE reservoirs SET state = ?, cursor = ?
+                WHERE reservoir_id = ? AND state IN (?, ?, ?, ?)
+                """,
+                (
+                    ReservoirState.READY.value,
+                    lease_row["cursor_start"],
+                    reservoir_id,
+                    ReservoirState.LEASED.value,
+                    ReservoirState.RUNNING.value,
+                    ReservoirState.PAUSED.value,
+                    ReservoirState.PREEMPTED.value,
+                ),
+            ).rowcount
+            if changed != 1:
+                raise ValueError("reservoir is not owned by active lease")
+            self.connection.commit()
+        except BaseException:
+            self.connection.rollback()
+            raise
+
     def get_lease(self, lease_id: str) -> Any | None:
         row = self.connection.execute(
             "SELECT * FROM work_leases WHERE lease_id = ?", (lease_id,)

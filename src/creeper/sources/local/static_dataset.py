@@ -77,6 +77,15 @@ class StaticDatasetAdapter:
                     )
                     bytes_read += len(raw_line)
                     next_cursor = str(source.tell())
+                    if len(records) >= lease.max_records:
+                        # Distinguish a lease boundary from EOF without
+                        # consuming the next record. This lets the runtime
+                        # mark a final bounded lease EXHAUSTED immediately.
+                        probe_position = source.tell()
+                        if not source.read(1):
+                            next_cursor = None
+                        else:
+                            source.seek(probe_position)
 
         elapsed = time.monotonic() - started
         return iter(records), LeaseResult(

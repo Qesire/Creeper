@@ -9,11 +9,12 @@ task state is durable before network work starts.
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 import time
 
-from creeper.authority.baseline_index import YEAR_BITS, BaselineIndex
-from creeper.evidence.policies import EvidenceQueryKey, TemporalScope
+from creeper.authority.baseline_index import BaselineIndex
+from creeper.evidence.planner import EvidencePlanner
+from creeper.evidence.policies import EvidenceQueryKey
 from creeper.evidence.providers.cdx import Transport, query_year
 from creeper.records.models import HostObservation, SourceRecord
 from creeper.runtime.queues import BoundedQueues
@@ -77,12 +78,7 @@ class SyncRuntime:
         self.evidence_policy_version = evidence_policy_version
         self.owner = owner
         self.baseline_batch_size = baseline_batch_size
-
-    def _candidate_for(self, lease: WorkLease) -> LeaseCandidate:
-        for candidate in self.candidates:
-            if candidate.reservoir_id == lease.reservoir_id:
-                return candidate
-        raise KeyError(f"no candidate for lease reservoir: {lease.reservoir_id}")
+        self.evidence_planner = EvidencePlanner()
 
     def _adapter_for(self, candidate: LeaseCandidate) -> object:
         if candidate.reservoir is None:
@@ -93,96 +89,143 @@ class SyncRuntime:
             raise KeyError(f"no adapter: {candidate.reservoir.adapter_id}") from exc
 
     @staticmethod
-    def _missing_years(observation: HostObservation, annual_mask: int, evidence_store: EvidenceStore) -> tuple[int, ...]:
-        years: list[int] = []
-        local_mask = 0
-        for capsule in evidence_store.for_hostname(observation.hostname):
-            local_mask |= YEAR_BITS.get(capsule.year, 0)
-        direct_mask = observation.direct_year_mask
-        if observation.source_year in YEAR_BITS:
-            direct_mask |= YEAR_BITS[observation.source_year]
-        for year, bit in YEAR_BITS.items():
-            if direct_mask & bit and not (annual_mask | local_mask) & bit:
-                years.append(year)
-        return tuple(years)
-
-    @staticmethod
     def _put(queue, value: object) -> int:
         queue.put_nowait(value)
         return queue.qsize()
 
-    def _enqueue_observation_tasks(
-        self,
-        queues: BoundedQueues,
-        observation: HostObservation,
-        annual_mask: int,
-        provider: str,
-    ) -> tuple[int, int]:
-        """Return (enqueued, high-water) for this observation.
-
-        Credit capacity is checked before durable enqueueing, so a lease can
-        never turn a finite provider pool into an unbounded task store.
-        """
-        enqueued = high_water = 0
-        for year in self._missing_years(observation, annual_mask, self.evidence_store):
-            if queues.evidence_task_queue.full():
-                break
-            balance = self.scheduler.ledger.balance(provider)
-            if balance.available + balance.reserved < 1:
-                break
-            key = EvidenceQueryKey(
-                observation.hostname,
-                TemporalScope(year, year),
-                provider,
-                self.evidence_policy_version,
+    def _grant_fresh_lease(self, *, owner: str) -> tuple[LeaseCandidate, WorkLease] | None:
+        """Rank candidates, then atomically claim a fresh persisted lease."""
+        self.control_store.recover_expired_leases()
+        for candidate in self.scheduler.rank(self.candidates):
+            template = candidate.lease
+            if template is None:
+                raise ValueError("runtime lease candidate requires a lease template")
+            lease = self.control_store.grant_fresh_lease(
+                candidate.reservoir_id,
+                owner=owner,
+                max_records=template.max_records,
+                max_requests=template.max_requests,
+                max_bytes=template.max_bytes,
+                max_seconds=template.max_seconds,
+                resource_class=template.resource_class,
+                expected_evidence_tasks=candidate.expected_evidence_tasks,
+                expected_novel_eed=candidate.expected_novel_eed,
+                now=time.time(),
             )
-            if self.control_store.enqueue_evidence_tasks([key]):
-                self.scheduler.ledger.note_queued(provider)
-                high_water = max(high_water, self._put(queues.evidence_task_queue, key))
-                enqueued += 1
-        return enqueued, high_water
+            if lease is not None:
+                return candidate, lease
+        return None
 
     def run_once(self) -> SyncRuntimeReport:
         queues = BoundedQueues(**self.queue_capacities)
-        lease = self.scheduler.grant_next(self.candidates, owner=self.owner)
-        if lease is None:
+        granted = self._grant_fresh_lease(owner=self.owner)
+        if granted is None:
             return SyncRuntimeReport()
-        if lease.expires_at is None:
-            lease = replace(lease, expires_at=time.time() + lease.max_seconds)
-
-        candidate = self._candidate_for(lease)
+        candidate, lease = granted
         provider = candidate.evidence_provider or self.evidence_provider
-        self.control_store.save_lease(lease)
         running = lease.start()
         self.control_store.save_lease(running)
         source_records = observations = enqueued = completed = capsules = 0
         max_source = max_observations = max_evidence = max_commits = 0
-        reserved_remaining = candidate.expected_evidence_tasks if candidate.evidence_mode != "direct_year" else 0
+        direct_capsules = []
+        writer = CommitWriter(self.evidence_store, self.control_store, owner=self.owner)
+        result = None
+        ledger_queued = ledger_claimed = ledger_reserved = 0
 
         try:
             adapter = self._adapter_for(candidate)
             execute = getattr(adapter, "execute")
             extract_hosts = getattr(adapter, "extract_hosts")
-            records, _result = execute(running)
+            records, result = execute(running)
+            if result.records == 0 and result.next_cursor == running.cursor_start and result.next_cursor is not None:
+                raise RuntimeError("lease made no cursor progress")
             pending: list[HostObservation] = []
+            scheduled_keys: set[EvidenceQueryKey] = set()
+
+            def drain_evidence_tasks() -> None:
+                nonlocal completed, capsules, max_commits
+                nonlocal ledger_queued, ledger_claimed
+                keys: list[EvidenceQueryKey] = []
+                while not queues.evidence_task_queue.empty():
+                    keys.append(queues.evidence_task_queue.get_nowait())
+                if not keys:
+                    return
+                claimed = self.control_store.claim_evidence_tasks(
+                    owner=self.owner, limit=len(keys), keys=keys
+                )
+                self.scheduler.ledger.claim_evidence(provider, len(keys))
+                ledger_queued -= len(keys)
+                ledger_claimed += len(keys)
+                claimed_by_key = {task.key for task in claimed}
+                for key in keys:
+                    if key not in claimed_by_key:
+                        self.scheduler.ledger.complete_evidence(provider)
+                        ledger_claimed -= 1
+                        continue
+                    query_result = query_year(
+                        key.hostname,
+                        key.temporal_scope.year_from,
+                        self.evidence_transport,
+                        provider=key.provider,
+                        policy_version=key.policy_version,
+                    )
+                    max_commits = max(max_commits, self._put(queues.commits, query_result))
+                    queues.commits.get_nowait()
+                    writer.submit(query_result.capsule, query_result)
+                    completed += 1
+                    if query_result.capsule is not None:
+                        capsules += 1
+                    self.scheduler.ledger.complete_evidence(provider)
+                    ledger_claimed -= 1
+
+            def enqueue_external_keys(keys: Iterable[EvidenceQueryKey]) -> None:
+                nonlocal enqueued, max_evidence
+                nonlocal ledger_queued, ledger_reserved
+                remaining = [key for key in keys if key not in scheduled_keys]
+                scheduled_keys.update(remaining)
+                cursor = 0
+                while cursor < len(remaining):
+                    if queues.evidence_task_queue.full():
+                        drain_evidence_tasks()
+                    free_slots = queues.evidence_task_queue.maxsize - queues.evidence_task_queue.qsize()
+                    balance = self.scheduler.ledger.balance(provider)
+                    grant = min(len(remaining) - cursor, free_slots, balance.available)
+                    if grant < 1:
+                        raise RuntimeError("evidence credits exhausted before lease completion")
+                    chunk = remaining[cursor : cursor + grant]
+                    self.scheduler.ledger.reserve_evidence(provider, grant)
+                    ledger_reserved += grant
+                    self.control_store.enqueue_evidence_tasks(chunk)
+                    self.scheduler.ledger.note_queued(provider, grant)
+                    ledger_reserved -= grant
+                    ledger_queued += grant
+                    for key in chunk:
+                        max_evidence = max(max_evidence, self._put(queues.evidence_task_queue, key))
+                    enqueued += grant
+                    cursor += grant
 
             def resolve_pending() -> None:
-                nonlocal enqueued, max_evidence
+                nonlocal direct_capsules
                 if not pending:
                     return
                 hostnames = [observation.hostname for observation in pending]
                 resolved: dict[str, tuple[int, bool]] = {}
+                local_masks = self.evidence_store.resolve_year_masks(hostnames)
                 for batch in self.baseline.iter_resolve_batches(
                     hostnames, input_batch_size=self.baseline_batch_size
                 ):
                     resolved.update(batch)
                 for item in pending:
                     annual_mask, _candidate = resolved.get(item.hostname, (0, False))
-                    count, high_water = self._enqueue_observation_tasks(
-                        queues, item, annual_mask, provider
+                    plan = self.evidence_planner.plan(
+                        item,
+                        official_mask=annual_mask,
+                        local_mask=local_masks.get(item.hostname, 0),
+                        provider=provider,
+                        policy_version=self.evidence_policy_version,
                     )
-                    enqueued += count
-                    max_evidence = max(max_evidence, high_water)
+                    direct_capsules.extend(plan.direct_capsules)
+                    enqueue_external_keys(plan.external_keys)
                 pending.clear()
 
             for record in records:
@@ -199,43 +242,16 @@ class SyncRuntime:
                         resolve_pending()
             resolve_pending()
 
-            keys: list[EvidenceQueryKey] = []
-            while not queues.evidence_task_queue.empty():
-                keys.append(queues.evidence_task_queue.get_nowait())
-            if keys:
-                claimed = self.control_store.claim_evidence_tasks(
-                    owner=self.owner, limit=len(keys), keys=keys
-                )
-                # Every dequeued key consumes a queued credit.  Tasks skipped
-                # because another runner completed them are completed locally.
-                self.scheduler.ledger.claim_evidence(provider, len(keys))
-                claimed_by_key = {task.key: task for task in claimed}
-                writer = CommitWriter(self.evidence_store, self.control_store, owner=self.owner)
-                for key in keys:
-                    if key not in claimed_by_key:
-                        self.scheduler.ledger.complete_evidence(provider)
-                        continue
-                    result = query_year(
-                        key.hostname,
-                        key.temporal_scope.year_from,
-                        self.evidence_transport,
-                        provider=key.provider,
-                        policy_version=key.policy_version,
-                    )
-                    max_commits = max(max_commits, self._put(queues.commits, result))
-                    queues.commits.get_nowait()
-                    writer.submit(result.capsule, result)
-                    completed += 1
-                    if result.capsule is not None:
-                        capsules += 1
-                    self.scheduler.ledger.complete_evidence(provider)
-                writer.close()
-
-            if reserved_remaining:
-                balance = self.scheduler.ledger.balance(provider)
-                self.scheduler.ledger.release_evidence(provider, min(reserved_remaining, balance.reserved))
-            succeeded = running.complete()
-            self.control_store.save_lease(succeeded)
+            drain_evidence_tasks()
+            writer.close()
+            if direct_capsules:
+                capsules += self.evidence_store.put_many(direct_capsules)
+            assert result is not None
+            self.control_store.finalize_lease(
+                running,
+                next_cursor=result.next_cursor,
+                exhausted=result.next_cursor is None,
+            )
             return SyncRuntimeReport(
                 leases_succeeded=1,
                 source_records=source_records,
@@ -249,8 +265,14 @@ class SyncRuntime:
                 max_commit_queue_depth=max_commits,
             )
         except BaseException:
-            if reserved_remaining:
-                balance = self.scheduler.ledger.balance(provider)
-                self.scheduler.ledger.release_evidence(provider, min(reserved_remaining, balance.reserved))
-            self.control_store.save_lease(running.abort())
+            try:
+                writer.close()
+            finally:
+                if ledger_reserved:
+                    self.scheduler.ledger.release_evidence(provider, ledger_reserved)
+                if ledger_queued:
+                    self.scheduler.ledger.release_queued(provider, ledger_queued)
+                if ledger_claimed:
+                    self.scheduler.ledger.release_claimed(provider, ledger_claimed)
+                self.control_store.abort_lease(running)
             raise

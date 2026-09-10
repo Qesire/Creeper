@@ -108,9 +108,19 @@ def _run_once(config_path: Path) -> dict[str, int]:
             evidence_mode="discovery_only",
             state=ReservoirState.READY,
         )
+        stored_domain = control.get_domain(domain_id)
+        if stored_domain is None:
+            control.save_domain(domain)
+        else:
+            domain = stored_domain
+        stored_reservoir = control.get_reservoir(reservoir_id)
+        if stored_reservoir is None:
+            control.save_reservoir(reservoir)
+        else:
+            reservoir = stored_reservoir
         lease = WorkLease.create(
             reservoir_id=reservoir_id,
-            cursor_start=None,
+            cursor_start=reservoir.cursor,
             max_records=max_records,
             max_requests=max_requests,
             max_bytes=max_bytes,
@@ -127,8 +137,6 @@ def _run_once(config_path: Path) -> dict[str, int]:
             expected_evidence_tasks=max_records,
             evidence_provider="wayback",
         )
-        control.save_domain(domain)
-        control.save_reservoir(reservoir)
 
         def local_empty_transport(_hostname: str, _year: int):
             return [([], True)]

@@ -7,6 +7,7 @@ from pathlib import Path
 
 from creeper.authority.baseline_index import BaselineIndex
 from creeper.cli import main
+from creeper.sources.reservoirs import ReservoirState
 from creeper.storage.control_store import ControlStore
 
 
@@ -68,6 +69,25 @@ evidence_capacity = 1
                 [task.key.hostname for task in control.list_evidence_tasks()],
                 ["new.example"],
             )
+        finally:
+            control.close()
+
+    def test_second_run_once_preserves_exhausted_reservoir_progress(self):
+        root, config = self._workspace()
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(main(["run", "--once", str(config)]), 0)
+        second_output = io.StringIO()
+        with contextlib.redirect_stdout(second_output):
+            self.assertEqual(main(["run", "--once", str(config)]), 0)
+
+        second_report = json.loads(second_output.getvalue())
+        self.assertEqual(second_report["leases_succeeded"], 0)
+        self.assertEqual(second_report["source_records"], 0)
+        control = ControlStore(root / "runtime" / "control.sqlite3")
+        try:
+            reservoir = control.get_reservoir("local_dataset")
+            self.assertEqual(reservoir.state, ReservoirState.EXHAUSTED)
         finally:
             control.close()
 

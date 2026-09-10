@@ -115,6 +115,22 @@ class CreditLedger:
             raise ValueError("cannot complete more evidence than claimed")
         self._claimed[provider] -= amount
 
+    def release_queued(self, provider: str, amount: int = 1) -> None:
+        """Discard queued work after its owning lease is aborted."""
+        self._check_provider(provider)
+        self._check_amount(amount)
+        if amount > self._queued[provider]:
+            raise ValueError("cannot release more evidence than queued")
+        self._queued[provider] -= amount
+
+    def release_claimed(self, provider: str, amount: int = 1) -> None:
+        """Release claimed work after a worker fails before completion."""
+        self._check_provider(provider)
+        self._check_amount(amount)
+        if amount > self._claimed[provider]:
+            raise ValueError("cannot release more evidence than claimed")
+        self._claimed[provider] -= amount
+
     def reserve_evidence(self, provider: str, amount: int = 1) -> bool:
         self._check_provider(provider)
         self._check_amount(amount)

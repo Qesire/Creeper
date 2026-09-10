@@ -172,7 +172,13 @@ class SyncRuntimeIntegrationTests(unittest.TestCase):
             self.assertEqual(calls, [("novel.example", 1997)])
             self.assertEqual(evidence.count(), 1)
             self.assertEqual(len(adapter.leases), 1)
-            self.assertEqual(control.get_lease(lease.lease_id).state.value, "SUCCEEDED")
+            executed_lease = adapter.leases[0]
+            self.assertNotEqual(executed_lease.lease_id, lease.lease_id)
+            self.assertEqual(
+                control.get_lease(executed_lease.lease_id).state.value,
+                "SUCCEEDED",
+            )
+            self.assertIsNone(control.get_lease(lease.lease_id))
 
             evidence.close()
             control.close()
