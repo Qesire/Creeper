@@ -9,7 +9,7 @@ from creeper.evidence.policies import (
 )
 from creeper.storage.control_store import ControlStore
 from creeper.scheduler.leases import LeaseState, WorkLease
-from creeper.sources.domains import SourceDomain
+from creeper.sources.domains import DomainState, SourceDomain
 from creeper.sources.reservoirs import Reservoir, ReservoirState
 
 
@@ -123,6 +123,37 @@ class ControlStoreTests(unittest.TestCase):
             self.assertEqual(store.get_domain(domain.domain_id), domain)
             self.assertEqual(store.get_reservoir(reservoir.reservoir_id), reservoir)
             self.assertEqual(store.get_lease(lease.lease_id), lease)
+            store.close()
+
+    def test_restores_non_initial_domain_and_reservoir_states(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ControlStore(Path(tmp) / "control.sqlite3")
+            productive = self._domain().transition(DomainState.EXPLORING).transition(
+                DomainState.PRODUCTIVE
+            )
+            ready = self._reservoir().transition(ReservoirState.QUALIFYING).transition(
+                ReservoirState.READY
+            )
+            store.save_domain(self._domain())
+            store.save_reservoir(self._reservoir())
+            store.connection.execute(
+                "UPDATE source_domains SET state = ? WHERE domain_id = ?",
+                (productive.state.value, productive.domain_id),
+            )
+            store.connection.execute(
+                "UPDATE reservoirs SET state = ? WHERE reservoir_id = ?",
+                (ready.state.value, ready.reservoir_id),
+            )
+            store.connection.commit()
+
+            self.assertEqual(
+                store.get_domain(productive.domain_id).state,
+                DomainState.PRODUCTIVE,
+            )
+            self.assertEqual(
+                store.get_reservoir(ready.reservoir_id).state,
+                ReservoirState.READY,
+            )
             store.close()
 
     def test_running_requires_granted_lease_and_recovery_expires_only_active(self):

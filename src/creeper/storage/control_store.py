@@ -369,10 +369,7 @@ class ControlStore:
             family=row["family"],
             discovery_mechanism=row["discovery_mechanism"],
             temporal_scope=(row["temporal_from"], row["temporal_to"]),
-        ).transition(row["state"]) if row["state"] != DomainState.UNEXPLORED else SourceDomain(
-            domain_id=row["domain_id"], family=row["family"],
-            discovery_mechanism=row["discovery_mechanism"],
-            temporal_scope=(row["temporal_from"], row["temporal_to"]),
+            state=DomainState(row["state"]),
         )
 
     def save_reservoir(self, reservoir: Any) -> None:
@@ -416,16 +413,14 @@ class ControlStore:
         if row is None:
             return None
         _, Reservoir, ReservoirState, _ = self._runtime_types()
-        reservoir = Reservoir(
+        return Reservoir(
             reservoir_id=row["reservoir_id"], domain_id=row["domain_id"],
             adapter_id=row["adapter_id"], root_locator=row["root_locator"],
             enumeration_kind=row["enumeration_kind"],
             capacity_lower=row["capacity_lower"], capacity_upper=row["capacity_upper"],
             cursor=row["cursor"], evidence_mode=row["evidence_mode"],
+            state=ReservoirState(row["state"]),
         )
-        if row["state"] != getattr(ReservoirState, "DISCOVERED").value:
-            reservoir = reservoir.transition(row["state"])
-        return reservoir
 
     def save_lease(self, lease: Any) -> None:
         from creeper.scheduler.leases import LeaseState
