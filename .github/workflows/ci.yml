@@ -2,20 +2,21 @@ name: CI
 
 on:
   push:
+  pull_request:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  lock-probe:
-    name: Resolve selectolax lock
+  test:
+    name: Python 3.12
     runs-on: ubuntu-latest
+    env:
+      CREEPER_NETWORK_TESTS: "0"
 
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
-        with:
-          ref: probe/selectolax-lock
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -24,18 +25,17 @@ jobs:
 
       - name: Set up uv
         uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
 
-      - name: Resolve lockfile
-        run: uv lock
+      - name: Sync locked environment
+        run: uv sync --all-groups --locked
 
-      - name: Commit generated lockfile when changed
-        run: |
-          if git diff --quiet -- uv.lock; then
-            echo "uv.lock already current"
-            exit 0
-          fi
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add uv.lock
-          git commit -m "build: refresh selectolax uv lock"
-          git push origin HEAD:probe/selectolax-lock
+      - name: Run offline test suite
+        run: uv run python -m unittest discover -s tests -v
+
+      - name: Build package
+        run: uv build
+
+      - name: Check patch whitespace
+        run: git diff --check
