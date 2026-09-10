@@ -36,6 +36,7 @@ class CoordinatorConfig:
     scout_parallelism: int = 4
     search_parallelism: int = 3
     failure_retry_seconds: float = 30.0
+    search_cooldown_seconds: float = 30.0
 
 
 @dataclass(frozen=True)
@@ -94,10 +95,17 @@ def _positive_int(value: Any, *, name: str) -> int:
     return value
 
 
-def _positive_float(value: Any, *, name: str) -> float:
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
-        raise ValueError(f"{name} must be a positive number")
+def _nonnegative_float(value: Any, *, name: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
+        raise ValueError(f"{name} must be a non-negative number")
     return float(value)
+
+
+def _positive_float(value: Any, *, name: str) -> float:
+    value = _nonnegative_float(value, name=name)
+    if value <= 0:
+        raise ValueError(f"{name} must be a positive number")
+    return value
 
 
 def _unit_float(value: Any, *, name: str) -> float:
@@ -165,6 +173,10 @@ def load_source_discovery_config(config_path: Path) -> SourceDiscoveryServiceCon
         failure_retry_seconds=_positive_float(
             coordinator_raw.get("failure_retry_seconds", 30.0),
             name="coordinator.failure_retry_seconds",
+        ),
+        search_cooldown_seconds=_nonnegative_float(
+            coordinator_raw.get("search_cooldown_seconds", 30.0),
+            name="coordinator.search_cooldown_seconds",
         ),
     )
 
@@ -287,7 +299,11 @@ async def run_source_discovery_cycles(
     control = ControlStore(root / "control.sqlite3")
     try:
         registry = SourceDiscoveryRegistry(control)
-        manager = SourceReservoirManager(registry, targets=config.pool)
+        manager = SourceReservoirManager(
+            registry,
+            targets=config.pool,
+            search_cooldown_seconds=config.coordinator.search_cooldown_seconds,
+        )
         limits = httpx.Limits(
             max_connections=max(4, config.coordinator.triage_parallelism * 2),
             max_keepalive_connections=max(2, config.coordinator.triage_parallelism),
