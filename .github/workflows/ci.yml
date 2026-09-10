@@ -23,9 +23,13 @@ jobs:
       - name: Set up uv
         uses: astral-sh/setup-uv@v5
 
-      - name: Resolve and print lockfile
-        run: |
-          uv lock
-          echo '===== UV_LOCK_BEGIN ====='
-          cat uv.lock
-          echo '===== UV_LOCK_END ====='
+      - name: Resolve lockfile
+        run: uv lock
+
+      - name: Upload generated lockfile
+        uses: actions/upload-artifact@v4
+        with:
+          name: selectolax-uv-lock
+          path: uv.lock
+          if-no-files-found: error
+          retention-days: 1
