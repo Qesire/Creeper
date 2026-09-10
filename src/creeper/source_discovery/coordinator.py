@@ -112,6 +112,7 @@ class CoordinatorCycleReport:
     search_candidates_registered: int = 0
     search_candidates_dropped: int = 0
     search_failures: int = 0
+    search_backoff_skipped: int = 0
 
 
 T = TypeVar("T")
@@ -173,6 +174,7 @@ class SourceDiscoveryCoordinator:
         scout_parallelism: int | None = None,
         search_parallelism: int = 3,
         failure_retry_seconds: float = 30.0,
+        retry_clock=time.monotonic,
     ) -> None:
         if triage_parallelism < 1 or search_parallelism < 1:
             raise ValueError("coordinator parallelism must be positive")
@@ -192,7 +194,9 @@ class SourceDiscoveryCoordinator:
         self.scout_parallelism = min(scout_parallelism, manager.targets.scout_parallelism)
         self.search_parallelism = search_parallelism
         self.failure_retry_seconds = float(failure_retry_seconds)
+        self.retry_clock = retry_clock
         self._startup_recovered = False
+        self._search_retry_deadlines: dict[str, float] = {}
 
     @staticmethod
     def _failure_reason(stage: str, error: Exception) -> str:
@@ -221,6 +225,27 @@ class SourceDiscoveryCoordinator:
                 return await _capture(executor(item))
 
         return await asyncio.gather(*(one(item) for item in items))
+
+    def _eligible_search_directives(
+        self,
+        directives: tuple[SearchDirective, ...],
+    ) -> tuple[tuple[SearchDirective, ...], int]:
+        now = float(self.retry_clock())
+        # Expired entries are deleted so a long-lived process does not accumulate
+        # one key for every historical family-specific search.
+        self._search_retry_deadlines = {
+            key: deadline
+            for key, deadline in self._search_retry_deadlines.items()
+            if deadline > now
+        }
+        eligible: list[SearchDirective] = []
+        skipped = 0
+        for directive in directives:
+            if self._search_retry_deadlines.get(directive.dedup_key, 0.0) > now:
+                skipped += 1
+            else:
+                eligible.append(directive)
+        return tuple(eligible), skipped
 
     def _claim_scouts(self, source_keys: tuple[str, ...]) -> list[SourceCandidate]:
         claimed: list[SourceCandidate] = []
@@ -346,10 +371,18 @@ class SourceDiscoveryCoordinator:
         outcomes: list[_Outcome[SearchBatch]],
         counts: dict[str, int],
     ) -> None:
+        now = float(self.retry_clock())
         for directive, outcome in zip(directives, outcomes, strict=True):
             if outcome.error is not None:
+                self._search_retry_deadlines[directive.dedup_key] = (
+                    now + self.failure_retry_seconds
+                )
                 counts["search_failures"] += 1
                 continue
+            # A successful provider invocation, including an empty result, clears
+            # transient failure state. Durable strategy cooldown is recorded by
+            # the completed search episode below.
+            self._search_retry_deadlines.pop(directive.dedup_key, None)
             batch = outcome.value
             assert batch is not None
             cost = (
@@ -402,6 +435,9 @@ class SourceDiscoveryCoordinator:
                 self._startup_recovered = True
 
             plan = self.manager.plan()
+            search_directives, search_backoff_skipped = self._eligible_search_directives(
+                plan.search_directives
+            )
             counts = {
                 "recovered_scouts": recovered,
                 "activated": 0,
@@ -420,6 +456,7 @@ class SourceDiscoveryCoordinator:
                 "search_candidates_registered": 0,
                 "search_candidates_dropped": 0,
                 "search_failures": 0,
+                "search_backoff_skipped": search_backoff_skipped,
             }
 
             for source_key in plan.activate_source_keys:
@@ -450,7 +487,7 @@ class SourceDiscoveryCoordinator:
                 self.scout_parallelism,
             )
             search_task = self._bounded_batch(
-                plan.search_directives,
+                search_directives,
                 self.search_executor,
                 self.search_parallelism,
             )
@@ -464,6 +501,6 @@ class SourceDiscoveryCoordinator:
             # the sqlite3 connection thread-confined while external I/O remains concurrent.
             self._commit_triage(triage_candidates, triage_outcomes, counts)
             self._commit_scouts(scout_candidates, scout_outcomes, counts)
-            self._commit_searches(plan.search_directives, search_outcomes, counts)
+            self._commit_searches(search_directives, search_outcomes, counts)
 
             return CoordinatorCycleReport(**counts)
