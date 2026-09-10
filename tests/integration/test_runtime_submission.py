@@ -211,7 +211,7 @@ class RuntimeSubmissionIntegrationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             task_root = root / "task"
-            baseline_dir = task_root / "next-baseline"
+            baseline_dir = task_root / "merged260909-3"
             baseline_dir.mkdir(parents=True)
             for year in range(1996, 2002):
                 (baseline_dir / f"{year}.txt").write_text("", encoding="utf-8")
