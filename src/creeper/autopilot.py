@@ -64,6 +64,7 @@ class ReadinessServicePolicy:
     poll_seconds: float = 30.0
 
 
+@dataclass(frozen=True)
 class AutopilotConfig:
     source_discovery_config: Path
     source_producer_config: Path
