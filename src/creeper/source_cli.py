@@ -255,17 +255,8 @@ def run_once(config_path: Path, *, owner: str) -> dict[str, object]:
     limits = config.get("limits")
     if not isinstance(limits, dict):
         raise ValueError("limits table is required")
-    runtime_root = _path(
-        config.get("runtime_data_root"),
-        config_path=config_path,
-        name="runtime_data_root",
-    )
 
-    telemetry = RuntimeTelemetryStore(runtime_root / "telemetry.sqlite3")
-    try:
-        observer = lambda report: _record_source_telemetry(telemetry, report)
-
-        if config.get("source_mode", "static") == "activated":
+    if config.get("source_mode", "static") == "activated":
         return _run_activated_once(config_path, config=config, limits=limits, owner=owner)
 
     backlog_capacity = _positive_int(
