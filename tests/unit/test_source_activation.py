@@ -145,6 +145,30 @@ class SourceActivationCompilerTests(unittest.TestCase):
             finally:
                 control.close()
 
+    def test_exhausted_reservoir_releases_active_discovery_slot(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            control = ControlStore(Path(tmp) / "control.sqlite3")
+            try:
+                candidate = _candidate("https://archive.example/exhausted.cdxj")
+                registry = self._registry(control, candidate)
+                spec = SourceActivationCompiler(control, registry=registry).compile(candidate)
+                control.connection.execute(
+                    "UPDATE reservoirs SET state = ? WHERE reservoir_id = ?",
+                    ("EXHAUSTED", spec.reservoir_id),
+                )
+                control.connection.commit()
+
+                changed = registry.reconcile_exhausted_activations()
+
+                self.assertEqual(changed, 1)
+                self.assertEqual(
+                    registry.get_candidate(candidate.source_key).state,
+                    SourceState.EXHAUSTED,
+                )
+                self.assertEqual(registry.reconcile_exhausted_activations(), 0)
+            finally:
+                control.close()
+
     def test_compile_active_discovers_registered_active_candidates(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             control = ControlStore(Path(tmp) / "control.sqlite3")
