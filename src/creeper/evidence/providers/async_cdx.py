@@ -239,9 +239,14 @@ class AsyncWaybackCDXClient:
         hostname: str,
         year_from: int,
         year_to: int,
+        *,
+        page_limit: int | None = None,
     ) -> AsyncIterator[Page]:
         if not 1996 <= year_from <= year_to <= 2001:
             raise ValueError("year range must be within 1996-2001")
+        effective_limit = self.limit if page_limit is None else int(page_limit)
+        if effective_limit < 1:
+            raise ValueError("page_limit must be positive")
         query = {
             "url": f"http://{hostname}/",
             "matchType": "host",
@@ -257,7 +262,7 @@ class AsyncWaybackCDXClient:
             "filter": "statuscode:[23][0-9][0-9]",
             "gzip": "false",
             "showResumeKey": "true",
-            "limit": str(self.limit),
+            "limit": str(effective_limit),
         }
         resume_key: str | None = None
         while True:
@@ -432,7 +437,12 @@ class AsyncWaybackCDXClient:
         pages_seen = records_seen = 0
         last_page_complete: bool | None = None
         try:
-            async for page, complete in self.iter_range_pages(hostname, year, year):
+            async for page, complete in self.iter_range_pages(
+                hostname,
+                year,
+                year,
+                page_limit=1,
+            ):
                 pages_seen += 1
                 last_page_complete = complete
                 for row in page:
