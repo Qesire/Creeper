@@ -139,14 +139,14 @@ class AsyncEvidenceWorker:
         async with semaphore:
             async with host_lock:
                 try:
-                scope = task.key.temporal_scope
-                if scope.year_from != scope.year_to:
-                    query_range = getattr(provider, "query_range", None)
-                    if query_range is None:
-                        raise ValueError(
-                            f"provider {task.key.provider!r} does not support range probes"
-                        )
-                    return await query_range(task.key)
+                    scope = task.key.temporal_scope
+                    if scope.year_from != scope.year_to:
+                        query_range = getattr(provider, "query_range", None)
+                        if query_range is None:
+                            raise ValueError(
+                                f"provider {task.key.provider!r} does not support range probes"
+                            )
+                        return await query_range(task.key)
                     return await provider.query_key(task.key)
                 except asyncio.CancelledError:
                     raise
