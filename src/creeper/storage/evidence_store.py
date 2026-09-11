@@ -132,7 +132,10 @@ class EvidenceStore:
                 """
             )
             self.connection.execute(
-                "INSERT INTO evidence_store_meta(key, value) VALUES (?, ?)",
+                """
+                INSERT OR IGNORE INTO evidence_store_meta(key, value)
+                VALUES (?, ?)
+                """,
                 ("host-year-index-v1", "complete"),
             )
         self.connection.commit()
