@@ -267,8 +267,19 @@ class SourceReservoirManager:
         return tuple(directives)
 
     def plan(self) -> ReservoirPlan:
-        all_candidates = self.registry.list_candidates()
-        candidates = self._usable(all_candidates)
+        # Terminal historical rows are audit state, not scheduling inventory.
+        # Keep the hot planner proportional to the live reservoir pool.
+        schedulable_states = (
+            SourceState.DISCOVERED,
+            SourceState.TRIAGED,
+            SourceState.SCOUT_READY,
+            SourceState.SCOUTING,
+            SourceState.WARM,
+            SourceState.ACTIVE,
+        )
+        candidates = self._usable(
+            self.registry.list_candidates_in_states(schedulable_states)
+        )
         by_state: dict[SourceState, list[SourceCandidate]] = {
             state: [] for state in SourceState
         }
