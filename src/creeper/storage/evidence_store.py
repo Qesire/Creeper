@@ -117,28 +117,36 @@ class EvidenceStore:
             ) WITHOUT ROWID;
             """
         )
-        indexed = self.connection.execute(
-            "SELECT 1 FROM evidence_store_meta WHERE key = ?",
-            ("host-year-index-v1",),
-        ).fetchone()
-        if indexed is None:
-            self.connection.execute(
-                """
-                INSERT OR IGNORE INTO evidence_host_years(hostname, year)
-                SELECT hostname, year
-                FROM evidence_capsules
-                GROUP BY hostname, year
-                ORDER BY hostname, year
-                """
-            )
-            self.connection.execute(
-                """
-                INSERT OR IGNORE INTO evidence_store_meta(key, value)
-                VALUES (?, ?)
-                """,
-                ("host-year-index-v1", "complete"),
-            )
-        self.connection.commit()
+        # Serialize the one-time backfill across independently started
+        # producer/evidence/readiness processes. Without this transaction, all
+        # three can observe a missing marker and scan the full capsule table.
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            indexed = self.connection.execute(
+                "SELECT 1 FROM evidence_store_meta WHERE key = ?",
+                ("host-year-index-v1",),
+            ).fetchone()
+            if indexed is None:
+                self.connection.execute(
+                    """
+                    INSERT OR IGNORE INTO evidence_host_years(hostname, year)
+                    SELECT hostname, year
+                    FROM evidence_capsules
+                    GROUP BY hostname, year
+                    ORDER BY hostname, year
+                    """
+                )
+                self.connection.execute(
+                    """
+                    INSERT INTO evidence_store_meta(key, value)
+                    VALUES (?, ?)
+                    """,
+                    ("host-year-index-v1", "complete"),
+                )
+            self.connection.commit()
+        except BaseException:
+            self.connection.rollback()
+            raise
 
     def put(self, capsule: EvidenceCapsule) -> None:
         self.put_many([capsule])
