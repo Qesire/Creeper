@@ -240,7 +240,7 @@ def main(argv: list[str] | None = None) -> int:
         "--endpoint",
         default="https://web.archive.org/cdx/search/cdx",
     )
-    parser.add_argument("--claim-batch-size", type=int, default=16)
+    parser.add_argument("--claim-batch-size", type=int, default=64)
     parser.add_argument("--lease-seconds", type=float, default=300.0)
     parser.add_argument("--max-inflight", type=int, default=4)
     parser.add_argument("--requests-per-second", type=float, default=0.5)
