@@ -3,6 +3,7 @@ import unittest
 from dataclasses import replace
 from pathlib import Path
 
+from creeper.authority.baseline_index import YEAR_BITS
 from creeper.evidence.policies import (
     CDXQueryState,
     EvidenceQueryKey,
@@ -456,6 +457,42 @@ class ControlStoreTests(unittest.TestCase):
             task = store.get_evidence_task(key)
             self.assertEqual(task.state, CDXQueryState.TRANSIENT_ERROR)
             self.assertEqual(task.retry_at, 123.5)
+            store.close()
+
+    def test_completed_provider_ranges_are_reused_as_coverage_masks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ControlStore(Path(tmp) / "control.sqlite3")
+            range_key = EvidenceQueryKey(
+                "example.com", TemporalScope(1996, 1998), "wayback", "v1"
+            )
+            invalid_key = EvidenceQueryKey(
+                "invalid.example", TemporalScope(1996, 1998), "wayback", "v1"
+            )
+            store.enqueue_evidence_tasks([range_key, invalid_key])
+            claimed = store.claim_evidence_tasks(owner="worker-1", limit=2)
+            self.assertEqual(len(claimed), 2)
+            store.finish_range_task(
+                range_key,
+                CDXQueryState.PASS,
+                owner="worker-1",
+            )
+            store.finish_range_task(
+                invalid_key,
+                CDXQueryState.INVALID,
+                owner="worker-1",
+            )
+
+            masks = store.resolve_provider_coverage_masks(
+                ["example.com", "invalid.example"],
+                provider="wayback",
+                policy_version="v1",
+            )
+
+            self.assertEqual(
+                masks["example.com"],
+                YEAR_BITS[1996] | YEAR_BITS[1997] | YEAR_BITS[1998],
+            )
+            self.assertEqual(masks["invalid.example"], 0)
             store.close()
 
     def test_finish_range_task_atomically_fans_out_exact_followups(self):
