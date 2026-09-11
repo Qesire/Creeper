@@ -40,6 +40,7 @@ class EvidencePlanner:
         provider: str,
         policy_version: str,
         allow_direct: bool = False,
+        external_covered_mask: int = 0,
     ) -> EvidencePlan:
         hostname = normalize_official(observation.hostname)
         if hostname is None:
@@ -59,6 +60,7 @@ class EvidencePlanner:
             hint_mask |= claimed_direct_mask
         hint_mask &= ~suppressed_mask
         hint_mask &= ~direct_mask
+        hint_mask &= ~external_covered_mask
 
         direct_capsules = tuple(
             self._direct_capsule(observation, hostname, year, policy_version)
