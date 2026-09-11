@@ -573,6 +573,14 @@ def _watch_loop(
             continue
         if stop_event.is_set():
             break
+        if report["admission_blocked"]:
+            # Backpressure is a temporary capacity condition, not source idle.
+            # Poll at the short cadence so newly terminal evidence slots are
+            # refilled promptly instead of waiting through a 60-second
+            # exponential idle backoff.
+            sleep_fn(float(idle_backoff_seconds))
+            idle = float(idle_backoff_seconds)
+            continue
         sleep_fn(idle)
         idle = min(float(max_idle_backoff_seconds), idle * 2.0)
     return total
