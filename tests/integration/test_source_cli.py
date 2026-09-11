@@ -68,6 +68,50 @@ class SourceProducerCliTests(unittest.TestCase):
         self.assertEqual(result["source_records"], 2)
         self.assertTrue(result["admission_blocked"])
 
+    def test_admission_backpressure_uses_short_fixed_poll(self):
+        stop = Event()
+        sleeps: list[float] = []
+        blocked = {
+            "leases_succeeded": 0,
+            "source_records": 0,
+            "observations": 0,
+            "evidence_tasks_enqueued": 0,
+            "direct_capsules_committed": 0,
+            "admission_blocked": True,
+            "max_source_record_queue_depth": 0,
+            "max_observation_queue_depth": 0,
+        }
+
+        def sleep(seconds):
+            sleeps.append(seconds)
+            if len(sleeps) >= 3:
+                stop.set()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / "watch.toml"
+            config.write_text(
+                "\n".join(
+                    [
+                        'source_mode = "static"',
+                        "",
+                        "[limits]",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            with patch("creeper.source_cli.run_once", return_value=blocked):
+                result = run_watch(
+                    config,
+                    owner="backpressure-poll-test",
+                    stop_event=stop,
+                    idle_backoff_seconds=1.0,
+                    max_idle_backoff_seconds=60.0,
+                    sleep_fn=sleep,
+                )
+
+        self.assertEqual(sleeps, [1.0, 1.0, 1.0])
+        self.assertTrue(result["admission_blocked"])
+
     def test_static_watch_reuses_one_persistent_runtime(self):
         stop = Event()
         reports = iter(
