@@ -54,6 +54,7 @@ class EvidenceServicePolicy:
     requests_per_second: float = 0.5
     max_connections: int = 8
     max_keepalive_connections: int = 4
+    keepalive_expiry_seconds: float = 30.0
     throttle_floor_seconds: float = 2.0
     timeout: float = 30.0
     max_retries: int = 3
@@ -276,6 +277,13 @@ def load_autopilot_config(config_path: Path) -> AutopilotConfig:
             ),
             name="evidence.max_keepalive_connections",
         ),
+        keepalive_expiry_seconds=_positive_float(
+            ev_raw.get(
+                "keepalive_expiry_seconds",
+                ev_default.keepalive_expiry_seconds,
+            ),
+            name="evidence.keepalive_expiry_seconds",
+        ),
         throttle_floor_seconds=_nonnegative_float(
             ev_raw.get(
                 "throttle_floor_seconds",
@@ -471,6 +479,8 @@ def build_child_specs(config: AutopilotConfig) -> tuple[ChildSpec, ...]:
                 str(evidence.max_connections),
                 "--max-keepalive-connections",
                 str(evidence.max_keepalive_connections),
+                "--keepalive-expiry-seconds",
+                str(evidence.keepalive_expiry_seconds),
                 "--throttle-floor-seconds",
                 str(evidence.throttle_floor_seconds),
                 "--timeout",
