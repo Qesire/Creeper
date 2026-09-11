@@ -67,6 +67,7 @@ class AsyncWaybackCDXClient:
         requests_per_second: float = 0.0,
         max_connections: int = 16,
         max_keepalive_connections: int = 8,
+        keepalive_expiry_seconds: float = 30.0,
         throttle_floor_seconds: float = 2.0,
         user_agent: str = "Creeper/2.2 (research; https://github.com/Qesire/Creeper)",
         client: httpx.AsyncClient | None = None,
@@ -82,6 +83,7 @@ class AsyncWaybackCDXClient:
             or max_connections < 1
             or max_keepalive_connections < 0
             or max_keepalive_connections > max_connections
+            or keepalive_expiry_seconds <= 0
             or throttle_floor_seconds < 0
         ):
             raise ValueError("invalid async CDX client limits")
@@ -120,6 +122,7 @@ class AsyncWaybackCDXClient:
             limits=httpx.Limits(
                 max_connections=max_connections,
                 max_keepalive_connections=max_keepalive_connections,
+                keepalive_expiry=keepalive_expiry_seconds,
             ),
             headers={
                 "User-Agent": user_agent,
@@ -301,6 +304,12 @@ class AsyncWaybackCDXClient:
             "showResumeKey": "true",
             "limit": str(effective_limit),
         }
+        if year_from != year_to:
+            # A range probe needs only one accepted capture per year. CDX
+            # collapsing preserves the first row of each adjacent year run,
+            # sharply reducing dense same-year capture streams without losing
+            # year-existence evidence.
+            query["collapse"] = "timestamp:4"
         resume_key: str | None = None
         while True:
             params = dict(query)
@@ -410,6 +419,25 @@ class AsyncWaybackCDXClient:
                         page_no=pages_seen,
                         record_no=records_seen,
                         extraction_method="cdx_query_range",
+                    )
+                expected_years = scope.year_to - scope.year_from + 1
+                if len(capsules_by_year) == expected_years:
+                    # Every year in scope is already positively proven. There
+                    # are no absent years left that require exhaustive
+                    # pagination, so finishing the CDX scan cannot change the
+                    # competition result.
+                    complete_years = tuple(range(scope.year_from, scope.year_to + 1))
+                    return RangeEvidenceQueryResult(
+                        hostname=key.hostname,
+                        key=key,
+                        state=CDXQueryState.PASS,
+                        candidate_years=complete_years,
+                        capsules=tuple(
+                            capsules_by_year[year] for year in complete_years
+                        ),
+                        pages_seen=pages_seen,
+                        records_seen=records_seen,
+                        error=None,
                     )
             complete_years = (
                 tuple(sorted(capsules_by_year))

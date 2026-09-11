@@ -66,6 +66,8 @@ class AutopilotTests(unittest.TestCase):
         self.assertIn("--max-connections", evidence)
         self.assertIn("8", evidence)
         self.assertIn("--max-keepalive-connections", evidence)
+        self.assertIn("--keepalive-expiry-seconds", evidence)
+        self.assertIn("30.0", evidence)
         self.assertIn("--requests-per-second", evidence)
         self.assertIn("0.5", evidence)
 
