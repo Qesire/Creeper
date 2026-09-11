@@ -7,8 +7,11 @@ retains only the competition-specific exact-host/exact-year acceptance rules.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from collections.abc import AsyncIterator
 
 import httpx
@@ -64,7 +67,8 @@ class AsyncWaybackCDXClient:
         requests_per_second: float = 0.0,
         max_connections: int = 16,
         max_keepalive_connections: int = 8,
-        user_agent: str = "Creeper/2.2 (research; contact administrator)",
+        throttle_floor_seconds: float = 2.0,
+        user_agent: str = "Creeper/2.2 (research; https://github.com/Qesire/Creeper)",
         client: httpx.AsyncClient | None = None,
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
@@ -78,6 +82,7 @@ class AsyncWaybackCDXClient:
             or max_connections < 1
             or max_keepalive_connections < 0
             or max_keepalive_connections > max_connections
+            or throttle_floor_seconds < 0
         ):
             raise ValueError("invalid async CDX client limits")
         if client is not None and transport is not None:
@@ -88,7 +93,11 @@ class AsyncWaybackCDXClient:
         self.max_retries = max_retries
         self.backoff = backoff
         self.max_backoff = max_backoff
+        self.throttle_floor_seconds = float(throttle_floor_seconds)
         self.http_requests = 0
+        self.throttle_responses = 0
+        self._cooldown_until = 0.0
+        self._cooldown_lock = asyncio.Lock()
         if requests_per_second > 0:
             # aiolimiter.acquire() always requests one token, so a sub-one
             # rate cannot be represented as ``max_rate < 1``. Use a longer
@@ -141,6 +150,61 @@ class AsyncWaybackCDXClient:
             max=max(self.backoff, self.max_backoff),
         )
 
+    @staticmethod
+    def _retry_after_seconds(response: httpx.Response) -> float | None:
+        """Parse Retry-After as delta-seconds or an HTTP date."""
+        raw = response.headers.get("Retry-After")
+        if raw is None:
+            return None
+        value = raw.strip()
+        if not value:
+            return None
+        try:
+            return max(0.0, float(value))
+        except ValueError:
+            pass
+        try:
+            target = parsedate_to_datetime(value)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if target.tzinfo is None:
+            target = target.replace(tzinfo=timezone.utc)
+        return max(
+            0.0,
+            (target.astimezone(timezone.utc) - datetime.now(timezone.utc)).total_seconds(),
+        )
+
+    async def _extend_cooldown(self, seconds: float) -> None:
+        """Extend one provider-wide monotonic cooldown shared by all coroutines."""
+        if seconds <= 0:
+            return
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + float(seconds)
+        async with self._cooldown_lock:
+            self._cooldown_until = max(self._cooldown_until, deadline)
+
+    async def _wait_for_cooldown(self) -> None:
+        """Wait until provider-wide throttling has expired.
+
+        This is deliberately shared across requests. A single 429/503 therefore
+        slows every coroutine instead of allowing the rest of the batch to keep
+        hammering the same CDX endpoint.
+        """
+        loop = asyncio.get_running_loop()
+        while True:
+            async with self._cooldown_lock:
+                remaining = self._cooldown_until - loop.time()
+            if remaining <= 0:
+                return
+            await asyncio.sleep(remaining)
+
+    async def _register_throttle(self, response: httpx.Response) -> None:
+        self.throttle_responses += 1
+        delay = self._retry_after_seconds(response)
+        if delay is None:
+            delay = max(self.throttle_floor_seconds, self.backoff)
+        await self._extend_cooldown(delay)
+
     async def _get(self, params: dict[str, str]) -> httpx.Response:
         retrying = AsyncRetrying(
             stop=stop_after_attempt(self.max_retries + 1),
@@ -150,14 +214,21 @@ class AsyncWaybackCDXClient:
         )
         async for attempt in retrying:
             with attempt:
+                await self._wait_for_cooldown()
                 if self._limiter is None:
                     self.http_requests += 1
                     response = await self.client.get(self.endpoint, params=params)
                 else:
                     async with self._limiter:
+                        # Cooldown may have been extended while this coroutine
+                        # was waiting for a rate token.
+                        await self._wait_for_cooldown()
                         self.http_requests += 1
                         response = await self.client.get(self.endpoint, params=params)
-                if response.status_code == 429 or response.status_code >= 500:
+                if response.status_code == 429 or response.status_code == 503:
+                    await self._register_throttle(response)
+                    response.raise_for_status()
+                if response.status_code >= 500:
                     response.raise_for_status()
                 if response.status_code >= 400:
                     raise ValueError(
