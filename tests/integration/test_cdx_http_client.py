@@ -2,6 +2,7 @@ import gzip
 import json
 import unittest
 from urllib.error import HTTPError
+from urllib.parse import parse_qs, urlsplit
 
 from creeper.evidence.policies import CDXQueryState
 from creeper.evidence.providers.cdx import WaybackCDXClient, query_year
@@ -19,8 +20,11 @@ class WaybackCDXClientTests(unittest.TestCase):
         pages = list(client.query_range("example.com", 1996, 1998))
 
         self.assertEqual(pages, [([], True)])
-        self.assertIn("from=19960101000000", urls[0])
-        self.assertIn("to=19981231235959", urls[0])
+        query = parse_qs(urlsplit(urls[0]).query)
+        self.assertEqual(query["from"], ["19960101000000"])
+        self.assertEqual(query["to"], ["19981231235959"])
+        self.assertIn("urlkey", query["fl"][0].split(","))
+        self.assertEqual(query["filter"], ["statuscode:[23][0-9][0-9]"])
 
     def test_empty_resume_key_page_followed_by_complete_empty_page_is_exhaustive(self):
         responses = [
