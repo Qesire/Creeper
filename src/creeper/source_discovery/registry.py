@@ -484,6 +484,21 @@ class SourceDiscoveryRegistry:
             changed += 1
         return changed
 
+    def list_candidates_in_states(
+        self,
+        states: Iterable[SourceState],
+    ) -> list[SourceCandidate]:
+        """Read only scheduling-relevant source states from the hot path."""
+        values = tuple(dict.fromkeys(SourceState(state).value for state in states))
+        if not values:
+            return []
+        placeholders = ",".join("?" for _ in values)
+        rows = self.connection.execute(
+            f"SELECT * FROM source_candidates WHERE state IN ({placeholders})",
+            values,
+        ).fetchall()
+        return [self._candidate_from_row(row) for row in rows]
+
     def inventory(self) -> dict[SourceState, int]:
         result = {state: 0 for state in SourceState}
         for row in self.connection.execute(
