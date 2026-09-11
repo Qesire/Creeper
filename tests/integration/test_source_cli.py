@@ -42,13 +42,25 @@ class SourceProducerCliTests(unittest.TestCase):
         def fake_once(config, *, owner):
             return next(reports)
 
-        with patch("creeper.source_cli.run_once", side_effect=fake_once):
-            result = run_watch(
-                Path("unused.toml"),
-                owner="test",
-                stop_event=stop,
-                sleep_fn=lambda _: stop.set(),
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / "watch.toml"
+            config.write_text(
+                "\n".join(
+                    [
+                        'source_mode = "static"',
+                        "",
+                        "[limits]",
+                    ]
+                ),
+                encoding="utf-8",
             )
+            with patch("creeper.source_cli.run_once", side_effect=fake_once):
+                result = run_watch(
+                    config,
+                    owner="test",
+                    stop_event=stop,
+                    sleep_fn=lambda _: stop.set(),
+                )
 
         self.assertEqual(result["leases_succeeded"], 1)
         self.assertEqual(result["source_records"], 2)
