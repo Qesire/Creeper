@@ -62,7 +62,10 @@ class AutopilotTests(unittest.TestCase):
         )
         evidence = specs[2].argv
         self.assertIn("--max-inflight", evidence)
-        self.assertIn("2", evidence)
+        self.assertIn("4", evidence)
+        self.assertIn("--max-connections", evidence)
+        self.assertIn("8", evidence)
+        self.assertIn("--max-keepalive-connections", evidence)
         self.assertIn("--requests-per-second", evidence)
         self.assertIn("0.5", evidence)
 
