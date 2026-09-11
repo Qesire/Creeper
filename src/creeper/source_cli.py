@@ -158,6 +158,10 @@ class ActivatedSourceRuntime:
     def refresh_workset(self) -> int:
         candidates: list[LeaseCandidate] = []
         adapters: dict[str, object] = {}
+        wayback_headroom = self.producer.admission.available_capacity(
+            provider="wayback",
+            capacity=self.backlog_capacity,
+        )
         for spec in self.compiler.compile_active():
             reservoir = self.control.get_reservoir(spec.reservoir_id)
             if reservoir is None:
@@ -171,16 +175,25 @@ class ActivatedSourceRuntime:
                 adapter = ProductionAdapterFactory.open(reservoir)
                 self.adapter_cache[reservoir.adapter_id] = adapter
             adapters[reservoir.adapter_id] = adapter
-            expected_tasks = (
-                self.max_records
-                if reservoir.evidence_mode != "direct_year"
-                else 0
-            )
+            if reservoir.evidence_mode == "direct_year":
+                lease_records = self.max_records
+                expected_tasks = 0
+            else:
+                # Every currently supported discovery-only production adapter
+                # emits at most one host observation / provider task per source
+                # record. Shrink the lease to the durable queue headroom rather
+                # than requiring the whole configured lease to fit at once.
+                lease_records = min(self.max_records, wayback_headroom)
+                expected_tasks = lease_records
+                if lease_records < 1:
+                    continue
             expected_eed = self._expected_lease_eed(spec.source_key)
+            if self.max_records > 0:
+                expected_eed *= lease_records / self.max_records
             template = WorkLease.create(
                 reservoir_id=reservoir.reservoir_id,
                 cursor_start=reservoir.cursor,
-                max_records=self.max_records,
+                max_records=lease_records,
                 max_requests=self.max_requests,
                 max_bytes=self.max_bytes,
                 max_seconds=self.max_seconds,
