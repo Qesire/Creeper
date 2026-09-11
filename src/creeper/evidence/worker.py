@@ -96,7 +96,9 @@ class AsyncEvidenceWorker:
         if unknown_limits:
             raise KeyError(f"inflight configured for unknown providers: {sorted(unknown_limits)}")
         self._semaphores: dict[str, asyncio.Semaphore] = {}
-        self._host_locks: dict[tuple[str, str], asyncio.Lock] = {}
+        # Bounded striped locks prevent overlapping queries for the same host
+        # without retaining one Lock per hostname across a multi-million task run.
+        self._host_lock_stripes = tuple(asyncio.Lock() for _ in range(256))
         for provider in self.providers:
             limit = limits.get(provider, 4)
             if not isinstance(limit, int) or limit < 1:
@@ -135,7 +137,7 @@ class AsyncEvidenceWorker:
         provider = self.providers[task.key.provider]
         semaphore = self._semaphores[task.key.provider]
         host_key = (task.key.provider, task.key.hostname)
-        host_lock = self._host_locks.setdefault(host_key, asyncio.Lock())
+        host_lock = self._host_lock_stripes[hash(host_key) % len(self._host_lock_stripes)]
         async with semaphore:
             async with host_lock:
                 try:
