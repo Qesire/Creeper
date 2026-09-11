@@ -408,6 +408,7 @@ def _report_has_progress(report: dict[str, object]) -> bool:
     """Return whether another near-immediate pipeline tick is useful."""
     progress_fields = (
         "recovered_scouts",
+        "production_exhausted",
         "activated",
         "triaged_to_scout",
         "triaged_hold",
