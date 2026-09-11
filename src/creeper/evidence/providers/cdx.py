@@ -65,7 +65,7 @@ class WaybackCDXClient:
         max_retries: int = 3,
         backoff: float = 1.0,
         requests_per_second: float = 0.0,
-        user_agent: str = "Creeper/2.1 (research; contact administrator)",
+        user_agent: str = "Creeper/2.2 (research; https://github.com/Qesire/Creeper)",
         fetch: Callable[[str, float, dict[str, str]], bytes] | None = None,
         sleep: Callable[[float], None] = time.sleep,
     ):
@@ -125,7 +125,8 @@ class WaybackCDXClient:
             "from": f"{year_from}0101000000",
             "to": f"{year_to}1231235959",
             "output": "json",
-            "fl": "timestamp,original,statuscode,mimetype,digest,length",
+            "fl": "urlkey,timestamp,original,statuscode,digest,length",
+            "filter": "statuscode:[23][0-9][0-9]",
             "gzip": "false",
             "showResumeKey": "true",
             "limit": str(self.limit),
