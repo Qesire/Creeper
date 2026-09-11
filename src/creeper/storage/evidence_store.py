@@ -261,6 +261,13 @@ class EvidenceStore:
         ).fetchone()
         return int(row[0] or 0)
 
+    def host_year_count(self) -> int:
+        return int(
+            self.connection.execute(
+                "SELECT COUNT(*) FROM evidence_host_years"
+            ).fetchone()[0]
+        )
+
     def all_capsules(self) -> list[EvidenceCapsule]:
         """Return every persisted capsule in a stable, reproducible order."""
         rows = self.connection.execute(
