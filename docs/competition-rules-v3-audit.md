@@ -6,9 +6,9 @@
 
 当前系统的 host-year 基础模型、baseline mask、Candidate 分离和 EED 计算方向正确；来源禁用规则的主路径也已增加 fail-closed 门禁。但还不能把全部 source 结果声明为符合 V3。主要风险集中在：
 
-1. submission builder 仍允许调用者提供 EED/growth 作为上下文；
+1. 低层通用 submission builder 仍允许调用者提供 EED/growth 作为测试或离线上下文；正式 runtime 快照已不再信任这些值；
 2. EvidenceCapsule 的旧数据兼容默认值仍需在正式提交前由真实 source provenance 覆盖；
-3. EED authority 尚未在没有 model path 时强制从最新 baseline 文件重算。
+3. baseline EED 仍需由最新官方 baseline manifest/报告提供，并与 runtime 使用的 EED model 一起审计。
 
 ## 逐项结果
 
@@ -27,8 +27,8 @@
 | CDXJ 明确 timestamp 作为 direct evidence | parser 保存 timestamp/direct mask；CDXJ reservoir 激活为 direct-year | PASS |
 | WARC-Date 不自动等同直接证据 | 当前 WARC 路径默认 hint，符合保守政策 | PASS |
 | 每条年度证据保留 source/original URL/record locator/type | `EvidenceCapsule`、SQLite、JSONL exporter 和 verifier 均有显式字段 | PARTIAL：旧兼容 capsule 使用推导值 |
-| EED 从年度证据/年度文件重算 | readiness 脚本可重算，但 builder 仍接受 caller-supplied EED | PARTIAL |
-| submission 前重新对最新 baseline 计算 | readiness 路径支持；正式 builder 门禁不够强 | PARTIAL |
+| EED 从年度证据/年度文件重算 | runtime snapshot 强制使用官方 EED model 从 novel evidence 重算；无 model 时置零且不可 ready | PASS（runtime）；低层 builder 仍为通用接口 |
+| submission 前重新对最新 baseline 计算 | runtime 使用当前 BaselineIndex 做 host-year 过滤，并以 baseline_eed 计算增长率；baseline EED 来源仍需审计 | PARTIAL |
 | 六个年度文件和 Candidate 独立交付 | 两个 exporter 路径均生成六个年度文件；verifier 检查证据 provenance | PASS |
 
 ## 必须修复项
@@ -67,7 +67,7 @@ Submission builder 不应把调用者提供的 `novel_eed` / `growth_rate` 当�
 - manifest 包含 parser/policy/model/baseline 版本和 source contribution；
 - EED report 与导出年度文件可重算一致。
 
-仍待补强：无 EED model path 时禁止使用调用者传入的 EED/growth 数值。
+本轮已补强：无 EED model path 时，runtime 不再使用调用者传入的 EED/growth 数值，而是生成不可提交的零值快照，并标记 `missing-official-eed-model`。
 
 ### P2 — 估值，不是规则门禁
 

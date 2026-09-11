@@ -46,15 +46,25 @@ def build_runtime_snapshot(
         if capsule.year in YEAR_BITS
         and not baseline.year_mask(capsule.hostname) & YEAR_BITS[capsule.year]
     ]
-    eed_report = context.eed_report
-    novel_eed = context.novel_eed
-    growth_rate = context.growth_rate
-    if context.eed_model_path is not None:
+    if context.eed_model_path is None:
+        eed_report = {
+            "authority": "missing-official-eed-model",
+            "equivalent_english_domains": "0",
+            "method": "runtime snapshot is not submission-authoritative without the official EED model",
+        }
+        novel_eed = "0"
+        growth_rate = "0"
+    else:
         eed_report, _ = calculate_eed_values(
             (capsule.hostname for capsule in novel_capsules),
             Path(context.eed_model_path),
             input_file="<runtime-evidence-store>",
         )
+        eed_report = {
+            **eed_report,
+            "authority": "official-calculator-v1",
+            "model_path": str(Path(context.eed_model_path).resolve()),
+        }
         novel_eed = str(eed_report["equivalent_english_domains"])
         baseline_eed = Decimal(str(context.baseline_eed))
         growth_rate = (

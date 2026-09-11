@@ -19,6 +19,53 @@ from creeper.storage.evidence_store import EvidenceStore
 
 
 class RuntimeSubmissionIntegrationTests(unittest.TestCase):
+    def test_runtime_snapshot_without_eed_model_cannot_use_caller_values(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task_root = root / "task"
+            baseline_dir = task_root / "merged260909-3"
+            baseline_dir.mkdir(parents=True)
+            for year in range(1996, 2002):
+                (baseline_dir / f"{year}.txt").write_text("", encoding="utf-8")
+            (baseline_dir / "candidate_pool.txt").write_text("", encoding="utf-8")
+            baseline = BaselineIndex.build(task_root, root / "baseline.sqlite3")
+            evidence = EvidenceStore(root / "evidence.sqlite3")
+            evidence.put(
+                EvidenceCapsule(
+                    "claimed.example", 1997, "wayback", "capture_timestamp_year",
+                    "19970101000000", "http://claimed.example/", "a" * 64, "v1",
+                )
+            )
+            context = RuntimeSubmissionContext(
+                baseline_manifest={
+                    "baseline_id": "merged260909-3",
+                    "annual_file_hashes": {f"{year}.txt": "b" * 64 for year in range(1996, 2002)},
+                },
+                code_revision="c" * 64,
+                source_report_set=("source.json",),
+                cdx_audit_set=("audit.json",),
+                eed_report={"equivalent_english_domains": "999"},
+                novel_eed="999",
+                growth_rate="999",
+            )
+            try:
+                snapshot = build_runtime_snapshot(
+                    context=context,
+                    evidence_store=evidence,
+                    baseline=baseline,
+                    snapshot_id="missing-eed-model",
+                )
+                self.assertFalse(snapshot.ready)
+                self.assertEqual(snapshot.novel_eed, "0")
+                self.assertEqual(snapshot.growth_rate, "0")
+                self.assertEqual(
+                    snapshot.eed_report["authority"],
+                    "missing-official-eed-model",
+                )
+            finally:
+                evidence.close()
+                baseline.close()
+
     def test_build_runtime_snapshot_uses_real_stores_and_is_ready(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -31,6 +78,11 @@ class RuntimeSubmissionIntegrationTests(unittest.TestCase):
                     encoding="utf-8",
                 )
             (baseline_dir / "candidate_pool.txt").write_text("", encoding="utf-8")
+            model = root / "model.json"
+            model.write_text(
+                '{"tld": ["example"], "lang": ["eng"], "perc_of_tld": ["100"]}\n',
+                encoding="utf-8",
+            )
             baseline = BaselineIndex.build(task_root, root / "baseline.sqlite3")
             evidence = EvidenceStore(root / "evidence.sqlite3")
             evidence.put_many([
@@ -58,6 +110,8 @@ class RuntimeSubmissionIntegrationTests(unittest.TestCase):
                 eed_report={"equivalent_english_domains": "2"},
                 novel_eed="2",
                 growth_rate="0.05",
+                eed_model_path=model,
+                baseline_eed="40",
             )
 
             snapshot = build_runtime_snapshot(
@@ -85,6 +139,11 @@ class RuntimeSubmissionIntegrationTests(unittest.TestCase):
             for year in range(1996, 2002):
                 (baseline_dir / f"{year}.txt").write_text("", encoding="utf-8")
             (baseline_dir / "candidate_pool.txt").write_text("", encoding="utf-8")
+            model = root / "model.json"
+            model.write_text(
+                '{"tld": ["example"], "lang": ["eng"], "perc_of_tld": ["100"]}\n',
+                encoding="utf-8",
+            )
             baseline = BaselineIndex.build(task_root, root / "baseline.sqlite3")
             control = ControlStore(root / "control.sqlite3")
             evidence = EvidenceStore(root / "evidence.sqlite3")
@@ -170,6 +229,8 @@ class RuntimeSubmissionIntegrationTests(unittest.TestCase):
                 eed_report={"equivalent_english_domains": "1"},
                 novel_eed="1",
                 growth_rate="0.05",
+                eed_model_path=model,
+                baseline_eed="20",
             )
 
             def transport(hostname, year):
@@ -294,6 +355,7 @@ class RuntimeSubmissionIntegrationTests(unittest.TestCase):
                 self.assertEqual(snapshot.novel_eed, "1")
                 self.assertEqual(snapshot.growth_rate, "1")
                 self.assertEqual(snapshot.eed_report["equivalent_english_domains"], "1")
+                self.assertEqual(snapshot.eed_report["authority"], "official-calculator-v1")
                 self.assertTrue(snapshot.ready)
             finally:
                 evidence.close()
