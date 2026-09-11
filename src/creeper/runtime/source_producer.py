@@ -90,6 +90,21 @@ class SourceProducer:
         self.evidence_planner = EvidencePlanner()
         self.admission = EvidenceBacklogAdmission(control_store)
 
+    def refresh_workset(
+        self,
+        *,
+        candidates: Iterable[LeaseCandidate],
+        adapters: Mapping[str, object],
+    ) -> None:
+        """Replace the lightweight production workset without reopening stores.
+
+        Long-lived source services call this after discovery activation changes.
+        BaselineIndex, SQLite connections, scheduler/admission state, and cached
+        adapters remain alive across leases.
+        """
+        self.candidates = tuple(candidates)
+        self.adapters = dict(adapters)
+
     @staticmethod
     def _put(queue, value: object) -> int:
         queue.put_nowait(value)
