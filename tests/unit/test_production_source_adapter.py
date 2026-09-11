@@ -281,6 +281,44 @@ class ProductionSourceAdapterTests(unittest.TestCase):
             self.assertEqual(observation.year_hint_mask, 1 << (year - 1996))
             self.assertEqual(observation.direct_year_mask, 0)
 
+    def test_csv_record_year_overrides_single_year_source_prior(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "webbase-2001.csv"
+            path.write_text(
+                "https://row.example/a,1998\n",
+                encoding="utf-8",
+            )
+            reservoir = Reservoir(
+                reservoir_id="reservoir:csv-priority",
+                domain_id="domain:csv-priority",
+                adapter_id="structured:csv-priority",
+                root_locator=str(path),
+                enumeration_kind="structured_records",
+                capacity_lower=1,
+                state=ReservoirState.READY,
+                evidence_mode="discovery_only",
+            )
+            adapter = ProductionAdapterFactory.open(
+                reservoir,
+                temporal_scope=(2001, 2001),
+            )
+            lease = WorkLease.create(
+                reservoir_id=reservoir.reservoir_id,
+                max_records=1,
+                max_requests=1,
+                max_bytes=4096,
+                max_seconds=10,
+            )
+            records, _result = adapter.execute(lease)
+            observation = next(iter(adapter.extract_hosts(next(records))))
+            adapter.close()
+
+        self.assertEqual(observation.hostname, "row.example")
+        self.assertEqual(observation.source_year, 1998)
+        self.assertEqual(observation.source_time, "1998")
+        self.assertEqual(observation.year_hint_mask, 1 << (1998 - 1996))
+        self.assertEqual(observation.direct_year_mask, 0)
+
     def test_structured_cdx_adapter_parses_jisc_style_rows(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "1998.cdx"
