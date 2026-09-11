@@ -106,7 +106,7 @@ class AsyncEvidenceWorker:
         self._semaphores: dict[str, asyncio.Semaphore] = {}
         # Bounded striped locks prevent overlapping queries for the same host
         # without retaining one Lock per hostname across a multi-million task run.
-        self._host_lock_stripes = tuple(asyncio.Lock() for _ in range(256))
+        self._host_lock_stripes = tuple(asyncio.Lock() for _ in range(4096))
         for provider in self.providers:
             limit = limits.get(provider, 4)
             if not isinstance(limit, int) or limit < 1:
@@ -152,8 +152,11 @@ class AsyncEvidenceWorker:
             "big",
         ) % len(self._host_lock_stripes)
         host_lock = self._host_lock_stripes[stripe]
-        async with semaphore:
-            async with host_lock:
+        # Same-host serialization is a semantic guard, not provider capacity.
+        # Acquire it before the provider semaphore so a duplicate/same-stripe
+        # waiter cannot consume an inflight slot while doing no network work.
+        async with host_lock:
+            async with semaphore:
                 try:
                     scope = task.key.temporal_scope
                     if scope.year_from != scope.year_to:
