@@ -207,12 +207,23 @@ class AsyncEvidenceWorker:
             flush_count=max(1, min(self.claim_batch_size, 128)),
         )
         terminal = retryable = 0
+        range_inserted_capsules = 0
         task_by_key = {task.key: task for task in tasks}
         try:
             for result in results:
                 if result.key is None:
                     raise ValueError("provider result must preserve EvidenceQueryKey")
                 if isinstance(result, RangeEvidenceQueryResult):
+                    # Positive CDX rows are individually valid evidence even if
+                    # a later page makes the parent range retryable. Persist
+                    # them first; duplicate retries are idempotent in
+                    # EvidenceStore. Only candidate years not backed by a
+                    # capsule fall back to exact-year provider tasks.
+                    if result.capsules:
+                        range_inserted_capsules += self.evidence_store.put_many(
+                            result.capsules
+                        )
+                    capsule_years = {capsule.year for capsule in result.capsules}
                     if result.state in {
                         CDXQueryState.PASS,
                         CDXQueryState.EMPTY_EXHAUSTIVE,
@@ -220,7 +231,6 @@ class AsyncEvidenceWorker:
                     }:
                         followups = ()
                         if result.state is CDXQueryState.PASS:
-                            scope = result.key.temporal_scope
                             followups = tuple(
                                 EvidenceQueryKey(
                                     result.hostname,
@@ -229,6 +239,7 @@ class AsyncEvidenceWorker:
                                     result.key.policy_version,
                                 )
                                 for year in result.candidate_years
+                                if year not in capsule_years
                             )
                         self.control_store.finish_range_task(
                             result.key,
@@ -280,7 +291,7 @@ class AsyncEvidenceWorker:
             claimed=len(tasks),
             terminal=terminal,
             retryable=retryable,
-            inserted_capsules=writer.inserted_capsules,
+            inserted_capsules=writer.inserted_capsules + range_inserted_capsules,
             unknown_provider=0,
         )
 
