@@ -123,9 +123,12 @@ class AsyncWaybackCDXClientTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_exact_year_uses_one_row_pages_but_range_keeps_bulk_limit(self):
         seen_limits = []
+        seen_collapse = []
 
         async def handler(request):
-            seen_limits.append(parse_qs(request.url.query.decode())["limit"][0])
+            query = parse_qs(request.url.query.decode())
+            seen_limits.append(query["limit"][0])
+            seen_collapse.append(query.get("collapse", []))
             payload = [
                 ["urlkey", "timestamp", "original", "statuscode"],
                 ["com,example)/", "19970102030405", "http://example.com/", "200"],
@@ -150,6 +153,7 @@ class AsyncWaybackCDXClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(exact.state, CDXQueryState.PASS)
         self.assertEqual(ranged.state, CDXQueryState.PASS)
         self.assertEqual(seen_limits, ["1", "1000"])
+        self.assertEqual(seen_collapse, [[], ["timestamp:4"]])
 
     async def test_non_retryable_http_error_is_invalid_without_retry(self):
         calls = 0
@@ -217,6 +221,55 @@ class AsyncWaybackCDXClientTests(unittest.IsolatedAsyncioTestCase):
             all(capsule.extraction_method == "cdx_query_range" for capsule in result.capsules)
         )
         self.assertEqual(result.key, range_key)
+
+    async def test_range_stops_when_every_year_is_already_proven(self):
+        range_key = EvidenceQueryKey(
+            "example.com", TemporalScope(1996, 1998), "wayback", "cdx-v1"
+        )
+        async with AsyncWaybackCDXClient(
+            transport=httpx.MockTransport(
+                lambda request: httpx.Response(200, request=request)
+            ),
+            max_retries=0,
+        ) as client:
+            async def dense_pages(hostname, year_from, year_to):
+                yield (
+                    [
+                        {
+                            "timestamp": "19960102030405",
+                            "original": "http://example.com/a",
+                            "statuscode": "200",
+                        },
+                        {
+                            "timestamp": "19970102030405",
+                            "original": "http://example.com/b",
+                            "statuscode": "200",
+                        },
+                    ],
+                    False,
+                )
+                yield (
+                    [
+                        {
+                            "timestamp": "19980102030405",
+                            "original": "http://example.com/c",
+                            "statuscode": "200",
+                        }
+                    ],
+                    False,
+                )
+                raise AssertionError("range probe consumed unnecessary later page")
+
+            with patch.object(client, "iter_range_pages", dense_pages):
+                result = await client.query_range(range_key)
+
+        self.assertEqual(result.state, CDXQueryState.PASS)
+        self.assertEqual(result.candidate_years, (1996, 1997, 1998))
+        self.assertEqual(result.pages_seen, 2)
+        self.assertEqual(
+            tuple(capsule.year for capsule in result.capsules),
+            (1996, 1997, 1998),
+        )
 
     async def test_incomplete_range_keeps_positive_capsule_without_negative_claim(self):
         range_key = EvidenceQueryKey(
