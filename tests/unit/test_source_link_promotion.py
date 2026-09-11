@@ -59,9 +59,9 @@ class LinkPromotionTests(unittest.TestCase):
         self.assertEqual(item.candidate.baseline_overlap_prior, 0.5)
 
     def test_url_list_and_compressed_cdxj_are_strong_bulk_artifacts(self) -> None:
-        for url in (
-            "https://seed.example/data/webbase-2001.urls.gz",
-            "https://seed.example/data/index.cdxj.gz",
+        for url, expected_year in (
+            ("https://seed.example/data/webbase-2001.urls.gz", 2001),
+            ("https://seed.example/data/index.cdxj.gz", None),
         ):
             acc = LinkPromotionAccumulator()
             acc.add(self.link(url, same_site=True, anchor="historical URL export"))
@@ -72,6 +72,23 @@ class LinkPromotionTests(unittest.TestCase):
             self.assertTrue(promoted[0].evidence.bulk_artifact)
             self.assertEqual(promoted[0].candidate.source_family, "BULK_ARTIFACT")
             self.assertEqual(promoted[0].candidate.level, SourceLevel.SOURCE)
+            self.assertEqual(promoted[0].candidate.expected_year_from, expected_year)
+            self.assertEqual(promoted[0].candidate.expected_year_to, expected_year)
+
+    def test_ambiguous_multiple_target_years_do_not_create_a_single_year_hint(self) -> None:
+        acc = LinkPromotionAccumulator()
+        acc.add(
+            self.link(
+                "https://seed.example/data/crawl-1998-2001.urls.gz",
+                same_site=True,
+            )
+        )
+
+        promoted = acc.promoted()
+
+        self.assertEqual(len(promoted), 1)
+        self.assertIsNone(promoted[0].candidate.expected_year_from)
+        self.assertIsNone(promoted[0].candidate.expected_year_to)
 
     def test_generic_external_page_is_never_promoted_without_resource_signal(self) -> None:
         acc = LinkPromotionAccumulator()
