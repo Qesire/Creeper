@@ -60,6 +60,65 @@ class EvidenceStoreTests(unittest.TestCase):
             )
             store.close()
 
+    def test_host_year_index_deduplicates_provider_and_payload_variants(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = EvidenceStore(Path(tmp) / "evidence.sqlite3")
+            store.put_many([
+                EvidenceCapsule(
+                    "same.example.com", 1998, "wayback", "capture_timestamp_year",
+                    "19980101000000", "http://same.example.com/a", "a" * 64, "cdx-v1"
+                ),
+                EvidenceCapsule(
+                    "same.example.com", 1998, "arquivo", "capture_timestamp_year",
+                    "19980201000000", "http://same.example.com/b", "b" * 64, "archive-v1"
+                ),
+                EvidenceCapsule(
+                    "same.example.com", 2000, "wayback", "capture_timestamp_year",
+                    "20000101000000", "http://same.example.com/c", "c" * 64, "cdx-v1"
+                ),
+            ])
+
+            rows = store.host_years_after(0)
+
+            self.assertEqual(
+                [(row.hostname, row.year) for row in rows],
+                [("same.example.com", 1998), ("same.example.com", 2000)],
+            )
+            self.assertEqual(store.max_host_year_sequence(), 2)
+            self.assertEqual(store.host_years_after(rows[0].sequence, limit=1)[0].year, 2000)
+            store.close()
+
+    def test_canonical_host_year_capsules_returns_one_deterministic_capsule(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = EvidenceStore(Path(tmp) / "evidence.sqlite3")
+            store.put_many([
+                EvidenceCapsule(
+                    "same.example.com", 1998, "wayback", "capture_timestamp_year",
+                    "19980101000000", "http://same.example.com/a", "b" * 64, "cdx-v1"
+                ),
+                EvidenceCapsule(
+                    "same.example.com", 1998, "arquivo", "capture_timestamp_year",
+                    "19980201000000", "http://same.example.com/b", "a" * 64, "archive-v1"
+                ),
+            ])
+
+            rows = store.canonical_host_year_capsules()
+
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0].hostname, "same.example.com")
+            self.assertEqual(rows[0].year, 1998)
+            self.assertEqual(rows[0].provider, "arquivo")
+            store.close()
+
+    def test_evidence_store_uses_wal_for_multi_process_runtime(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = EvidenceStore(Path(tmp) / "evidence.sqlite3")
+            mode = store.connection.execute("PRAGMA journal_mode").fetchone()[0]
+            timeout = store.connection.execute("PRAGMA busy_timeout").fetchone()[0]
+            self.assertEqual(str(mode).lower(), "wal")
+            self.assertGreaterEqual(int(timeout), 30_000)
+            store.close()
+
     def test_resolve_year_masks_normalizes_deduplicates_and_returns_zero_for_missing(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = EvidenceStore(Path(tmp) / "evidence.sqlite3")
