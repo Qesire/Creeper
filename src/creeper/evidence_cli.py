@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 from dataclasses import asdict
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -45,6 +46,17 @@ async def run_service(
         raise ValueError("invalid evidence worker poll bounds")
 
     runtime_data_root.mkdir(parents=True, exist_ok=True)
+    lock_path = runtime_data_root / "locks" / "wayback-evidence-worker.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError as exc:
+        os.close(lock_fd)
+        raise RuntimeError(
+            f"evidence provider worker is already running: {lock_path}"
+        ) from exc
+
     control = ControlStore(runtime_data_root / "control.sqlite3")
     evidence = EvidenceStore(runtime_data_root / "evidence.sqlite3")
     total = EvidenceWorkerReport()
@@ -111,6 +123,10 @@ async def run_service(
             loop.remove_signal_handler(signum)
         evidence.close()
         control.close()
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        finally:
+            os.close(lock_fd)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -157,7 +173,7 @@ def main(argv: list[str] | None = None) -> int:
                 poll_max_seconds=args.poll_max_seconds,
             )
         )
-    except ValueError as exc:
+    except (ValueError, RuntimeError) as exc:
         parser.error(str(exc))
     if args.once:
         print(json.dumps(asdict(report), ensure_ascii=False, indent=2))
