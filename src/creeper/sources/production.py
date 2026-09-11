@@ -118,7 +118,7 @@ class StructuredProductionAdapter:
     @staticmethod
     def _kind_from_locator(locator: str) -> str:
         path = urlsplit(locator).path.lower()
-        if path.endswith(".cdxj"):
+        if path.endswith((".cdxj", ".cdxj.gz")):
             return "cdxj"
         if path.endswith((".cdx", ".cdx.gz")):
             return "cdx"
