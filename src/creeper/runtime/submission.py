@@ -32,6 +32,52 @@ class RuntimeSubmissionContext:
     baseline_eed: str = "0"
 
 
+def _annual_eed_report(
+    capsules,
+    model_path: Path,
+) -> dict[str, object]:
+    """Compute authoritative EED with annual host-year semantics.
+
+    The official calculator deduplicates hostnames within one input. Competition
+    results are annual, so the same hostname proven in two different years must
+    contribute once in each year. Therefore each year is calculated
+    independently and the six annual EED values are summed.
+    """
+    by_year: dict[int, set[str]] = {year: set() for year in YEAR_BITS}
+    for capsule in capsules:
+        if capsule.year in by_year:
+            by_year[capsule.year].add(capsule.hostname)
+
+    total = Decimal("0")
+    annual: dict[str, object] = {}
+    for year in sorted(by_year):
+        summary, rows = calculate_eed_values(
+            by_year[year],
+            Path(model_path),
+            input_file=f"<runtime-evidence-store:{year}>",
+        )
+        year_eed = Decimal(str(summary["equivalent_english_domains"]))
+        total += year_eed
+        annual[str(year)] = {
+            "novel_host_years": len(by_year[year]),
+            "equivalent_english_domains": format(year_eed, "f"),
+            "summary": summary,
+            "tld_breakdown": rows,
+        }
+
+    return {
+        "authority": "official-calculator-v1",
+        "method": (
+            "Equivalent-English Domains are calculated independently for each "
+            "annual result set and summed across 1996-2001; a hostname proven "
+            "in multiple years contributes once per distinct year."
+        ),
+        "model_path": str(Path(model_path).resolve()),
+        "equivalent_english_domains": format(total, "f"),
+        "annual": annual,
+    }
+
+
 def build_runtime_snapshot(
     *,
     context: RuntimeSubmissionContext,
@@ -55,16 +101,10 @@ def build_runtime_snapshot(
         novel_eed = "0"
         growth_rate = "0"
     else:
-        eed_report, _ = calculate_eed_values(
-            (capsule.hostname for capsule in novel_capsules),
+        eed_report = _annual_eed_report(
+            novel_capsules,
             Path(context.eed_model_path),
-            input_file="<runtime-evidence-store>",
         )
-        eed_report = {
-            **eed_report,
-            "authority": "official-calculator-v1",
-            "model_path": str(Path(context.eed_model_path).resolve()),
-        }
         novel_eed = str(eed_report["equivalent_english_domains"])
         baseline_eed = Decimal(str(context.baseline_eed))
         growth_rate = (
