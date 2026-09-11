@@ -82,6 +82,7 @@ _META_TERMS = frozenset(
     }
 )
 _TOKEN_RE = re.compile(r"[a-z0-9]+")
+_TARGET_YEAR_RE = re.compile(r"(?<!\d)(199[6-9]|200[01])(?!\d)")
 
 
 def _tokens(value: str) -> frozenset[str]:
@@ -91,6 +92,17 @@ def _tokens(value: str) -> frozenset[str]:
 def _is_bulk(url: str) -> bool:
     path = urlsplit(url).path.lower()
     return any(path.endswith(suffix) for suffix in _BULK_SUFFIXES)
+
+
+def _inferred_target_year(url: str) -> int | None:
+    """Infer one target-year scheduling hint from an explicit resource name.
+
+    This is discovery metadata only. It may narrow later provider queries, but
+    never grants direct evidence authority.
+    """
+    name = urlsplit(url).path.rsplit("/", 1)[-1]
+    years = {int(match.group(1)) for match in _TARGET_YEAR_RE.finditer(name)}
+    return next(iter(years)) if len(years) == 1 else None
 
 
 def _resource_signal(link: ScrapyLinkDiscovery) -> tuple[int, int]:
@@ -240,12 +252,15 @@ class LinkPromotionAccumulator:
                 + min(0.2, len(aggregate.referrers) * 0.04)
                 + min(0.1, aggregate.resource_hits * 0.025),
             )
+            inferred_year = _inferred_target_year(url)
             candidate = SourceCandidate(
                 canonical_entrypoint=url,
                 source_family=family,
                 level=level,
                 discovered_by=discovered_by,
                 discovery_strategy=discovery_strategy,
+                expected_year_from=inferred_year,
+                expected_year_to=inferred_year,
                 temporal_semantics_prior=temporal,
                 enumerability_prior=enumerability,
                 direct_evidence_prior=0.0,
