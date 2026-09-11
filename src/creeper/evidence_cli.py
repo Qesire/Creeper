@@ -21,6 +21,7 @@ from creeper.evidence.providers.async_cdx import AsyncWaybackCDXClient
 from creeper.evidence.worker import AsyncEvidenceWorker, EvidenceWorkerReport
 from creeper.storage.control_store import ControlStore
 from creeper.storage.evidence_store import EvidenceStore
+from creeper.storage.telemetry_store import RuntimeTelemetryStore
 
 
 async def run_service(
@@ -60,11 +61,13 @@ async def run_service(
 
     control: ControlStore | None = None
     evidence: EvidenceStore | None = None
+    telemetry: RuntimeTelemetryStore | None = None
     installed_signals: list[signal.Signals] = []
 
     try:
         control = ControlStore(runtime_data_root / "control.sqlite3")
         evidence = EvidenceStore(runtime_data_root / "evidence.sqlite3")
+        telemetry = RuntimeTelemetryStore(runtime_data_root / "telemetry.sqlite3")
         total = EvidenceWorkerReport()
         stop = asyncio.Event()
         loop = asyncio.get_running_loop()
@@ -98,14 +101,69 @@ async def run_service(
                 retry_max_seconds=retry_max_seconds,
             )
             idle_delay = poll_min_seconds
+            previous_http_requests = 0
+            previous_throttle_responses = 0
+            previous_transport_errors = 0
+            previous_http_429 = 0
+            previous_http_503 = 0
+            previous_http_5xx = 0
             while True:
                 report = await worker.run_once()
+
+                current_http_429 = int(provider.http_status_counts.get(429, 0))
+                current_http_503 = int(provider.http_status_counts.get(503, 0))
+                current_http_5xx = sum(
+                    int(count)
+                    for status, count in provider.http_status_counts.items()
+                    if 500 <= int(status) <= 599
+                )
+                telemetry.add_counters(
+                    {
+                        "evidence_batches_with_work": int(report.claimed > 0),
+                        "evidence_claimed_tasks": report.claimed,
+                        "evidence_terminal_tasks": report.terminal,
+                        "evidence_retryable_tasks": report.retryable,
+                        "evidence_inserted_capsules": report.inserted_capsules,
+                        "evidence_pass_results": report.pass_count,
+                        "evidence_empty_exhaustive_results": report.empty_exhaustive_count,
+                        "evidence_invalid_results": report.invalid_count,
+                        "evidence_incomplete_results": report.incomplete_count,
+                        "evidence_transient_error_results": report.transient_error_count,
+                        "wayback_http_requests": (
+                            provider.http_requests - previous_http_requests
+                        ),
+                        "wayback_throttle_responses": (
+                            provider.throttle_responses - previous_throttle_responses
+                        ),
+                        "wayback_transport_errors": (
+                            provider.transport_errors - previous_transport_errors
+                        ),
+                        "wayback_http_429": current_http_429 - previous_http_429,
+                        "wayback_http_503": current_http_503 - previous_http_503,
+                        "wayback_http_5xx": current_http_5xx - previous_http_5xx,
+                    }
+                )
+                previous_http_requests = provider.http_requests
+                previous_throttle_responses = provider.throttle_responses
+                previous_transport_errors = provider.transport_errors
+                previous_http_429 = current_http_429
+                previous_http_503 = current_http_503
+                previous_http_5xx = current_http_5xx
                 total = EvidenceWorkerReport(
                     claimed=total.claimed + report.claimed,
                     terminal=total.terminal + report.terminal,
                     retryable=total.retryable + report.retryable,
                     inserted_capsules=total.inserted_capsules + report.inserted_capsules,
                     unknown_provider=total.unknown_provider + report.unknown_provider,
+                    pass_count=total.pass_count + report.pass_count,
+                    empty_exhaustive_count=(
+                        total.empty_exhaustive_count + report.empty_exhaustive_count
+                    ),
+                    invalid_count=total.invalid_count + report.invalid_count,
+                    incomplete_count=total.incomplete_count + report.incomplete_count,
+                    transient_error_count=(
+                        total.transient_error_count + report.transient_error_count
+                    ),
                     provider_http_requests_total=provider.http_requests,
                     provider_throttle_responses_total=provider.throttle_responses,
                 )
@@ -132,6 +190,8 @@ async def run_service(
         if "loop" in locals():
             for signum in installed_signals:
                 loop.remove_signal_handler(signum)
+        if telemetry is not None:
+            telemetry.close()
         if evidence is not None:
             evidence.close()
         if control is not None:
