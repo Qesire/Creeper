@@ -42,7 +42,7 @@ def _adapter_kind(entrypoint: str) -> tuple[str, str]:
     if name.endswith(suffixes):
         return "warc_arc", "archive_records"
     structured = (
-        ".cdxj", ".cdx", ".cdx.gz",
+        ".cdxj", ".cdxj.gz", ".cdx", ".cdx.gz",
         ".jsonl", ".jsonl.gz",
         ".csv", ".csv.gz", ".tsv", ".tsv.gz",
         ".txt", ".txt.gz", ".list", ".list.gz", ".urls", ".urls.gz",
@@ -56,7 +56,7 @@ def _adapter_kind(entrypoint: str) -> tuple[str, str]:
 
 def _direct_year_capable(entrypoint: str) -> bool:
     name = PurePosixPath(urlsplit(entrypoint).path.lower()).name
-    return name.endswith((".cdx", ".cdx.gz", ".cdxj"))
+    return name.endswith((".cdx", ".cdx.gz", ".cdxj", ".cdxj.gz"))
 
 
 class SourceActivationCompiler:
