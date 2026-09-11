@@ -19,7 +19,7 @@ shutdown_grace_seconds = 10.0
 [evidence]
 # Conservative public Wayback profile. Increase only after bounded A/B tests.
 endpoint = "https://web.archive.org/cdx/search/cdx"
-claim_batch_size = 16
+claim_batch_size = 64
 lease_seconds = 300.0
 # Keep request-start rate conservative while allowing enough concurrent waits
 # to hide Wayback/proxy latency.
