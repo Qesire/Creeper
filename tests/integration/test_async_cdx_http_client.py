@@ -115,6 +115,36 @@ class AsyncWaybackCDXClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(first_query["filter"], ["statuscode:[23][0-9][0-9]"])
         self.assertEqual(second_query["resumeKey"], ["resume-token!"])
 
+    async def test_exact_year_uses_one_row_pages_but_range_keeps_bulk_limit(self):
+        seen_limits = []
+
+        async def handler(request):
+            seen_limits.append(parse_qs(request.url.query.decode())["limit"][0])
+            payload = [
+                ["urlkey", "timestamp", "original", "statuscode"],
+                ["com,example)/", "19970102030405", "http://example.com/", "200"],
+            ]
+            return httpx.Response(
+                200,
+                content=json.dumps(payload).encode(),
+                request=request,
+            )
+
+        range_key = EvidenceQueryKey(
+            "example.com", TemporalScope(1996, 2000), "wayback", "cdx-v1"
+        )
+        async with AsyncWaybackCDXClient(
+            transport=httpx.MockTransport(handler),
+            max_retries=0,
+            limit=1000,
+        ) as client:
+            exact = await client.query_key(self.key())
+            ranged = await client.query_range(range_key)
+
+        self.assertEqual(exact.state, CDXQueryState.PASS)
+        self.assertEqual(ranged.state, CDXQueryState.PASS)
+        self.assertEqual(seen_limits, ["1", "1000"])
+
     async def test_non_retryable_http_error_is_invalid_without_retry(self):
         calls = 0
 
