@@ -146,7 +146,7 @@ class AsyncWaybackCDXClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.state, CDXQueryState.TRANSIENT_ERROR)
         self.assertEqual(calls, 2)
 
-    async def test_range_probe_reports_candidate_years_without_capsules(self):
+    async def test_range_probe_reuses_positive_rows_as_capsules(self):
         async def handler(request):
             payload = [
                 ["timestamp", "original", "statuscode"],
@@ -165,7 +165,39 @@ class AsyncWaybackCDXClientTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result.state, CDXQueryState.PASS)
         self.assertEqual(result.candidate_years, (1997, 1999))
+        self.assertEqual(tuple(capsule.year for capsule in result.capsules), (1997, 1999))
+        self.assertTrue(
+            all(capsule.extraction_method == "cdx_query_range" for capsule in result.capsules)
+        )
         self.assertEqual(result.key, range_key)
+
+    async def test_incomplete_range_keeps_positive_capsule_without_negative_claim(self):
+        range_key = EvidenceQueryKey(
+            "example.com", TemporalScope(1996, 1998), "wayback", "cdx-v1"
+        )
+        async with AsyncWaybackCDXClient(
+            transport=httpx.MockTransport(lambda request: httpx.Response(200, request=request)),
+            max_retries=0,
+        ) as client:
+            async def partial_pages(hostname, year_from, year_to):
+                yield (
+                    [
+                        {
+                            "timestamp": "19970102030405",
+                            "original": "http://example.com/",
+                            "statuscode": "200",
+                        }
+                    ],
+                    False,
+                )
+                raise ConnectionError("later page unavailable")
+
+            with patch.object(client, "iter_range_pages", partial_pages):
+                result = await client.query_range(range_key)
+
+        self.assertEqual(result.state, CDXQueryState.TRANSIENT_ERROR)
+        self.assertEqual(result.candidate_years, ())
+        self.assertEqual(tuple(capsule.year for capsule in result.capsules), (1997,))
 
     async def test_sub_one_request_per_second_limit_allows_single_request(self):
         async def handler(request):
