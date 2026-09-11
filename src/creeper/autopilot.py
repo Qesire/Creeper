@@ -55,7 +55,6 @@ class EvidenceServicePolicy:
 
 
 @dataclass(frozen=True)
-@dataclass(frozen=True)
 class ReadinessServicePolicy:
     eed_model: Path
     baseline_eed: str
