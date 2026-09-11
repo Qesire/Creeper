@@ -304,6 +304,12 @@ class AsyncWaybackCDXClient:
             "showResumeKey": "true",
             "limit": str(effective_limit),
         }
+        if year_from != year_to:
+            # A range probe needs only one accepted capture per year. CDX
+            # collapsing preserves the first row of each adjacent year run,
+            # sharply reducing dense same-year capture streams without losing
+            # year-existence evidence.
+            query["collapse"] = "timestamp:4"
         resume_key: str | None = None
         while True:
             params = dict(query)
@@ -413,6 +419,25 @@ class AsyncWaybackCDXClient:
                         page_no=pages_seen,
                         record_no=records_seen,
                         extraction_method="cdx_query_range",
+                    )
+                expected_years = scope.year_to - scope.year_from + 1
+                if len(capsules_by_year) == expected_years:
+                    # Every year in scope is already positively proven. There
+                    # are no absent years left that require exhaustive
+                    # pagination, so finishing the CDX scan cannot change the
+                    # competition result.
+                    complete_years = tuple(range(scope.year_from, scope.year_to + 1))
+                    return RangeEvidenceQueryResult(
+                        hostname=key.hostname,
+                        key=key,
+                        state=CDXQueryState.PASS,
+                        candidate_years=complete_years,
+                        capsules=tuple(
+                            capsules_by_year[year] for year in complete_years
+                        ),
+                        pages_seen=pages_seen,
+                        records_seen=records_seen,
+                        error=None,
                     )
             complete_years = (
                 tuple(sorted(capsules_by_year))
