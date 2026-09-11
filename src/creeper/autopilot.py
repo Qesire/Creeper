@@ -32,6 +32,7 @@ from creeper.runtime.resource_governor import (
     StabilizedResourceGovernor,
 )
 from creeper.source_discovery_service import load_source_discovery_config
+from creeper.storage.telemetry_store import RuntimeTelemetryStore
 
 
 @dataclass(frozen=True)
@@ -610,11 +611,18 @@ def run_autopilot(
     """Supervise all autonomous Creeper stages with bounded restart backoff."""
     stop_event = stop_event or Event()
     policy = config.supervisor
+    telemetry = RuntimeTelemetryStore(
+        config.runtime_data_root / "telemetry.sqlite3"
+    )
+    telemetry.add_counters({"autopilot_runs": 1})
     children = {
         spec.name: _ChildRuntime(spec)
         for spec in build_child_specs(config)
     }
     stabilized: StabilizedResourceGovernor | None = None
+    sampler = LocalResourceSampler(config.runtime_data_root)
+    if resource_sample_fn is None:
+        resource_sample_fn = sampler.sample
     if config.resource_governor is not None:
         resource_policy = config.resource_governor
         stabilized = StabilizedResourceGovernor(
@@ -626,21 +634,20 @@ def run_autopilot(
             ),
             recovery_samples=resource_policy.recovery_samples,
         )
-        if resource_sample_fn is None:
-            sampler = LocalResourceSampler(config.runtime_data_root)
-            resource_sample_fn = sampler.sample
-
     last_governor_state: GovernorState | None = None
+    last_resource_telemetry_at: float | None = None
     try:
         while not stop_event.is_set():
             now = float(monotonic())
             state = GovernorState.NORMAL
+            sample: ResourceSample | None = None
+            assert resource_sample_fn is not None
             if stabilized is not None:
-                assert resource_sample_fn is not None
                 sample = resource_sample_fn(_live_process_pids(children))
                 state = stabilized.update(sample)
                 desired = _desired_children(state, set(children))
-                if state is not last_governor_state:
+                state_changed = state is not last_governor_state
+                if state_changed:
                     _write_governor_status(
                         config.runtime_data_root,
                         state=state,
@@ -648,7 +655,22 @@ def run_autopilot(
                         desired_children=desired,
                         wall_time=float(wall_clock()),
                     )
+                    telemetry.add_counters(
+                        {f"governor_enter_{state.value}": 1}
+                    )
                     last_governor_state = state
+                if (
+                    state_changed
+                    or last_resource_telemetry_at is None
+                    or now - last_resource_telemetry_at >= 10.0
+                ):
+                    telemetry.append_resource_sample(
+                        rss_bytes=sample.rss_bytes,
+                        disk_free_bytes=sample.disk_free_bytes,
+                        governor_state=state.value,
+                        sampled_at=float(wall_clock()),
+                    )
+                    last_resource_telemetry_at = now
                 if state is GovernorState.EMERGENCY_STOP:
                     for child in children.values():
                         if child.process is not None:
@@ -664,6 +686,24 @@ def run_autopilot(
                     )
             else:
                 desired = set(children)
+                if (
+                    last_resource_telemetry_at is None
+                    or now - last_resource_telemetry_at >= 10.0
+                ):
+                    try:
+                        sample = resource_sample_fn(_live_process_pids(children))
+                    except (OSError, RuntimeError):
+                        # Observability is best-effort when no safety governor is
+                        # configured; it must not change legacy autopilot liveness.
+                        sample = None
+                    if sample is not None:
+                        telemetry.append_resource_sample(
+                            rss_bytes=sample.rss_bytes,
+                            disk_free_bytes=sample.disk_free_bytes,
+                            governor_state=GovernorState.NORMAL.value,
+                            sampled_at=float(wall_clock()),
+                        )
+                    last_resource_telemetry_at = now
 
             for name, child in children.items():
                 if name not in desired:
@@ -685,6 +725,9 @@ def run_autopilot(
                         continue
                     child.process = popen_factory(child.spec.argv)
                     child.started_at = now
+                    telemetry.add_counters(
+                        {f"child_start_{name}": 1}
+                    )
                     continue
 
                 returncode = child.process.poll()
@@ -698,6 +741,12 @@ def run_autopilot(
                 if ran_for >= policy.stable_reset_seconds:
                     child.restarts = 0
                 child.restarts += 1
+                telemetry.add_counters(
+                    {
+                        f"child_exit_{name}": 1,
+                        f"child_restart_scheduled_{name}": 1,
+                    }
+                )
                 if child.restarts > policy.max_restarts:
                     raise RuntimeError(
                         f"{child.spec.name} exceeded restart budget "
@@ -718,6 +767,7 @@ def run_autopilot(
                     child.process,
                     grace_seconds=policy.shutdown_grace_seconds,
                 )
+        telemetry.close()
 
 
 def main(argv: list[str] | None = None) -> int:

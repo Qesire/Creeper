@@ -49,6 +49,10 @@ class AsyncWaybackCDXClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.state, CDXQueryState.PASS)
         self.assertEqual(calls, 2)
         self.assertEqual(client.http_requests, 2)
+        self.assertEqual(client.throttle_responses, 1)
+        self.assertEqual(client.http_status_counts[429], 1)
+        self.assertEqual(client.http_status_counts[200], 1)
+        self.assertEqual(client.transport_errors, 0)
 
     async def test_retry_after_extends_provider_wide_cooldown(self):
         request = httpx.Request("GET", "https://example.invalid/cdx")
@@ -162,6 +166,9 @@ class AsyncWaybackCDXClientTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result.state, CDXQueryState.INVALID)
         self.assertEqual(calls, 1)
+        self.assertEqual(client.http_requests, 1)
+        self.assertEqual(client.http_status_counts[404], 1)
+        self.assertEqual(client.transport_errors, 0)
 
     async def test_transport_timeout_exhaustion_is_transient(self):
         calls = 0
@@ -180,6 +187,9 @@ class AsyncWaybackCDXClientTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result.state, CDXQueryState.TRANSIENT_ERROR)
         self.assertEqual(calls, 2)
+        self.assertEqual(client.http_requests, 2)
+        self.assertEqual(client.transport_errors, 2)
+        self.assertEqual(sum(client.http_status_counts.values()), 0)
 
     async def test_range_probe_reuses_positive_rows_as_capsules(self):
         async def handler(request):

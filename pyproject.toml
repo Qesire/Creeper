@@ -24,6 +24,7 @@ creeper-source-producer = "creeper.source_cli:main"
 creeper-evidence-worker = "creeper.evidence_cli:main"
 creeper-autopilot = "creeper.autopilot:main"
 creeper-readiness-worker = "creeper.readiness_cli:main"
+creeper-validation = "creeper.validation_cli:main"
 
 [build-system]
 requires = ["setuptools>=68"]

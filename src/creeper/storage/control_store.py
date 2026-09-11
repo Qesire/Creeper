@@ -486,6 +486,31 @@ class ControlStore:
         ).fetchall()
         return [self._task(row) for row in rows]
 
+    def evidence_task_state_counts(self) -> dict[str, int]:
+        """Aggregate the durable evidence backlog without materializing tasks."""
+        counts = {state.value: 0 for state in CDXQueryState}
+        for row in self.connection.execute(
+            "SELECT state, COUNT(*) AS count FROM evidence_tasks GROUP BY state"
+        ):
+            counts[str(row["state"])] = int(row["count"])
+        return counts
+
+    def reservoir_state_counts(self) -> dict[str, int]:
+        return {
+            str(row["state"]): int(row["count"])
+            for row in self.connection.execute(
+                "SELECT state, COUNT(*) AS count FROM reservoirs GROUP BY state"
+            )
+        }
+
+    def work_lease_state_counts(self) -> dict[str, int]:
+        return {
+            str(row["state"]): int(row["count"])
+            for row in self.connection.execute(
+                "SELECT state, COUNT(*) AS count FROM work_leases GROUP BY state"
+            )
+        }
+
     def set_checkpoint(self, key: str, value: str) -> None:
         with self.connection:
             self.connection.execute(

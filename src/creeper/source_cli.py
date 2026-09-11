@@ -30,6 +30,7 @@ from creeper.source_discovery.activation import SourceActivationCompiler
 from creeper.source_discovery.registry import SourceDiscoveryRegistry
 from creeper.storage.control_store import ControlStore
 from creeper.storage.evidence_store import EvidenceStore
+from creeper.storage.telemetry_store import RuntimeTelemetryStore
 
 
 def _path(value: object, *, config_path: Path, name: str) -> Path:
@@ -439,6 +440,38 @@ def _accumulate_watch_report(
         total[key] = max(int(total[key]), int(report[key]))
 
 
+def _record_source_telemetry(
+    telemetry: RuntimeTelemetryStore,
+    report: dict[str, object],
+) -> None:
+    telemetry.add_counters(
+        {
+            "source_leases_succeeded": int(report["leases_succeeded"]),
+            "source_records": int(report["source_records"]),
+            "source_observations": int(report["observations"]),
+            "source_evidence_tasks_enqueued": int(
+                report["evidence_tasks_enqueued"]
+            ),
+            "source_direct_capsules_committed": int(
+                report["direct_capsules_committed"]
+            ),
+            "source_admission_blocked_events": int(
+                bool(report["admission_blocked"])
+            ),
+        }
+    )
+    telemetry.set_max_gauges(
+        {
+            "source_max_record_queue_depth": int(
+                report["max_source_record_queue_depth"]
+            ),
+            "source_max_observation_queue_depth": int(
+                report["max_observation_queue_depth"]
+            ),
+        }
+    )
+
+
 def _watch_loop(
     next_report,
     *,
@@ -446,12 +479,15 @@ def _watch_loop(
     idle_backoff_seconds: float,
     max_idle_backoff_seconds: float,
     sleep_fn,
+    report_observer=None,
 ) -> dict[str, object]:
     total = _empty_watch_total()
     idle = float(idle_backoff_seconds)
     while not stop_event.is_set():
         report = next_report()
         _accumulate_watch_report(total, report)
+        if report_observer is not None:
+            report_observer(report)
         if report["leases_succeeded"]:
             idle = float(idle_backoff_seconds)
             continue
@@ -485,30 +521,48 @@ def run_watch(
     limits = config.get("limits")
     if not isinstance(limits, dict):
         raise ValueError("limits table is required")
+    runtime_value = config.get("runtime_data_root")
+    telemetry: RuntimeTelemetryStore | None = None
+    if isinstance(runtime_value, str) and runtime_value.strip():
+        runtime_root = _path(
+            runtime_value,
+            config_path=config_path,
+            name="runtime_data_root",
+        )
+        telemetry = RuntimeTelemetryStore(runtime_root / "telemetry.sqlite3")
 
-    if config.get("source_mode", "static") == "activated":
-        with ActivatedSourceRuntime(
-            config_path,
-            config=config,
-            limits=limits,
-            owner=owner,
-        ) as runtime:
-            return _watch_loop(
-                runtime.run_once,
-                stop_event=stop_event,
-                idle_backoff_seconds=idle_backoff_seconds,
-                max_idle_backoff_seconds=max_idle_backoff_seconds,
-                sleep_fn=sleep_fn,
-            )
+    try:
+        def observer(report: dict[str, object]) -> None:
+            if telemetry is not None:
+                _record_source_telemetry(telemetry, report)
 
-    return _watch_loop(
-        lambda: run_once(config_path, owner=owner),
-        stop_event=stop_event,
-        idle_backoff_seconds=idle_backoff_seconds,
-        max_idle_backoff_seconds=max_idle_backoff_seconds,
-        sleep_fn=sleep_fn,
-    )
+        if config.get("source_mode", "static") == "activated":
+            with ActivatedSourceRuntime(
+                config_path,
+                config=config,
+                limits=limits,
+                owner=owner,
+            ) as runtime:
+                return _watch_loop(
+                    runtime.run_once,
+                    stop_event=stop_event,
+                    idle_backoff_seconds=idle_backoff_seconds,
+                    max_idle_backoff_seconds=max_idle_backoff_seconds,
+                    sleep_fn=sleep_fn,
+                    report_observer=observer,
+                )
 
+        return _watch_loop(
+            lambda: run_once(config_path, owner=owner),
+            stop_event=stop_event,
+            idle_backoff_seconds=idle_backoff_seconds,
+            max_idle_backoff_seconds=max_idle_backoff_seconds,
+            sleep_fn=sleep_fn,
+            report_observer=observer,
+        )
+    finally:
+        if telemetry is not None:
+            telemetry.close()
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="creeper-source-producer")

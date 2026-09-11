@@ -45,6 +45,11 @@ class EvidenceWorkerReport:
     retryable: int = 0
     inserted_capsules: int = 0
     unknown_provider: int = 0
+    pass_count: int = 0
+    empty_exhaustive_count: int = 0
+    invalid_count: int = 0
+    incomplete_count: int = 0
+    transient_error_count: int = 0
     provider_http_requests_total: int = 0
     provider_throttle_responses_total: int = 0
 
@@ -225,6 +230,15 @@ class AsyncEvidenceWorker:
             flush_count=max(1, min(self.claim_batch_size, 128)),
         )
         terminal = retryable = 0
+        state_counts = {
+            CDXQueryState.PASS: 0,
+            CDXQueryState.EMPTY_EXHAUSTIVE: 0,
+            CDXQueryState.INVALID: 0,
+            CDXQueryState.INCOMPLETE: 0,
+            CDXQueryState.TRANSIENT_ERROR: 0,
+        }
+        for result in results:
+            state_counts[result.state] += 1
         range_capsules = [
             capsule
             for result in results
@@ -316,6 +330,11 @@ class AsyncEvidenceWorker:
             retryable=retryable,
             inserted_capsules=writer.inserted_capsules + range_inserted_capsules,
             unknown_provider=0,
+            pass_count=state_counts[CDXQueryState.PASS],
+            empty_exhaustive_count=state_counts[CDXQueryState.EMPTY_EXHAUSTIVE],
+            invalid_count=state_counts[CDXQueryState.INVALID],
+            incomplete_count=state_counts[CDXQueryState.INCOMPLETE],
+            transient_error_count=state_counts[CDXQueryState.TRANSIENT_ERROR],
         )
 
     async def run_until_idle(self, *, max_batches: int | None = None) -> EvidenceWorkerReport:
@@ -334,6 +353,15 @@ class AsyncEvidenceWorker:
                 retryable=total.retryable + report.retryable,
                 inserted_capsules=total.inserted_capsules + report.inserted_capsules,
                 unknown_provider=total.unknown_provider + report.unknown_provider,
+                pass_count=total.pass_count + report.pass_count,
+                empty_exhaustive_count=(
+                    total.empty_exhaustive_count + report.empty_exhaustive_count
+                ),
+                invalid_count=total.invalid_count + report.invalid_count,
+                incomplete_count=total.incomplete_count + report.incomplete_count,
+                transient_error_count=(
+                    total.transient_error_count + report.transient_error_count
+                ),
             )
             batches += 1
         return total

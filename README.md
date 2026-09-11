@@ -108,6 +108,56 @@ Automatic final submission packaging is not yet triggered by the supervisor;
 the formal snapshot/export path remains an explicit final control after
 readiness reaches its gate.
 
+## Production validation
+
+Long-run competition throughput must be measured from the same durable runtime,
+not inferred from unit tests or synthetic evidence. The autopilot writes
+operational-only counters to `telemetry.sqlite3`; this database is never
+Evidence, Novelty, or submission authority.
+
+A bounded validation window is opened and closed explicitly:
+
+```bash
+REVISION="$(git rev-parse HEAD)"
+
+creeper-validation start "$CREEPER_HOME" \
+  "$CREEPER_HOME/validation/1k" \
+  --label 1k \
+  --target-source-records 1000 \
+  --code-revision "$REVISION"
+
+# Run creeper-autopilot until the bounded workload has reached the intended
+# scale, then close the measurement window.
+
+creeper-validation finish "$CREEPER_HOME" \
+  "$CREEPER_HOME/validation/1k"
+```
+
+Repeat with separate immutable run directories for `10k`, `100k`, and
+`1m`. The target is an audit bound, not an automatic stop condition. For a
+soak test, omit `--target-source-records` and use a time-labelled directory
+such as `validation/soak-24h`.
+
+`start` refuses to open a throughput window unless incremental readiness has
+caught up to the current EvidenceStore sequence. `finish` marks the run
+invalid if readiness is behind, if baseline/EED-model identity changed during
+the window, or if monotonic telemetry counters were reset. Only reports with
+`"valid_for_throughput": true` should be used for performance claims.
+
+Each `report.json` includes:
+
+- Novel EED/hour, Novel EED/day, and Novel EED/1000 actual Wayback HTTP attempts;
+- PASS, EMPTY_EXHAUSTIVE, and retryable fractions;
+- HTTP 429, 5xx, provider-throttle, and transport-error fractions;
+- source records/second and the durable end-of-window EvidenceTask backlog;
+- Evidence/Control/readiness/telemetry storage growth;
+- window-scoped peak RSS, minimum free disk, and sampled governor states.
+
+The 100k/250k/500k EED/day values embedded in the report are engineering
+comparison targets, not organizer-defined score thresholds. The final
+submission score remains governed by the competition's accepted annual
+hostname-year evidence and formal submission rules.
+
 ## Local commands
 
 ```bash
@@ -122,6 +172,7 @@ PYTHONPATH=src python3 scripts/run_offline_dry_run.py <task-root> <index.sqlite3
 PYTHONPATH=src python3 scripts/run_lookup_bench.py <task-root> <index.sqlite3> <report.json> --limit 100000
 PYTHONPATH=src python3 scripts/evaluate_performance.py <performance-gate.json> --lookup-report <lookup.json> --efficiency-report <efficiency_v1.json>
 PYTHONPATH=src python3 scripts/run_eed_readiness.py <report-dir> --accepted-dir <annual-results> --baseline-dir <annual-baseline> --model <q2_tld_top_langs.json> --baseline-eed <value> --elapsed-seconds <seconds> --run-id <id>
+creeper-validation snapshot <runtime-data-root>
 ```
 
 The full V3 index trial on the reference workspace produced 41,007,905
