@@ -48,7 +48,7 @@ class SupervisorPolicy:
 @dataclass(frozen=True)
 class EvidenceServicePolicy:
     endpoint: str = "https://web.archive.org/cdx/search/cdx"
-    claim_batch_size: int = 16
+    claim_batch_size: int = 64
     lease_seconds: float = 300.0
     max_inflight: int = 4
     requests_per_second: float = 0.5
