@@ -23,12 +23,19 @@ class FakeProvider:
         self.delay = delay
         self.active = 0
         self.max_active = 0
+        self.active_by_host = {}
+        self.max_active_by_host = {}
         self.keys = []
 
     async def query_key(self, key):
         self.keys.append(key)
         self.active += 1
         self.max_active = max(self.max_active, self.active)
+        self.active_by_host[key.hostname] = self.active_by_host.get(key.hostname, 0) + 1
+        self.max_active_by_host[key.hostname] = max(
+            self.max_active_by_host.get(key.hostname, 0),
+            self.active_by_host[key.hostname],
+        )
         try:
             if self.delay:
                 await asyncio.sleep(self.delay)
@@ -55,6 +62,7 @@ class FakeProvider:
             )
         finally:
             self.active -= 1
+            self.active_by_host[key.hostname] -= 1
 
 
 class FakeRangeProvider(FakeProvider):
@@ -116,6 +124,29 @@ class AsyncEvidenceWorkerTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(
             all(task.state == CDXQueryState.EMPTY_EXHAUSTIVE.value for task in self.control.list_evidence_tasks())
         )
+
+    async def test_same_hostname_is_serialized_while_other_hosts_run_concurrently(self):
+        keys = [
+            EvidenceQueryKey("same.example", TemporalScope(1997, 1997), "wayback", "cdx-v1"),
+            EvidenceQueryKey("same.example", TemporalScope(1998, 1998), "wayback", "cdx-v1"),
+            EvidenceQueryKey("other.example", TemporalScope(1997, 1997), "wayback", "cdx-v1"),
+        ]
+        self.control.enqueue_evidence_tasks(keys)
+        provider = FakeProvider(delay=0.03)
+        worker = AsyncEvidenceWorker(
+            control_store=self.control,
+            evidence_store=self.evidence,
+            providers={"wayback": provider},
+            owner="worker-host-lock",
+            claim_batch_size=3,
+            provider_inflight={"wayback": 3},
+        )
+
+        report = await worker.run_once()
+
+        self.assertEqual(report.terminal, 3)
+        self.assertEqual(provider.max_active_by_host["same.example"], 1)
+        self.assertGreaterEqual(provider.max_active, 2)
 
     async def test_pass_capsules_are_batched_into_evidence_store(self):
         keys = [self.key("one.example"), self.key("two.example")]
