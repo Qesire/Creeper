@@ -185,6 +185,23 @@ def _counter_deltas(
     return deltas, reset
 
 
+def _readiness_is_current(snapshot: dict[str, object]) -> tuple[bool, str | None]:
+    readiness = snapshot.get("readiness")
+    if not isinstance(readiness, dict):
+        return False, "readiness snapshot is missing"
+    try:
+        cursor = int(readiness["evidence_cursor"])
+        latest = int(readiness["latest_evidence_sequence"])
+    except (KeyError, TypeError, ValueError):
+        return False, "readiness cursor metadata is missing"
+    if cursor < latest:
+        return (
+            False,
+            f"readiness is behind evidence: cursor={cursor} latest={latest}",
+        )
+    return True, None
+
+
 def _readiness_delta(
     start: dict[str, object],
     end: dict[str, object],
@@ -203,7 +220,10 @@ def _readiness_delta(
     right = _decimal(after.get("novel_eed"))
     if left is None or right is None:
         return None, False, "readiness novel_eed is unavailable"
-    return right - left, False, None
+    delta = right - left
+    if delta < 0:
+        return None, False, "readiness novel_eed decreased under unchanged authority"
+    return delta, False, None
 
 
 def build_validation_report(
@@ -222,6 +242,8 @@ def build_validation_report(
         raise ValueError("validation finish timestamp must be after start")
 
     deltas, counter_resets = _counter_deltas(start, end)
+    start_current, start_current_reason = _readiness_is_current(start)
+    end_current, end_current_reason = _readiness_is_current(end)
     eed_delta, authority_changed, readiness_reason = _readiness_delta(start, end)
     http_requests = deltas.get("wayback_http_requests", 0)
     source_records = deltas.get("source_records", 0)
@@ -234,7 +256,13 @@ def build_validation_report(
     http_5xx = deltas.get("wayback_http_5xx", 0)
     transport_errors = deltas.get("wayback_transport_errors", 0)
 
-    valid = not counter_resets and not authority_changed and eed_delta is not None
+    valid = (
+        not counter_resets
+        and not authority_changed
+        and start_current
+        and end_current
+        and eed_delta is not None
+    )
     eed_per_hour = (
         None if not valid else eed_delta * Decimal("3600") / Decimal(str(elapsed))
     )
@@ -294,8 +322,20 @@ def build_validation_report(
                 if counter_resets
                 else []
             ),
+            *(
+                [f"start {start_current_reason}"]
+                if start_current_reason is not None
+                else []
+            ),
+            *(
+                [f"finish {end_current_reason}"]
+                if end_current_reason is not None
+                else []
+            ),
             *([readiness_reason] if readiness_reason else []),
         ],
+        "start_readiness_current": start_current,
+        "finish_readiness_current": end_current,
         "authority_changed": authority_changed,
         "counter_deltas": deltas,
         "novel_eed_delta": None if eed_delta is None else format(eed_delta, "f"),
@@ -364,6 +404,12 @@ def start_validation_run(
     if start_path.exists():
         raise FileExistsError(f"validation run already started: {start_path}")
     snapshot = capture_runtime_snapshot(runtime_data_root, clock=clock)
+    current, reason = _readiness_is_current(snapshot)
+    if not current:
+        raise RuntimeError(
+            "validation start requires readiness caught up to evidence: "
+            + str(reason)
+        )
     payload = {
         **snapshot,
         "validation_label": label,
