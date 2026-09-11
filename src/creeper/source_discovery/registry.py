@@ -459,6 +459,31 @@ class SourceDiscoveryRegistry:
             ).fetchall()
         return [self._candidate_from_row(row) for row in rows]
 
+    def reconcile_exhausted_activations(self) -> int:
+        """Mirror terminal production Reservoir state back into discovery.
+
+        Discovery activation capacity is defined by productive ACTIVE sources,
+        not historical activations. Once the durable production Reservoir is
+        exhausted, the corresponding candidate must leave ACTIVE so the
+        manager can promote another WARM source automatically.
+        """
+        rows = self.connection.execute(
+            """
+            SELECT sc.source_key
+            FROM source_candidates AS sc
+            JOIN source_activations AS sa ON sa.source_key = sc.source_key
+            JOIN reservoirs AS r ON r.reservoir_id = sa.reservoir_id
+            WHERE sc.state = ? AND r.state = ?
+            ORDER BY sc.source_key
+            """,
+            (SourceState.ACTIVE.value, "EXHAUSTED"),
+        ).fetchall()
+        changed = 0
+        for row in rows:
+            self.transition(str(row["source_key"]), SourceState.EXHAUSTED)
+            changed += 1
+        return changed
+
     def inventory(self) -> dict[SourceState, int]:
         result = {state: 0 for state in SourceState}
         for row in self.connection.execute(
