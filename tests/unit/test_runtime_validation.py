@@ -14,7 +14,14 @@ from creeper.storage.telemetry_store import RuntimeTelemetryStore
 
 class RuntimeValidationTests(unittest.TestCase):
     @staticmethod
-    def _readiness(root: Path, *, eed: str, baseline: str = "base-a") -> None:
+    def _readiness(
+        root: Path,
+        *,
+        eed: str,
+        baseline: str = "base-a",
+        cursor: int = 0,
+        latest: int = 0,
+    ) -> None:
         path = root / "readiness" / "readiness.json"
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(
@@ -24,6 +31,8 @@ class RuntimeValidationTests(unittest.TestCase):
                     "baseline_signature": baseline,
                     "model_signature": "model-a",
                     "confirmed_fraction_of_five_percent": "0.1",
+                    "evidence_cursor": cursor,
+                    "latest_evidence_sequence": latest,
                 }
             ),
             encoding="utf-8",
@@ -76,7 +85,7 @@ class RuntimeValidationTests(unittest.TestCase):
                 evidence.close()
                 control.close()
 
-            self._readiness(root, eed="10")
+            self._readiness(root, eed="10", cursor=1, latest=1)
             start_validation_run(
                 runtime_data_root=root,
                 run_dir=run_dir,
@@ -120,7 +129,7 @@ class RuntimeValidationTests(unittest.TestCase):
                 evidence.close()
                 telemetry.close()
 
-            self._readiness(root, eed="110")
+            self._readiness(root, eed="110", cursor=2, latest=2)
             (root / "spool.bin").write_bytes(b"x" * 1024)
 
             report = finish_validation_run(
@@ -159,6 +168,27 @@ class RuntimeValidationTests(unittest.TestCase):
             self.assertTrue((run_dir / "start.json").is_file())
             self.assertTrue((run_dir / "end.json").is_file())
             self.assertTrue((run_dir / "report.json").is_file())
+
+    def test_start_rejects_readiness_backlog_to_prevent_false_yield(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "runtime"
+            root.mkdir()
+            RuntimeTelemetryStore(root / "telemetry.sqlite3").close()
+            ControlStore(root / "control.sqlite3").close()
+            evidence = EvidenceStore(root / "evidence.sqlite3")
+            try:
+                evidence.put(self._capsule("backlog.example", 1997, "a"))
+            finally:
+                evidence.close()
+            self._readiness(root, eed="0", cursor=0, latest=1)
+
+            with self.assertRaisesRegex(RuntimeError, "caught up"):
+                start_validation_run(
+                    runtime_data_root=root,
+                    run_dir=root / "validation" / "lagging",
+                    label="lagging",
+                    clock=lambda: 10.0,
+                )
 
     def test_authority_change_invalidates_throughput_rate(self):
         with tempfile.TemporaryDirectory() as tmp:
