@@ -43,6 +43,7 @@ async def run_service(
     retry_max_seconds: float,
     poll_min_seconds: float,
     poll_max_seconds: float,
+    keepalive_expiry_seconds: float = 30.0,
 ) -> EvidenceWorkerReport:
     if poll_min_seconds <= 0 or poll_max_seconds < poll_min_seconds:
         raise ValueError("invalid evidence worker poll bounds")
@@ -87,6 +88,7 @@ async def run_service(
             requests_per_second=requests_per_second,
             max_connections=max_connections,
             max_keepalive_connections=max_keepalive_connections,
+            keepalive_expiry_seconds=keepalive_expiry_seconds,
             throttle_floor_seconds=throttle_floor_seconds,
         ) as provider:
             worker = AsyncEvidenceWorker(
@@ -246,6 +248,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--requests-per-second", type=float, default=0.5)
     parser.add_argument("--max-connections", type=int, default=8)
     parser.add_argument("--max-keepalive-connections", type=int, default=4)
+    parser.add_argument("--keepalive-expiry-seconds", type=float, default=30.0)
     parser.add_argument("--throttle-floor-seconds", type=float, default=2.0)
     parser.add_argument("--timeout", type=float, default=30.0)
     parser.add_argument("--max-retries", type=int, default=3)
@@ -275,6 +278,7 @@ def main(argv: list[str] | None = None) -> int:
                 retry_max_seconds=args.retry_max_seconds,
                 poll_min_seconds=args.poll_min_seconds,
                 poll_max_seconds=args.poll_max_seconds,
+                keepalive_expiry_seconds=args.keepalive_expiry_seconds,
             )
         )
     except (ValueError, RuntimeError) as exc:
