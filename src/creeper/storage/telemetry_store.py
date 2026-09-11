@@ -43,6 +43,16 @@ class RuntimeTelemetryStore:
                 value REAL NOT NULL,
                 updated_at REAL NOT NULL
             ) WITHOUT ROWID;
+
+            CREATE TABLE IF NOT EXISTS resource_samples (
+                sample_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                sampled_at REAL NOT NULL,
+                rss_bytes INTEGER NOT NULL,
+                disk_free_bytes INTEGER NOT NULL,
+                governor_state TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_resource_samples_time
+                ON resource_samples(sampled_at);
             """
         )
         self.connection.commit()
@@ -136,6 +146,91 @@ class RuntimeTelemetryStore:
                 """,
                 rows,
             )
+
+    def append_resource_sample(
+        self,
+        *,
+        rss_bytes: int,
+        disk_free_bytes: int,
+        governor_state: str,
+        sampled_at: float | None = None,
+    ) -> None:
+        if (
+            isinstance(rss_bytes, bool)
+            or not isinstance(rss_bytes, int)
+            or rss_bytes < 0
+            or isinstance(disk_free_bytes, bool)
+            or not isinstance(disk_free_bytes, int)
+            or disk_free_bytes < 0
+        ):
+            raise ValueError("resource byte samples must be non-negative integers")
+        if not isinstance(governor_state, str) or not governor_state.strip():
+            raise ValueError("governor_state must be a non-empty string")
+        when = float(self.clock()) if sampled_at is None else float(sampled_at)
+        with self.connection:
+            self.connection.execute(
+                """
+                INSERT INTO resource_samples(
+                    sampled_at, rss_bytes, disk_free_bytes, governor_state
+                ) VALUES (?, ?, ?, ?)
+                """,
+                (when, rss_bytes, disk_free_bytes, governor_state),
+            )
+
+    def resource_summary(
+        self,
+        *,
+        start_time: float,
+        end_time: float,
+    ) -> dict[str, object]:
+        if end_time < start_time:
+            raise ValueError("resource summary end_time precedes start_time")
+        row = self.connection.execute(
+            """
+            SELECT COUNT(*) AS samples,
+                   MAX(rss_bytes) AS peak_rss_bytes,
+                   AVG(rss_bytes) AS mean_rss_bytes,
+                   MIN(disk_free_bytes) AS min_disk_free_bytes,
+                   MAX(disk_free_bytes) AS max_disk_free_bytes
+            FROM resource_samples
+            WHERE sampled_at >= ? AND sampled_at <= ?
+            """,
+            (float(start_time), float(end_time)),
+        ).fetchone()
+        states = {
+            str(item["governor_state"]): int(item["count"])
+            for item in self.connection.execute(
+                """
+                SELECT governor_state, COUNT(*) AS count
+                FROM resource_samples
+                WHERE sampled_at >= ? AND sampled_at <= ?
+                GROUP BY governor_state
+                ORDER BY governor_state
+                """,
+                (float(start_time), float(end_time)),
+            )
+        }
+        samples = int(row["samples"] or 0)
+        return {
+            "samples": samples,
+            "peak_rss_bytes": (
+                None if row["peak_rss_bytes"] is None else int(row["peak_rss_bytes"])
+            ),
+            "mean_rss_bytes": (
+                None if row["mean_rss_bytes"] is None else float(row["mean_rss_bytes"])
+            ),
+            "min_disk_free_bytes": (
+                None
+                if row["min_disk_free_bytes"] is None
+                else int(row["min_disk_free_bytes"])
+            ),
+            "max_disk_free_bytes": (
+                None
+                if row["max_disk_free_bytes"] is None
+                else int(row["max_disk_free_bytes"])
+            ),
+            "governor_state_samples": states,
+        }
 
     def snapshot(self) -> TelemetrySnapshot:
         counters = {
