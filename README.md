@@ -26,6 +26,48 @@ direct year-specific evidence when its timestamp and record provenance are
 preserved; undated discovery sources and metadata-only hints remain outside
 the annual master files.
 
+## Autonomous runtime
+
+For competition-scale continuous work, Creeper can run the three durable stages
+under one supervisor:
+
+```bash
+creeper-autopilot conf/autopilot.toml
+```
+
+The supervisor launches and monitors:
+
+```text
+source discovery/search/scout
+        ↓
+ACTIVE SourceCandidate
+        ↓
+persistent source producer
+        ↓
+durable EvidenceTask backlog
+        ↓
+Wayback evidence worker
+```
+
+Production exhaustion is reconciled back into discovery state so an exhausted
+ACTIVE source releases its slot and the next measured WARM source can be
+promoted automatically. Search strategy reward is updated from measured scout
+EED, and the production scheduler ranks active sources from measured EED yield
+rather than treating every source as equally valuable.
+
+The activated source producer keeps BaselineIndex, SQLite handles, and adapter
+instances alive across leases. High-duplicate archives are deduplicated within
+each producer batch so one repeated host-year does not create thousands of
+capsules or baseline lookups.
+
+The supervisor uses bounded exponential restart backoff and stops the whole
+pipeline after a configured child restart budget is exceeded. This prevents a
+misconfigured child from silently spinning forever.
+
+ResourceGovernor-driven process throttling and automatic submission packaging
+are not yet part of the supervisor loop; they remain explicit later-stage
+controls.
+
 ## Local commands
 
 ```bash
