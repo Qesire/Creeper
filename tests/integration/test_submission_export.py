@@ -42,7 +42,8 @@ class SubmissionExportTests(unittest.TestCase):
             with zipfile.ZipFile(archive) as bundle:
                 names = set(bundle.namelist())
                 manifest = json.loads(bundle.read("manifest.json"))
-                self.assertNotIn("annual/1996.txt", names)
+                self.assertIn("annual/1996.txt", names)
+                self.assertEqual(bundle.read("annual/1996.txt"), b"")
                 self.assertEqual(bundle.read("annual/1997.txt").decode(), "new.example\n")
                 self.assertEqual(manifest["records"], 1)
             index.close()

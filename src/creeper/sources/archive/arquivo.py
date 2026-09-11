@@ -18,6 +18,7 @@ import httpx
 from tenacity import Retrying, retry_if_exception, stop_after_attempt, wait_none, wait_random_exponential
 
 from creeper.authority.normalizer import normalize_official
+from creeper.authority.baseline_index import YEAR_BITS
 from creeper.records.candidates import CandidateSourceScope
 from creeper.records.models import HostObservation, SourceRecord
 from creeper.runtime.http import configured_http_proxy
@@ -251,6 +252,9 @@ class ArquivoCDXSource:
                 capture_url = str(row.get("url", "")).strip()
                 if not capture_url:
                     continue
+                status = str(row.get("status", "")).strip()
+                if status and status[:1] not in {"2", "3"}:
+                    continue
                 timestamp = str(row.get("timestamp", ""))
                 source_year = int(timestamp[:4]) if timestamp[:4].isdigit() else None
                 locator = f"{self.client.last_request_url}#row={row_number}"
@@ -260,6 +264,10 @@ class ArquivoCDXSource:
                     payload=capture_url,
                     scope=self.scope,
                     source_year=source_year,
+                    source_time=timestamp,
+                    record_type="CDX_CAPTURE",
+                    artifact_ref=locator,
+                    direct_year_mask=YEAR_BITS.get(source_year, 0),
                 )
                 emitted += 1
 
@@ -276,4 +284,9 @@ class ArquivoCDXSource:
                 locator=record.locator,
                 scope=record.scope,
                 source_year=record.source_year,
+                source_time=record.source_time,
+                record_type=record.record_type,
+                artifact_ref=record.artifact_ref,
+                direct_year_mask=record.direct_year_mask,
+                year_hint_mask=record.year_hint_mask,
             )

@@ -84,6 +84,7 @@ class SourceActivationCompilerTests(unittest.TestCase):
                 registry = self._registry(control, candidate)
                 compiler = SourceActivationCompiler(control, registry=registry)
                 first = compiler.compile(candidate)
+                self.assertEqual(first.evidence_mode, "direct_year")
                 reservoir = control.get_reservoir(first.reservoir_id)
                 assert reservoir is not None
                 control.connection.execute(

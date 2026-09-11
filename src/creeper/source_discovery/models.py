@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import math
 import posixpath
+import re
 from dataclasses import dataclass
 from enum import StrEnum
 from urllib.parse import SplitResult, urlsplit, urlunsplit
@@ -16,6 +17,13 @@ class SourceLevel(StrEnum):
     SOURCE = "SOURCE"
     COLLECTION = "COLLECTION"
     METASOURCE = "METASOURCE"
+
+
+def is_common_crawl_provenance(*values: str) -> bool:
+    """Return whether source provenance identifies the excluded CC corpus."""
+    text = " ".join(str(value) for value in values).lower()
+    compact = re.sub(r"[^a-z0-9]+", "", text)
+    return "commoncrawl" in compact
 
 
 class SourceState(StrEnum):

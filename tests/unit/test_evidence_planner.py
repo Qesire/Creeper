@@ -61,6 +61,28 @@ class EvidencePlannerTests(unittest.TestCase):
             [("new.example", 1997)],
         )
 
+    def test_isc_reference_can_never_become_direct_evidence(self):
+        from creeper.evidence.planner import EvidencePlanner
+
+        plan = EvidencePlanner().plan(
+            self.observation(
+                scope=CandidateSourceScope.ISC_REFERENCE,
+                source_id="network_wizards:1997",
+                direct_year_mask=YEAR_BITS[1997],
+            ),
+            official_mask=0,
+            local_mask=0,
+            provider="wayback",
+            policy_version="v1",
+            allow_direct=True,
+        )
+
+        self.assertEqual(plan.direct_capsules, ())
+        self.assertEqual(
+            [(key.temporal_scope.year_from, key.temporal_scope.year_to) for key in plan.external_keys],
+            [(1997, 1997)],
+        )
+
     def test_official_and_local_masks_suppress_direct_and_external_outputs(self):
         from creeper.evidence.planner import EvidencePlanner
 

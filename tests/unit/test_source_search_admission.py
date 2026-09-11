@@ -45,6 +45,16 @@ class SearchAdmissionPolicyTests(unittest.TestCase):
             or "",
         )
 
+    def test_rejects_common_crawl_corpus_before_scout(self) -> None:
+        policy = SearchAdmissionPolicy(min_expected_volume=100_000)
+        reason = policy.rejection_reason(
+            self.candidate(
+                canonical_entrypoint="https://index.commoncrawl.org/CC-MAIN-2001-01-index",
+                source_family="COMMON_CRAWL_CORPUS",
+            )
+        )
+        self.assertIn("Common Crawl corpus", reason or "")
+
 
 _HELPER = r'''
 import argparse

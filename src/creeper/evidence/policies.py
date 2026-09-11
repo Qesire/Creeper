@@ -52,6 +52,31 @@ class EvidenceCapsule:
     source_locator: str
     payload_hash: str
     policy_version: str
+    evidence_type: str = ""
+    source_id: str = ""
+    original_url: str = ""
+    record_locator: str = ""
+    extraction_method: str = ""
+
+    def __post_init__(self) -> None:
+        # Keep old persisted/test capsules readable while making the V3
+        # provenance fields explicit in every new representation.
+        if not self.evidence_type:
+            object.__setattr__(
+                self,
+                "evidence_type",
+                "source_direct_year"
+                if self.provider.startswith("direct:")
+                else "archive_capture",
+            )
+        if not self.source_id:
+            object.__setattr__(self, "source_id", self.provider)
+        if not self.original_url:
+            object.__setattr__(self, "original_url", self.source_locator)
+        if not self.record_locator:
+            object.__setattr__(self, "record_locator", self.source_locator)
+        if not self.extraction_method:
+            object.__setattr__(self, "extraction_method", "provider_record")
 
 
 @dataclass(frozen=True)

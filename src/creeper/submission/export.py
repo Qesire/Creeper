@@ -34,6 +34,11 @@ def _accepted(capsules: Iterable[EvidenceCapsule], index: BaselineIndex):
             source_locator=capsule.source_locator,
             payload_hash=capsule.payload_hash,
             policy_version=capsule.policy_version,
+            evidence_type=capsule.evidence_type,
+            source_id=capsule.source_id,
+            original_url=capsule.original_url,
+            record_locator=capsule.record_locator,
+            extraction_method=capsule.extraction_method,
         )
 
 
@@ -59,7 +64,8 @@ def export_submission(
         "contributor": contributor,
         "submission_time": when.astimezone(timezone.utc).isoformat(),
         "records": len(accepted),
-        "years": {str(year): len(by_year[year]) for year in sorted(by_year)},
+        "years": {str(year): len(by_year[year]) for year in range(1996, 2002)},
+        "annual_files": [f"annual/{year}.txt" for year in range(1996, 2002)],
         "evidence_policy": sorted({c.policy_version for c in accepted}),
         "baseline_index": str(index.path),
     }
@@ -70,7 +76,7 @@ def export_submission(
             "evidence.jsonl",
             "".join(json.dumps(asdict(c), sort_keys=True) + "\n" for c in accepted),
         )
-        for year in sorted(by_year):
+        for year in range(1996, 2002):
             bundle.writestr(
                 f"annual/{year}.txt",
                 "".join(host + "\n" for host in sorted(by_year[year])),

@@ -17,6 +17,7 @@ from creeper.records.models import HostObservation, SourceRecord
 from creeper.scheduler.leases import LeaseResult, WorkLease
 from creeper.sources.archive.warc_source import WarcSourceLeaseExecutor
 from creeper.sources.archive.cdxj import parse_cdxj_line
+from creeper.sources.archive.cdx import parse_cdx_line
 from creeper.sources.reservoirs import Reservoir
 
 
@@ -77,6 +78,7 @@ class WarcProductionAdapter:
                 locator=record.locator,
                 scope=record.scope,
                 source_year=record.source_year,
+                source_time=record.source_time,
                 record_type=record.record_type,
                 artifact_ref=record.artifact_ref,
                 direct_year_mask=record.direct_year_mask,
@@ -99,6 +101,8 @@ class StructuredProductionAdapter:
         path = urlsplit(locator).path.lower()
         if path.endswith(".cdxj"):
             return "cdxj"
+        if path.endswith((".cdx", ".cdx.gz")):
+            return "cdx"
         if path.endswith((".jsonl", ".jsonl.gz")):
             return "jsonl"
         if path.endswith((".csv", ".csv.gz", ".tsv", ".tsv.gz")):
@@ -140,6 +144,8 @@ class StructuredProductionAdapter:
                 record = (
                     parse_cdxj_line(line, source_id=self.source_id, locator=locator)
                     if self.kind == "cdxj"
+                    else parse_cdx_line(line, source_id=self.source_id, locator=locator)
+                    if self.kind == "cdx"
                     else SourceRecord(
                         source_id=self.source_id,
                         locator=locator,
@@ -147,7 +153,11 @@ class StructuredProductionAdapter:
                         scope=CandidateSourceScope.LOCAL_DISCOVERY,
                     )
                 )
-                if record is not None and record.source_year in range(1996, 2002):
+                if (
+                    record is not None
+                    and record.source_year in range(1996, 2002)
+                    and record.direct_year_mask == 0
+                ):
                     record = replace(
                         record,
                         year_hint_mask=1 << (record.source_year - 1996),
@@ -190,6 +200,7 @@ class StructuredProductionAdapter:
                 locator=record.locator,
                 scope=record.scope,
                 source_year=record.source_year,
+                source_time=record.source_time,
                 record_type=record.record_type,
                 artifact_ref=record.artifact_ref,
                 direct_year_mask=record.direct_year_mask,

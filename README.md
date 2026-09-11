@@ -18,6 +18,14 @@ supports:
 The fixed Common Crawl TLD model remains available to EED calculation only.
 Common Crawl corpus discoveries cannot enter the active candidate set.
 
+The project-level competition rules and current compliance audit are maintained
+in [`docs/competition-rules-v3.md`](docs/competition-rules-v3.md) and
+[`docs/competition-rules-v3-audit.md`](docs/competition-rules-v3-audit.md).
+In particular, a dated JISC/UKWA or Arquivo CDX/CDXJ record is treated as
+direct year-specific evidence when its timestamp and record provenance are
+preserved; undated discovery sources and metadata-only hints remain outside
+the annual master files.
+
 ## Local commands
 
 ```bash

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import StrEnum
+import re
 from typing import Iterable
 
 from creeper.authority.baseline_index import BaselineIndex
@@ -39,12 +40,14 @@ class ActiveCandidateSet:
 
 
 def classify_candidate_source(source_id: str) -> CandidateSourceScope:
-    value = source_id.strip().lower().replace("-", "_")
-    if "common_crawl" in value or value.startswith("cc_"):
+    value = source_id.strip().lower()
+    tokenized = re.sub(r"[^a-z0-9]+", "_", value).strip("_")
+    compact = re.sub(r"[^a-z0-9]+", "", value)
+    if "commoncrawl" in compact or tokenized.startswith("cc_"):
         return CandidateSourceScope.COMMON_CRAWL_CORPUS_EXCLUDED
-    if value.startswith("isc") or "isc_reference" in value:
+    if compact.startswith("isc") or "iscreference" in compact or "networkwizards" in compact:
         return CandidateSourceScope.ISC_REFERENCE
-    if value in {"official_pool", "candidate_pool", "v3_candidate_pool"}:
+    if tokenized in {"official_pool", "candidate_pool", "v3_candidate_pool"}:
         return CandidateSourceScope.OFFICIAL_POOL
     return CandidateSourceScope.LOCAL_DISCOVERY
 
@@ -69,17 +72,27 @@ def reconcile_active_candidates(
         if hostname is None:
             unparsed.append(record.hostname)
             continue
+        inferred_scope = classify_candidate_source(record.source_id)
+        # Source provenance is authoritative for the two restricted classes.
+        # This prevents a caller from accidentally re-labelling Common Crawl
+        # or raw ISC/Network Wizards data as ordinary local discovery.
+        effective_scope = record.scope
+        if inferred_scope in {
+            CandidateSourceScope.COMMON_CRAWL_CORPUS_EXCLUDED,
+            CandidateSourceScope.ISC_REFERENCE,
+        }:
+            effective_scope = inferred_scope
         normalized = CandidateRecord(
             hostname=hostname,
             source_id=record.source_id,
-            scope=record.scope,
+            scope=effective_scope,
             source_locator=record.source_locator,
             source_year=record.source_year,
         )
-        if record.scope is CandidateSourceScope.ISC_REFERENCE:
+        if effective_scope is CandidateSourceScope.ISC_REFERENCE:
             isc.setdefault(hostname, normalized)
             continue
-        if not is_active_candidate_allowed(record.scope):
+        if not is_active_candidate_allowed(effective_scope):
             excluded.setdefault(hostname, normalized)
             continue
         if index.year_mask(hostname):

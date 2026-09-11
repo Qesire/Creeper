@@ -313,6 +313,11 @@ class AsyncWaybackCDXClient:
                             source_locator=original,
                             payload_hash=hashlib.sha256(payload).hexdigest(),
                             policy_version=key.policy_version,
+                            evidence_type="exact_host_cdx_capture",
+                            source_id=key.provider,
+                            original_url=original,
+                            record_locator=f"{key.provider}:{hostname}:{year}:page={pages_seen}:record={records_seen}",
+                            extraction_method="cdx_query_year",
                         )
                         return EvidenceQueryResult(
                             hostname,

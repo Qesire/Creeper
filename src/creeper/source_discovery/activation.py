@@ -42,7 +42,7 @@ def _adapter_kind(entrypoint: str) -> tuple[str, str]:
     if name.endswith(suffixes):
         return "warc_arc", "archive_records"
     structured = (
-        ".cdxj", ".cdx", ".jsonl", ".jsonl.gz", ".csv", ".csv.gz",
+        ".cdxj", ".cdx", ".cdx.gz", ".jsonl", ".jsonl.gz", ".csv", ".csv.gz",
         ".tsv", ".tsv.gz", ".txt", ".txt.gz",
     )
     if name.endswith(structured):
@@ -50,6 +50,11 @@ def _adapter_kind(entrypoint: str) -> tuple[str, str]:
     raise SourceActivationError(
         f"unsupported adapter for discovered source: {entrypoint}"
     )
+
+
+def _direct_year_capable(entrypoint: str) -> bool:
+    name = PurePosixPath(urlsplit(entrypoint).path.lower()).name
+    return name.endswith((".cdx", ".cdx.gz", ".cdxj"))
 
 
 class SourceActivationCompiler:
@@ -82,7 +87,14 @@ class SourceActivationCompiler:
         adapter_id = f"{adapter_kind}:{source_key.removeprefix('src:')}"
         year_from = candidate.expected_year_from or 1996
         year_to = candidate.expected_year_to or 2001
-        capacity_lower = max(0, int(measurement.unique_hosts))
+        capacity_lower = max(
+            0,
+            int(
+                measurement.observed_host_year_pairs
+                if measurement.measurement_mode.value == "HOST_YEAR"
+                else measurement.unique_hosts
+            ),
+        )
         capacity_upper = (
             max(capacity_lower, int(candidate.expected_volume))
             if candidate.expected_volume is not None
@@ -139,7 +151,8 @@ class SourceActivationCompiler:
             enumeration_kind=enumeration_kind,
             capacity_lower=capacity_lower,
             capacity_upper=capacity_upper,
-            evidence_mode="discovery_only",
+            evidence_mode=("direct_year" if _direct_year_capable(candidate.canonical_entrypoint)
+                           else "discovery_only"),
             state=ReservoirState.READY,
         )
         self.control_store.save_activation(

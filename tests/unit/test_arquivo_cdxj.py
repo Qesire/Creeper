@@ -50,6 +50,15 @@ class ArquivoCDXJTests(unittest.TestCase):
 
         self.assertEqual(complete_cdxj_lines(complete + partial), [complete.decode().rstrip("\n")])
 
+    def test_non_success_cdxj_capture_is_not_direct_evidence(self) -> None:
+        line = (
+            'com,example)/ 19991231120000 '
+            '{"url":"http://example.com/","mime":"text/html","status":"404"}'
+        )
+        self.assertIsNone(
+            parse_cdxj_line(line, source_id="arquivo_pt_cdxj:test", locator="row:1")
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

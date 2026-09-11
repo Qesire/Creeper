@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from creeper.source_discovery.models import SourceState
+from creeper.source_discovery.models import SourceState, is_common_crawl_provenance
 from creeper.source_discovery.promotion import (
     LinkPromotionAccumulator,
     PromotionPolicy,
@@ -75,6 +75,13 @@ def expand_scrapy_spool(
 
         inserted = False
         if existing is None:
+            if is_common_crawl_provenance(
+                proposed.source_family,
+                proposed.canonical_entrypoint,
+                proposed.discovered_by,
+            ):
+                suppressed += 1
+                continue
             effective, inserted = registry.register_proposal(proposed)
             inserted_candidates += int(inserted)
 

@@ -29,6 +29,7 @@ class HostObservation:
     locator: str
     scope: CandidateSourceScope
     source_year: int | None = None
+    source_time: str | None = None
     record_type: str = ""
     artifact_ref: str = ""
     direct_year_mask: int = 0

@@ -57,6 +57,11 @@ def build_snapshot(
                 capsule.source_locator,
                 capsule.payload_hash,
                 capsule.policy_version,
+                capsule.evidence_type,
+                capsule.source_id,
+                capsule.original_url,
+                capsule.record_locator,
+                capsule.extraction_method,
             )
         )
     coverage = len(novel) / len(capsules) if capsules else 0.0

@@ -17,6 +17,7 @@ from creeper.source_discovery.models import (
     SourceState,
     StrategyReward,
     SuppressionScope,
+    is_common_crawl_provenance,
 )
 from creeper.storage.control_store import ControlStore
 
@@ -350,6 +351,14 @@ class SourceDiscoveryRegistry:
         proposal_id: str | None = None,
     ) -> tuple[SourceCandidate, bool]:
         """Persist one proposal event and deduplicate the underlying resource."""
+        if is_common_crawl_provenance(
+            candidate.source_family,
+            candidate.canonical_entrypoint,
+            candidate.discovered_by,
+        ):
+            raise ValueError(
+                "Common Crawl corpus is excluded from the active candidate pool"
+            )
         now = float(self.clock())
         proposal_id = proposal_id or f"proposal:{uuid.uuid4().hex}"
         self.connection.execute("BEGIN IMMEDIATE")

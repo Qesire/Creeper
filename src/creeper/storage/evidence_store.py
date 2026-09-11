@@ -34,6 +34,11 @@ class EvidenceStore:
                     source_locator TEXT NOT NULL,
                     payload_hash TEXT NOT NULL,
                     policy_version TEXT NOT NULL,
+                    evidence_type TEXT NOT NULL DEFAULT '',
+                    source_id TEXT NOT NULL DEFAULT '',
+                    original_url TEXT NOT NULL DEFAULT '',
+                    record_locator TEXT NOT NULL DEFAULT '',
+                    extraction_method TEXT NOT NULL DEFAULT '',
                     PRIMARY KEY(hostname, year, provider, payload_hash, policy_version)
                 ) WITHOUT ROWID
                 """
@@ -70,6 +75,23 @@ class EvidenceStore:
                 self.connection.execute(
                     "ALTER TABLE evidence_capsules_v2 RENAME TO evidence_capsules"
                 )
+        current_columns = {
+            str(row[1])
+            for row in self.connection.execute(
+                "PRAGMA table_info(evidence_capsules)"
+            ).fetchall()
+        }
+        for name in (
+            "evidence_type",
+            "source_id",
+            "original_url",
+            "record_locator",
+            "extraction_method",
+        ):
+            if name not in current_columns:
+                self.connection.execute(
+                    f"ALTER TABLE evidence_capsules ADD COLUMN {name} TEXT NOT NULL DEFAULT ''"
+                )
         self.connection.commit()
 
     def put(self, capsule: EvidenceCapsule) -> None:
@@ -86,6 +108,8 @@ class EvidenceStore:
                     hostname, capsule.year, capsule.provider, capsule.temporal_semantics,
                     capsule.evidence_timestamp, capsule.source_locator,
                     capsule.payload_hash, capsule.policy_version,
+                    capsule.evidence_type, capsule.source_id, capsule.original_url,
+                    capsule.record_locator, capsule.extraction_method,
                 )
             )
         if not rows:
@@ -96,8 +120,9 @@ class EvidenceStore:
                 """
                 INSERT OR IGNORE INTO evidence_capsules(
                     hostname, year, provider, temporal_semantics, evidence_timestamp,
-                    source_locator, payload_hash, policy_version
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    source_locator, payload_hash, policy_version, evidence_type,
+                    source_id, original_url, record_locator, extraction_method
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 rows,
             )

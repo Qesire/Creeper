@@ -31,6 +31,7 @@ from creeper.source_discovery.models import (
     SourceCandidate,
 )
 from creeper.sources.archive.cdxj import parse_cdxj_line
+from creeper.sources.archive.cdx import parse_cdx_line
 from creeper.sources.archive.warc import WarcFormatError, iter_warc_target_records
 
 
@@ -416,12 +417,16 @@ def _extract_hosts(
     saw_undated_host = False
     sampled = 0
 
-    if suffix == ".cdxj":
+    if suffix in {".cdxj", ".cdx"}:
         for line in lines:
             if sampled >= policy.max_records:
                 break
             sampled += 1
-            record = parse_cdxj_line(line, source_id="measured-scout", locator=str(sampled))
+            record = (
+                parse_cdxj_line(line, source_id="measured-scout", locator=str(sampled))
+                if suffix == ".cdxj"
+                else parse_cdx_line(line, source_id="measured-scout", locator=str(sampled))
+            )
             if (
                 record is None
                 or record.source_year is None

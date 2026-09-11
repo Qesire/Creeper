@@ -21,6 +21,39 @@ class CandidateScopeTests(unittest.TestCase):
             classify_candidate_source("common-crawl-corpus"),
             CandidateSourceScope.COMMON_CRAWL_CORPUS_EXCLUDED,
         )
+        self.assertEqual(
+            classify_candidate_source("commoncrawl"),
+            CandidateSourceScope.COMMON_CRAWL_CORPUS_EXCLUDED,
+        )
+
+    def test_source_name_overrides_mislabelled_common_crawl_scope(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            annual = root / "merged260909-3"
+            annual.mkdir()
+            for year in range(1996, 2002):
+                (annual / f"{year}.txt").write_text("", encoding="utf-8")
+            (annual / "candidate_pool.txt").write_text("", encoding="utf-8")
+            index = BaselineIndex.build(root, root / "index.sqlite3")
+            result = reconcile_active_candidates(
+                [
+                    CandidateRecord(
+                        "cc.example",
+                        "commoncrawl-index",
+                        CandidateSourceScope.LOCAL_DISCOVERY,
+                    )
+                ],
+                index,
+            )
+            self.assertEqual(result.active, ())
+            self.assertEqual([item.hostname for item in result.excluded], ["cc.example"])
+            index.close()
+
+    def test_network_wizards_is_reference_only(self):
+        self.assertEqual(
+            classify_candidate_source("network_wizards:1997"),
+            CandidateSourceScope.ISC_REFERENCE,
+        )
 
     def test_reconciliation_separates_isc_and_removes_annual_hosts(self):
         with tempfile.TemporaryDirectory() as tmp:

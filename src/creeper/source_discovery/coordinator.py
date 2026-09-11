@@ -20,7 +20,12 @@ from pathlib import Path
 from typing import Generic, TypeVar
 
 from creeper.source_discovery.manager import SearchDirective, SourceReservoirManager
-from creeper.source_discovery.models import ScoutMeasurement, SourceCandidate, SourceState
+from creeper.source_discovery.models import (
+    ScoutMeasurement,
+    SourceCandidate,
+    SourceState,
+    is_common_crawl_provenance,
+)
 from creeper.source_discovery.registry import SourceDiscoveryRegistry
 
 
@@ -320,6 +325,13 @@ class SourceDiscoveryCoordinator:
 
             inserted = False
             if existing is None:
+                if is_common_crawl_provenance(
+                    proposed.source_family,
+                    proposed.canonical_entrypoint,
+                    proposed.discovered_by,
+                ):
+                    counts["scout_children_dropped"] += 1
+                    continue
                 effective, inserted = self.registry.register_proposal(proposed)
                 counts["scout_children_registered"] += int(inserted)
 
@@ -417,6 +429,13 @@ class SourceDiscoveryCoordinator:
                     continue
                 accepted.append(normalized)
             for candidate in accepted:
+                if is_common_crawl_provenance(
+                    candidate.source_family,
+                    candidate.canonical_entrypoint,
+                    candidate.discovered_by,
+                ):
+                    dropped += 1
+                    continue
                 self.registry.register_proposal(candidate, episode_id=episode.episode_id)
             self.registry.finish_search_episode(
                 episode.episode_id,

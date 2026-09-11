@@ -79,6 +79,31 @@ class SourceDiscoveryRegistryTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             canonicalize_source_entrypoint("https://user:secret@example.com/archive")
 
+    def test_common_crawl_corpus_cannot_be_registered_from_any_discovery_path(self) -> None:
+        candidate = self.candidate(
+            "CC-MAIN-2001-01-index",
+            family="BULK_ARTIFACT",
+        )
+        candidate = SourceCandidate(
+            canonical_entrypoint="https://index.commoncrawl.org/CC-MAIN-2001-01-index",
+            source_family=candidate.source_family,
+            level=candidate.level,
+            discovered_by=candidate.discovered_by,
+            discovery_strategy=candidate.discovery_strategy,
+            expected_year_from=candidate.expected_year_from,
+            expected_year_to=candidate.expected_year_to,
+            expected_volume=candidate.expected_volume,
+            temporal_semantics_prior=candidate.temporal_semantics_prior,
+            enumerability_prior=candidate.enumerability_prior,
+            direct_evidence_prior=candidate.direct_evidence_prior,
+            baseline_overlap_prior=candidate.baseline_overlap_prior,
+            access_cost_prior=candidate.access_cost_prior,
+            adapter_cost_prior=candidate.adapter_cost_prior,
+            confidence=candidate.confidence,
+        )
+        with self.assertRaisesRegex(ValueError, "Common Crawl"):
+            self.registry.register_proposal(candidate)
+
     def test_duplicate_proposals_share_candidate_but_preserve_episode_attribution(self) -> None:
         episode = self.registry.begin_search_episode(
             strategy="META_SOURCE_SEARCH",

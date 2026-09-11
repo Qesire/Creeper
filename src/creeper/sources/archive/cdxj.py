@@ -6,6 +6,7 @@ import json
 from collections.abc import Iterable, Iterator
 
 from creeper.records.candidates import CandidateSourceScope
+from creeper.authority.baseline_index import YEAR_BITS
 from creeper.records.models import SourceRecord
 
 
@@ -31,12 +32,19 @@ def parse_cdxj_line(line: str, *, source_id: str, locator: str) -> SourceRecord 
     original_url = payload.get("url")
     if not isinstance(original_url, str) or not original_url.strip():
         return None
+    status = payload.get("status")
+    if status is not None and str(status).strip()[:1] not in {"2", "3"}:
+        return None
     return SourceRecord(
         source_id=source_id,
         locator=locator,
         payload=original_url.strip(),
         scope=CandidateSourceScope.LOCAL_DISCOVERY,
         source_year=int(fields[1][:4]),
+        record_type="CDX_CAPTURE",
+        source_time=fields[1],
+        artifact_ref=locator,
+        direct_year_mask=YEAR_BITS.get(int(fields[1][:4]), 0),
     )
 
 

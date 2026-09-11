@@ -99,6 +99,15 @@ def verify_submission_archive(
                     year = int(record["year"])
                     if hostname is None or year not in range(1996, 2002):
                         raise ValueError("invalid hostname/year")
+                    for field in (
+                        "evidence_type",
+                        "source_id",
+                        "original_url",
+                        "record_locator",
+                        "extraction_method",
+                    ):
+                        if not str(record.get(field, "")).strip():
+                            raise ValueError(f"missing evidence provenance: {field}")
                     evidence_keys.add((hostname, year))
                 except (ValueError, KeyError, TypeError, json.JSONDecodeError) as exc:
                     errors.append(f"invalid evidence line {line_number}: {exc}")

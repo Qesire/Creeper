@@ -9,7 +9,21 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from creeper.source_discovery.models import SourceCandidate
+from creeper.source_discovery.models import SourceCandidate, is_common_crawl_provenance
+
+
+def _is_common_crawl_corpus(candidate: SourceCandidate) -> bool:
+    """Recognize the explicitly excluded Common Crawl corpus family.
+
+    The check is intentionally based on both provenance metadata and the
+    entrypoint. Agent output must not bypass the V3 source exclusion merely by
+    choosing a different spelling for the family name.
+    """
+    return is_common_crawl_provenance(
+        candidate.source_family,
+        candidate.canonical_entrypoint,
+        candidate.discovered_by,
+    )
 
 
 @dataclass(frozen=True)
@@ -40,6 +54,8 @@ class SearchAdmissionPolicy:
             raise ValueError("require_year_bounds must be a boolean")
 
     def rejection_reason(self, candidate: SourceCandidate) -> str | None:
+        if _is_common_crawl_corpus(candidate):
+            return "Common Crawl corpus is excluded from the active candidate pool"
         volume = candidate.expected_volume
         if volume is None:
             return "missing expected_volume high-reservoir estimate"
