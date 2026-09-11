@@ -68,6 +68,74 @@ class SourceProducerCliTests(unittest.TestCase):
         self.assertEqual(result["source_records"], 2)
         self.assertTrue(result["admission_blocked"])
 
+    def test_static_watch_reuses_one_persistent_runtime(self):
+        stop = Event()
+        reports = iter(
+            [
+                {
+                    "leases_succeeded": 1,
+                    "source_records": 1,
+                    "observations": 1,
+                    "evidence_tasks_enqueued": 1,
+                    "direct_capsules_committed": 0,
+                    "admission_blocked": False,
+                    "max_source_record_queue_depth": 1,
+                    "max_observation_queue_depth": 1,
+                },
+                {
+                    "leases_succeeded": 0,
+                    "source_records": 0,
+                    "observations": 0,
+                    "evidence_tasks_enqueued": 0,
+                    "direct_capsules_committed": 0,
+                    "admission_blocked": True,
+                    "max_source_record_queue_depth": 0,
+                    "max_observation_queue_depth": 0,
+                },
+            ]
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = root / "watch-static.toml"
+            config.write_text(
+                "\n".join(
+                    [
+                        'source_mode = "static"',
+                        f'runtime_data_root = "{root / "runtime"}"',
+                        f'baseline_index = "{root / "baseline.sqlite3"}"',
+                        f'dataset = "{root / "hosts.txt"}"',
+                        "",
+                        "[limits]",
+                        "queue_source_records = 4",
+                        "queue_observations = 4",
+                        "queue_evidence_tasks = 4",
+                        "queue_commits = 4",
+                        "lease_max_records = 4",
+                        "lease_max_requests = 4",
+                        "lease_max_bytes = 4096",
+                        "lease_max_seconds = 30",
+                        "evidence_backlog_capacity = 4",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            with patch("creeper.source_cli.StaticSourceRuntime") as runtime_cls:
+                runtime = runtime_cls.return_value.__enter__.return_value
+                runtime.run_once.side_effect = lambda: next(reports)
+                result = run_watch(
+                    config,
+                    owner="persistent-static-test",
+                    stop_event=stop,
+                    sleep_fn=lambda _: stop.set(),
+                )
+
+        runtime_cls.assert_called_once()
+        self.assertEqual(runtime.run_once.call_count, 2)
+        self.assertEqual(result["leases_succeeded"], 1)
+        self.assertTrue(result["admission_blocked"])
+
     def test_activated_runtime_shrinks_lease_to_backlog_headroom(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
