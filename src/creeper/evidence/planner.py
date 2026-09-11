@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 from dataclasses import dataclass
 
-from creeper.authority.baseline_index import YEAR_BITS
+from creeper.authority.baseline_index import ALL_YEAR_MASK, YEAR_BITS
 from creeper.authority.normalizer import normalize_official
 from creeper.evidence.policies import EvidenceCapsule, EvidenceQueryKey, TemporalScope
 from creeper.records.candidates import CandidateSourceScope
@@ -58,6 +58,17 @@ class EvidencePlanner:
             hint_mask |= YEAR_BITS[observation.source_year]
         if not allow_direct or restricted_source:
             hint_mask |= claimed_direct_mask
+        has_temporal_claim = bool(
+            observation.year_hint_mask
+            or observation.direct_year_mask
+            or observation.source_year in YEAR_BITS
+        )
+        if not has_temporal_claim:
+            # An undated hostname is still a valid discovery candidate. Ask
+            # the evidence provider for the complete competition period; the
+            # range probe will identify years with captures and fan out only
+            # those years to exact queries.
+            hint_mask = ALL_YEAR_MASK
         hint_mask &= ~suppressed_mask
         hint_mask &= ~direct_mask
         hint_mask &= ~external_covered_mask

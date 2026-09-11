@@ -1,7 +1,7 @@
 import hashlib
 import unittest
 
-from creeper.authority.baseline_index import YEAR_BITS
+from creeper.authority.baseline_index import ALL_YEAR_MASK, YEAR_BITS
 from creeper.evidence.policies import EvidenceQueryKey
 from creeper.records.candidates import CandidateSourceScope
 from creeper.records.models import HostObservation
@@ -119,6 +119,37 @@ class EvidencePlannerTests(unittest.TestCase):
         )
         self.assertEqual(plan.external_keys[0].temporal_scope.year_to, 1999)
         self.assertEqual(plan.direct_capsules, ())
+
+    def test_undated_hostname_plans_full_competition_year_range(self):
+        from creeper.evidence.planner import EvidencePlanner
+
+        plan = EvidencePlanner().plan(
+            self.observation(),
+            official_mask=YEAR_BITS[1997],
+            local_mask=0,
+            provider="wayback",
+            policy_version="v1",
+        )
+
+        self.assertEqual(plan.direct_capsules, ())
+        self.assertEqual(
+            [
+                (key.temporal_scope.year_from, key.temporal_scope.year_to)
+                for key in plan.external_keys
+            ],
+            [(1996, 1996), (1998, 2001)],
+        )
+        self.assertEqual(
+            sum(
+                1 << (year - 1996)
+                for key in plan.external_keys
+                for year in range(
+                    key.temporal_scope.year_from,
+                    key.temporal_scope.year_to + 1,
+                )
+            ),
+            ALL_YEAR_MASK & ~YEAR_BITS[1997],
+        )
 
     def test_contiguous_missing_years_are_one_range_and_gaps_are_separate(self):
         from creeper.evidence.planner import EvidencePlanner
