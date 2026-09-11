@@ -9,7 +9,9 @@ policy, and configuration consistency.
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 from dataclasses import dataclass
+import fcntl
 import os
 from pathlib import Path
 import signal
@@ -334,6 +336,26 @@ def build_child_specs(config: AutopilotConfig) -> tuple[ChildSpec, ...]:
     )
 
 
+@contextmanager
+def _autopilot_lock(path: Path):
+    """Prevent duplicate supervisors from launching competing producers."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise RuntimeError(
+                f"autopilot is already running for this runtime: {path}"
+            ) from exc
+        yield
+    finally:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
+
+
 def _stop_child(process: Any, *, grace_seconds: float) -> None:
     if process.poll() is not None:
         return
@@ -417,7 +439,10 @@ def main(argv: list[str] | None = None) -> int:
         signal.signal(signum, request_stop)
     try:
         config = load_autopilot_config(args.config)
-        run_autopilot(config, stop_event=stop)
+        with _autopilot_lock(
+            config.runtime_data_root / "locks" / "autopilot.lock"
+        ):
+            run_autopilot(config, stop_event=stop)
     except KeyboardInterrupt:
         return 130
     except (OSError, tomllib.TOMLDecodeError, ValueError, RuntimeError) as exc:
