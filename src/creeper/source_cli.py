@@ -54,6 +54,200 @@ def _positive_float(value: object, name: str) -> float:
 
 
 
+class StaticSourceRuntime:
+    """Persistent runtime for one configured static discovery reservoir.
+
+    Long-running WebBase production frequently operates with only a handful of
+    free evidence slots. Reusing BaselineIndex, SQLite handles, and the dataset
+    adapter avoids rebuilding the local runtime every time Wayback frees one
+    slot.
+    """
+
+    def __init__(
+        self,
+        config_path: Path,
+        *,
+        config: dict[str, object],
+        limits: dict[str, object],
+        owner: str,
+    ) -> None:
+        self.config_path = Path(config_path)
+        self.owner = owner
+        self.backlog_capacity = _positive_int(
+            limits.get("evidence_backlog_capacity"),
+            "evidence_backlog_capacity",
+        )
+        self.queue_capacities = {
+            "source_records": _positive_int(
+                limits.get("queue_source_records"), "queue_source_records"
+            ),
+            "observations": _positive_int(
+                limits.get("queue_observations"), "queue_observations"
+            ),
+            "evidence_tasks": _positive_int(
+                limits.get("queue_evidence_tasks"), "queue_evidence_tasks"
+            ),
+            "commits": _positive_int(
+                limits.get("queue_commits"), "queue_commits"
+            ),
+        }
+        self.max_records = _positive_int(
+            limits.get("lease_max_records"), "lease_max_records"
+        )
+        self.max_requests = _positive_int(
+            limits.get("lease_max_requests"), "lease_max_requests"
+        )
+        self.max_bytes = _positive_int(
+            limits.get("lease_max_bytes"), "lease_max_bytes"
+        )
+        self.max_seconds = _positive_float(
+            limits.get("lease_max_seconds"), "lease_max_seconds"
+        )
+
+        baseline_path = _path(
+            config.get("baseline_index"),
+            config_path=self.config_path,
+            name="baseline_index",
+        )
+        dataset_path = _path(
+            config.get("dataset"),
+            config_path=self.config_path,
+            name="dataset",
+        )
+        runtime_root = _path(
+            config.get("runtime_data_root"),
+            config_path=self.config_path,
+            name="runtime_data_root",
+        )
+        self.source_id = config.get("source_id", "local_dataset")
+        self.domain_id = config.get("domain_id", "local_static_dataset")
+        self.reservoir_id = config.get("reservoir_id", self.source_id)
+        self.source_year = config.get("source_year")
+        for name, value in (
+            ("source_id", self.source_id),
+            ("domain_id", self.domain_id),
+            ("reservoir_id", self.reservoir_id),
+        ):
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"{name} must be a non-empty string")
+        if self.source_id != self.reservoir_id:
+            raise ValueError("local static source_id and reservoir_id must match")
+        if (
+            isinstance(self.source_year, bool)
+            or not isinstance(self.source_year, int)
+            or not 1996 <= self.source_year <= 2001
+        ):
+            raise ValueError("source_year must be between 1996 and 2001")
+
+        self.baseline = BaselineIndex(baseline_path)
+        self.control = ControlStore(runtime_root / "control.sqlite3")
+        self.evidence = EvidenceStore(runtime_root / "evidence.sqlite3")
+        self.adapter = StaticDatasetAdapter(
+            dataset_path,
+            source_id=self.source_id,
+            source_year=self.source_year,
+        )
+        domain = SourceDomain(
+            domain_id=self.domain_id,
+            family="LOCAL_STATIC_DATASET",
+            discovery_mechanism="configured local file",
+            temporal_scope=(1996, 2001),
+            state=DomainState.EXPLORING,
+        )
+        reservoir = Reservoir(
+            reservoir_id=self.reservoir_id,
+            domain_id=self.domain_id,
+            adapter_id=self.adapter.adapter_id,
+            root_locator=str(dataset_path),
+            enumeration_kind="line_file",
+            capacity_lower=0,
+            capacity_upper=None,
+            evidence_mode="discovery_only",
+            state=ReservoirState.READY,
+        )
+        if self.control.get_domain(self.domain_id) is None:
+            self.control.save_domain(domain)
+        if self.control.get_reservoir(self.reservoir_id) is None:
+            self.control.save_reservoir(reservoir)
+
+        self.producer = SourceProducer(
+            baseline=self.baseline,
+            control_store=self.control,
+            evidence_store=self.evidence,
+            scheduler=GlobalScheduler(
+                CreditLedger({"wayback": self.backlog_capacity})
+            ),
+            candidates=(),
+            adapters={self.adapter.adapter_id: self.adapter},
+            backlog_capacities={"wayback": self.backlog_capacity},
+            queue_capacities=self.queue_capacities,
+            owner=self.owner,
+        )
+
+    def close(self) -> None:
+        close = getattr(self.adapter, "close", None)
+        if callable(close):
+            close()
+        self.evidence.close()
+        self.control.close()
+        self.baseline.close()
+
+    def __enter__(self) -> "StaticSourceRuntime":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        self.close()
+
+    def run_once(self) -> dict[str, object]:
+        reservoir = self.control.get_reservoir(self.reservoir_id)
+        if reservoir is None:
+            raise RuntimeError(
+                f"static reservoir disappeared: {self.reservoir_id}"
+            )
+        if reservoir.state is ReservoirState.EXHAUSTED:
+            return SourceProducerReport().as_dict()
+
+        headroom = self.producer.admission.available_capacity(
+            provider="wayback",
+            capacity=self.backlog_capacity,
+        )
+        lease_records = min(self.max_records, headroom)
+        if lease_records < 1:
+            return SourceProducerReport(
+                admission_blocked=reservoir.state is ReservoirState.READY
+            ).as_dict()
+
+        template = WorkLease.create(
+            reservoir_id=reservoir.reservoir_id,
+            cursor_start=reservoir.cursor,
+            max_records=lease_records,
+            max_requests=self.max_requests,
+            max_bytes=self.max_bytes,
+            max_seconds=self.max_seconds,
+            expected_evidence_tasks=lease_records,
+            expected_novel_eed=float(lease_records),
+        )
+        candidate = LeaseCandidate(
+            reservoir_id=reservoir.reservoir_id,
+            expected_novel_eed=float(lease_records),
+            costs=ResourceCost(
+                general_network=0,
+                evidence_network=1,
+                cpu=1,
+                ssd=1,
+            ),
+            reservoir=reservoir,
+            lease=template,
+            evidence_provider="wayback",
+            expected_evidence_tasks=lease_records,
+        )
+        self.producer.refresh_workset(
+            candidates=(candidate,),
+            adapters={self.adapter.adapter_id: self.adapter},
+        )
+        return self.producer.run_once().as_dict()
+
+
 class ActivatedSourceRuntime:
     """Persistent production runtime for discovery-activated sources.
 
@@ -258,147 +452,20 @@ def run_once(config_path: Path, *, owner: str) -> dict[str, object]:
         raise ValueError("limits table is required")
 
     if config.get("source_mode", "static") == "activated":
-        return _run_activated_once(config_path, config=config, limits=limits, owner=owner)
-
-    backlog_capacity = _positive_int(
-        limits.get("evidence_backlog_capacity"),
-        "evidence_backlog_capacity",
-    )
-    queue_capacities = {
-        "source_records": _positive_int(
-            limits.get("queue_source_records"), "queue_source_records"
-        ),
-        "observations": _positive_int(
-            limits.get("queue_observations"), "queue_observations"
-        ),
-        "evidence_tasks": _positive_int(
-            limits.get("queue_evidence_tasks"), "queue_evidence_tasks"
-        ),
-        "commits": _positive_int(limits.get("queue_commits"), "queue_commits"),
-    }
-    max_records = _positive_int(limits.get("lease_max_records"), "lease_max_records")
-    max_requests = _positive_int(limits.get("lease_max_requests"), "lease_max_requests")
-    max_bytes = _positive_int(limits.get("lease_max_bytes"), "lease_max_bytes")
-    max_seconds = _positive_float(limits.get("lease_max_seconds"), "lease_max_seconds")
-
-    baseline_path = _path(
-        config.get("baseline_index"), config_path=config_path, name="baseline_index"
-    )
-    dataset_path = _path(config.get("dataset"), config_path=config_path, name="dataset")
-    runtime_root = _path(
-        config.get("runtime_data_root"),
-        config_path=config_path,
-        name="runtime_data_root",
-    )
-    source_id = config.get("source_id", "local_dataset")
-    domain_id = config.get("domain_id", "local_static_dataset")
-    reservoir_id = config.get("reservoir_id", source_id)
-    source_year = config.get("source_year")
-    for name, value in (
-        ("source_id", source_id),
-        ("domain_id", domain_id),
-        ("reservoir_id", reservoir_id),
-    ):
-        if not isinstance(value, str) or not value.strip():
-            raise ValueError(f"{name} must be a non-empty string")
-    if source_id != reservoir_id:
-        raise ValueError("local static source_id and reservoir_id must match")
-    if (
-        isinstance(source_year, bool)
-        or not isinstance(source_year, int)
-        or not 1996 <= source_year <= 2001
-    ):
-        raise ValueError("source_year must be between 1996 and 2001")
-
-    baseline = BaselineIndex(baseline_path)
-    control = ControlStore(runtime_root / "control.sqlite3")
-    evidence = EvidenceStore(runtime_root / "evidence.sqlite3")
-    try:
-        adapter = StaticDatasetAdapter(
-            dataset_path,
-            source_id=source_id,
-            source_year=source_year,
-        )
-        domain = SourceDomain(
-            domain_id=domain_id,
-            family="LOCAL_STATIC_DATASET",
-            discovery_mechanism="configured local file",
-            temporal_scope=(1996, 2001),
-            state=DomainState.EXPLORING,
-        )
-        reservoir = Reservoir(
-            reservoir_id=reservoir_id,
-            domain_id=domain_id,
-            adapter_id=adapter.adapter_id,
-            root_locator=str(dataset_path),
-            enumeration_kind="line_file",
-            capacity_lower=0,
-            capacity_upper=None,
-            evidence_mode="discovery_only",
-            state=ReservoirState.READY,
-        )
-        stored_domain = control.get_domain(domain_id)
-        if stored_domain is None:
-            control.save_domain(domain)
-        stored_reservoir = control.get_reservoir(reservoir_id)
-        if stored_reservoir is None:
-            control.save_reservoir(reservoir)
-        else:
-            reservoir = stored_reservoir
-
-        # Static discovery-only sources also participate in the same durable
-        # evidence backpressure contract as activated sources. Size each lease to
-        # currently available provider headroom instead of requiring the whole
-        # configured lease to fit. This lets a saturated production runtime
-        # continuously consume newly freed slots without queue oversubscription.
-        headroom = EvidenceBacklogAdmission(control).available_capacity(
-            provider="wayback",
-            capacity=backlog_capacity,
-        )
-        lease_records = min(max_records, headroom)
-        if lease_records < 1:
-            return SourceProducerReport(admission_blocked=True).as_dict()
-
-        # This configured local source contributes at most one target-year hint
-        # per record, so lease_records is a conservative upper bound on newly
-        # created EvidenceTasks for the lease.
-        expected_tasks = lease_records
-        template = WorkLease.create(
-            reservoir_id=reservoir_id,
-            cursor_start=reservoir.cursor,
-            max_records=lease_records,
-            max_requests=max_requests,
-            max_bytes=max_bytes,
-            max_seconds=max_seconds,
-            expected_evidence_tasks=expected_tasks,
-            expected_novel_eed=float(lease_records),
-        )
-        candidate = LeaseCandidate(
-            reservoir_id=reservoir_id,
-            expected_novel_eed=float(lease_records),
-            costs=ResourceCost(general_network=0, evidence_network=1, cpu=1, ssd=1),
-            reservoir=reservoir,
-            lease=template,
-            evidence_provider="wayback",
-            expected_evidence_tasks=expected_tasks,
-        )
-        scheduler = GlobalScheduler(CreditLedger({"wayback": backlog_capacity}))
-        producer = SourceProducer(
-            baseline=baseline,
-            control_store=control,
-            evidence_store=evidence,
-            scheduler=scheduler,
-            candidates=[candidate],
-            adapters={adapter.adapter_id: adapter},
-            backlog_capacities={"wayback": backlog_capacity},
-            queue_capacities=queue_capacities,
+        return _run_activated_once(
+            config_path,
+            config=config,
+            limits=limits,
             owner=owner,
         )
-        return producer.run_once().as_dict()
-    finally:
-        evidence.close()
-        control.close()
-        baseline.close()
+
+    with StaticSourceRuntime(
+        config_path,
+        config=config,
+        limits=limits,
+        owner=owner,
+    ) as runtime:
+        return runtime.run_once()
 
 
 def _run_activated_once(
@@ -550,29 +617,24 @@ def run_watch(
                 _record_source_telemetry(telemetry, report)
 
         if config.get("source_mode", "static") == "activated":
-            with ActivatedSourceRuntime(
-                config_path,
-                config=config,
-                limits=limits,
-                owner=owner,
-            ) as runtime:
-                return _watch_loop(
-                    runtime.run_once,
-                    stop_event=stop_event,
-                    idle_backoff_seconds=idle_backoff_seconds,
-                    max_idle_backoff_seconds=max_idle_backoff_seconds,
-                    sleep_fn=sleep_fn,
-                    report_observer=observer,
-                )
+            runtime_factory = ActivatedSourceRuntime
+        else:
+            runtime_factory = StaticSourceRuntime
 
-        return _watch_loop(
-            lambda: run_once(config_path, owner=owner),
-            stop_event=stop_event,
-            idle_backoff_seconds=idle_backoff_seconds,
-            max_idle_backoff_seconds=max_idle_backoff_seconds,
-            sleep_fn=sleep_fn,
-            report_observer=observer,
-        )
+        with runtime_factory(
+            config_path,
+            config=config,
+            limits=limits,
+            owner=owner,
+        ) as runtime:
+            return _watch_loop(
+                runtime.run_once,
+                stop_event=stop_event,
+                idle_backoff_seconds=idle_backoff_seconds,
+                max_idle_backoff_seconds=max_idle_backoff_seconds,
+                sleep_fn=sleep_fn,
+                report_observer=observer,
+            )
     finally:
         if telemetry is not None:
             telemetry.close()
