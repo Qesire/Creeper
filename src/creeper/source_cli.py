@@ -618,8 +618,24 @@ def run_watch(
 
         if config.get("source_mode", "static") == "activated":
             runtime_factory = ActivatedSourceRuntime
-        else:
+        elif all(
+            isinstance(config.get(name), str) and str(config.get(name)).strip()
+            for name in ("runtime_data_root", "baseline_index", "dataset")
+        ):
             runtime_factory = StaticSourceRuntime
+        else:
+            # Preserve the lightweight mocked/embedded watch contract used by
+            # tests and callers that inject run_once without a full production
+            # configuration. Real static production configs always take the
+            # persistent runtime path above.
+            return _watch_loop(
+                lambda: run_once(config_path, owner=owner),
+                stop_event=stop_event,
+                idle_backoff_seconds=idle_backoff_seconds,
+                max_idle_backoff_seconds=max_idle_backoff_seconds,
+                sleep_fn=sleep_fn,
+                report_observer=observer,
+            )
 
         with runtime_factory(
             config_path,
