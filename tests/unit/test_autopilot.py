@@ -8,6 +8,7 @@ import unittest
 from creeper.autopilot import (
     AutopilotConfig,
     EvidenceServicePolicy,
+    ReadinessServicePolicy,
     SupervisorPolicy,
     build_child_specs,
     load_autopilot_config,
@@ -61,6 +62,46 @@ class AutopilotTests(unittest.TestCase):
         self.assertIn("2", evidence)
         self.assertIn("--requests-per-second", evidence)
         self.assertIn("0.5", evidence)
+
+    def test_readiness_adds_fourth_isolated_service_process(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = AutopilotConfig(
+                source_discovery_config=root / "discovery.toml",
+                source_producer_config=root / "producer.toml",
+                runtime_data_root=root / "runtime",
+                supervisor=SupervisorPolicy(),
+                evidence=EvidenceServicePolicy(),
+                baseline_index=root / "baseline.sqlite3",
+                readiness=ReadinessServicePolicy(
+                    eed_model=root / "eed-model.json",
+                    baseline_eed="35266393.8852",
+                    batch_size=1234,
+                    max_batches_per_cycle=7,
+                    poll_seconds=11.0,
+                ),
+            )
+            specs = build_child_specs(config)
+
+        self.assertEqual(
+            [spec.name for spec in specs],
+            [
+                "source-discovery",
+                "source-producer",
+                "evidence-worker",
+                "readiness-worker",
+            ],
+        )
+        readiness = specs[3].argv
+        self.assertIn("--baseline-index", readiness)
+        self.assertIn(str(root / "baseline.sqlite3"), readiness)
+        self.assertIn("--eed-model", readiness)
+        self.assertIn(str(root / "eed-model.json"), readiness)
+        self.assertIn("--baseline-eed", readiness)
+        self.assertIn("35266393.8852", readiness)
+        self.assertIn("1234", readiness)
+        self.assertIn("7", readiness)
+        self.assertIn("11.0", readiness)
 
     def test_supervisor_stops_all_children_together(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -143,6 +184,7 @@ class AutopilotTests(unittest.TestCase):
                     [
                         'source_mode = "activated"',
                         f'runtime_data_root = "{runtime}"',
+                        f'baseline_index = "{root / "baseline.sqlite3"}"',
                     ]
                 ),
                 encoding="utf-8",
@@ -166,6 +208,7 @@ class AutopilotTests(unittest.TestCase):
                     [
                         'source_mode = "static"',
                         f'runtime_data_root = "{runtime}"',
+                        f'baseline_index = "{root / "baseline.sqlite3"}"',
                     ]
                 ),
                 encoding="utf-8",
