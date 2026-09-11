@@ -274,6 +274,9 @@ def load_source_discovery_config(config_path: Path) -> SourceDiscoveryServiceCon
                 max_line_bytes=_positive_int(
                     measurement_raw.get("max_line_bytes", defaults.max_line_bytes), name="measurement.max_line_bytes"
                 ),
+                sample_windows=_positive_int(
+                    measurement_raw.get("sample_windows", defaults.sample_windows), name="measurement.sample_windows"
+                ),
                 min_unique_hosts=_positive_int(
                     measurement_raw.get("min_unique_hosts", defaults.min_unique_hosts), name="measurement.min_unique_hosts"
                 ),
