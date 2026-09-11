@@ -554,7 +554,7 @@ def _extract_hosts(
             ),
         )
 
-    if suffix in {"", ".txt", ".list"} or lower_type.startswith("text/plain"):
+    if suffix in {"", ".txt", ".list", ".urls"} or lower_type.startswith("text/plain"):
         for line in lines:
             if sampled >= policy.max_records:
                 break
@@ -602,6 +602,7 @@ class MeasuredYieldScoutExecutor:
             ".ndjson",
             ".txt",
             ".list",
+            ".urls",
         }
 
     async def _download_prefix(
