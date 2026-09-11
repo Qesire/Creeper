@@ -1,6 +1,7 @@
 import json
 import unittest
 from unittest.mock import patch
+from urllib.parse import parse_qs, urlsplit
 
 import httpx
 
@@ -107,8 +108,12 @@ class AsyncWaybackCDXClientTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result.state, CDXQueryState.EMPTY_EXHAUSTIVE)
         self.assertEqual(result.pages_seen, 2)
-        self.assertIn("showResumeKey=true", calls[0])
-        self.assertIn("resumeKey=resume-token%21", calls[1])
+        first_query = parse_qs(urlsplit(calls[0]).query)
+        second_query = parse_qs(urlsplit(calls[1]).query)
+        self.assertEqual(first_query["showResumeKey"], ["true"])
+        self.assertIn("urlkey", first_query["fl"][0].split(","))
+        self.assertEqual(first_query["filter"], ["statuscode:[23][0-9][0-9]"])
+        self.assertEqual(second_query["resumeKey"], ["resume-token!"])
 
     async def test_non_retryable_http_error_is_invalid_without_retry(self):
         calls = 0
