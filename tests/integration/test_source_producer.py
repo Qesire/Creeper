@@ -43,6 +43,11 @@ class FakeSource:
             locator=record.locator,
             scope=record.scope,
             source_year=record.source_year,
+            source_time=record.source_time,
+            record_type=record.record_type,
+            artifact_ref=record.artifact_ref,
+            direct_year_mask=record.direct_year_mask,
+            year_hint_mask=record.year_hint_mask,
         )
 
 
@@ -171,6 +176,83 @@ class SourceProducerTests(unittest.TestCase):
         self.assertEqual(report.evidence_tasks_enqueued, 0)
         self.assertEqual(adapter.executions, 1)
         self.assertIsNone(self.control.get_evidence_task(exact_key))
+
+    def test_duplicate_direct_host_years_commit_one_capsule_per_batch(self):
+        records = [
+            SourceRecord(
+                source_id="direct-fixture",
+                locator=f"fixture://{index}",
+                payload="repeat.example",
+                scope=CandidateSourceScope.LOCAL_DISCOVERY,
+                source_year=1997,
+                source_time=f"1997010{index}000000",
+                record_type="CDX_CAPTURE",
+                artifact_ref=f"fixture://{index}",
+                direct_year_mask=1 << (1997 - 1996),
+            )
+            for index in range(1, 4)
+        ]
+        adapter = FakeSource(records)
+        domain = SourceDomain(
+            domain_id="direct-domain",
+            family="DIRECT_FIXTURE",
+            discovery_mechanism="test",
+            temporal_scope=(1996, 2001),
+            state=DomainState.EXPLORING,
+        )
+        reservoir = Reservoir(
+            reservoir_id="direct-reservoir",
+            domain_id=domain.domain_id,
+            adapter_id=adapter.adapter_id,
+            root_locator="fixture://direct",
+            enumeration_kind="finite_list",
+            capacity_lower=3,
+            capacity_upper=3,
+            evidence_mode="direct_year",
+            state=ReservoirState.READY,
+        )
+        self.control.save_domain(domain)
+        self.control.save_reservoir(reservoir)
+        template = WorkLease.create(
+            reservoir_id=reservoir.reservoir_id,
+            max_records=3,
+            max_requests=1,
+            max_bytes=4096,
+            max_seconds=30,
+            expected_evidence_tasks=0,
+            expected_novel_eed=1.0,
+        )
+        candidate = LeaseCandidate(
+            reservoir_id=reservoir.reservoir_id,
+            expected_novel_eed=1.0,
+            costs=ResourceCost(0, 0, 1, 1),
+            reservoir=reservoir,
+            lease=template,
+            evidence_mode="direct_year",
+            expected_evidence_tasks=0,
+        )
+        runtime = SourceProducer(
+            baseline=self.baseline,
+            control_store=self.control,
+            evidence_store=self.evidence,
+            scheduler=GlobalScheduler(CreditLedger({"wayback": 1})),
+            candidates=[candidate],
+            adapters={adapter.adapter_id: adapter},
+            backlog_capacities={"wayback": 1},
+            queue_capacities={
+                "source_records": 4,
+                "observations": 4,
+                "evidence_tasks": 4,
+                "commits": 4,
+            },
+            baseline_batch_size=10,
+        )
+
+        report = runtime.run_once()
+
+        self.assertEqual(report.direct_capsules_committed, 1)
+        self.assertEqual(self.evidence.count(), 1)
+        self.assertEqual(report.evidence_tasks_enqueued, 0)
 
     def test_full_backlog_blocks_source_before_adapter_execution(self):
         occupied = EvidenceQueryKey(
