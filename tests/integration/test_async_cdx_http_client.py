@@ -53,6 +53,8 @@ class AsyncWaybackCDXClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(client.http_status_counts[429], 1)
         self.assertEqual(client.http_status_counts[200], 1)
         self.assertEqual(client.transport_errors, 0)
+        self.assertGreaterEqual(client.http_elapsed_milliseconds, 0)
+        self.assertEqual(sum(client.http_latency_buckets.values()), 2)
 
     async def test_retry_after_extends_provider_wide_cooldown(self):
         request = httpx.Request("GET", "https://example.invalid/cdx")
