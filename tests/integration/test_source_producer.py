@@ -154,6 +154,83 @@ class SourceProducerTests(unittest.TestCase):
         self.assertEqual(runtime.admission.reserved("wayback"), 0)
         self.assertEqual(self.evidence.count(), 0)
 
+    def test_single_year_discovery_hint_enqueues_exact_year_without_direct_capsule(self):
+        record = SourceRecord(
+            source_id="webbase-fixture",
+            locator="fixture://webbase/1",
+            payload="novel.example",
+            scope=CandidateSourceScope.LOCAL_DISCOVERY,
+            source_year=2001,
+            year_hint_mask=1 << (2001 - 1996),
+        )
+        adapter = FakeSource([record])
+        domain = SourceDomain(
+            domain_id="webbase-domain",
+            family="RESEARCH_CRAWL",
+            discovery_mechanism="test",
+            temporal_scope=(2001, 2001),
+            state=DomainState.EXPLORING,
+        )
+        reservoir = Reservoir(
+            reservoir_id="webbase-reservoir",
+            domain_id=domain.domain_id,
+            adapter_id=adapter.adapter_id,
+            root_locator="fixture://webbase",
+            enumeration_kind="finite_list",
+            capacity_lower=1,
+            capacity_upper=1,
+            evidence_mode="discovery_only",
+            state=ReservoirState.READY,
+        )
+        self.control.save_domain(domain)
+        self.control.save_reservoir(reservoir)
+        template = WorkLease.create(
+            reservoir_id=reservoir.reservoir_id,
+            max_records=1,
+            max_requests=1,
+            max_bytes=1024,
+            max_seconds=30,
+            expected_evidence_tasks=1,
+            expected_novel_eed=1.0,
+        )
+        candidate = LeaseCandidate(
+            reservoir_id=reservoir.reservoir_id,
+            expected_novel_eed=1.0,
+            costs=ResourceCost(0, 1, 1, 1),
+            reservoir=reservoir,
+            lease=template,
+            evidence_provider="wayback",
+            expected_evidence_tasks=1,
+        )
+        runtime = SourceProducer(
+            baseline=self.baseline,
+            control_store=self.control,
+            evidence_store=self.evidence,
+            scheduler=GlobalScheduler(CreditLedger({"wayback": 1})),
+            candidates=[candidate],
+            adapters={adapter.adapter_id: adapter},
+            backlog_capacities={"wayback": 1},
+            queue_capacities={
+                "source_records": 2,
+                "observations": 2,
+                "evidence_tasks": 2,
+                "commits": 2,
+            },
+        )
+
+        report = runtime.run_once()
+
+        key = EvidenceQueryKey(
+            "novel.example",
+            TemporalScope(2001, 2001),
+            "wayback",
+            "cdx-v1",
+        )
+        self.assertIsNotNone(self.control.get_evidence_task(key))
+        self.assertEqual(report.evidence_tasks_enqueued, 1)
+        self.assertEqual(report.direct_capsules_committed, 0)
+        self.assertEqual(self.evidence.count(), 0)
+
     def test_completed_wayback_range_suppresses_redundant_exact_year_work(self):
         range_key = EvidenceQueryKey(
             "novel.example", TemporalScope(1996, 1998), "wayback", "cdx-v1"
