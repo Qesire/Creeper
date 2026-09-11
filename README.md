@@ -194,7 +194,8 @@ creeper-evidence-worker <runtime-data-root> \
   --max-inflight 4 \
   --requests-per-second 0.5 \
   --max-connections 8 \
-  --max-keepalive-connections 4
+  --max-keepalive-connections 4 \
+  --keepalive-expiry-seconds 30
 ```
 
 Completed evidence tasks are committed as they finish rather than waiting for
