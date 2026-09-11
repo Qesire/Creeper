@@ -470,7 +470,7 @@ class AutopilotTests(unittest.TestCase):
             )
             self.assertEqual(loaded.resource_governor.recovery_samples, 7)
 
-    def test_config_requires_shared_runtime_and_activated_producer(self):
+    def test_config_requires_shared_runtime_and_accepts_static_producer(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             scrapy = root / "scrapy"
@@ -526,8 +526,12 @@ class AutopilotTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            with self.assertRaisesRegex(ValueError, "source_mode"):
-                load_autopilot_config(config)
+            static_loaded = load_autopilot_config(config)
+            self.assertEqual(static_loaded.runtime_data_root, runtime.resolve())
+            self.assertEqual(
+                static_loaded.baseline_index,
+                (root / "baseline.sqlite3").resolve(),
+            )
 
 
 if __name__ == "__main__":
