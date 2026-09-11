@@ -8,6 +8,7 @@ from dataclasses import replace
 import io
 import json
 from pathlib import Path
+import re
 import time
 from urllib.parse import urlsplit
 
@@ -144,10 +145,16 @@ class StructuredProductionAdapter:
         if not text:
             return None
         if "://" in text or text.startswith("//"):
-            parsed = urlsplit(text if not text.startswith("//") else "http:" + text)
+            try:
+                parsed = urlsplit(text if not text.startswith("//") else "http:" + text)
+            except ValueError:
+                return None
             return normalize_official(parsed.hostname or "")
         if "/" in text:
-            parsed = urlsplit("http://" + text)
+            try:
+                parsed = urlsplit("http://" + text)
+            except ValueError:
+                return None
             return normalize_official(parsed.hostname or "")
         return normalize_official(text)
 
@@ -156,7 +163,11 @@ class StructuredProductionAdapter:
         if isinstance(value, bool):
             return None
         text = str(value).strip() if isinstance(value, (int, float, str)) else ""
-        if len(text) < 4 or not text[:4].isdigit():
+        if not (
+            re.fullmatch(r"\d{4}", text)
+            or re.fullmatch(r"\d{8,14}", text)
+            or re.fullmatch(r"\d{4}[-/]\d{1,2}(?:[-/]\d{1,2})?(?:[T ][0-9:]+Z?)?", text)
+        ):
             return None
         year = int(text[:4])
         return year if 1996 <= year <= 2001 else None

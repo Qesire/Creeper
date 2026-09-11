@@ -281,6 +281,43 @@ class ProductionSourceAdapterTests(unittest.TestCase):
             self.assertEqual(observation.year_hint_mask, 1 << (year - 1996))
             self.assertEqual(observation.direct_year_mask, 0)
 
+    def test_csv_title_with_brackets_and_slash_does_not_abort_url_extraction(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "pandora.csv"
+            path.write_text(
+                "tep_id,name,gathered_url,surt\n"
+                "/tep/134347,2001 Local Government Elections [results] / "
+                "Electoral Commission of Queensland,"
+                "http://www.ecq.qld.gov.au/elections/local/LG2012/groupIndex.html,"
+                '"au,gov,qld,ecq)/elections/local/lg2012/groupindex.html"\n',
+                encoding="utf-8",
+            )
+            reservoir = Reservoir(
+                reservoir_id="reservoir:pandora",
+                domain_id="domain:pandora",
+                adapter_id="structured:pandora",
+                root_locator=str(path),
+                enumeration_kind="structured_records",
+                capacity_lower=1,
+                state=ReservoirState.READY,
+                evidence_mode="discovery_only",
+            )
+            adapter = ProductionAdapterFactory.open(reservoir)
+            lease = WorkLease.create(
+                reservoir_id=reservoir.reservoir_id,
+                max_records=1,
+                max_requests=1,
+                max_bytes=4096,
+                max_seconds=10,
+            )
+            records, _result = adapter.execute(lease)
+            observation = next(iter(adapter.extract_hosts(next(records))))
+            adapter.close()
+
+        self.assertEqual(observation.hostname, "www.ecq.qld.gov.au")
+        self.assertIsNone(observation.source_year)
+        self.assertEqual(observation.year_hint_mask, 0)
+
     def test_csv_record_year_overrides_single_year_source_prior(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "webbase-2001.csv"
