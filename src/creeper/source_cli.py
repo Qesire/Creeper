@@ -218,6 +218,15 @@ class ActivatedSourceRuntime:
                     expected_evidence_tasks=expected_tasks,
                 )
             )
+        # Do not retain adapter objects for exhausted/deactivated sources
+        # across a multi-hour autonomous run. Current adapters hold no durable
+        # authority; cursor state lives in ControlStore.
+        active_adapter_ids = set(adapters)
+        self.adapter_cache = {
+            adapter_id: adapter
+            for adapter_id, adapter in self.adapter_cache.items()
+            if adapter_id in active_adapter_ids
+        }
         self.producer.refresh_workset(
             candidates=candidates,
             adapters=adapters,
