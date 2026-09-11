@@ -96,6 +96,7 @@ class AsyncEvidenceWorker:
         if unknown_limits:
             raise KeyError(f"inflight configured for unknown providers: {sorted(unknown_limits)}")
         self._semaphores: dict[str, asyncio.Semaphore] = {}
+        self._host_locks: dict[tuple[str, str], asyncio.Lock] = {}
         for provider in self.providers:
             limit = limits.get(provider, 4)
             if not isinstance(limit, int) or limit < 1:
@@ -133,8 +134,11 @@ class AsyncEvidenceWorker:
     async def _execute(self, task: EvidenceTask) -> EvidenceQueryResult:
         provider = self.providers[task.key.provider]
         semaphore = self._semaphores[task.key.provider]
+        host_key = (task.key.provider, task.key.hostname)
+        host_lock = self._host_locks.setdefault(host_key, asyncio.Lock())
         async with semaphore:
-            try:
+            async with host_lock:
+                try:
                 scope = task.key.temporal_scope
                 if scope.year_from != scope.year_to:
                     query_range = getattr(provider, "query_range", None)
@@ -143,11 +147,11 @@ class AsyncEvidenceWorker:
                             f"provider {task.key.provider!r} does not support range probes"
                         )
                     return await query_range(task.key)
-                return await provider.query_key(task.key)
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:  # operational failure, never evidence INVALID
-                return self._transient_for(task, str(exc) or type(exc).__name__)
+                    return await provider.query_key(task.key)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:  # operational failure, never evidence INVALID
+                    return self._transient_for(task, str(exc) or type(exc).__name__)
 
     async def _heartbeat(
         self,
