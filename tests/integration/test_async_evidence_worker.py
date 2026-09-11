@@ -65,6 +65,20 @@ class FakeProvider:
             self.active_by_host[key.hostname] -= 1
 
 
+class SelectiveDelayProvider(FakeProvider):
+    def __init__(self, release_slow: asyncio.Event, fast_done: asyncio.Event):
+        super().__init__(state=CDXQueryState.EMPTY_EXHAUSTIVE)
+        self.release_slow = release_slow
+        self.fast_done = fast_done
+
+    async def query_key(self, key):
+        if key.hostname == "slow.example":
+            await self.release_slow.wait()
+        else:
+            self.fast_done.set()
+        return await super().query_key(key)
+
+
 class FakeRangeProvider(FakeProvider):
     def __init__(self):
         super().__init__(state=CDXQueryState.PASS)
@@ -167,6 +181,49 @@ class AsyncEvidenceWorkerTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(
             all(task.state == CDXQueryState.EMPTY_EXHAUSTIVE.value for task in self.control.list_evidence_tasks())
         )
+
+    async def test_fast_result_is_terminal_before_slow_batch_tail_finishes(self):
+        fast = self.key("fast.example")
+        slow = self.key("slow.example")
+        self.control.enqueue_evidence_tasks([fast, slow])
+        release_slow = asyncio.Event()
+        fast_done = asyncio.Event()
+        provider = SelectiveDelayProvider(release_slow, fast_done)
+        worker = AsyncEvidenceWorker(
+            control_store=self.control,
+            evidence_store=self.evidence,
+            providers={"wayback": provider},
+            owner="worker-incremental-finish",
+            claim_batch_size=2,
+            provider_inflight={"wayback": 2},
+        )
+
+        running = asyncio.create_task(worker.run_once())
+        await asyncio.wait_for(fast_done.wait(), timeout=1.0)
+        for _ in range(20):
+            await asyncio.sleep(0)
+            fast_task = self.control.get_evidence_task(fast)
+            if (
+                fast_task is not None
+                and fast_task.state == CDXQueryState.EMPTY_EXHAUSTIVE.value
+            ):
+                break
+
+        fast_task = self.control.get_evidence_task(fast)
+        slow_task = self.control.get_evidence_task(slow)
+        self.assertIsNotNone(fast_task)
+        self.assertIsNotNone(slow_task)
+        self.assertEqual(
+            fast_task.state,
+            CDXQueryState.EMPTY_EXHAUSTIVE.value,
+        )
+        self.assertIsNone(fast_task.lease_owner)
+        self.assertEqual(slow_task.lease_owner, "worker-incremental-finish")
+        self.assertFalse(running.done())
+
+        release_slow.set()
+        report = await running
+        self.assertEqual(report.terminal, 2)
 
     async def test_same_hostname_is_serialized_while_other_hosts_run_concurrently(self):
         keys = [

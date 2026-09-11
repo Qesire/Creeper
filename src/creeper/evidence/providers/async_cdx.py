@@ -97,6 +97,8 @@ class AsyncWaybackCDXClient:
         self.http_requests = 0
         self.throttle_responses = 0
         self.transport_errors = 0
+        self.http_elapsed_milliseconds = 0
+        self.http_latency_buckets: Counter[str] = Counter()
         self.http_status_counts: Counter[int] = Counter()
         self._cooldown_until = 0.0
         self._cooldown_lock = asyncio.Lock()
@@ -215,20 +217,47 @@ class AsyncWaybackCDXClient:
         async for attempt in retrying:
             with attempt:
                 await self._wait_for_cooldown()
-                try:
-                    if self._limiter is None:
-                        self.http_requests += 1
-                        response = await self.client.get(self.endpoint, params=params)
-                    else:
-                        async with self._limiter:
-                            # Cooldown may have been extended while this coroutine
-                            # was waiting for a rate token.
-                            await self._wait_for_cooldown()
-                            self.http_requests += 1
-                            response = await self.client.get(self.endpoint, params=params)
-                except (httpx.TimeoutException, httpx.TransportError):
-                    self.transport_errors += 1
-                    raise
+
+                async def request_once() -> httpx.Response:
+                    loop = asyncio.get_running_loop()
+                    started = loop.time()
+                    self.http_requests += 1
+                    try:
+                        return await self.client.get(
+                            self.endpoint,
+                            params=params,
+                        )
+                    except (httpx.TimeoutException, httpx.TransportError):
+                        self.transport_errors += 1
+                        raise
+                    finally:
+                        elapsed_ms = max(
+                            0,
+                            int(round((loop.time() - started) * 1000.0)),
+                        )
+                        self.http_elapsed_milliseconds += elapsed_ms
+                        if elapsed_ms <= 2_000:
+                            bucket = "le_2s"
+                        elif elapsed_ms <= 4_000:
+                            bucket = "le_4s"
+                        elif elapsed_ms <= 8_000:
+                            bucket = "le_8s"
+                        elif elapsed_ms <= 16_000:
+                            bucket = "le_16s"
+                        elif elapsed_ms <= 30_000:
+                            bucket = "le_30s"
+                        else:
+                            bucket = "gt_30s"
+                        self.http_latency_buckets[bucket] += 1
+
+                if self._limiter is None:
+                    response = await request_once()
+                else:
+                    async with self._limiter:
+                        # Cooldown may have been extended while this coroutine
+                        # was waiting for a rate token.
+                        await self._wait_for_cooldown()
+                        response = await request_once()
                 self.http_status_counts[int(response.status_code)] += 1
                 if response.status_code == 429 or response.status_code == 503:
                     await self._register_throttle(response)

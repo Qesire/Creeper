@@ -159,6 +159,173 @@ class SourceProducerCliTests(unittest.TestCase):
                     0.5,
                 )
 
+    def test_static_runtime_shrinks_lease_to_backlog_headroom(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task_root = root / "task"
+            baseline_root = task_root / "merged260909-3"
+            baseline_root.mkdir(parents=True)
+            for year in range(1996, 2002):
+                (baseline_root / f"{year}.txt").write_text("", encoding="utf-8")
+            (baseline_root / "candidate_pool.txt").write_text("", encoding="utf-8")
+            baseline_path = root / "baseline.sqlite3"
+            BaselineIndex.build(task_root, baseline_path).close()
+
+            dataset = root / "hosts.txt"
+            dataset.write_text(
+                "\n".join(
+                    [
+                        "one.example",
+                        "two.example",
+                        "three.example",
+                        "four.example",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            runtime_root = root / "runtime"
+            runtime_root.mkdir()
+            control = ControlStore(runtime_root / "control.sqlite3")
+            try:
+                for index in range(3):
+                    control.enqueue_evidence_tasks(
+                        [
+                            EvidenceQueryKey(
+                                f"occupied-{index}.example",
+                                TemporalScope(1997, 1997),
+                                "wayback",
+                                "cdx-v1",
+                            )
+                        ]
+                    )
+            finally:
+                control.close()
+
+            config = root / "static.toml"
+            config.write_text(
+                "\n".join(
+                    [
+                        'source_mode = "static"',
+                        f'baseline_index = {json.dumps(str(baseline_path))}',
+                        f'dataset = {json.dumps(str(dataset))}',
+                        f'runtime_data_root = {json.dumps(str(runtime_root))}',
+                        'source_id = "webbase-static"',
+                        'domain_id = "webbase-domain"',
+                        'reservoir_id = "webbase-static"',
+                        "source_year = 2001",
+                        "",
+                        "[limits]",
+                        "queue_source_records = 8",
+                        "queue_observations = 8",
+                        "queue_evidence_tasks = 8",
+                        "queue_commits = 8",
+                        "lease_max_records = 4",
+                        "lease_max_requests = 4",
+                        "lease_max_bytes = 4096",
+                        "lease_max_seconds = 30",
+                        "evidence_backlog_capacity = 4",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            report = run_once(config, owner="static-headroom-test")
+
+            self.assertEqual(report["leases_succeeded"], 1)
+            self.assertEqual(report["source_records"], 1)
+            self.assertEqual(report["evidence_tasks_enqueued"], 1)
+            control = ControlStore(runtime_root / "control.sqlite3")
+            try:
+                reservoir = control.get_reservoir("webbase-static")
+                self.assertIsNotNone(reservoir)
+                self.assertIsNotNone(reservoir.cursor)
+                self.assertEqual(
+                    sum(
+                        control.evidence_task_state_counts().values()
+                    ),
+                    4,
+                )
+            finally:
+                control.close()
+
+    def test_static_runtime_does_not_advance_when_backlog_is_full(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task_root = root / "task"
+            baseline_root = task_root / "merged260909-3"
+            baseline_root.mkdir(parents=True)
+            for year in range(1996, 2002):
+                (baseline_root / f"{year}.txt").write_text("", encoding="utf-8")
+            (baseline_root / "candidate_pool.txt").write_text("", encoding="utf-8")
+            baseline_path = root / "baseline.sqlite3"
+            BaselineIndex.build(task_root, baseline_path).close()
+
+            dataset = root / "hosts.txt"
+            dataset.write_text("blocked.example\n", encoding="utf-8")
+            runtime_root = root / "runtime"
+            runtime_root.mkdir()
+            control = ControlStore(runtime_root / "control.sqlite3")
+            try:
+                for index in range(2):
+                    control.enqueue_evidence_tasks(
+                        [
+                            EvidenceQueryKey(
+                                f"occupied-full-{index}.example",
+                                TemporalScope(1997, 1997),
+                                "wayback",
+                                "cdx-v1",
+                            )
+                        ]
+                    )
+            finally:
+                control.close()
+
+            config = root / "static-full.toml"
+            config.write_text(
+                "\n".join(
+                    [
+                        'source_mode = "static"',
+                        f'baseline_index = {json.dumps(str(baseline_path))}',
+                        f'dataset = {json.dumps(str(dataset))}',
+                        f'runtime_data_root = {json.dumps(str(runtime_root))}',
+                        'source_id = "webbase-full"',
+                        'domain_id = "webbase-full-domain"',
+                        'reservoir_id = "webbase-full"',
+                        "source_year = 2001",
+                        "",
+                        "[limits]",
+                        "queue_source_records = 4",
+                        "queue_observations = 4",
+                        "queue_evidence_tasks = 4",
+                        "queue_commits = 4",
+                        "lease_max_records = 4",
+                        "lease_max_requests = 4",
+                        "lease_max_bytes = 4096",
+                        "lease_max_seconds = 30",
+                        "evidence_backlog_capacity = 2",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            report = run_once(config, owner="static-full-test")
+
+            self.assertEqual(report["leases_succeeded"], 0)
+            self.assertTrue(report["admission_blocked"])
+            self.assertEqual(report["source_records"], 0)
+            control = ControlStore(runtime_root / "control.sqlite3")
+            try:
+                reservoir = control.get_reservoir("webbase-full")
+                self.assertIsNotNone(reservoir)
+                self.assertIsNone(reservoir.cursor)
+                self.assertEqual(
+                    sum(control.evidence_task_state_counts().values()),
+                    2,
+                )
+            finally:
+                control.close()
+
     def test_once_mode_stops_at_durable_evidence_task(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

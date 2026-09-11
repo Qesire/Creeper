@@ -255,6 +255,7 @@ def build_validation_report(
     http_429 = deltas.get("wayback_http_429", 0)
     http_5xx = deltas.get("wayback_http_5xx", 0)
     transport_errors = deltas.get("wayback_transport_errors", 0)
+    http_elapsed_ms = deltas.get("wayback_http_elapsed_ms", 0)
 
     valid = (
         not counter_resets
@@ -361,6 +362,21 @@ def build_validation_report(
         "provider_429_fraction": ratio(http_429, http_requests),
         "provider_5xx_fraction": ratio(http_5xx, http_requests),
         "provider_transport_error_fraction": ratio(transport_errors, http_requests),
+        "mean_provider_request_latency_seconds": (
+            None
+            if http_requests <= 0
+            else format(
+                Decimal(http_elapsed_ms)
+                / Decimal(http_requests)
+                / Decimal("1000"),
+                "f",
+            )
+        ),
+        "provider_latency_buckets": {
+            name.removeprefix("wayback_latency_"): value
+            for name, value in deltas.items()
+            if name.startswith("wayback_latency_")
+        },
         "target_source_records": target_source_records,
         "target_source_records_progress": target_progress,
         "target_source_records_reached": target_reached,

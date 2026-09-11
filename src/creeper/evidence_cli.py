@@ -107,6 +107,18 @@ async def run_service(
             previous_http_429 = 0
             previous_http_503 = 0
             previous_http_5xx = 0
+            previous_http_elapsed_ms = 0
+            previous_latency_buckets = {
+                name: 0
+                for name in (
+                    "le_2s",
+                    "le_4s",
+                    "le_8s",
+                    "le_16s",
+                    "le_30s",
+                    "gt_30s",
+                )
+            }
             while True:
                 report = await worker.run_once()
 
@@ -117,6 +129,10 @@ async def run_service(
                     for status, count in provider.http_status_counts.items()
                     if 500 <= int(status) <= 599
                 )
+                current_latency_buckets = {
+                    name: int(provider.http_latency_buckets.get(name, 0))
+                    for name in previous_latency_buckets
+                }
                 telemetry.add_counters(
                     {
                         "evidence_batches_with_work": int(report.claimed > 0),
@@ -141,6 +157,17 @@ async def run_service(
                         "wayback_http_429": current_http_429 - previous_http_429,
                         "wayback_http_503": current_http_503 - previous_http_503,
                         "wayback_http_5xx": current_http_5xx - previous_http_5xx,
+                        "wayback_http_elapsed_ms": (
+                            provider.http_elapsed_milliseconds
+                            - previous_http_elapsed_ms
+                        ),
+                        **{
+                            f"wayback_latency_{name}": (
+                                current_latency_buckets[name]
+                                - previous_latency_buckets[name]
+                            )
+                            for name in current_latency_buckets
+                        },
                     }
                 )
                 previous_http_requests = provider.http_requests
@@ -149,6 +176,8 @@ async def run_service(
                 previous_http_429 = current_http_429
                 previous_http_503 = current_http_503
                 previous_http_5xx = current_http_5xx
+                previous_http_elapsed_ms = provider.http_elapsed_milliseconds
+                previous_latency_buckets = current_latency_buckets
                 total = EvidenceWorkerReport(
                     claimed=total.claimed + report.claimed,
                     terminal=total.terminal + report.terminal,
@@ -213,10 +242,10 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--claim-batch-size", type=int, default=16)
     parser.add_argument("--lease-seconds", type=float, default=300.0)
-    parser.add_argument("--max-inflight", type=int, default=2)
+    parser.add_argument("--max-inflight", type=int, default=4)
     parser.add_argument("--requests-per-second", type=float, default=0.5)
-    parser.add_argument("--max-connections", type=int, default=4)
-    parser.add_argument("--max-keepalive-connections", type=int, default=2)
+    parser.add_argument("--max-connections", type=int, default=8)
+    parser.add_argument("--max-keepalive-connections", type=int, default=4)
     parser.add_argument("--throttle-floor-seconds", type=float, default=2.0)
     parser.add_argument("--timeout", type=float, default=30.0)
     parser.add_argument("--max-retries", type=int, default=3)

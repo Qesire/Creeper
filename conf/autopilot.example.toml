@@ -1,6 +1,6 @@
 # One-command autonomous Creeper runtime.
 # The referenced discovery and producer configs must point at the same
-# runtime_data_root. The producer config must set source_mode = "activated".
+# runtime_data_root. The producer may use source_mode = "static" or "activated".
 
 source_discovery_config = "source-discovery.example.toml"
 source_producer_config = "creeper.activated.example.toml"
@@ -21,10 +21,12 @@ shutdown_grace_seconds = 10.0
 endpoint = "https://web.archive.org/cdx/search/cdx"
 claim_batch_size = 16
 lease_seconds = 300.0
-max_inflight = 2
+# Keep request-start rate conservative while allowing enough concurrent waits
+# to hide Wayback/proxy latency.
+max_inflight = 4
 requests_per_second = 0.5
-max_connections = 4
-max_keepalive_connections = 2
+max_connections = 8
+max_keepalive_connections = 4
 throttle_floor_seconds = 2.0
 timeout = 30.0
 max_retries = 3

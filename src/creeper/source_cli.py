@@ -17,7 +17,8 @@ import time
 import tomllib
 
 from creeper.authority.baseline_index import BaselineIndex
-from creeper.runtime.source_producer import SourceProducer
+from creeper.runtime.source_producer import SourceProducer, SourceProducerReport
+from creeper.scheduler.admission import EvidenceBacklogAdmission
 from creeper.scheduler.credits import CreditLedger
 from creeper.scheduler.global_scheduler import GlobalScheduler
 from creeper.scheduler.leases import WorkLease
@@ -345,24 +346,36 @@ def run_once(config_path: Path, *, owner: str) -> dict[str, object]:
         else:
             reservoir = stored_reservoir
 
-        # This configured local source contributes one target-year hint per
-        # record, so max_records is a conservative upper bound on newly created
-        # EvidenceTasks for one lease. Other adapters must supply their own
-        # conservative bound when constructing LeaseCandidate.
-        expected_tasks = max_records
+        # Static discovery-only sources also participate in the same durable
+        # evidence backpressure contract as activated sources. Size each lease to
+        # currently available provider headroom instead of requiring the whole
+        # configured lease to fit. This lets a saturated production runtime
+        # continuously consume newly freed slots without queue oversubscription.
+        headroom = EvidenceBacklogAdmission(control).available_capacity(
+            provider="wayback",
+            capacity=backlog_capacity,
+        )
+        lease_records = min(max_records, headroom)
+        if lease_records < 1:
+            return SourceProducerReport(admission_blocked=True).as_dict()
+
+        # This configured local source contributes at most one target-year hint
+        # per record, so lease_records is a conservative upper bound on newly
+        # created EvidenceTasks for the lease.
+        expected_tasks = lease_records
         template = WorkLease.create(
             reservoir_id=reservoir_id,
             cursor_start=reservoir.cursor,
-            max_records=max_records,
+            max_records=lease_records,
             max_requests=max_requests,
             max_bytes=max_bytes,
             max_seconds=max_seconds,
             expected_evidence_tasks=expected_tasks,
-            expected_novel_eed=float(max_records),
+            expected_novel_eed=float(lease_records),
         )
         candidate = LeaseCandidate(
             reservoir_id=reservoir_id,
-            expected_novel_eed=float(max_records),
+            expected_novel_eed=float(lease_records),
             costs=ResourceCost(general_network=0, evidence_network=1, cpu=1, ssd=1),
             reservoir=reservoir,
             lease=template,

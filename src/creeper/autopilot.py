@@ -50,10 +50,10 @@ class EvidenceServicePolicy:
     endpoint: str = "https://web.archive.org/cdx/search/cdx"
     claim_batch_size: int = 16
     lease_seconds: float = 300.0
-    max_inflight: int = 2
+    max_inflight: int = 4
     requests_per_second: float = 0.5
-    max_connections: int = 4
-    max_keepalive_connections: int = 2
+    max_connections: int = 8
+    max_keepalive_connections: int = 4
     throttle_floor_seconds: float = 2.0
     timeout: float = 30.0
     max_retries: int = 3
@@ -170,8 +170,11 @@ def _nonnegative_int(value: object, *, name: str) -> int:
 def _producer_runtime_config(config_path: Path) -> tuple[Path, Path]:
     with config_path.open("rb") as stream:
         root = tomllib.load(stream)
-    if root.get("source_mode", "static") != "activated":
-        raise ValueError("autopilot source producer must use source_mode='activated'")
+    source_mode = root.get("source_mode", "static")
+    if source_mode not in {"static", "activated"}:
+        raise ValueError(
+            "autopilot source producer source_mode must be 'static' or 'activated'"
+        )
     runtime_root = _resolve(
         root.get("runtime_data_root"),
         base=config_path.parent,

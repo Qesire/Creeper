@@ -149,6 +149,7 @@ Each `report.json` includes:
 - Novel EED/hour, Novel EED/day, and Novel EED/1000 actual Wayback HTTP attempts;
 - PASS, EMPTY_EXHAUSTIVE, and retryable fractions;
 - HTTP 429, 5xx, provider-throttle, and transport-error fractions;
+- mean Wayback request latency plus coarse latency buckets;
 - source records/second and the durable end-of-window EvidenceTask backlog;
 - Evidence/Control/readiness/telemetry storage growth;
 - window-scoped peak RSS, minimum free disk, and sampled governor states.
@@ -182,21 +183,24 @@ the result is machine- and filesystem-dependent.
 
 For production Wayback evidence, use one provider process per runtime root and
 let that process multiplex different hostnames asynchronously. The default
-service profile is deliberately conservative: two in-flight host queries,
-strictly paced at 0.5 request starts/second, with provider-wide cooldown after
-HTTP 429/503. Example:
+service profile keeps the provider request-start rate conservative while using
+four in-flight host queries to hide Wayback/proxy latency. Requests remain
+strictly paced at 0.5 starts/second, with provider-wide cooldown after HTTP
+429/503. Example:
 
 ```bash
 creeper-evidence-worker <runtime-data-root> \
-  --max-inflight 2 \
+  --max-inflight 4 \
   --requests-per-second 0.5 \
-  --max-connections 4 \
-  --max-keepalive-connections 2
+  --max-connections 8 \
+  --max-keepalive-connections 4
 ```
 
-The worker JSON log reports `provider_http_requests_total` and
-`provider_throttle_responses_total`; increase concurrency only when throughput
-improves without increasing throttling. Complete range probes reuse accepted
+Completed evidence tasks are committed as they finish rather than waiting for
+the slowest request in a claimed batch, so durable backlog headroom is released
+continuously. Telemetry also records cumulative request latency and latency
+buckets; increase request-start rate only after observed throughput reaches the
+configured pacing limit without increased throttling. Complete range probes reuse accepted
 capture rows directly and completed provider coverage suppresses later duplicate
 Wayback work for the same host-years.
 

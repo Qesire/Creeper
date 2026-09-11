@@ -102,6 +102,11 @@ class RuntimeValidationTests(unittest.TestCase):
                     {
                         "source_records": 1000,
                         "wayback_http_requests": 500,
+                        "wayback_http_elapsed_ms": 2_500_000,
+                        "wayback_latency_le_2s": 50,
+                        "wayback_latency_le_4s": 150,
+                        "wayback_latency_le_8s": 250,
+                        "wayback_latency_le_16s": 50,
                         "wayback_throttle_responses": 5,
                         "wayback_http_429": 5,
                         "wayback_http_5xx": 8,
@@ -149,6 +154,19 @@ class RuntimeValidationTests(unittest.TestCase):
             self.assertTrue(report["target_source_records_reached"])
             self.assertEqual(report["provider_429_fraction"], "0.01")
             self.assertEqual(report["provider_5xx_fraction"], "0.016")
+            self.assertEqual(
+                report["mean_provider_request_latency_seconds"],
+                "5",
+            )
+            self.assertEqual(
+                report["provider_latency_buckets"],
+                {
+                    "le_16s": 50,
+                    "le_2s": 50,
+                    "le_4s": 150,
+                    "le_8s": 250,
+                },
+            )
             self.assertEqual(
                 report["resource_window"]["peak_rss_bytes"],
                 300,
