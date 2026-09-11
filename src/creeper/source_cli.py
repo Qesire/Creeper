@@ -172,7 +172,10 @@ class ActivatedSourceRuntime:
                 continue
             adapter = self.adapter_cache.get(reservoir.adapter_id)
             if adapter is None:
-                adapter = ProductionAdapterFactory.open(reservoir)
+                adapter = ProductionAdapterFactory.open(
+                    reservoir,
+                    temporal_scope=spec.temporal_scope,
+                )
                 self.adapter_cache[reservoir.adapter_id] = adapter
             adapters[reservoir.adapter_id] = adapter
             if reservoir.evidence_mode == "direct_year":
