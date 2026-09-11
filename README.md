@@ -28,14 +28,14 @@ the annual master files.
 
 ## Autonomous runtime
 
-For competition-scale continuous work, Creeper can run the three durable stages
-under one supervisor:
+For competition-scale continuous work, Creeper can run the durable production
+stages and optional incremental readiness worker under one supervisor:
 
 ```bash
 creeper-autopilot conf/autopilot.toml
 ```
 
-The supervisor launches and monitors:
+With `[readiness]` enabled, the supervisor launches and monitors:
 
 ```text
 source discovery/search/scout
@@ -47,6 +47,12 @@ persistent source producer
 durable EvidenceTask backlog
         ↓
 Wayback evidence worker
+        ↓
+EvidenceStore unique host-year stream
+        ↓
+incremental annual EED readiness
+        ↓
+prewarm-ready / formal-gate-ready markers
 ```
 
 Production exhaustion is reconciled back into discovery state so an exhausted
@@ -64,9 +70,15 @@ The supervisor uses bounded exponential restart backoff and stops the whole
 pipeline after a configured child restart budget is exceeded. This prevents a
 misconfigured child from silently spinning forever.
 
-ResourceGovernor-driven process throttling and automatic submission packaging
-are not yet part of the supervisor loop; they remain explicit later-stage
-controls.
+The readiness worker is an incremental trigger, not submission authority. It
+processes only new unique `(hostname, year)` evidence rows, resets and replays
+when the baseline or EED model changes, and retracts stale gate markers after a
+rebase. Final submission still performs a canonical host-year scan, annual
+official-compatible EED recomputation, baseline diff, and full precheck.
+
+ResourceGovernor-driven process throttling and automatic final submission
+packaging are not yet part of the supervisor loop; they remain explicit
+later-stage controls.
 
 ## Local commands
 

@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 from contextlib import contextmanager
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 import fcntl
 import os
 from pathlib import Path
@@ -54,12 +55,23 @@ class EvidenceServicePolicy:
 
 
 @dataclass(frozen=True)
+class ReadinessServicePolicy:
+    eed_model: Path
+    baseline_eed: str
+    batch_size: int = 50_000
+    max_batches_per_cycle: int = 20
+    poll_seconds: float = 30.0
+
+
+@dataclass(frozen=True)
 class AutopilotConfig:
     source_discovery_config: Path
     source_producer_config: Path
     runtime_data_root: Path
     supervisor: SupervisorPolicy
     evidence: EvidenceServicePolicy
+    baseline_index: Path | None = None
+    readiness: ReadinessServicePolicy | None = None
 
 
 @dataclass(frozen=True)
@@ -103,6 +115,22 @@ def _nonnegative_float(value: object, *, name: str) -> float:
     return float(value)
 
 
+def _strict_bool(value: object, *, name: str) -> bool:
+    if not isinstance(value, bool):
+        raise ValueError(f"{name} must be a boolean")
+    return value
+
+
+def _decimal_string(value: object, *, name: str) -> str:
+    try:
+        parsed = Decimal(str(value))
+    except (InvalidOperation, ValueError) as exc:
+        raise ValueError(f"{name} must be a finite non-negative decimal") from exc
+    if not parsed.is_finite() or parsed < 0:
+        raise ValueError(f"{name} must be a finite non-negative decimal")
+    return format(parsed, "f")
+
+
 def _positive_int(value: object, *, name: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < 1:
         raise ValueError(f"{name} must be a positive integer")
@@ -115,16 +143,22 @@ def _nonnegative_int(value: object, *, name: str) -> int:
     return value
 
 
-def _producer_runtime_root(config_path: Path) -> Path:
+def _producer_runtime_config(config_path: Path) -> tuple[Path, Path]:
     with config_path.open("rb") as stream:
         root = tomllib.load(stream)
     if root.get("source_mode", "static") != "activated":
         raise ValueError("autopilot source producer must use source_mode='activated'")
-    return _resolve(
+    runtime_root = _resolve(
         root.get("runtime_data_root"),
         base=config_path.parent,
         name="source producer runtime_data_root",
     )
+    baseline_index = _resolve(
+        root.get("baseline_index"),
+        base=config_path.parent,
+        name="source producer baseline_index",
+    )
+    return runtime_root, baseline_index
 
 
 def load_autopilot_config(config_path: Path) -> AutopilotConfig:
@@ -142,7 +176,7 @@ def load_autopilot_config(config_path: Path) -> AutopilotConfig:
         name="source_producer_config",
     )
     discovery = load_source_discovery_config(discovery_path)
-    producer_root = _producer_runtime_root(producer_path)
+    producer_root, baseline_index = _producer_runtime_config(producer_path)
     if discovery.runtime_data_root.resolve() != producer_root.resolve():
         raise ValueError(
             "source discovery and source producer must share one runtime_data_root"
@@ -265,19 +299,66 @@ def load_autopilot_config(config_path: Path) -> AutopilotConfig:
         raise ValueError(
             "evidence.poll_max_seconds must be >= poll_min_seconds"
         )
+    readiness = None
+    readiness_raw = root.get("readiness")
+    if readiness_raw is not None:
+        if not isinstance(readiness_raw, dict):
+            raise ValueError("[readiness] must be a TOML table")
+        enabled = _strict_bool(
+            readiness_raw.get("enabled", True),
+            name="readiness.enabled",
+        )
+        if enabled:
+            raw_model = readiness_raw.get("eed_model")
+            if raw_model is None:
+                if discovery.measurement is None:
+                    raise ValueError(
+                        "readiness.eed_model is required when discovery measurement "
+                        "does not provide one"
+                    )
+                eed_model = discovery.measurement.eed_model
+            else:
+                eed_model = _resolve(
+                    raw_model,
+                    base=config_path.parent,
+                    name="readiness.eed_model",
+                )
+            baseline_eed = _decimal_string(
+                readiness_raw.get("baseline_eed"),
+                name="readiness.baseline_eed",
+            )
+            readiness = ReadinessServicePolicy(
+                eed_model=eed_model,
+                baseline_eed=baseline_eed,
+                batch_size=_positive_int(
+                    readiness_raw.get("batch_size", 50_000),
+                    name="readiness.batch_size",
+                ),
+                max_batches_per_cycle=_positive_int(
+                    readiness_raw.get("max_batches_per_cycle", 20),
+                    name="readiness.max_batches_per_cycle",
+                ),
+                poll_seconds=_positive_float(
+                    readiness_raw.get("poll_seconds", 30.0),
+                    name="readiness.poll_seconds",
+                ),
+            )
+
     return AutopilotConfig(
         source_discovery_config=discovery_path,
         source_producer_config=producer_path,
         runtime_data_root=producer_root,
         supervisor=supervisor,
         evidence=evidence,
+        baseline_index=baseline_index,
+        readiness=readiness,
     )
 
 
 def build_child_specs(config: AutopilotConfig) -> tuple[ChildSpec, ...]:
     py = sys.executable
     evidence = config.evidence
-    return (
+    specs = [
         ChildSpec(
             "source-discovery",
             (
@@ -333,7 +414,35 @@ def build_child_specs(config: AutopilotConfig) -> tuple[ChildSpec, ...]:
                 str(evidence.poll_max_seconds),
             ),
         ),
-    )
+    ]
+    if config.readiness is not None:
+        if config.baseline_index is None:
+            raise ValueError("readiness requires producer baseline_index")
+        readiness = config.readiness
+        specs.append(
+            ChildSpec(
+                "readiness-worker",
+                (
+                    py,
+                    "-m",
+                    "creeper.readiness_cli",
+                    str(config.runtime_data_root),
+                    "--baseline-index",
+                    str(config.baseline_index),
+                    "--eed-model",
+                    str(readiness.eed_model),
+                    "--baseline-eed",
+                    readiness.baseline_eed,
+                    "--batch-size",
+                    str(readiness.batch_size),
+                    "--max-batches-per-cycle",
+                    str(readiness.max_batches_per_cycle),
+                    "--poll-seconds",
+                    str(readiness.poll_seconds),
+                ),
+            )
+        )
+    return tuple(specs)
 
 
 @contextmanager
