@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
 
+from creeper.authority.baseline_index import YEAR_BITS
 from creeper.evidence.policies import (
     CDXQueryState,
     EvidenceQueryKey,
@@ -171,6 +172,58 @@ class ControlStore:
             lease_owner=row["lease_owner"],
             lease_until=row["lease_until"],
         )
+
+    def resolve_provider_coverage_masks(
+        self,
+        hostnames: Iterable[str],
+        *,
+        provider: str,
+        policy_version: str,
+        chunk_size: int = 800,
+    ) -> dict[str, int]:
+        """Return years already exhaustively covered by one evidence provider.
+
+        PASS and EMPTY_EXHAUSTIVE tasks both imply that the provider completed
+        the full temporal scope. PASS years with accepted captures are already
+        represented in EvidenceStore; the remaining years in that completed
+        scope are reusable negative knowledge. INVALID/retryable tasks do not
+        establish coverage.
+        """
+        if not provider or not policy_version:
+            raise ValueError("provider and policy_version are required")
+        if chunk_size < 1:
+            raise ValueError("chunk_size must be positive")
+        values = list(dict.fromkeys(str(item) for item in hostnames if str(item)))
+        result = {hostname: 0 for hostname in values}
+        if not values:
+            return result
+        limit = min(int(chunk_size), 800)
+        for start in range(0, len(values), limit):
+            chunk = values[start:start + limit]
+            placeholders = ",".join("?" for _ in chunk)
+            rows = self.connection.execute(
+                f"""
+                SELECT hostname, year_from, year_to
+                FROM evidence_tasks
+                WHERE hostname IN ({placeholders})
+                  AND provider = ?
+                  AND policy_version = ?
+                  AND state IN (?, ?)
+                """,
+                [
+                    *chunk,
+                    provider,
+                    policy_version,
+                    CDXQueryState.PASS.value,
+                    CDXQueryState.EMPTY_EXHAUSTIVE.value,
+                ],
+            ).fetchall()
+            for row in rows:
+                mask = result.get(str(row["hostname"]), 0)
+                for year in range(int(row["year_from"]), int(row["year_to"]) + 1):
+                    mask |= YEAR_BITS.get(year, 0)
+                result[str(row["hostname"])] = mask
+        return result
 
     def enqueue_evidence_tasks(self, keys: Iterable[EvidenceQueryKey]) -> int:
         rows = [(*self._values(key), CDXQueryState.PENDING.value) for key in keys]
