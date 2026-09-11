@@ -80,6 +80,49 @@ class FakeRangeProvider(FakeProvider):
         )
 
 
+class FakeRangeCapsuleProvider(FakeProvider):
+    def __init__(self, *, state=CDXQueryState.PASS):
+        super().__init__(state=state)
+        self.range_keys = []
+
+    async def query_range(self, key):
+        self.range_keys.append(key)
+        capsules = (
+            EvidenceCapsule(
+                hostname=key.hostname,
+                year=1997,
+                provider=key.provider,
+                temporal_semantics="capture_timestamp_year",
+                evidence_timestamp="19970102030405",
+                source_locator=f"http://{key.hostname}/",
+                payload_hash="b" * 64,
+                policy_version=key.policy_version,
+                evidence_type="exact_host_cdx_capture",
+                extraction_method="cdx_query_range",
+            ),
+            EvidenceCapsule(
+                hostname=key.hostname,
+                year=1999,
+                provider=key.provider,
+                temporal_semantics="capture_timestamp_year",
+                evidence_timestamp="19990102030405",
+                source_locator=f"http://{key.hostname}/",
+                payload_hash="c" * 64,
+                policy_version=key.policy_version,
+                evidence_type="exact_host_cdx_capture",
+                extraction_method="cdx_query_range",
+            ),
+        )
+        return RangeEvidenceQueryResult(
+            hostname=key.hostname,
+            key=key,
+            state=self.state,
+            candidate_years=(1997, 1999) if self.state is CDXQueryState.PASS else (),
+            capsules=capsules,
+            error="retry range" if self.state is CDXQueryState.TRANSIENT_ERROR else None,
+        )
+
+
 class AsyncEvidenceWorkerTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -238,6 +281,55 @@ class AsyncEvidenceWorkerTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreater(visible.lease_until, time.time())
         report = await task
         self.assertEqual(report.terminal, 1)
+
+    async def test_range_positive_capsules_avoid_exact_year_requery(self):
+        key = EvidenceQueryKey(
+            "range-capsule.example", TemporalScope(1996, 2000), "wayback", "cdx-v1"
+        )
+        self.control.enqueue_evidence_tasks([key])
+        provider = FakeRangeCapsuleProvider()
+        worker = AsyncEvidenceWorker(
+            control_store=self.control,
+            evidence_store=self.evidence,
+            providers={"wayback": provider},
+            owner="worker-range-capsules",
+        )
+
+        report = await worker.run_once()
+
+        self.assertEqual(report.claimed, 1)
+        self.assertEqual(report.terminal, 1)
+        self.assertEqual(report.inserted_capsules, 2)
+        self.assertEqual(tuple(c.year for c in self.evidence.for_hostname(key.hostname)), (1997, 1999))
+        tasks = self.control.list_evidence_tasks()
+        self.assertEqual(len(tasks), 1)
+        self.assertEqual(tasks[0].key, key)
+        self.assertEqual(tasks[0].state, CDXQueryState.PASS.value)
+
+    async def test_retryable_range_commits_positive_capsules_but_keeps_parent_retryable(self):
+        key = EvidenceQueryKey(
+            "partial-range.example", TemporalScope(1996, 2000), "wayback", "cdx-v1"
+        )
+        self.control.enqueue_evidence_tasks([key])
+        provider = FakeRangeCapsuleProvider(state=CDXQueryState.TRANSIENT_ERROR)
+        worker = AsyncEvidenceWorker(
+            control_store=self.control,
+            evidence_store=self.evidence,
+            providers={"wayback": provider},
+            owner="worker-range-partial",
+            retry_base_seconds=10.0,
+            retry_max_seconds=10.0,
+            clock=lambda: self.now,
+        )
+
+        report = await worker.run_once()
+
+        self.assertEqual(report.retryable, 1)
+        self.assertEqual(report.inserted_capsules, 2)
+        task = self.control.get_evidence_task(key)
+        self.assertEqual(task.state, CDXQueryState.TRANSIENT_ERROR.value)
+        self.assertEqual(task.retry_at, self.now + 10.0)
+        self.assertEqual(tuple(c.year for c in self.evidence.for_hostname(key.hostname)), (1997, 1999))
 
     async def test_range_task_fans_out_exact_year_tasks_without_writing_capsules(self):
         key = EvidenceQueryKey(
