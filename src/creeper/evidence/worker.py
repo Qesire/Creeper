@@ -171,23 +171,29 @@ class AsyncEvidenceWorker:
 
     async def _heartbeat(
         self,
-        keys: tuple[EvidenceQueryKey, ...],
+        active_keys: set[EvidenceQueryKey],
         stop: asyncio.Event,
     ) -> None:
-        """Keep visibility alive while a claimed network batch is running."""
+        """Keep visibility alive only for results that are still in flight.
+
+        Completed tasks are removed from the active set immediately after their
+        durable state transition, so terminal work is not renewed again.
+        """
         renewal_seconds = self.lease_seconds + self.heartbeat_interval
         while True:
-            # Renew before sleeping so newly claimed work immediately gains one
-            # heartbeat interval of scheduler-jitter headroom. This keeps slow
-            # network tasks invisible even if the event loop is briefly delayed
-            # by synchronous SQLite commits elsewhere in the process.
-            renewed = self.queue.renew(
-                keys,
-                owner=self.owner,
-                lease_seconds=renewal_seconds,
-            )
-            if renewed != len(keys):
-                raise RuntimeError("lost ownership while renewing evidence visibility")
+            if stop.is_set():
+                return
+            keys = tuple(active_keys)
+            if keys:
+                renewed = self.queue.renew(
+                    keys,
+                    owner=self.owner,
+                    lease_seconds=renewal_seconds,
+                )
+                if renewed != len(keys):
+                    raise RuntimeError(
+                        "lost ownership while renewing evidence visibility"
+                    )
             try:
                 await asyncio.wait_for(
                     stop.wait(),
@@ -200,10 +206,10 @@ class AsyncEvidenceWorker:
     async def run_once(self) -> EvidenceWorkerReport:
         """Claim and process one bounded durable batch.
 
-        Existing PENDING/INCOMPLETE/TRANSIENT_ERROR rows are eligible, so this
-        worker can resume backlog created by an earlier process or SourceLease.
-        Tasks for unconfigured providers remain untouched for the appropriate
-        provider worker instead of being claimed and churned through retries.
+        Provider work remains bounded by the per-provider semaphore, but durable
+        completion is incremental: as soon as one task finishes it is committed
+        and its queue slot is released. A slow tail request therefore no longer
+        holds the rest of the batch before SourceProducer can observe headroom.
         """
         tasks = self.queue.claim(
             owner=self.owner,
@@ -214,22 +220,23 @@ class AsyncEvidenceWorker:
         if not tasks:
             return EvidenceWorkerReport()
 
-        keys = tuple(task.key for task in tasks)
+        task_by_key = {task.key: task for task in tasks}
+        active_keys = set(task_by_key)
         stop_heartbeat = asyncio.Event()
-        heartbeat = asyncio.create_task(self._heartbeat(keys, stop_heartbeat))
-        try:
-            results = await asyncio.gather(*(self._execute(task) for task in tasks))
-        finally:
-            stop_heartbeat.set()
-            await heartbeat
-
+        heartbeat = asyncio.create_task(
+            self._heartbeat(active_keys, stop_heartbeat)
+        )
+        executions = [
+            asyncio.create_task(self._execute(task))
+            for task in tasks
+        ]
         writer = CommitWriter(
             self.evidence_store,
             self.control_store,
             owner=self.owner,
-            flush_count=max(1, min(self.claim_batch_size, 128)),
+            flush_count=1,
         )
-        terminal = retryable = 0
+        terminal = retryable = range_inserted_capsules = 0
         state_counts = {
             CDXQueryState.PASS: 0,
             CDXQueryState.EMPTY_EXHAUSTIVE: 0,
@@ -237,30 +244,24 @@ class AsyncEvidenceWorker:
             CDXQueryState.INCOMPLETE: 0,
             CDXQueryState.TRANSIENT_ERROR: 0,
         }
-        for result in results:
-            state_counts[result.state] += 1
-        range_capsules = [
-            capsule
-            for result in results
-            if isinstance(result, RangeEvidenceQueryResult)
-            for capsule in result.capsules
-        ]
-        # Commit all observed range positives in one transaction before any
-        # parent range task is made terminal. A crash after this point is safe:
-        # range retries merely hit EvidenceStore's idempotent primary key.
-        range_inserted_capsules = self.evidence_store.put_many(range_capsules)
-        task_by_key = {task.key: task for task in tasks}
+
         try:
-            for result in results:
+            for completed in asyncio.as_completed(executions):
+                result = await completed
                 if result.key is None:
-                    raise ValueError("provider result must preserve EvidenceQueryKey")
+                    raise ValueError(
+                        "provider result must preserve EvidenceQueryKey"
+                    )
+                state_counts[result.state] += 1
+
                 if isinstance(result, RangeEvidenceQueryResult):
-                    # Positive CDX rows are individually valid evidence even if
-                    # a later page makes the parent range retryable. Persist
-                    # them first; duplicate retries are idempotent in
-                    # EvidenceStore. Only candidate years not backed by a
-                    # capsule fall back to exact-year provider tasks.
-                    capsule_years = {capsule.year for capsule in result.capsules}
+                    if result.capsules:
+                        range_inserted_capsules += self.evidence_store.put_many(
+                            result.capsules
+                        )
+                    capsule_years = {
+                        capsule.year for capsule in result.capsules
+                    }
                     if result.state in {
                         CDXQueryState.PASS,
                         CDXQueryState.EMPTY_EXHAUSTIVE,
@@ -285,12 +286,33 @@ class AsyncEvidenceWorker:
                             owner=self.owner,
                         )
                         terminal += 1
-                        continue
-                    if result.state not in {
+                    elif result.state in {
                         CDXQueryState.INCOMPLETE,
                         CDXQueryState.TRANSIENT_ERROR,
                     }:
-                        raise ValueError(f"unsupported provider state: {result.state}")
+                        task = task_by_key[result.key]
+                        self.control_store.finish_evidence_task(
+                            result.key,
+                            result.state,
+                            owner=self.owner,
+                            retry_at=self._retry_at(task.attempt),
+                        )
+                        retryable += 1
+                    else:
+                        raise ValueError(
+                            f"unsupported provider state: {result.state}"
+                        )
+                elif result.state in {
+                    CDXQueryState.PASS,
+                    CDXQueryState.EMPTY_EXHAUSTIVE,
+                    CDXQueryState.INVALID,
+                }:
+                    writer.submit(result.capsule, result)
+                    terminal += 1
+                elif result.state in {
+                    CDXQueryState.INCOMPLETE,
+                    CDXQueryState.TRANSIENT_ERROR,
+                }:
                     task = task_by_key[result.key]
                     self.control_store.finish_evidence_task(
                         result.key,
@@ -299,42 +321,38 @@ class AsyncEvidenceWorker:
                         retry_at=self._retry_at(task.attempt),
                     )
                     retryable += 1
-                    continue
-                if result.state in {
-                    CDXQueryState.PASS,
-                    CDXQueryState.EMPTY_EXHAUSTIVE,
-                    CDXQueryState.INVALID,
-                }:
-                    writer.submit(result.capsule, result)
-                    terminal += 1
-                    continue
-                if result.state not in {
-                    CDXQueryState.INCOMPLETE,
-                    CDXQueryState.TRANSIENT_ERROR,
-                }:
-                    raise ValueError(f"unsupported provider state: {result.state}")
-                task = task_by_key[result.key]
-                self.control_store.finish_evidence_task(
-                    result.key,
-                    result.state,
-                    owner=self.owner,
-                    retry_at=self._retry_at(task.attempt),
-                )
-                retryable += 1
+                else:
+                    raise ValueError(
+                        f"unsupported provider state: {result.state}"
+                    )
+
+                active_keys.discard(result.key)
         finally:
+            for execution in executions:
+                if not execution.done():
+                    execution.cancel()
+            await asyncio.gather(*executions, return_exceptions=True)
             writer.close()
+            stop_heartbeat.set()
+            await heartbeat
 
         return EvidenceWorkerReport(
             claimed=len(tasks),
             terminal=terminal,
             retryable=retryable,
-            inserted_capsules=writer.inserted_capsules + range_inserted_capsules,
+            inserted_capsules=(
+                writer.inserted_capsules + range_inserted_capsules
+            ),
             unknown_provider=0,
             pass_count=state_counts[CDXQueryState.PASS],
-            empty_exhaustive_count=state_counts[CDXQueryState.EMPTY_EXHAUSTIVE],
+            empty_exhaustive_count=state_counts[
+                CDXQueryState.EMPTY_EXHAUSTIVE
+            ],
             invalid_count=state_counts[CDXQueryState.INVALID],
             incomplete_count=state_counts[CDXQueryState.INCOMPLETE],
-            transient_error_count=state_counts[CDXQueryState.TRANSIENT_ERROR],
+            transient_error_count=state_counts[
+                CDXQueryState.TRANSIENT_ERROR
+            ],
         )
 
     async def run_until_idle(self, *, max_batches: int | None = None) -> EvidenceWorkerReport:
