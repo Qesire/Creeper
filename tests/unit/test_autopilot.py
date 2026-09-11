@@ -157,6 +157,94 @@ class AutopilotTests(unittest.TestCase):
 
         self.assertEqual(discovery_spawns[0], 2)
 
+    def test_config_parses_optional_readiness_worker(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            scrapy = root / "scrapy"
+            scrapy.mkdir()
+            runtime = root / "runtime"
+            baseline = root / "baseline.sqlite3"
+            baseline.write_bytes(b"fixture")
+            model = root / "eed-model.json"
+            model.write_text(
+                '{"tld":["org"],"lang":["eng"],"perc_of_tld":["100"]}',
+                encoding="utf-8",
+            )
+            discovery = root / "discovery.toml"
+            discovery.write_text(
+                "\n".join(
+                    [
+                        f'runtime_data_root = "{runtime}"',
+                        f'scrapy_project_dir = "{scrapy}"',
+                        "",
+                        "[agent]",
+                        'command = ["python", "agent.py"]',
+                        'backend = "fixture"',
+                        'actor = "agent:test"',
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            producer = root / "producer.toml"
+            producer.write_text(
+                "\n".join(
+                    [
+                        'source_mode = "activated"',
+                        f'runtime_data_root = "{runtime}"',
+                        f'baseline_index = "{baseline}"',
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            config = root / "autopilot.toml"
+            config.write_text(
+                "\n".join(
+                    [
+                        f'source_discovery_config = "{discovery}"',
+                        f'source_producer_config = "{producer}"',
+                        "",
+                        "[readiness]",
+                        "enabled = true",
+                        f'eed_model = "{model}"',
+                        'baseline_eed = "35266393.8852"',
+                        "batch_size = 123",
+                        "max_batches_per_cycle = 4",
+                        "poll_seconds = 9.0",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            loaded = load_autopilot_config(config)
+            specs = build_child_specs(loaded)
+
+            self.assertIsNotNone(loaded.readiness)
+            assert loaded.readiness is not None
+            self.assertEqual(loaded.baseline_index, baseline.resolve())
+            self.assertEqual(loaded.readiness.eed_model, model.resolve())
+            self.assertEqual(loaded.readiness.baseline_eed, "35266393.8852")
+            self.assertEqual(loaded.readiness.batch_size, 123)
+            self.assertEqual(
+                [spec.name for spec in specs][-1],
+                "readiness-worker",
+            )
+
+            config.write_text(
+                "\n".join(
+                    [
+                        f'source_discovery_config = "{discovery}"',
+                        f'source_producer_config = "{producer}"',
+                        "",
+                        "[readiness]",
+                        "enabled = false",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            disabled = load_autopilot_config(config)
+            self.assertIsNone(disabled.readiness)
+            self.assertEqual(len(build_child_specs(disabled)), 3)
+
     def test_config_requires_shared_runtime_and_activated_producer(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
