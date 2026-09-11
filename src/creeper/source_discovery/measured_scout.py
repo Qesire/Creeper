@@ -554,7 +554,7 @@ def _extract_hosts(
             ),
         )
 
-    if suffix in {"", ".txt", ".list"} or lower_type.startswith("text/plain"):
+    if suffix in {"", ".txt", ".list", ".urls"} or lower_type.startswith("text/plain"):
         for line in lines:
             if sampled >= policy.max_records:
                 break
@@ -572,6 +572,40 @@ def _extract_hosts(
         )
 
     return None
+
+
+def _apply_source_year_hint(
+    parsed: ParsedHostSample,
+    *,
+    candidate: SourceCandidate,
+    policy: MeasuredYieldScoutPolicy,
+) -> ParsedHostSample:
+    """Project an exact source-level year into scout ranking only.
+
+    This turns an undated URL list such as `webbase-2001.urls.gz` into
+    host-year *measurement* pairs so baseline overlap is estimated against the
+    relevant annual mask. It does not grant direct evidence authority; the
+    production path still emits provider-backed EvidenceTasks.
+    """
+    if parsed.measurement_mode is not MeasurementMode.HOST_ONLY:
+        return parsed
+    if parsed.host_year_pairs:
+        return parsed
+    year_from = candidate.expected_year_from
+    year_to = candidate.expected_year_to
+    if (
+        year_from is None
+        or year_to is None
+        or year_from != year_to
+        or not policy.target_year_from <= year_from <= policy.target_year_to
+    ):
+        return parsed
+    return ParsedHostSample(
+        sampled_records=parsed.sampled_records,
+        hosts=set(parsed.hosts),
+        host_year_pairs={(hostname, year_from) for hostname in parsed.hosts},
+        measurement_mode=MeasurementMode.HOST_YEAR,
+    )
 
 
 class MeasuredYieldScoutExecutor:
@@ -602,6 +636,7 @@ class MeasuredYieldScoutExecutor:
             ".ndjson",
             ".txt",
             ".list",
+            ".urls",
         }
 
     async def _download_prefix(
@@ -860,6 +895,11 @@ class MeasuredYieldScoutExecutor:
                 ScoutDisposition.HOLD,
                 reason="unsupported measured source format; requires a format-specific mature parser",
             )
+        parsed = _apply_source_year_hint(
+            parsed,
+            candidate=candidate,
+            policy=self.policy,
+        )
         elapsed = max(0.0, float(self.clock()) - started)
         measurement = self._measurement(
             parsed=parsed,

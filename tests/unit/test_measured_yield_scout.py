@@ -48,15 +48,15 @@ class MeasuredYieldScoutTests(unittest.IsolatedAsyncioTestCase):
         self.tmp.cleanup()
 
     @staticmethod
-    def candidate(url: str) -> SourceCandidate:
+    def candidate(url: str, *, exact_year: int | None = None) -> SourceCandidate:
         return SourceCandidate(
             canonical_entrypoint=url,
             source_family="BULK_ARTIFACT",
             level=SourceLevel.SOURCE,
             discovered_by="test",
             discovery_strategy="META_SOURCE_SEARCH",
-            expected_year_from=1996,
-            expected_year_to=2001,
+            expected_year_from=1996 if exact_year is None else exact_year,
+            expected_year_to=2001 if exact_year is None else exact_year,
             expected_volume=100_000,
             enumerability_prior=0.9,
             confidence=0.8,
@@ -223,6 +223,49 @@ class MeasuredYieldScoutTests(unittest.IsolatedAsyncioTestCase):
         self.assertLessEqual(measurement.bytes_read, 480)
         self.assertGreater(measurement.novel_hosts, 0)
         self.assertGreater(measurement.novel_host_year_pairs, 0)
+
+    async def test_single_year_url_list_ranks_partially_known_host_as_novel_pair(self) -> None:
+        raw = b"https://known.com/from-webbase\n"
+        body = gzip.compress(raw)
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            return streamed_response(
+                206,
+                body,
+                headers={"content-type": "application/gzip"},
+            )
+
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler)
+        ) as client:
+            scout = MeasuredYieldScoutExecutor(
+                client,
+                self.baseline,
+                {"com": Decimal("1")},
+                policy=self.policy(
+                    min_unique_hosts=1,
+                    min_novel_hosts=1,
+                    min_novel_fraction=0.0,
+                    min_novel_eed=0.5,
+                ),
+            )
+            result = await scout(
+                self.candidate(
+                    "https://data.example/webbase-2001.urls.gz",
+                    exact_year=2001,
+                )
+            )
+
+        self.assertEqual(result.disposition, ScoutDisposition.WARM)
+        self.assertIsNotNone(result.measurement)
+        measurement = result.measurement
+        assert measurement is not None
+        self.assertEqual(measurement.measurement_mode, MeasurementMode.HOST_YEAR)
+        self.assertEqual(measurement.novel_hosts, 0)
+        self.assertEqual(measurement.observed_host_year_pairs, 1)
+        self.assertEqual(measurement.novel_host_year_pairs, 1)
+        self.assertEqual(measurement.novel_pair_eed, 1.0)
+        self.assertEqual(measurement.direct_host_years, 0)
 
     async def test_gzipped_jsonl_uses_bounded_mature_stream_path(self) -> None:
         calls = 0

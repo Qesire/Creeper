@@ -135,6 +135,11 @@ class ActivatedSourceRuntime:
         )
 
     def close(self) -> None:
+        for adapter in self.adapter_cache.values():
+            close = getattr(adapter, "close", None)
+            if callable(close):
+                close()
+        self.adapter_cache.clear()
         self.evidence.close()
         self.control.close()
         self.baseline.close()
@@ -172,7 +177,10 @@ class ActivatedSourceRuntime:
                 continue
             adapter = self.adapter_cache.get(reservoir.adapter_id)
             if adapter is None:
-                adapter = ProductionAdapterFactory.open(reservoir)
+                adapter = ProductionAdapterFactory.open(
+                    reservoir,
+                    temporal_scope=spec.temporal_scope,
+                )
                 self.adapter_cache[reservoir.adapter_id] = adapter
             adapters[reservoir.adapter_id] = adapter
             if reservoir.evidence_mode == "direct_year":
@@ -222,11 +230,13 @@ class ActivatedSourceRuntime:
         # across a multi-hour autonomous run. Current adapters hold no durable
         # authority; cursor state lives in ControlStore.
         active_adapter_ids = set(adapters)
-        self.adapter_cache = {
-            adapter_id: adapter
-            for adapter_id, adapter in self.adapter_cache.items()
-            if adapter_id in active_adapter_ids
-        }
+        for adapter_id, adapter in tuple(self.adapter_cache.items()):
+            if adapter_id in active_adapter_ids:
+                continue
+            close = getattr(adapter, "close", None)
+            if callable(close):
+                close()
+            self.adapter_cache.pop(adapter_id, None)
         self.producer.refresh_workset(
             candidates=candidates,
             adapters=adapters,
