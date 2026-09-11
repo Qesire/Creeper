@@ -1,0 +1,21 @@
+# Production config for discovery-activated source reservoirs.
+source_mode = "activated"
+runtime_data_root = "/path/to/Creeper-data/v3-merged260909-3"
+baseline_index = "/path/to/Creeper-data/v3-merged260909-3/baseline.sqlite3"
+
+[limits]
+queue_source_records = 1000
+queue_observations = 1000
+queue_evidence_tasks = 1000
+queue_commits = 1000
+
+# One bounded source lease. The long-lived producer reuses BaselineIndex,
+# SQLite connections, and adapter instances between leases.
+lease_max_records = 10000
+lease_max_requests = 16
+lease_max_bytes = 67108864
+lease_max_seconds = 300
+
+# Durable provider backlog high-water. Discovery/source acquisition pauses
+# before this queue is over-admitted.
+evidence_backlog_capacity = 10000
