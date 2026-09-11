@@ -49,6 +49,41 @@ class AsyncWaybackCDXClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(calls, 2)
         self.assertEqual(client.http_requests, 2)
 
+    async def test_retry_after_extends_provider_wide_cooldown(self):
+        request = httpx.Request("GET", "https://example.invalid/cdx")
+        response = httpx.Response(
+            429,
+            headers={"Retry-After": "3"},
+            request=request,
+        )
+        async with AsyncWaybackCDXClient(
+            transport=httpx.MockTransport(
+                lambda request: httpx.Response(200, request=request)
+            ),
+            max_retries=0,
+        ) as client:
+            loop = __import__("asyncio").get_running_loop()
+            before = loop.time()
+            await client._register_throttle(response)
+            self.assertEqual(client.throttle_responses, 1)
+            self.assertGreaterEqual(client._cooldown_until - before, 2.9)
+
+    async def test_503_without_retry_after_uses_shared_floor_cooldown(self):
+        request = httpx.Request("GET", "https://example.invalid/cdx")
+        response = httpx.Response(503, request=request)
+        async with AsyncWaybackCDXClient(
+            transport=httpx.MockTransport(
+                lambda request: httpx.Response(200, request=request)
+            ),
+            max_retries=0,
+            backoff=0,
+            throttle_floor_seconds=1.5,
+        ) as client:
+            loop = __import__("asyncio").get_running_loop()
+            before = loop.time()
+            await client._register_throttle(response)
+            self.assertGreaterEqual(client._cooldown_until - before, 1.4)
+
     async def test_resume_key_pages_are_exhausted_with_one_reused_client(self):
         calls = []
 
