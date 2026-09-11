@@ -139,6 +139,35 @@ class EvidencePlannerTests(unittest.TestCase):
             [(1996, 1997), (2000, 2001)],
         )
 
+    def test_provider_coverage_suppresses_external_query_but_not_direct_evidence(self):
+        from creeper.evidence.planner import EvidencePlanner
+
+        covered = YEAR_BITS[1997]
+        external = EvidencePlanner().plan(
+            self.observation(year_hint_mask=YEAR_BITS[1997]),
+            official_mask=0,
+            local_mask=0,
+            provider="wayback",
+            policy_version="v1",
+            external_covered_mask=covered,
+        )
+        direct = EvidencePlanner().plan(
+            self.observation(
+                direct_year_mask=YEAR_BITS[1997],
+                year_hint_mask=YEAR_BITS[1997],
+            ),
+            official_mask=0,
+            local_mask=0,
+            provider="wayback",
+            policy_version="v1",
+            allow_direct=True,
+            external_covered_mask=covered,
+        )
+
+        self.assertEqual(external.external_keys, ())
+        self.assertEqual([capsule.year for capsule in direct.direct_capsules], [1997])
+        self.assertEqual(direct.external_keys, ())
+
     def test_authorized_direct_year_takes_precedence_over_same_year_hint(self):
         from creeper.evidence.planner import EvidencePlanner
 
