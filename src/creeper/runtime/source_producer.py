@@ -208,6 +208,13 @@ class SourceProducer:
                 hostnames = [observation.hostname for observation in pending]
                 resolved: dict[str, tuple[int, bool]] = {}
                 local_masks = self.evidence_store.resolve_year_masks(hostnames)
+                provider_coverage_masks = (
+                    self.control_store.resolve_provider_coverage_masks(
+                        hostnames,
+                        provider=provider,
+                        policy_version=self.evidence_policy_version,
+                    )
+                )
                 for batch in self.baseline.iter_resolve_batches(
                     hostnames,
                     input_batch_size=self.baseline_batch_size,
@@ -226,6 +233,9 @@ class SourceProducer:
                         provider=provider,
                         policy_version=self.evidence_policy_version,
                         allow_direct=allow_direct,
+                        external_covered_mask=provider_coverage_masks.get(
+                            item.hostname, 0
+                        ),
                     )
                     direct_capsules.extend(plan.direct_capsules)
                     enqueue_external_keys(plan.external_keys)
