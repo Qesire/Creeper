@@ -13,6 +13,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 import fcntl
+import json
 import os
 from pathlib import Path
 import signal
@@ -23,6 +24,13 @@ import time
 import tomllib
 from typing import Any, Callable
 
+from creeper.runtime.resource_governor import (
+    GovernorState,
+    LocalResourceSampler,
+    ResourceGovernor,
+    ResourceSample,
+    StabilizedResourceGovernor,
+)
 from creeper.source_discovery_service import load_source_discovery_config
 
 
@@ -64,6 +72,15 @@ class ReadinessServicePolicy:
 
 
 @dataclass(frozen=True)
+class ResourceGovernorPolicy:
+    rss_throttle_bytes: int
+    rss_stop_bytes: int
+    disk_throttle_bytes: int
+    disk_stop_bytes: int
+    recovery_samples: int = 5
+
+
+@dataclass(frozen=True)
 class AutopilotConfig:
     source_discovery_config: Path
     source_producer_config: Path
@@ -72,6 +89,7 @@ class AutopilotConfig:
     evidence: EvidenceServicePolicy
     baseline_index: Path | None = None
     readiness: ReadinessServicePolicy | None = None
+    resource_governor: ResourceGovernorPolicy | None = None
 
 
 @dataclass(frozen=True)
@@ -129,6 +147,11 @@ def _decimal_string(value: object, *, name: str) -> str:
     if not parsed.is_finite() or parsed < 0:
         raise ValueError(f"{name} must be a finite non-negative decimal")
     return format(parsed, "f")
+
+
+def _gib_bytes(value: object, *, name: str) -> int:
+    gib = _positive_float(value, name=name)
+    return int(gib * (1024 ** 3))
 
 
 def _positive_int(value: object, *, name: str) -> int:
@@ -344,6 +367,51 @@ def load_autopilot_config(config_path: Path) -> AutopilotConfig:
                 ),
             )
 
+    resource_governor = None
+    resource_raw = root.get("resource_governor")
+    if resource_raw is not None:
+        if not isinstance(resource_raw, dict):
+            raise ValueError("[resource_governor] must be a TOML table")
+        enabled = _strict_bool(
+            resource_raw.get("enabled", True),
+            name="resource_governor.enabled",
+        )
+        if enabled:
+            rss_throttle = _gib_bytes(
+                resource_raw.get("rss_throttle_gib"),
+                name="resource_governor.rss_throttle_gib",
+            )
+            rss_stop = _gib_bytes(
+                resource_raw.get("rss_stop_gib"),
+                name="resource_governor.rss_stop_gib",
+            )
+            disk_throttle = _gib_bytes(
+                resource_raw.get("disk_throttle_gib"),
+                name="resource_governor.disk_throttle_gib",
+            )
+            disk_stop = _gib_bytes(
+                resource_raw.get("disk_stop_gib"),
+                name="resource_governor.disk_stop_gib",
+            )
+            if rss_stop < rss_throttle:
+                raise ValueError(
+                    "resource_governor.rss_stop_gib must be >= rss_throttle_gib"
+                )
+            if disk_stop > disk_throttle:
+                raise ValueError(
+                    "resource_governor.disk_stop_gib must be <= disk_throttle_gib"
+                )
+            resource_governor = ResourceGovernorPolicy(
+                rss_throttle_bytes=rss_throttle,
+                rss_stop_bytes=rss_stop,
+                disk_throttle_bytes=disk_throttle,
+                disk_stop_bytes=disk_stop,
+                recovery_samples=_positive_int(
+                    resource_raw.get("recovery_samples", 5),
+                    name="resource_governor.recovery_samples",
+                ),
+            )
+
     return AutopilotConfig(
         source_discovery_config=discovery_path,
         source_producer_config=producer_path,
@@ -352,6 +420,7 @@ def load_autopilot_config(config_path: Path) -> AutopilotConfig:
         evidence=evidence,
         baseline_index=baseline_index,
         readiness=readiness,
+        resource_governor=resource_governor,
     )
 
 
@@ -476,6 +545,58 @@ def _stop_child(process: Any, *, grace_seconds: float) -> None:
         process.wait()
 
 
+def _desired_children(
+    state: GovernorState,
+    available: set[str],
+) -> set[str]:
+    if state is GovernorState.NORMAL:
+        return set(available)
+    if state is GovernorState.THROTTLED:
+        return set(available) - {"source-discovery"}
+    if state is GovernorState.DRAIN_ONLY:
+        return set(available) & {"readiness-worker"}
+    return set()
+
+
+def _live_process_pids(children: dict[str, _ChildRuntime]) -> tuple[int, ...]:
+    pids = {os.getpid()}
+    for child in children.values():
+        process = child.process
+        if process is None or process.poll() is not None:
+            continue
+        pid = getattr(process, "pid", None)
+        if isinstance(pid, int) and not isinstance(pid, bool) and pid > 0:
+            pids.add(pid)
+    return tuple(sorted(pids))
+
+
+def _write_governor_status(
+    runtime_root: Path,
+    *,
+    state: GovernorState,
+    sample: ResourceSample,
+    desired_children: set[str],
+    wall_time: float,
+) -> None:
+    root = runtime_root / "governor"
+    root.mkdir(parents=True, exist_ok=True)
+    target = root / "state.json"
+    temporary = root / "state.json.tmp"
+    payload = {
+        "state": state.value,
+        "sampled_at_unix": wall_time,
+        "rss_bytes": sample.rss_bytes,
+        "disk_free_bytes": sample.disk_free_bytes,
+        "provider_pressure": sample.provider_pressure,
+        "desired_children": sorted(desired_children),
+    }
+    temporary.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    os.replace(temporary, target)
+
+
 def run_autopilot(
     config: AutopilotConfig,
     *,
@@ -483,6 +604,8 @@ def run_autopilot(
     popen_factory: Callable[..., Any] = subprocess.Popen,
     sleep_fn: Callable[[float], None] = time.sleep,
     monotonic: Callable[[], float] = time.monotonic,
+    wall_clock: Callable[[], float] = time.time,
+    resource_sample_fn: Callable[[tuple[int, ...]], ResourceSample] | None = None,
 ) -> None:
     """Supervise all autonomous Creeper stages with bounded restart backoff."""
     stop_event = stop_event or Event()
@@ -491,10 +614,72 @@ def run_autopilot(
         spec.name: _ChildRuntime(spec)
         for spec in build_child_specs(config)
     }
+    stabilized: StabilizedResourceGovernor | None = None
+    if config.resource_governor is not None:
+        resource_policy = config.resource_governor
+        stabilized = StabilizedResourceGovernor(
+            ResourceGovernor(
+                rss_throttle_bytes=resource_policy.rss_throttle_bytes,
+                rss_stop_bytes=resource_policy.rss_stop_bytes,
+                disk_throttle_bytes=resource_policy.disk_throttle_bytes,
+                disk_stop_bytes=resource_policy.disk_stop_bytes,
+            ),
+            recovery_samples=resource_policy.recovery_samples,
+        )
+        if resource_sample_fn is None:
+            sampler = LocalResourceSampler(config.runtime_data_root)
+            resource_sample_fn = sampler.sample
+
+    last_governor_state: GovernorState | None = None
     try:
         while not stop_event.is_set():
             now = float(monotonic())
-            for child in children.values():
+            state = GovernorState.NORMAL
+            if stabilized is not None:
+                assert resource_sample_fn is not None
+                sample = resource_sample_fn(_live_process_pids(children))
+                state = stabilized.update(sample)
+                desired = _desired_children(state, set(children))
+                if state is not last_governor_state:
+                    _write_governor_status(
+                        config.runtime_data_root,
+                        state=state,
+                        sample=sample,
+                        desired_children=desired,
+                        wall_time=float(wall_clock()),
+                    )
+                    last_governor_state = state
+                if state is GovernorState.EMERGENCY_STOP:
+                    for child in children.values():
+                        if child.process is not None:
+                            _stop_child(
+                                child.process,
+                                grace_seconds=policy.shutdown_grace_seconds,
+                            )
+                            child.process = None
+                    raise RuntimeError(
+                        "resource governor emergency stop: "
+                        f"rss_bytes={sample.rss_bytes} "
+                        f"disk_free_bytes={sample.disk_free_bytes}"
+                    )
+            else:
+                desired = set(children)
+
+            for name, child in children.items():
+                if name not in desired:
+                    if child.process is not None:
+                        _stop_child(
+                            child.process,
+                            grace_seconds=policy.shutdown_grace_seconds,
+                        )
+                    child.process = None
+                    child.started_at = None
+                    child.next_start = 0.0
+                    # Governance pauses are intentional clean lifecycle
+                    # boundaries, not crashes that should consume restart budget.
+                    child.restarts = 0
+                    continue
+
                 if child.process is None:
                     if now < child.next_start:
                         continue

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from threading import Event
+import json
 import tempfile
 import unittest
 
@@ -9,11 +10,13 @@ from creeper.autopilot import (
     AutopilotConfig,
     EvidenceServicePolicy,
     ReadinessServicePolicy,
+    ResourceGovernorPolicy,
     SupervisorPolicy,
     build_child_specs,
     load_autopilot_config,
     run_autopilot,
 )
+from creeper.runtime.resource_governor import ResourceSample
 
 
 class _FakeProcess:
@@ -124,6 +127,163 @@ class AutopilotTests(unittest.TestCase):
 
         self.assertEqual(len(processes), 3)
         self.assertTrue(all(process.terminated for process in processes))
+
+    def test_resource_governor_degrades_and_recovers_child_set_without_restart_penalty(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = AutopilotConfig(
+                source_discovery_config=root / "discovery.toml",
+                source_producer_config=root / "producer.toml",
+                runtime_data_root=root / "runtime",
+                supervisor=SupervisorPolicy(
+                    poll_seconds=0.01,
+                    shutdown_grace_seconds=0.01,
+                ),
+                evidence=EvidenceServicePolicy(),
+                resource_governor=ResourceGovernorPolicy(
+                    rss_throttle_bytes=100,
+                    rss_stop_bytes=200,
+                    disk_throttle_bytes=100,
+                    disk_stop_bytes=50,
+                    recovery_samples=2,
+                ),
+            )
+            stop = Event()
+            spawned: list[str] = []
+            terminated: list[str] = []
+
+            class NamedProcess(_FakeProcess):
+                _next_pid = 10_000
+
+                def __init__(self, name):
+                    super().__init__()
+                    self.name = name
+                    self.pid = NamedProcess._next_pid
+                    NamedProcess._next_pid += 1
+
+                def terminate(self):
+                    terminated.append(self.name)
+                    super().terminate()
+
+            def spawn(argv):
+                if "creeper.source_discovery_service" in argv:
+                    name = "source-discovery"
+                elif "creeper.source_cli" in argv:
+                    name = "source-producer"
+                elif "creeper.evidence_cli" in argv:
+                    name = "evidence-worker"
+                else:
+                    name = "other"
+                spawned.append(name)
+                return NamedProcess(name)
+
+            samples = iter(
+                [
+                    ResourceSample(rss_bytes=10, disk_free_bytes=500),
+                    ResourceSample(rss_bytes=150, disk_free_bytes=500),
+                    ResourceSample(rss_bytes=10, disk_free_bytes=90),
+                    ResourceSample(rss_bytes=10, disk_free_bytes=500),
+                    ResourceSample(rss_bytes=10, disk_free_bytes=500),
+                ]
+            )
+
+            calls = [0]
+
+            def sleep(_seconds):
+                calls[0] += 1
+                if calls[0] >= 5:
+                    stop.set()
+
+            run_autopilot(
+                config,
+                stop_event=stop,
+                popen_factory=spawn,
+                sleep_fn=sleep,
+                monotonic=lambda: float(calls[0]),
+                wall_clock=lambda: 1234.0 + calls[0],
+                resource_sample_fn=lambda _pids: next(samples),
+            )
+
+            self.assertEqual(spawned.count("source-discovery"), 2)
+            self.assertEqual(spawned.count("source-producer"), 2)
+            self.assertEqual(spawned.count("evidence-worker"), 2)
+            # Discovery is stopped at THROTTLED; producer/evidence are stopped
+            # only when the lower disk watermark enters DRAIN_ONLY.
+            self.assertGreaterEqual(terminated.count("source-discovery"), 2)
+            self.assertGreaterEqual(terminated.count("source-producer"), 2)
+            self.assertGreaterEqual(terminated.count("evidence-worker"), 2)
+            status = json.loads(
+                (root / "runtime" / "governor" / "state.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(status["state"], "normal")
+            self.assertEqual(
+                status["desired_children"],
+                ["evidence-worker", "source-discovery", "source-producer"],
+            )
+
+    def test_resource_governor_emergency_stops_children_and_aborts_autopilot(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = AutopilotConfig(
+                source_discovery_config=root / "discovery.toml",
+                source_producer_config=root / "producer.toml",
+                runtime_data_root=root / "runtime",
+                supervisor=SupervisorPolicy(
+                    poll_seconds=0.01,
+                    shutdown_grace_seconds=0.01,
+                ),
+                evidence=EvidenceServicePolicy(),
+                resource_governor=ResourceGovernorPolicy(
+                    rss_throttle_bytes=100,
+                    rss_stop_bytes=200,
+                    disk_throttle_bytes=100,
+                    disk_stop_bytes=50,
+                    recovery_samples=2,
+                ),
+            )
+            processes: list[_FakeProcess] = []
+
+            class PidProcess(_FakeProcess):
+                def __init__(self, pid):
+                    super().__init__()
+                    self.pid = pid
+
+            def spawn(_argv):
+                process = PidProcess(20_000 + len(processes))
+                processes.append(process)
+                return process
+
+            samples = iter(
+                [
+                    ResourceSample(rss_bytes=10, disk_free_bytes=500),
+                    ResourceSample(rss_bytes=250, disk_free_bytes=500),
+                ]
+            )
+            ticks = [0]
+
+            def sleep(_seconds):
+                ticks[0] += 1
+
+            with self.assertRaisesRegex(RuntimeError, "emergency stop"):
+                run_autopilot(
+                    config,
+                    popen_factory=spawn,
+                    sleep_fn=sleep,
+                    monotonic=lambda: float(ticks[0]),
+                    resource_sample_fn=lambda _pids: next(samples),
+                )
+
+            self.assertEqual(len(processes), 3)
+            self.assertTrue(all(process.terminated for process in processes))
+            status = json.loads(
+                (root / "runtime" / "governor" / "state.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(status["state"], "emergency_stop")
+            self.assertEqual(status["desired_children"], [])
 
     def test_transient_child_exit_restarts_then_fails_at_budget(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -244,6 +404,71 @@ class AutopilotTests(unittest.TestCase):
             disabled = load_autopilot_config(config)
             self.assertIsNone(disabled.readiness)
             self.assertEqual(len(build_child_specs(disabled)), 3)
+
+    def test_config_parses_optional_resource_governor(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            scrapy = root / "scrapy"
+            scrapy.mkdir()
+            runtime = root / "runtime"
+            discovery = root / "discovery.toml"
+            discovery.write_text(
+                "\n".join(
+                    [
+                        f'runtime_data_root = "{runtime}"',
+                        f'scrapy_project_dir = "{scrapy}"',
+                        "",
+                        "[agent]",
+                        'command = ["python", "agent.py"]',
+                        'backend = "fixture"',
+                        'actor = "agent:test"',
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            producer = root / "producer.toml"
+            producer.write_text(
+                "\n".join(
+                    [
+                        'source_mode = "activated"',
+                        f'runtime_data_root = "{runtime}"',
+                        f'baseline_index = "{root / "baseline.sqlite3"}"',
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            config = root / "autopilot.toml"
+            config.write_text(
+                "\n".join(
+                    [
+                        f'source_discovery_config = "{discovery}"',
+                        f'source_producer_config = "{producer}"',
+                        "",
+                        "[resource_governor]",
+                        "enabled = true",
+                        "rss_throttle_gib = 8",
+                        "rss_stop_gib = 12",
+                        "disk_throttle_gib = 40",
+                        "disk_stop_gib = 10",
+                        "recovery_samples = 7",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            loaded = load_autopilot_config(config)
+
+            self.assertIsNotNone(loaded.resource_governor)
+            assert loaded.resource_governor is not None
+            self.assertEqual(
+                loaded.resource_governor.rss_throttle_bytes,
+                8 * 1024 ** 3,
+            )
+            self.assertEqual(
+                loaded.resource_governor.disk_stop_bytes,
+                10 * 1024 ** 3,
+            )
+            self.assertEqual(loaded.resource_governor.recovery_samples, 7)
 
     def test_config_requires_shared_runtime_and_activated_producer(self):
         with tempfile.TemporaryDirectory() as tmp:

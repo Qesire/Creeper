@@ -46,3 +46,19 @@ baseline_eed = "35266393.8852"
 batch_size = 50000
 max_batches_per_cycle = 20
 poll_seconds = 30.0
+
+[resource_governor]
+# Optional process-level safety guard for long unattended runs.
+# Tune these values to the actual machine before enabling.
+enabled = false
+# Aggregate RSS includes the autopilot process, all Creeper children, and Linux
+# descendants such as Scrapy sidecars.
+rss_throttle_gib = 16
+rss_stop_gib = 24
+# Low disk enters DRAIN_ONLY at the throttle watermark; the hard watermark
+# stops all children and aborts autopilot.
+disk_throttle_gib = 50
+disk_stop_gib = 10
+# Escalation is immediate. Recovery requires this many consecutive healthier
+# supervisor samples so state does not flap around a threshold.
+recovery_samples = 5

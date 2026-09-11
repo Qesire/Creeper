@@ -7,6 +7,7 @@ import asyncio
 import fcntl
 import json
 import os
+import signal
 import time
 import tomllib
 from collections.abc import Callable
@@ -483,6 +484,59 @@ async def run_source_discovery_watch(
             await sleep(delay)
 
 
+async def _run_watch_cli(
+    config: SourceDiscoveryServiceConfig,
+    *,
+    busy_sleep_seconds: float,
+    idle_sleep_seconds: float,
+) -> int:
+    """Run watch mode with signal-driven asyncio cancellation.
+
+    Cancelling the coordinator task is important because Scrapy sidecar launches
+    are cancellation-aware and terminate their whole process group.
+    """
+    loop = asyncio.get_running_loop()
+    current = asyncio.current_task()
+    if current is None:
+        raise RuntimeError("source discovery watch requires an asyncio task")
+    received: list[signal.Signals] = []
+    installed: list[signal.Signals] = []
+
+    def request_stop(signum: signal.Signals) -> None:
+        if not received:
+            received.append(signum)
+        current.cancel()
+
+    for signum in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(signum, request_stop, signum)
+            installed.append(signum)
+        except (NotImplementedError, RuntimeError):
+            pass
+
+    def emit(report: dict[str, object]) -> None:
+        print(
+            json.dumps(report, ensure_ascii=False, separators=(",", ":")),
+            flush=True,
+        )
+
+    try:
+        await run_source_discovery_watch(
+            config,
+            emit=emit,
+            busy_sleep_seconds=busy_sleep_seconds,
+            idle_sleep_seconds=idle_sleep_seconds,
+        )
+        return 0
+    except asyncio.CancelledError:
+        if received and received[0] is signal.SIGINT:
+            return 130
+        return 0
+    finally:
+        for signum in installed:
+            loop.remove_signal_handler(signum)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="creeper-source-discovery")
     parser.add_argument("config", type=Path)
@@ -496,13 +550,9 @@ def main(argv: list[str] | None = None) -> int:
     try:
         config = load_source_discovery_config(args.config)
         if args.watch:
-            def emit(report: dict[str, object]) -> None:
-                print(json.dumps(report, ensure_ascii=False, separators=(",", ":")), flush=True)
-
-            asyncio.run(
-                run_source_discovery_watch(
+            return asyncio.run(
+                _run_watch_cli(
                     config,
-                    emit=emit,
                     busy_sleep_seconds=args.busy_sleep_seconds,
                     idle_sleep_seconds=args.idle_sleep_seconds,
                 )

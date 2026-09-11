@@ -70,15 +70,43 @@ The supervisor uses bounded exponential restart backoff and stops the whole
 pipeline after a configured child restart budget is exceeded. This prevents a
 misconfigured child from silently spinning forever.
 
+With `[resource_governor]` enabled, the supervisor samples aggregate Linux
+process-tree RSS and free space on the runtime filesystem. Escalation is
+immediate, while recovery requires a configurable healthy-sample streak:
+
+```text
+NORMAL
+  discovery + producer + evidence + readiness
+
+THROTTLED
+  producer + evidence + readiness
+  (discovery is stopped)
+
+DRAIN_ONLY
+  readiness only
+  (all network/production children are stopped)
+
+EMERGENCY_STOP
+  all children stopped; autopilot exits with an explicit error
+```
+
+Low disk enters `DRAIN_ONLY` before the hard stop so Creeper does not continue
+expanding local source/evidence state into its remaining filesystem headroom.
+Governor-driven lifecycle stops are intentional and do not consume the child
+restart budget. Discovery shutdown is asyncio-cancellation aware, so an active
+Scrapy sidecar receives process-group cleanup rather than being orphaned.
+The current governor state is written atomically to
+`$CREEPER_HOME/governor/state.json`.
+
 The readiness worker is an incremental trigger, not submission authority. It
 processes only new unique `(hostname, year)` evidence rows, resets and replays
 when the baseline or EED model changes, and retracts stale gate markers after a
 rebase. Final submission still performs a canonical host-year scan, annual
 official-compatible EED recomputation, baseline diff, and full precheck.
 
-ResourceGovernor-driven process throttling and automatic final submission
-packaging are not yet part of the supervisor loop; they remain explicit
-later-stage controls.
+Automatic final submission packaging is not yet triggered by the supervisor;
+the formal snapshot/export path remains an explicit final control after
+readiness reaches its gate.
 
 ## Local commands
 
