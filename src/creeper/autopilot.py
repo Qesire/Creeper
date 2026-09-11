@@ -170,8 +170,11 @@ def _nonnegative_int(value: object, *, name: str) -> int:
 def _producer_runtime_config(config_path: Path) -> tuple[Path, Path]:
     with config_path.open("rb") as stream:
         root = tomllib.load(stream)
-    if root.get("source_mode", "static") != "activated":
-        raise ValueError("autopilot source producer must use source_mode='activated'")
+    source_mode = root.get("source_mode", "static")
+    if source_mode not in {"static", "activated"}:
+        raise ValueError(
+            "autopilot source producer source_mode must be 'static' or 'activated'"
+        )
     runtime_root = _resolve(
         root.get("runtime_data_root"),
         base=config_path.parent,
