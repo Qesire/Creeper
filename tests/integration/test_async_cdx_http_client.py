@@ -199,6 +199,18 @@ class AsyncWaybackCDXClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.candidate_years, ())
         self.assertEqual(tuple(capsule.year for capsule in result.capsules), (1997,))
 
+    async def test_rate_limiter_strictly_spaces_requests_above_one_rps(self):
+        async with AsyncWaybackCDXClient(
+            transport=httpx.MockTransport(
+                lambda request: httpx.Response(200, content=b"[]", request=request)
+            ),
+            max_retries=0,
+            requests_per_second=4.0,
+        ) as client:
+            self.assertIsNotNone(client._limiter)
+            self.assertEqual(client._limiter.max_rate, 1)
+            self.assertAlmostEqual(client._limiter.time_period, 0.25)
+
     async def test_sub_one_request_per_second_limit_allows_single_request(self):
         async def handler(request):
             payload = [
