@@ -272,8 +272,66 @@ class AsyncWaybackCDXClient:
             yield rows, True
             return
 
+    @staticmethod
+    def _accepted_year(
+        row: dict[str, object],
+        *,
+        hostname: str,
+        year_from: int,
+        year_to: int,
+    ) -> int | None:
+        timestamp = str(row.get("timestamp", ""))
+        original = str(row.get("original", ""))
+        status = str(row.get("status", row.get("statuscode", "")))
+        if (
+            len(timestamp) >= 4
+            and timestamp[:4].isdigit()
+            and year_from <= int(timestamp[:4]) <= year_to
+            and _exact_hostname(original, hostname)
+            and status[:1] in {"2", "3"}
+        ):
+            return int(timestamp[:4])
+        return None
+
+    @staticmethod
+    def _capsule_from_row(
+        key: EvidenceQueryKey,
+        row: dict[str, object],
+        *,
+        year: int,
+        page_no: int,
+        record_no: int,
+        extraction_method: str,
+    ) -> EvidenceCapsule:
+        original = str(row.get("original", ""))
+        timestamp = str(row.get("timestamp", ""))
+        payload = json.dumps(row, ensure_ascii=False, sort_keys=True).encode()
+        return EvidenceCapsule(
+            hostname=key.hostname,
+            year=year,
+            provider=key.provider,
+            temporal_semantics="capture_timestamp_year",
+            evidence_timestamp=timestamp,
+            source_locator=original,
+            payload_hash=hashlib.sha256(payload).hexdigest(),
+            policy_version=key.policy_version,
+            evidence_type="exact_host_cdx_capture",
+            source_id=key.provider,
+            original_url=original,
+            record_locator=(
+                f"{key.provider}:{key.hostname}:{year}:"
+                f"page={page_no}:record={record_no}"
+            ),
+            extraction_method=extraction_method,
+        )
+
     async def query_range(self, key: EvidenceQueryKey) -> RangeEvidenceQueryResult:
-        """Probe a multi-year range without authorizing annual evidence."""
+        """Probe a multi-year range and retain one accepted capture per year.
+
+        Positive rows are individually authoritative even if a later page fails.
+        Exhaustive negative conclusions are emitted only after the range has
+        reached a complete final page.
+        """
         if key.provider != self.provider:
             raise ValueError(
                 f"provider mismatch: key={key.provider!r}, client={self.provider!r}"
@@ -281,7 +339,7 @@ class AsyncWaybackCDXClient:
         scope = key.temporal_scope
         if scope.year_from == scope.year_to:
             raise ValueError("range provider requires a multi-year task")
-        candidate_years: set[int] = set()
+        capsules_by_year: dict[int, EvidenceCapsule] = {}
         pages_seen = records_seen = 0
         last_page_complete: bool | None = None
         try:
@@ -289,21 +347,30 @@ class AsyncWaybackCDXClient:
                 key.hostname, scope.year_from, scope.year_to
             ):
                 pages_seen += 1
-                records_seen += len(page)
                 last_page_complete = complete
                 for row in page:
-                    timestamp = str(row.get("timestamp", ""))
-                    original = str(row.get("original", ""))
-                    status = str(row.get("status", row.get("statuscode", "")))
-                    if (
-                        len(timestamp) >= 4
-                        and timestamp[:4].isdigit()
-                        and scope.year_from <= int(timestamp[:4]) <= scope.year_to
-                        and _exact_hostname(original, key.hostname)
-                        and status[:1] in {"2", "3"}
-                    ):
-                        candidate_years.add(int(timestamp[:4]))
-            complete_years = tuple(sorted(candidate_years)) if last_page_complete else ()
+                    records_seen += 1
+                    year = self._accepted_year(
+                        row,
+                        hostname=key.hostname,
+                        year_from=scope.year_from,
+                        year_to=scope.year_to,
+                    )
+                    if year is None or year in capsules_by_year:
+                        continue
+                    capsules_by_year[year] = self._capsule_from_row(
+                        key,
+                        row,
+                        year=year,
+                        page_no=pages_seen,
+                        record_no=records_seen,
+                        extraction_method="cdx_query_range",
+                    )
+            complete_years = (
+                tuple(sorted(capsules_by_year))
+                if last_page_complete is True
+                else ()
+            )
             return RangeEvidenceQueryResult(
                 hostname=key.hostname,
                 key=key,
@@ -317,6 +384,7 @@ class AsyncWaybackCDXClient:
                     )
                 ),
                 candidate_years=complete_years,
+                capsules=tuple(capsules_by_year[year] for year in sorted(capsules_by_year)),
                 pages_seen=pages_seen,
                 records_seen=records_seen,
                 error=None,
@@ -326,6 +394,7 @@ class AsyncWaybackCDXClient:
                 hostname=key.hostname,
                 key=key,
                 state=CDXQueryState.INVALID,
+                capsules=tuple(capsules_by_year[year] for year in sorted(capsules_by_year)),
                 pages_seen=pages_seen,
                 records_seen=records_seen,
                 error=str(exc),
@@ -340,6 +409,7 @@ class AsyncWaybackCDXClient:
                 hostname=key.hostname,
                 key=key,
                 state=CDXQueryState.TRANSIENT_ERROR,
+                capsules=tuple(capsules_by_year[year] for year in sorted(capsules_by_year)),
                 pages_seen=pages_seen,
                 records_seen=records_seen,
                 error=str(exc) or type(exc).__name__,
@@ -361,33 +431,22 @@ class AsyncWaybackCDXClient:
         try:
             async for page, complete in self.iter_range_pages(hostname, year, year):
                 pages_seen += 1
-                records_seen += len(page)
                 last_page_complete = complete
                 for row in page:
-                    timestamp = str(row.get("timestamp", ""))
-                    original = str(row.get("original", ""))
-                    status = str(row.get("status", row.get("statuscode", "")))
-                    if (
-                        is_year_timestamp(timestamp, year)
-                        and _exact_hostname(original, hostname)
-                        and status[:1] in {"2", "3"}
-                    ):
-                        payload = json.dumps(
-                            row, ensure_ascii=False, sort_keys=True
-                        ).encode()
-                        capsule = EvidenceCapsule(
-                            hostname=hostname,
-                            year=year,
-                            provider=key.provider,
-                            temporal_semantics="capture_timestamp_year",
-                            evidence_timestamp=timestamp,
-                            source_locator=original,
-                            payload_hash=hashlib.sha256(payload).hexdigest(),
-                            policy_version=key.policy_version,
-                            evidence_type="exact_host_cdx_capture",
-                            source_id=key.provider,
-                            original_url=original,
-                            record_locator=f"{key.provider}:{hostname}:{year}:page={pages_seen}:record={records_seen}",
+                    records_seen += 1
+                    accepted_year = self._accepted_year(
+                        row,
+                        hostname=hostname,
+                        year_from=year,
+                        year_to=year,
+                    )
+                    if accepted_year is not None:
+                        capsule = self._capsule_from_row(
+                            key,
+                            row,
+                            year=accepted_year,
+                            page_no=pages_seen,
+                            record_no=records_seen,
                             extraction_method="cdx_query_year",
                         )
                         return EvidenceQueryResult(
