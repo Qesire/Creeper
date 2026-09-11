@@ -47,6 +47,26 @@ annual hostnames and 61,507,012 candidate hostnames in about 2m49s, with a
 peak resident set of about 24 MB. Re-run the benchmark on the target machine;
 the result is machine- and filesystem-dependent.
 
+For production Wayback evidence, use one provider process per runtime root and
+let that process multiplex different hostnames asynchronously. The default
+service profile is deliberately conservative: two in-flight host queries,
+strictly paced at 0.5 request starts/second, with provider-wide cooldown after
+HTTP 429/503. Example:
+
+```bash
+creeper-evidence-worker <runtime-data-root> \
+  --max-inflight 2 \
+  --requests-per-second 0.5 \
+  --max-connections 4 \
+  --max-keepalive-connections 2
+```
+
+The worker JSON log reports `provider_http_requests_total` and
+`provider_throttle_responses_total`; increase concurrency only when throughput
+improves without increasing throttling. Complete range probes reuse accepted
+capture rows directly and completed provider coverage suppresses later duplicate
+Wayback work for the same host-years.
+
 The real-network pilot is intentionally bounded and single-worker. It records
 `PASS`, `EMPTY_EXHAUSTIVE`, `INCOMPLETE`, and transient failures separately;
 synthetic dry-run evidence is never treated as an official competition result.

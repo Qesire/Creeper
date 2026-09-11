@@ -93,12 +93,18 @@ class EvidenceQueryResult:
 
 @dataclass(frozen=True)
 class RangeEvidenceQueryResult:
-    """A temporal range probe that discovers candidate years only."""
+    """A multi-year probe with reusable positive evidence.
+
+    Positive capsules are authoritative as soon as their individual CDX rows
+    satisfy the exact-host/year acceptance predicate. Exhaustive negative
+    conclusions still require a complete range traversal.
+    """
 
     hostname: str
     key: EvidenceQueryKey
     state: CDXQueryState
     candidate_years: tuple[int, ...] = ()
+    capsules: tuple[EvidenceCapsule, ...] = ()
     pages_seen: int = 0
     records_seen: int = 0
     error: str | None = None
@@ -111,6 +117,19 @@ class RangeEvidenceQueryResult:
             raise ValueError("range result requires a multi-year temporal scope")
         if any(year not in range(scope.year_from, scope.year_to + 1) for year in self.candidate_years):
             raise ValueError("range candidate years must be inside the query scope")
+        capsule_years: set[int] = set()
+        for capsule in self.capsules:
+            if capsule.hostname != self.hostname:
+                raise ValueError("range capsule hostname must match query hostname")
+            if capsule.provider != self.key.provider:
+                raise ValueError("range capsule provider must match query provider")
+            if capsule.policy_version != self.key.policy_version:
+                raise ValueError("range capsule policy must match query policy")
+            if capsule.year not in range(scope.year_from, scope.year_to + 1):
+                raise ValueError("range capsule year must be inside the query scope")
+            if capsule.year in capsule_years:
+                raise ValueError("range result keeps at most one capsule per year")
+            capsule_years.add(capsule.year)
 
 
 def is_year_timestamp(timestamp: str, year: int) -> bool:

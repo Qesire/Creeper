@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 from dataclasses import asdict
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -34,6 +35,7 @@ async def run_service(
     requests_per_second: float,
     max_connections: int,
     max_keepalive_connections: int,
+    throttle_floor_seconds: float,
     timeout: float,
     max_retries: int,
     retry_base_seconds: float,
@@ -45,21 +47,35 @@ async def run_service(
         raise ValueError("invalid evidence worker poll bounds")
 
     runtime_data_root.mkdir(parents=True, exist_ok=True)
-    control = ControlStore(runtime_data_root / "control.sqlite3")
-    evidence = EvidenceStore(runtime_data_root / "evidence.sqlite3")
-    total = EvidenceWorkerReport()
-    stop = asyncio.Event()
-    loop = asyncio.get_running_loop()
+    lock_path = runtime_data_root / "locks" / "wayback-evidence-worker.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError as exc:
+        os.close(lock_fd)
+        raise RuntimeError(
+            f"evidence provider worker is already running: {lock_path}"
+        ) from exc
+
+    control: ControlStore | None = None
+    evidence: EvidenceStore | None = None
     installed_signals: list[signal.Signals] = []
-    if not once:
-        for signum in (signal.SIGINT, signal.SIGTERM):
-            try:
-                loop.add_signal_handler(signum, stop.set)
-                installed_signals.append(signum)
-            except (NotImplementedError, RuntimeError):
-                pass
 
     try:
+        control = ControlStore(runtime_data_root / "control.sqlite3")
+        evidence = EvidenceStore(runtime_data_root / "evidence.sqlite3")
+        total = EvidenceWorkerReport()
+        stop = asyncio.Event()
+        loop = asyncio.get_running_loop()
+        if not once:
+            for signum in (signal.SIGINT, signal.SIGTERM):
+                try:
+                    loop.add_signal_handler(signum, stop.set)
+                    installed_signals.append(signum)
+                except (NotImplementedError, RuntimeError):
+                    pass
+
         async with AsyncWaybackCDXClient(
             endpoint=endpoint,
             provider="wayback",
@@ -68,6 +84,7 @@ async def run_service(
             requests_per_second=requests_per_second,
             max_connections=max_connections,
             max_keepalive_connections=max_keepalive_connections,
+            throttle_floor_seconds=throttle_floor_seconds,
         ) as provider:
             worker = AsyncEvidenceWorker(
                 control_store=control,
@@ -89,12 +106,17 @@ async def run_service(
                     retryable=total.retryable + report.retryable,
                     inserted_capsules=total.inserted_capsules + report.inserted_capsules,
                     unknown_provider=total.unknown_provider + report.unknown_provider,
+                    provider_http_requests_total=provider.http_requests,
+                    provider_throttle_responses_total=provider.throttle_responses,
                 )
                 if once:
                     return total
                 if report.claimed:
                     idle_delay = poll_min_seconds
-                    print(json.dumps(asdict(report), ensure_ascii=False), flush=True)
+                    payload = asdict(report)
+                    payload["provider_http_requests_total"] = provider.http_requests
+                    payload["provider_throttle_responses_total"] = provider.throttle_responses
+                    print(json.dumps(payload, ensure_ascii=False), flush=True)
                     if stop.is_set():
                         return total
                     continue
@@ -107,10 +129,17 @@ async def run_service(
                 else:
                     return total
     finally:
-        for signum in installed_signals:
-            loop.remove_signal_handler(signum)
-        evidence.close()
-        control.close()
+        if "loop" in locals():
+            for signum in installed_signals:
+                loop.remove_signal_handler(signum)
+        if evidence is not None:
+            evidence.close()
+        if control is not None:
+            control.close()
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        finally:
+            os.close(lock_fd)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -124,10 +153,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--claim-batch-size", type=int, default=16)
     parser.add_argument("--lease-seconds", type=float, default=300.0)
-    parser.add_argument("--max-inflight", type=int, default=4)
-    parser.add_argument("--requests-per-second", type=float, default=0.0)
-    parser.add_argument("--max-connections", type=int, default=16)
-    parser.add_argument("--max-keepalive-connections", type=int, default=8)
+    parser.add_argument("--max-inflight", type=int, default=2)
+    parser.add_argument("--requests-per-second", type=float, default=0.5)
+    parser.add_argument("--max-connections", type=int, default=4)
+    parser.add_argument("--max-keepalive-connections", type=int, default=2)
+    parser.add_argument("--throttle-floor-seconds", type=float, default=2.0)
     parser.add_argument("--timeout", type=float, default=30.0)
     parser.add_argument("--max-retries", type=int, default=3)
     parser.add_argument("--retry-base-seconds", type=float, default=30.0)
@@ -149,6 +179,7 @@ def main(argv: list[str] | None = None) -> int:
                 requests_per_second=args.requests_per_second,
                 max_connections=args.max_connections,
                 max_keepalive_connections=args.max_keepalive_connections,
+                throttle_floor_seconds=args.throttle_floor_seconds,
                 timeout=args.timeout,
                 max_retries=args.max_retries,
                 retry_base_seconds=args.retry_base_seconds,
@@ -157,7 +188,7 @@ def main(argv: list[str] | None = None) -> int:
                 poll_max_seconds=args.poll_max_seconds,
             )
         )
-    except ValueError as exc:
+    except (ValueError, RuntimeError) as exc:
         parser.error(str(exc))
     if args.once:
         print(json.dumps(asdict(report), ensure_ascii=False, indent=2))

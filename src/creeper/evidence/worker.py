@@ -44,6 +44,8 @@ class EvidenceWorkerReport:
     retryable: int = 0
     inserted_capsules: int = 0
     unknown_provider: int = 0
+    provider_http_requests_total: int = 0
+    provider_throttle_responses_total: int = 0
 
 
 class AsyncEvidenceWorker:
@@ -96,6 +98,9 @@ class AsyncEvidenceWorker:
         if unknown_limits:
             raise KeyError(f"inflight configured for unknown providers: {sorted(unknown_limits)}")
         self._semaphores: dict[str, asyncio.Semaphore] = {}
+        # Bounded striped locks prevent overlapping queries for the same host
+        # without retaining one Lock per hostname across a multi-million task run.
+        self._host_lock_stripes = tuple(asyncio.Lock() for _ in range(256))
         for provider in self.providers:
             limit = limits.get(provider, 4)
             if not isinstance(limit, int) or limit < 1:
@@ -133,21 +138,24 @@ class AsyncEvidenceWorker:
     async def _execute(self, task: EvidenceTask) -> EvidenceQueryResult:
         provider = self.providers[task.key.provider]
         semaphore = self._semaphores[task.key.provider]
+        host_key = (task.key.provider, task.key.hostname)
+        host_lock = self._host_lock_stripes[hash(host_key) % len(self._host_lock_stripes)]
         async with semaphore:
-            try:
-                scope = task.key.temporal_scope
-                if scope.year_from != scope.year_to:
-                    query_range = getattr(provider, "query_range", None)
-                    if query_range is None:
-                        raise ValueError(
-                            f"provider {task.key.provider!r} does not support range probes"
-                        )
-                    return await query_range(task.key)
-                return await provider.query_key(task.key)
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:  # operational failure, never evidence INVALID
-                return self._transient_for(task, str(exc) or type(exc).__name__)
+            async with host_lock:
+                try:
+                    scope = task.key.temporal_scope
+                    if scope.year_from != scope.year_to:
+                        query_range = getattr(provider, "query_range", None)
+                        if query_range is None:
+                            raise ValueError(
+                                f"provider {task.key.provider!r} does not support range probes"
+                            )
+                        return await query_range(task.key)
+                    return await provider.query_key(task.key)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:  # operational failure, never evidence INVALID
+                    return self._transient_for(task, str(exc) or type(exc).__name__)
 
     async def _heartbeat(
         self,
@@ -201,12 +209,28 @@ class AsyncEvidenceWorker:
             flush_count=max(1, min(self.claim_batch_size, 128)),
         )
         terminal = retryable = 0
+        range_capsules = [
+            capsule
+            for result in results
+            if isinstance(result, RangeEvidenceQueryResult)
+            for capsule in result.capsules
+        ]
+        # Commit all observed range positives in one transaction before any
+        # parent range task is made terminal. A crash after this point is safe:
+        # range retries merely hit EvidenceStore's idempotent primary key.
+        range_inserted_capsules = self.evidence_store.put_many(range_capsules)
         task_by_key = {task.key: task for task in tasks}
         try:
             for result in results:
                 if result.key is None:
                     raise ValueError("provider result must preserve EvidenceQueryKey")
                 if isinstance(result, RangeEvidenceQueryResult):
+                    # Positive CDX rows are individually valid evidence even if
+                    # a later page makes the parent range retryable. Persist
+                    # them first; duplicate retries are idempotent in
+                    # EvidenceStore. Only candidate years not backed by a
+                    # capsule fall back to exact-year provider tasks.
+                    capsule_years = {capsule.year for capsule in result.capsules}
                     if result.state in {
                         CDXQueryState.PASS,
                         CDXQueryState.EMPTY_EXHAUSTIVE,
@@ -214,7 +238,6 @@ class AsyncEvidenceWorker:
                     }:
                         followups = ()
                         if result.state is CDXQueryState.PASS:
-                            scope = result.key.temporal_scope
                             followups = tuple(
                                 EvidenceQueryKey(
                                     result.hostname,
@@ -223,6 +246,7 @@ class AsyncEvidenceWorker:
                                     result.key.policy_version,
                                 )
                                 for year in result.candidate_years
+                                if year not in capsule_years
                             )
                         self.control_store.finish_range_task(
                             result.key,
@@ -274,7 +298,7 @@ class AsyncEvidenceWorker:
             claimed=len(tasks),
             terminal=terminal,
             retryable=retryable,
-            inserted_capsules=writer.inserted_capsules,
+            inserted_capsules=writer.inserted_capsules + range_inserted_capsules,
             unknown_provider=0,
         )
 

@@ -13,6 +13,7 @@ from creeper.authority.baseline_index import BaselineIndex
 from creeper.authority.eed import calculate_eed
 from creeper.authority.manifest import build_manifest
 from creeper.evidence.policies import EvidenceQueryKey, TemporalScope
+from creeper.evidence_cli import run_service as run_evidence_service
 from creeper.evidence.providers.async_cdx import AsyncWaybackCDXClient
 from creeper.evidence.worker import AsyncEvidenceWorker
 from creeper.runtime.doctor import run_doctor
@@ -250,40 +251,34 @@ async def _query_evidence_async(args: argparse.Namespace):
         requests_per_second=args.requests_per_second,
         max_connections=args.max_connections,
         max_keepalive_connections=min(args.max_connections, args.max_keepalive_connections),
+        throttle_floor_seconds=args.throttle_floor_seconds,
     ) as client:
         return await client.query_key(key)
 
 
 async def _run_evidence_worker_once(args: argparse.Namespace) -> dict[str, object]:
-    root = args.runtime_data_root
-    control = ControlStore(root / "control.sqlite3")
-    evidence = EvidenceStore(root / "evidence.sqlite3")
-    try:
-        async with AsyncWaybackCDXClient(
-            endpoint=args.endpoint,
-            provider="wayback",
-            timeout=args.timeout,
-            max_retries=args.max_retries,
-            requests_per_second=args.requests_per_second,
-            max_connections=args.max_connections,
-            max_keepalive_connections=min(args.max_connections, args.max_keepalive_connections),
-        ) as provider:
-            worker = AsyncEvidenceWorker(
-                control_store=control,
-                evidence_store=evidence,
-                providers={"wayback": provider},
-                owner=args.owner,
-                claim_batch_size=args.claim_batch_size,
-                lease_seconds=args.lease_seconds,
-                provider_inflight={"wayback": args.max_inflight},
-                retry_base_seconds=args.retry_base_seconds,
-                retry_max_seconds=args.retry_max_seconds,
-            )
-            report = await worker.run_once()
-            return asdict(report)
-    finally:
-        evidence.close()
-        control.close()
+    report = await run_evidence_service(
+        args.runtime_data_root,
+        owner=args.owner,
+        once=True,
+        endpoint=args.endpoint,
+        claim_batch_size=args.claim_batch_size,
+        lease_seconds=args.lease_seconds,
+        max_inflight=args.max_inflight,
+        requests_per_second=args.requests_per_second,
+        max_connections=args.max_connections,
+        max_keepalive_connections=min(
+            args.max_connections, args.max_keepalive_connections
+        ),
+        throttle_floor_seconds=args.throttle_floor_seconds,
+        timeout=args.timeout,
+        max_retries=args.max_retries,
+        retry_base_seconds=args.retry_base_seconds,
+        retry_max_seconds=args.retry_max_seconds,
+        poll_min_seconds=0.25,
+        poll_max_seconds=10.0,
+    )
+    return asdict(report)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -313,6 +308,7 @@ def main(argv: list[str] | None = None) -> int:
     evidence.add_argument("--requests-per-second", type=float, default=0.0)
     evidence.add_argument("--max-connections", type=int, default=4)
     evidence.add_argument("--max-keepalive-connections", type=int, default=4)
+    evidence.add_argument("--throttle-floor-seconds", type=float, default=2.0)
     evidence.add_argument("--policy-version", default="cdx-v1")
 
     evidence_worker = subparsers.add_parser("evidence-worker")
@@ -322,10 +318,11 @@ def main(argv: list[str] | None = None) -> int:
     evidence_worker.add_argument("--owner", default="evidence-worker")
     evidence_worker.add_argument("--claim-batch-size", type=int, default=16)
     evidence_worker.add_argument("--lease-seconds", type=float, default=300.0)
-    evidence_worker.add_argument("--max-inflight", type=int, default=4)
-    evidence_worker.add_argument("--requests-per-second", type=float, default=0.0)
-    evidence_worker.add_argument("--max-connections", type=int, default=8)
-    evidence_worker.add_argument("--max-keepalive-connections", type=int, default=4)
+    evidence_worker.add_argument("--max-inflight", type=int, default=2)
+    evidence_worker.add_argument("--requests-per-second", type=float, default=0.5)
+    evidence_worker.add_argument("--max-connections", type=int, default=4)
+    evidence_worker.add_argument("--max-keepalive-connections", type=int, default=2)
+    evidence_worker.add_argument("--throttle-floor-seconds", type=float, default=2.0)
     evidence_worker.add_argument("--timeout", type=float, default=30.0)
     evidence_worker.add_argument("--max-retries", type=int, default=3)
     evidence_worker.add_argument("--retry-base-seconds", type=float, default=30.0)
