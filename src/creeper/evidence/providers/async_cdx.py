@@ -30,7 +30,6 @@ from creeper.evidence.policies import (
     EvidenceQueryKey,
     EvidenceQueryResult,
     RangeEvidenceQueryResult,
-    is_year_timestamp,
 )
 from creeper.evidence.providers.cdx import Page, WaybackCDXClient, _exact_hostname
 from creeper.runtime.http import configured_http_proxy
@@ -249,7 +248,13 @@ class AsyncWaybackCDXClient:
             "from": f"{year_from}0101000000",
             "to": f"{year_to}1231235959",
             "output": "json",
-            "fl": "timestamp,original,statuscode,mimetype,digest,length",
+            # urlkey is intentionally present: Wayback resume-key pagination
+            # depends on the sort key being part of the selected CDX fields.
+            "fl": "urlkey,timestamp,original,statuscode,digest,length",
+            # Server-side filtering removes captures that can never satisfy
+            # Creeper's acceptance predicate. Local validation remains the
+            # final authority for every returned row.
+            "filter": "statuscode:[23][0-9][0-9]",
             "gzip": "false",
             "showResumeKey": "true",
             "limit": str(self.limit),
