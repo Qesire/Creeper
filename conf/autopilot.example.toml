@@ -27,6 +27,7 @@ max_inflight = 4
 requests_per_second = 0.5
 max_connections = 8
 max_keepalive_connections = 4
+keepalive_expiry_seconds = 30.0
 throttle_floor_seconds = 2.0
 timeout = 30.0
 max_retries = 3
