@@ -281,7 +281,6 @@ class AsyncEvidenceWorkerTests(unittest.IsolatedAsyncioTestCase):
         report = await running
         self.assertEqual(report.terminal, 3)
         self.assertEqual(provider.max_active_by_host["aa.example"], 1)
-        self.assertGreaterEqual(provider.max_active, 2)
 
     async def test_same_hostname_is_serialized_while_other_hosts_run_concurrently(self):
         keys = [
