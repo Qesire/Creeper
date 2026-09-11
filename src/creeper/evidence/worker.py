@@ -207,7 +207,16 @@ class AsyncEvidenceWorker:
             flush_count=max(1, min(self.claim_batch_size, 128)),
         )
         terminal = retryable = 0
-        range_inserted_capsules = 0
+        range_capsules = [
+            capsule
+            for result in results
+            if isinstance(result, RangeEvidenceQueryResult)
+            for capsule in result.capsules
+        ]
+        # Commit all observed range positives in one transaction before any
+        # parent range task is made terminal. A crash after this point is safe:
+        # range retries merely hit EvidenceStore's idempotent primary key.
+        range_inserted_capsules = self.evidence_store.put_many(range_capsules)
         task_by_key = {task.key: task for task in tasks}
         try:
             for result in results:
@@ -219,10 +228,6 @@ class AsyncEvidenceWorker:
                     # them first; duplicate retries are idempotent in
                     # EvidenceStore. Only candidate years not backed by a
                     # capsule fall back to exact-year provider tasks.
-                    if result.capsules:
-                        range_inserted_capsules += self.evidence_store.put_many(
-                            result.capsules
-                        )
                     capsule_years = {capsule.year for capsule in result.capsules}
                     if result.state in {
                         CDXQueryState.PASS,
