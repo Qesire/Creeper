@@ -530,8 +530,18 @@ def run_watch(
     limits = config.get("limits")
     if not isinstance(limits, dict):
         raise ValueError("limits table is required")
+    runtime_root = _path(
+        config.get("runtime_data_root"),
+        config_path=config_path,
+        name="runtime_data_root",
+    )
 
-    if config.get("source_mode", "static") == "activated":
+    telemetry = RuntimeTelemetryStore(runtime_root / "telemetry.sqlite3")
+    try:
+        def observer(report: dict[str, object]) -> None:
+            _record_source_telemetry(telemetry, report)
+
+        if config.get("source_mode", "static") == "activated":
             with ActivatedSourceRuntime(
                 config_path,
                 config=config,
@@ -557,7 +567,6 @@ def run_watch(
         )
     finally:
         telemetry.close()
-
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="creeper-source-producer")
