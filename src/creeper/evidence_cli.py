@@ -35,6 +35,7 @@ async def run_service(
     requests_per_second: float,
     max_connections: int,
     max_keepalive_connections: int,
+    throttle_floor_seconds: float,
     timeout: float,
     max_retries: int,
     retry_base_seconds: float,
@@ -80,6 +81,7 @@ async def run_service(
             requests_per_second=requests_per_second,
             max_connections=max_connections,
             max_keepalive_connections=max_keepalive_connections,
+            throttle_floor_seconds=throttle_floor_seconds,
         ) as provider:
             worker = AsyncEvidenceWorker(
                 control_store=control,
@@ -106,7 +108,10 @@ async def run_service(
                     return total
                 if report.claimed:
                     idle_delay = poll_min_seconds
-                    print(json.dumps(asdict(report), ensure_ascii=False), flush=True)
+                    payload = asdict(report)
+                    payload["wayback_http_requests_total"] = provider.http_requests
+                    payload["wayback_throttle_responses_total"] = provider.throttle_responses
+                    print(json.dumps(payload, ensure_ascii=False), flush=True)
                     if stop.is_set():
                         return total
                     continue
@@ -140,10 +145,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--claim-batch-size", type=int, default=16)
     parser.add_argument("--lease-seconds", type=float, default=300.0)
-    parser.add_argument("--max-inflight", type=int, default=4)
-    parser.add_argument("--requests-per-second", type=float, default=0.0)
-    parser.add_argument("--max-connections", type=int, default=16)
-    parser.add_argument("--max-keepalive-connections", type=int, default=8)
+    parser.add_argument("--max-inflight", type=int, default=2)
+    parser.add_argument("--requests-per-second", type=float, default=0.5)
+    parser.add_argument("--max-connections", type=int, default=4)
+    parser.add_argument("--max-keepalive-connections", type=int, default=2)
+    parser.add_argument("--throttle-floor-seconds", type=float, default=2.0)
     parser.add_argument("--timeout", type=float, default=30.0)
     parser.add_argument("--max-retries", type=int, default=3)
     parser.add_argument("--retry-base-seconds", type=float, default=30.0)
@@ -165,6 +171,7 @@ def main(argv: list[str] | None = None) -> int:
                 requests_per_second=args.requests_per_second,
                 max_connections=args.max_connections,
                 max_keepalive_connections=args.max_keepalive_connections,
+                throttle_floor_seconds=args.throttle_floor_seconds,
                 timeout=args.timeout,
                 max_retries=args.max_retries,
                 retry_base_seconds=args.retry_base_seconds,
