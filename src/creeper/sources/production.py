@@ -247,16 +247,21 @@ class StructuredProductionAdapter:
             except (StopIteration, csv.Error):
                 return None
             selected: str | None = None
+            explicit_year: int | None = None
+            explicit_time: str | None = None
             for cell in row:
                 if selected is None and self._hostname_from_scalar(cell) is not None:
                     selected = cell.strip()
-                if source_year is None:
+                if explicit_year is None:
                     year = self._year_from_scalar(cell)
                     if year is not None:
-                        source_year = year
-                        source_time = cell.strip()
+                        explicit_year = year
+                        explicit_time = cell.strip()
             if selected is None:
                 return None
+            if explicit_year is not None:
+                source_year = explicit_year
+                source_time = explicit_time
             payload = selected
             record_type = "STRUCTURED_DELIMITED"
 
