@@ -67,6 +67,7 @@ class AsyncWaybackCDXClient:
         requests_per_second: float = 0.0,
         max_connections: int = 16,
         max_keepalive_connections: int = 8,
+        keepalive_expiry_seconds: float = 30.0,
         throttle_floor_seconds: float = 2.0,
         user_agent: str = "Creeper/2.2 (research; https://github.com/Qesire/Creeper)",
         client: httpx.AsyncClient | None = None,
@@ -82,6 +83,7 @@ class AsyncWaybackCDXClient:
             or max_connections < 1
             or max_keepalive_connections < 0
             or max_keepalive_connections > max_connections
+            or keepalive_expiry_seconds <= 0
             or throttle_floor_seconds < 0
         ):
             raise ValueError("invalid async CDX client limits")
@@ -120,6 +122,7 @@ class AsyncWaybackCDXClient:
             limits=httpx.Limits(
                 max_connections=max_connections,
                 max_keepalive_connections=max_keepalive_connections,
+                keepalive_expiry=keepalive_expiry_seconds,
             ),
             headers={
                 "User-Agent": user_agent,
