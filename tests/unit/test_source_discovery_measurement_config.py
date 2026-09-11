@@ -61,6 +61,7 @@ follow_query = false
 baseline_index = "baseline.sqlite3"
 eed_model = "eed.json"
 max_records = 321
+sample_windows = 7
 min_novel_fraction = 0.125
 
 [admission]
@@ -88,6 +89,7 @@ actor = "agent:test"
         self.assertEqual(config.measurement.baseline_index, self.baseline.resolve())
         self.assertEqual(config.measurement.eed_model, self.eed.resolve())
         self.assertEqual(config.measurement.policy.max_records, 321)
+        self.assertEqual(config.measurement.policy.sample_windows, 7)
         self.assertEqual(config.measurement.policy.min_novel_fraction, 0.125)
 
     def test_missing_measurement_authority_file_fails_closed(self) -> None:
