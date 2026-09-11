@@ -44,6 +44,8 @@ class EvidenceWorkerReport:
     retryable: int = 0
     inserted_capsules: int = 0
     unknown_provider: int = 0
+    provider_http_requests_total: int = 0
+    provider_throttle_responses_total: int = 0
 
 
 class AsyncEvidenceWorker:
