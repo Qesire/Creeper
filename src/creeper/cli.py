@@ -250,6 +250,7 @@ async def _query_evidence_async(args: argparse.Namespace):
         requests_per_second=args.requests_per_second,
         max_connections=args.max_connections,
         max_keepalive_connections=min(args.max_connections, args.max_keepalive_connections),
+        throttle_floor_seconds=args.throttle_floor_seconds,
     ) as client:
         return await client.query_key(key)
 
@@ -267,6 +268,7 @@ async def _run_evidence_worker_once(args: argparse.Namespace) -> dict[str, objec
             requests_per_second=args.requests_per_second,
             max_connections=args.max_connections,
             max_keepalive_connections=min(args.max_connections, args.max_keepalive_connections),
+            throttle_floor_seconds=args.throttle_floor_seconds,
         ) as provider:
             worker = AsyncEvidenceWorker(
                 control_store=control,
@@ -313,6 +315,7 @@ def main(argv: list[str] | None = None) -> int:
     evidence.add_argument("--requests-per-second", type=float, default=0.0)
     evidence.add_argument("--max-connections", type=int, default=4)
     evidence.add_argument("--max-keepalive-connections", type=int, default=4)
+    evidence.add_argument("--throttle-floor-seconds", type=float, default=2.0)
     evidence.add_argument("--policy-version", default="cdx-v1")
 
     evidence_worker = subparsers.add_parser("evidence-worker")
@@ -322,10 +325,11 @@ def main(argv: list[str] | None = None) -> int:
     evidence_worker.add_argument("--owner", default="evidence-worker")
     evidence_worker.add_argument("--claim-batch-size", type=int, default=16)
     evidence_worker.add_argument("--lease-seconds", type=float, default=300.0)
-    evidence_worker.add_argument("--max-inflight", type=int, default=4)
-    evidence_worker.add_argument("--requests-per-second", type=float, default=0.0)
-    evidence_worker.add_argument("--max-connections", type=int, default=8)
-    evidence_worker.add_argument("--max-keepalive-connections", type=int, default=4)
+    evidence_worker.add_argument("--max-inflight", type=int, default=2)
+    evidence_worker.add_argument("--requests-per-second", type=float, default=0.5)
+    evidence_worker.add_argument("--max-connections", type=int, default=4)
+    evidence_worker.add_argument("--max-keepalive-connections", type=int, default=2)
+    evidence_worker.add_argument("--throttle-floor-seconds", type=float, default=2.0)
     evidence_worker.add_argument("--timeout", type=float, default=30.0)
     evidence_worker.add_argument("--max-retries", type=int, default=3)
     evidence_worker.add_argument("--retry-base-seconds", type=float, default=30.0)
