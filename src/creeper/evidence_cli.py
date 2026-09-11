@@ -106,14 +106,16 @@ async def run_service(
                     retryable=total.retryable + report.retryable,
                     inserted_capsules=total.inserted_capsules + report.inserted_capsules,
                     unknown_provider=total.unknown_provider + report.unknown_provider,
+                    provider_http_requests_total=provider.http_requests,
+                    provider_throttle_responses_total=provider.throttle_responses,
                 )
                 if once:
                     return total
                 if report.claimed:
                     idle_delay = poll_min_seconds
                     payload = asdict(report)
-                    payload["wayback_http_requests_total"] = provider.http_requests
-                    payload["wayback_throttle_responses_total"] = provider.throttle_responses
+                    payload["provider_http_requests_total"] = provider.http_requests
+                    payload["provider_throttle_responses_total"] = provider.throttle_responses
                     print(json.dumps(payload, ensure_ascii=False), flush=True)
                     if stop.is_set():
                         return total
