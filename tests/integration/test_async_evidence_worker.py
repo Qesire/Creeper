@@ -79,6 +79,20 @@ class SelectiveDelayProvider(FakeProvider):
         return await super().query_key(key)
 
 
+class HostLockBlockingProvider(FakeProvider):
+    def __init__(self, release_first: asyncio.Event, other_started: asyncio.Event):
+        super().__init__(state=CDXQueryState.EMPTY_EXHAUSTIVE)
+        self.release_first = release_first
+        self.other_started = other_started
+
+    async def query_key(self, key):
+        if key.hostname == "aa.example" and key.temporal_scope.year_from == 1997:
+            await self.release_first.wait()
+        if key.hostname == "zz.example":
+            self.other_started.set()
+        return await super().query_key(key)
+
+
 class FakeRangeProvider(FakeProvider):
     def __init__(self):
         super().__init__(state=CDXQueryState.PASS)
@@ -224,6 +238,50 @@ class AsyncEvidenceWorkerTests(unittest.IsolatedAsyncioTestCase):
         release_slow.set()
         report = await running
         self.assertEqual(report.terminal, 2)
+
+    async def test_same_host_waiter_does_not_consume_provider_inflight_slot(self):
+        keys = [
+            EvidenceQueryKey(
+                "aa.example",
+                TemporalScope(1997, 1997),
+                "wayback",
+                "cdx-v1",
+            ),
+            EvidenceQueryKey(
+                "aa.example",
+                TemporalScope(1998, 1998),
+                "wayback",
+                "cdx-v1",
+            ),
+            EvidenceQueryKey(
+                "zz.example",
+                TemporalScope(1997, 1997),
+                "wayback",
+                "cdx-v1",
+            ),
+        ]
+        self.control.enqueue_evidence_tasks(keys)
+        release_first = asyncio.Event()
+        other_started = asyncio.Event()
+        provider = HostLockBlockingProvider(release_first, other_started)
+        worker = AsyncEvidenceWorker(
+            control_store=self.control,
+            evidence_store=self.evidence,
+            providers={"wayback": provider},
+            owner="worker-host-lock-capacity",
+            claim_batch_size=3,
+            provider_inflight={"wayback": 2},
+        )
+
+        running = asyncio.create_task(worker.run_once())
+        await asyncio.wait_for(other_started.wait(), timeout=1.0)
+        self.assertFalse(running.done())
+
+        release_first.set()
+        report = await running
+        self.assertEqual(report.terminal, 3)
+        self.assertEqual(provider.max_active_by_host["aa.example"], 1)
+        self.assertGreaterEqual(provider.max_active, 2)
 
     async def test_same_hostname_is_serialized_while_other_hosts_run_concurrently(self):
         keys = [
