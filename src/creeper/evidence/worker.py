@@ -11,6 +11,7 @@ retryable work with a durable retry time.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -138,8 +139,14 @@ class AsyncEvidenceWorker:
     async def _execute(self, task: EvidenceTask) -> EvidenceQueryResult:
         provider = self.providers[task.key.provider]
         semaphore = self._semaphores[task.key.provider]
-        host_key = (task.key.provider, task.key.hostname)
-        host_lock = self._host_lock_stripes[hash(host_key) % len(self._host_lock_stripes)]
+        host_identity = (
+            task.key.provider + "\0" + task.key.hostname
+        ).encode("utf-8")
+        stripe = int.from_bytes(
+            hashlib.blake2s(host_identity, digest_size=4).digest(),
+            "big",
+        ) % len(self._host_lock_stripes)
+        host_lock = self._host_lock_stripes[stripe]
         async with semaphore:
             async with host_lock:
                 try:
@@ -163,18 +170,27 @@ class AsyncEvidenceWorker:
         stop: asyncio.Event,
     ) -> None:
         """Keep visibility alive while a claimed network batch is running."""
+        renewal_seconds = self.lease_seconds + self.heartbeat_interval
         while True:
+            # Renew before sleeping so newly claimed work immediately gains one
+            # heartbeat interval of scheduler-jitter headroom. This keeps slow
+            # network tasks invisible even if the event loop is briefly delayed
+            # by synchronous SQLite commits elsewhere in the process.
+            renewed = self.queue.renew(
+                keys,
+                owner=self.owner,
+                lease_seconds=renewal_seconds,
+            )
+            if renewed != len(keys):
+                raise RuntimeError("lost ownership while renewing evidence visibility")
             try:
-                await asyncio.wait_for(stop.wait(), timeout=self.heartbeat_interval)
+                await asyncio.wait_for(
+                    stop.wait(),
+                    timeout=self.heartbeat_interval,
+                )
                 return
             except TimeoutError:
-                renewed = self.queue.renew(
-                    keys,
-                    owner=self.owner,
-                    lease_seconds=self.lease_seconds,
-                )
-                if renewed != len(keys):
-                    raise RuntimeError("lost ownership while renewing evidence visibility")
+                continue
 
     async def run_once(self) -> EvidenceWorkerReport:
         """Claim and process one bounded durable batch.
