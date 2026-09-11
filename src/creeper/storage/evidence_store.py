@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 from collections.abc import Iterable
+from dataclasses import dataclass
 from pathlib import Path
 
 from creeper.authority.baseline_index import YEAR_BITS
@@ -11,11 +12,21 @@ from creeper.authority.normalizer import normalize_official
 from creeper.evidence.policies import EvidenceCapsule
 
 
+@dataclass(frozen=True)
+class EvidenceHostYear:
+    sequence: int
+    hostname: str
+    year: int
+
+
 class EvidenceStore:
     def __init__(self, path: Path):
         path.parent.mkdir(parents=True, exist_ok=True)
-        self.connection = sqlite3.connect(path)
+        self.connection = sqlite3.connect(path, timeout=30.0)
         self.connection.row_factory = sqlite3.Row
+        self.connection.execute("PRAGMA journal_mode=WAL")
+        self.connection.execute("PRAGMA synchronous=NORMAL")
+        self.connection.execute("PRAGMA busy_timeout=30000")
         self._ensure_schema()
 
     def _ensure_schema(self) -> None:
@@ -92,6 +103,38 @@ class EvidenceStore:
                 self.connection.execute(
                     f"ALTER TABLE evidence_capsules ADD COLUMN {name} TEXT NOT NULL DEFAULT ''"
                 )
+        self.connection.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS evidence_host_years (
+                sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                hostname TEXT NOT NULL,
+                year INTEGER NOT NULL,
+                UNIQUE(hostname, year)
+            );
+            CREATE TABLE IF NOT EXISTS evidence_store_meta (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            ) WITHOUT ROWID;
+            """
+        )
+        indexed = self.connection.execute(
+            "SELECT 1 FROM evidence_store_meta WHERE key = ?",
+            ("host-year-index-v1",),
+        ).fetchone()
+        if indexed is None:
+            self.connection.execute(
+                """
+                INSERT OR IGNORE INTO evidence_host_years(hostname, year)
+                SELECT hostname, year
+                FROM evidence_capsules
+                GROUP BY hostname, year
+                ORDER BY hostname, year
+                """
+            )
+            self.connection.execute(
+                "INSERT INTO evidence_store_meta(key, value) VALUES (?, ?)",
+                ("host-year-index-v1", "complete"),
+            )
         self.connection.commit()
 
     def put(self, capsule: EvidenceCapsule) -> None:
@@ -115,6 +158,9 @@ class EvidenceStore:
         if not rows:
             return 0
         before = self.connection.total_changes
+        host_years = list(
+            dict.fromkeys((str(row[0]), int(row[1])) for row in rows)
+        )
         with self.connection:
             self.connection.executemany(
                 """
@@ -126,7 +172,15 @@ class EvidenceStore:
                 """,
                 rows,
             )
-        return self.connection.total_changes - before
+            inserted_capsules = self.connection.total_changes - before
+            self.connection.executemany(
+                """
+                INSERT OR IGNORE INTO evidence_host_years(hostname, year)
+                VALUES (?, ?)
+                """,
+                host_years,
+            )
+        return inserted_capsules
 
     def for_hostname(self, hostname: str) -> list[EvidenceCapsule]:
         value = normalize_official(hostname)
@@ -137,6 +191,64 @@ class EvidenceStore:
             (value,),
         ).fetchall()
         return [EvidenceCapsule(**dict(row)) for row in rows]
+
+    def canonical_host_year_capsules(self) -> list[EvidenceCapsule]:
+        """Return one deterministic capsule for each proven host-year."""
+        rows = self.connection.execute(
+            """
+            WITH ranked AS (
+                SELECT *,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY hostname, year
+                           ORDER BY provider, payload_hash, policy_version
+                       ) AS rn
+                FROM evidence_capsules
+            )
+            SELECT hostname, year, provider, temporal_semantics,
+                   evidence_timestamp, source_locator, payload_hash,
+                   policy_version, evidence_type, source_id, original_url,
+                   record_locator, extraction_method
+            FROM ranked
+            WHERE rn = 1
+            ORDER BY hostname, year
+            """
+        ).fetchall()
+        return [EvidenceCapsule(**dict(row)) for row in rows]
+
+    def host_years_after(
+        self,
+        sequence: int,
+        *,
+        limit: int = 50_000,
+    ) -> list[EvidenceHostYear]:
+        if sequence < 0:
+            raise ValueError("sequence must be non-negative")
+        if limit < 1:
+            raise ValueError("limit must be positive")
+        rows = self.connection.execute(
+            """
+            SELECT sequence, hostname, year
+            FROM evidence_host_years
+            WHERE sequence > ?
+            ORDER BY sequence
+            LIMIT ?
+            """,
+            (int(sequence), int(limit)),
+        ).fetchall()
+        return [
+            EvidenceHostYear(
+                sequence=int(row["sequence"]),
+                hostname=str(row["hostname"]),
+                year=int(row["year"]),
+            )
+            for row in rows
+        ]
+
+    def max_host_year_sequence(self) -> int:
+        row = self.connection.execute(
+            "SELECT COALESCE(MAX(sequence), 0) FROM evidence_host_years"
+        ).fetchone()
+        return int(row[0] or 0)
 
     def all_capsules(self) -> list[EvidenceCapsule]:
         """Return every persisted capsule in a stable, reproducible order."""
