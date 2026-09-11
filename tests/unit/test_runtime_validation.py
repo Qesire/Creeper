@@ -153,7 +153,7 @@ class RuntimeValidationTests(unittest.TestCase):
                 0,
             )
             self.assertEqual(
-                report["end_backlog"]["evidence_task_states"]["PENDING"],
+                report["end_backlog"]["evidence_task_states"]["pending"],
                 1,
             )
             self.assertTrue((run_dir / "start.json").is_file())
