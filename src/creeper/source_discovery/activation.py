@@ -42,8 +42,10 @@ def _adapter_kind(entrypoint: str) -> tuple[str, str]:
     if name.endswith(suffixes):
         return "warc_arc", "archive_records"
     structured = (
-        ".cdxj", ".cdx", ".cdx.gz", ".jsonl", ".jsonl.gz", ".csv", ".csv.gz",
-        ".tsv", ".tsv.gz", ".txt", ".txt.gz",
+        ".cdxj", ".cdx", ".cdx.gz",
+        ".jsonl", ".jsonl.gz",
+        ".csv", ".csv.gz", ".tsv", ".tsv.gz",
+        ".txt", ".txt.gz", ".list", ".list.gz", ".urls", ".urls.gz",
     )
     if name.endswith(structured):
         return "structured", "structured_records"
