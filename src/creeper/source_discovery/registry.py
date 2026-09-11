@@ -162,6 +162,14 @@ class SourceDiscoveryRegistry:
                 FOREIGN KEY(source_key) REFERENCES source_candidates(source_key)
             ) WITHOUT ROWID;
 
+            CREATE TABLE IF NOT EXISTS source_search_reward_attribution (
+                source_key TEXT PRIMARY KEY,
+                episode_id TEXT NOT NULL,
+                credited_eed REAL NOT NULL DEFAULT 0,
+                FOREIGN KEY(source_key) REFERENCES source_candidates(source_key),
+                FOREIGN KEY(episode_id) REFERENCES source_search_episodes(episode_id)
+            ) WITHOUT ROWID;
+
             CREATE TABLE IF NOT EXISTS source_suppressions (
                 scope_type TEXT NOT NULL,
                 scope_key TEXT NOT NULL,
@@ -459,6 +467,46 @@ class SourceDiscoveryRegistry:
             ).fetchall()
         return [self._candidate_from_row(row) for row in rows]
 
+    def reconcile_exhausted_activations(self) -> int:
+        """Mirror terminal production Reservoir state back into discovery.
+
+        Discovery activation capacity is defined by productive ACTIVE sources,
+        not historical activations. Once the durable production Reservoir is
+        exhausted, the corresponding candidate must leave ACTIVE so the
+        manager can promote another WARM source automatically.
+        """
+        rows = self.connection.execute(
+            """
+            SELECT sc.source_key
+            FROM source_candidates AS sc
+            JOIN source_activations AS sa ON sa.source_key = sc.source_key
+            JOIN reservoirs AS r ON r.reservoir_id = sa.reservoir_id
+            WHERE sc.state = ? AND r.state = ?
+            ORDER BY sc.source_key
+            """,
+            (SourceState.ACTIVE.value, "EXHAUSTED"),
+        ).fetchall()
+        changed = 0
+        for row in rows:
+            self.transition(str(row["source_key"]), SourceState.EXHAUSTED)
+            changed += 1
+        return changed
+
+    def list_candidates_in_states(
+        self,
+        states: Iterable[SourceState],
+    ) -> list[SourceCandidate]:
+        """Read only scheduling-relevant source states from the hot path."""
+        values = tuple(dict.fromkeys(SourceState(state).value for state in states))
+        if not values:
+            return []
+        placeholders = ",".join("?" for _ in values)
+        rows = self.connection.execute(
+            f"SELECT * FROM source_candidates WHERE state IN ({placeholders})",
+            values,
+        ).fetchall()
+        return [self._candidate_from_row(row) for row in rows]
+
     def inventory(self) -> dict[SourceState, int]:
         result = {state: 0 for state in SourceState}
         for row in self.connection.execute(
@@ -503,6 +551,71 @@ class SourceDiscoveryRegistry:
         candidate = self.get_candidate(source_key)
         assert candidate is not None
         return candidate
+
+    def _attribute_search_reward_locked(
+        self,
+        source_key: str,
+        *,
+        accepted_novel_eed: float,
+    ) -> None:
+        """Idempotently attribute measured yield to one originating search.
+
+        Duplicate proposals do not multiply reward. The earliest search episode
+        that introduced the source receives the source's current measured
+        reward, and remeasurement adjusts only the delta.
+        """
+        attribution = self.connection.execute(
+            """
+            SELECT episode_id, credited_eed
+            FROM source_search_reward_attribution
+            WHERE source_key = ?
+            """,
+            (source_key,),
+        ).fetchone()
+        if attribution is None:
+            proposal = self.connection.execute(
+                """
+                SELECT episode_id
+                FROM source_proposals
+                WHERE source_key = ? AND episode_id IS NOT NULL
+                ORDER BY created_at, proposal_id
+                LIMIT 1
+                """,
+                (source_key,),
+            ).fetchone()
+            if proposal is None:
+                return
+            episode_id = str(proposal["episode_id"])
+            old_credit = 0.0
+            self.connection.execute(
+                """
+                INSERT INTO source_search_reward_attribution(
+                    source_key, episode_id, credited_eed
+                ) VALUES (?, ?, ?)
+                """,
+                (source_key, episode_id, float(accepted_novel_eed)),
+            )
+        else:
+            episode_id = str(attribution["episode_id"])
+            old_credit = float(attribution["credited_eed"])
+            self.connection.execute(
+                """
+                UPDATE source_search_reward_attribution
+                SET credited_eed = ?
+                WHERE source_key = ?
+                """,
+                (float(accepted_novel_eed), source_key),
+            )
+        delta = float(accepted_novel_eed) - old_credit
+        if delta:
+            self.connection.execute(
+                """
+                UPDATE source_search_episodes
+                SET accepted_novel_eed = MAX(0, accepted_novel_eed + ?)
+                WHERE episode_id = ?
+                """,
+                (delta, episode_id),
+            )
 
     def record_scout_measurement(
         self,
@@ -552,6 +665,10 @@ class SourceDiscoveryRegistry:
                     measurement.novel_pair_eed,
                     now,
                 ),
+            )
+            self._attribute_search_reward_locked(
+                source_key,
+                accepted_novel_eed=measurement.novel_eed_for_ranking,
             )
 
     def get_scout_measurement(self, source_key: str) -> ScoutMeasurement | None:

@@ -101,6 +101,7 @@ class SearchBatch:
 @dataclass(frozen=True)
 class CoordinatorCycleReport:
     recovered_scouts: int = 0
+    production_exhausted: int = 0
     activated: int = 0
     triaged_to_scout: int = 0
     triaged_hold: int = 0
@@ -453,12 +454,14 @@ class SourceDiscoveryCoordinator:
                 recovered = self._recover_stranded_scouts()
                 self._startup_recovered = True
 
+            production_exhausted = self.registry.reconcile_exhausted_activations()
             plan = self.manager.plan()
             search_directives, search_backoff_skipped = self._eligible_search_directives(
                 plan.search_directives
             )
             counts = {
                 "recovered_scouts": recovered,
+                "production_exhausted": production_exhausted,
                 "activated": 0,
                 "triaged_to_scout": 0,
                 "triaged_hold": 0,

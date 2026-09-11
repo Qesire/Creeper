@@ -14,7 +14,7 @@ import time
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 
-from creeper.authority.baseline_index import BaselineIndex
+from creeper.authority.baseline_index import BaselineIndex, YEAR_BITS
 from creeper.evidence.planner import EvidencePlanner
 from creeper.evidence.policies import EvidenceQueryKey
 from creeper.records.models import HostObservation
@@ -89,6 +89,21 @@ class SourceProducer:
         self.reservation_grace_seconds = reservation_grace_seconds
         self.evidence_planner = EvidencePlanner()
         self.admission = EvidenceBacklogAdmission(control_store)
+
+    def refresh_workset(
+        self,
+        *,
+        candidates: Iterable[LeaseCandidate],
+        adapters: Mapping[str, object],
+    ) -> None:
+        """Replace the lightweight production workset without reopening stores.
+
+        Long-lived source services call this after discovery activation changes.
+        BaselineIndex, SQLite connections, scheduler/admission state, and cached
+        adapters remain alive across leases.
+        """
+        self.candidates = tuple(candidates)
+        self.adapters = dict(adapters)
 
     @staticmethod
     def _put(queue, value: object) -> int:
@@ -205,7 +220,13 @@ class SourceProducer:
                 nonlocal direct_capsules
                 if not pending:
                     return
-                hostnames = [observation.hostname for observation in pending]
+                # High-frequency archive indexes may repeat the same host
+                # tens of thousands of times inside one lease. Resolve each
+                # unique hostname once, then update the in-memory masks as work
+                # is planned so later observations in this batch are free.
+                hostnames = list(
+                    dict.fromkeys(observation.hostname for observation in pending)
+                )
                 resolved: dict[str, tuple[int, bool]] = {}
                 local_masks = self.evidence_store.resolve_year_masks(hostnames)
                 provider_coverage_masks = (
@@ -237,8 +258,27 @@ class SourceProducer:
                             item.hostname, 0
                         ),
                     )
-                    direct_capsules.extend(plan.direct_capsules)
-                    enqueue_external_keys(plan.external_keys)
+                    if plan.direct_capsules:
+                        for capsule in plan.direct_capsules:
+                            bit = YEAR_BITS.get(capsule.year, 0)
+                            if local_masks.get(item.hostname, 0) & bit:
+                                continue
+                            direct_capsules.append(capsule)
+                            local_masks[item.hostname] = (
+                                local_masks.get(item.hostname, 0) | bit
+                            )
+                    if plan.external_keys:
+                        enqueue_external_keys(plan.external_keys)
+                        scheduled_mask = provider_coverage_masks.get(
+                            item.hostname, 0
+                        )
+                        for key in plan.external_keys:
+                            for year in range(
+                                key.temporal_scope.year_from,
+                                key.temporal_scope.year_to + 1,
+                            ):
+                                scheduled_mask |= YEAR_BITS.get(year, 0)
+                        provider_coverage_masks[item.hostname] = scheduled_mask
                 pending.clear()
 
             for record in records:

@@ -94,6 +94,36 @@ class EvidenceBacklogAdmission:
         ).fetchone()
         return int(row[0] or 0)
 
+    def available_capacity(
+        self,
+        *,
+        provider: str,
+        capacity: int,
+    ) -> int:
+        """Return currently unoccupied durable backlog capacity.
+
+        This is a scheduling hint only. The later `try_reserve` transaction
+        remains the authority, so concurrent producers cannot over-admit even
+        if this value becomes stale immediately after it is read.
+        """
+        if not provider:
+            raise ValueError("provider is required")
+        if not isinstance(capacity, int) or capacity < 0:
+            raise ValueError("capacity must be a non-negative integer")
+        now = self._now()
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            self._purge_expired_locked(now)
+            occupied = (
+                self._durable_backlog_locked(provider)
+                + self._reserved_locked(provider, now)
+            )
+            self.connection.commit()
+        except BaseException:
+            self.connection.rollback()
+            raise
+        return max(0, capacity - occupied)
+
     def try_reserve(
         self,
         *,

@@ -158,6 +158,56 @@ class SourceDiscoveryRegistryTests(unittest.TestCase):
         self.assertEqual(rewards[0].strategy, "META_SOURCE_SEARCH")
         self.assertEqual(rewards[0].reward_per_cost, 3.0)
 
+    def test_scout_measurement_credits_originating_search_once_and_updates_delta(self) -> None:
+        episode = self.registry.begin_search_episode(
+            strategy="META_SOURCE_SEARCH",
+            backend="web-search",
+            query="historical web crawl",
+            actor="agent:test",
+            episode_id="search:reward",
+        )
+        candidate = self.candidate("rewarded/")
+        self.registry.register_proposal(
+            candidate,
+            episode_id=episode.episode_id,
+            proposal_id="proposal:reward",
+        )
+        self.registry.finish_search_episode(
+            episode.episode_id,
+            search_cost_seconds=2.0,
+        )
+        first = ScoutMeasurement(
+            sampled_records=100,
+            unique_hosts=80,
+            novel_hosts=20,
+            direct_host_years=0,
+            requests=1,
+            bytes_read=1024,
+            elapsed_seconds=1.0,
+            novel_eed=8.0,
+        )
+        self.registry.record_scout_measurement(candidate.source_key, first)
+        self.assertEqual(
+            self.registry.get_search_episode(episode.episode_id).accepted_novel_eed,
+            8.0,
+        )
+
+        second = ScoutMeasurement(
+            sampled_records=100,
+            unique_hosts=80,
+            novel_hosts=30,
+            direct_host_years=0,
+            requests=1,
+            bytes_read=1024,
+            elapsed_seconds=1.0,
+            novel_eed=12.0,
+        )
+        self.registry.record_scout_measurement(candidate.source_key, second)
+
+        rewarded = self.registry.get_search_episode(episode.episode_id)
+        self.assertEqual(rewarded.accepted_novel_eed, 12.0)
+        self.assertEqual(self.registry.strategy_rewards()[0].reward_per_cost, 6.0)
+
     def test_agent_prior_cannot_promote_source_without_measured_scout(self) -> None:
         candidate = self.candidate("measured/")
         self.registry.register_proposal(candidate)

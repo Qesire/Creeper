@@ -41,6 +41,7 @@ class MeasuredYieldScoutPolicy:
     max_decompressed_bytes: int = 32 * 1024 * 1024
     max_records: int = 5_000
     max_line_bytes: int = 64 * 1024
+    sample_windows: int = 4
     target_year_from: int = 1996
     target_year_to: int = 2001
     min_unique_hosts: int = 100
@@ -55,6 +56,7 @@ class MeasuredYieldScoutPolicy:
             "max_decompressed_bytes",
             "max_records",
             "max_line_bytes",
+            "sample_windows",
             "min_unique_hosts",
             "min_novel_hosts",
         ):
@@ -79,16 +81,25 @@ class MeasuredYieldScoutPolicy:
 
 @dataclass(frozen=True)
 class PrefixDownload:
-    """One bounded HTTP probe with explicit truncation semantics.
-
-    ``truncated`` is true only when the response metadata or the observed chunk
-    boundary proves that bytes remain beyond the retained prefix. Reaching the
-    configured byte count alone is not sufficient evidence of truncation.
-    """
+    """One bounded HTTP range probe with explicit byte-position metadata."""
 
     payload: bytes
     content_type: str
     truncated: bool
+    range_start: int = 0
+    range_end: int | None = None
+    total_size: int | None = None
+
+
+@dataclass(frozen=True)
+class SampleDownload:
+    """One logical scout sample assembled from one or more bounded ranges."""
+
+    payload: bytes
+    content_type: str
+    truncated: bool
+    requests: int
+    bytes_read: int
 
 
 @dataclass(frozen=True)
@@ -581,28 +592,51 @@ class MeasuredYieldScoutExecutor:
         self.policy = policy or MeasuredYieldScoutPolicy()
         self.clock = clock
 
-    async def _download_prefix(self, url: str) -> PrefixDownload:
+    @staticmethod
+    def _windowable_line_resource(url: str) -> bool:
+        suffix, compressed = _suffix(urlsplit(url).path)
+        return (not compressed) and suffix in {
+            ".cdx",
+            ".cdxj",
+            ".jsonl",
+            ".ndjson",
+            ".txt",
+            ".list",
+        }
+
+    async def _download_prefix(
+        self,
+        url: str,
+        *,
+        start: int = 0,
+        max_bytes: int | None = None,
+    ) -> PrefixDownload:
+        budget = self.policy.max_download_bytes if max_bytes is None else int(max_bytes)
+        if start < 0 or budget < 1:
+            raise ValueError("invalid measured scout range")
         payload = bytearray()
         overflowed_chunk = False
         headers = {
-            "Range": f"bytes=0-{self.policy.max_download_bytes - 1}",
-            # The parser consumes the bounded prefix as WARC/CDXJ text. Do not
-            # hand it a content-encoded transfer body while using a raw-byte
-            # iterator; transparent decoding would otherwise be bypassed.
+            "Range": f"bytes={start}-{start + budget - 1}",
             "Accept-Encoding": "identity",
         }
         timeout = httpx.Timeout(self.policy.timeout_seconds)
-        async with self.client.stream("GET", url, headers=headers, timeout=timeout) as response:
+        async with self.client.stream(
+            "GET",
+            url,
+            headers=headers,
+            timeout=timeout,
+        ) as response:
             if response.status_code in {404, 410}:
-                return PrefixDownload(b"", "__permanent_missing__", False)
+                return PrefixDownload(
+                    b"",
+                    "__permanent_missing__",
+                    False,
+                    range_start=start,
+                )
             response.raise_for_status()
-            # Use raw bytes: httpx.aiter_bytes() applies Content-Encoding decoding,
-            # which would make a .gz resource get decompressed twice below.  A
-            # response supplied by a test or an adapter may already be loaded;
-            # in that case HTTPX rejects a second streaming iteration, so use
-            # the already buffered body directly.
             async for chunk in _iter_response_raw(response):
-                remaining = self.policy.max_download_bytes - len(payload)
+                remaining = budget - len(payload)
                 if remaining <= 0:
                     overflowed_chunk = True
                     break
@@ -611,9 +645,22 @@ class MeasuredYieldScoutExecutor:
                     overflowed_chunk = True
                     break
                 payload.extend(chunk)
-                if len(payload) >= self.policy.max_download_bytes:
+                if len(payload) >= budget:
                     break
             body = bytes(payload)
+            parsed_range = _parse_content_range(
+                response.headers.get("content-range")
+            )
+            range_start = start
+            range_end = (
+                start + len(body) - 1
+                if body
+                else None
+            )
+            total_size = None
+            if parsed_range is not None:
+                range_start, parsed_end, total_size = parsed_range
+                range_end = parsed_end
             return PrefixDownload(
                 payload=body,
                 content_type=response.headers.get("content-type", ""),
@@ -622,7 +669,107 @@ class MeasuredYieldScoutExecutor:
                     bytes_read=len(body),
                     overflowed_chunk=overflowed_chunk,
                 ),
+                range_start=range_start,
+                range_end=range_end,
+                total_size=total_size,
             )
+
+    @staticmethod
+    def _trim_line_window(download: PrefixDownload) -> bytes:
+        payload = download.payload
+        if not payload:
+            return payload
+        if download.range_start > 0:
+            boundary = payload.find(b"\n")
+            if boundary < 0:
+                return b""
+            payload = payload[boundary + 1 :]
+        if (
+            download.total_size is None
+            or download.range_end is None
+            or download.range_end + 1 < download.total_size
+        ):
+            boundary = payload.rfind(b"\n")
+            if boundary < 0:
+                return b""
+            payload = payload[: boundary + 1]
+        return payload
+
+    async def _download_sample(self, url: str) -> SampleDownload:
+        if (
+            self.policy.sample_windows <= 1
+            or not self._windowable_line_resource(url)
+        ):
+            first = await self._download_prefix(url)
+            return SampleDownload(
+                payload=first.payload,
+                content_type=first.content_type,
+                truncated=first.truncated,
+                requests=1,
+                bytes_read=len(first.payload),
+            )
+
+        per_window = max(
+            1,
+            self.policy.max_download_bytes // self.policy.sample_windows,
+        )
+        first = await self._download_prefix(
+            url,
+            start=0,
+            max_bytes=per_window,
+        )
+        if (
+            first.content_type == "__permanent_missing__"
+            or first.total_size is None
+            or first.total_size <= per_window
+        ):
+            return SampleDownload(
+                payload=first.payload,
+                content_type=first.content_type,
+                truncated=first.truncated,
+                requests=1,
+                bytes_read=len(first.payload),
+            )
+
+        max_start = max(0, first.total_size - per_window)
+        starts = []
+        for index in range(self.policy.sample_windows):
+            if self.policy.sample_windows == 1:
+                offset = 0
+            else:
+                offset = round(
+                    max_start * index / (self.policy.sample_windows - 1)
+                )
+            if offset not in starts:
+                starts.append(offset)
+
+        downloads = [first]
+        for offset in starts[1:]:
+            probe = await self._download_prefix(
+                url,
+                start=offset,
+                max_bytes=per_window,
+            )
+            # A server that ignores non-zero ranges usually returns byte 0.
+            # Ignore that duplicate rather than biasing the sample toward the
+            # prefix or exceeding the deterministic download budget.
+            if offset > 0 and probe.range_start != offset:
+                continue
+            downloads.append(probe)
+
+        chunks = [
+            self._trim_line_window(download)
+            for download in downloads
+        ]
+        combined = b"\n".join(chunk for chunk in chunks if chunk)
+        return SampleDownload(
+            payload=combined,
+            content_type=first.content_type,
+            truncated=True,
+            requests=len(downloads),
+            bytes_read=sum(len(download.payload) for download in downloads),
+        )
+
 
     def _measurement(
         self,
@@ -630,6 +777,7 @@ class MeasuredYieldScoutExecutor:
         parsed: ParsedHostSample,
         bytes_read: int,
         elapsed: float,
+        requests: int = 1,
     ) -> ScoutMeasurement:
         resolved = self.baseline.resolve_batch(parsed.hosts)
         novel = [
@@ -656,7 +804,7 @@ class MeasuredYieldScoutExecutor:
             unique_hosts=len(parsed.hosts),
             novel_hosts=len(novel),
             direct_host_years=0,
-            requests=1,
+            requests=requests,
             bytes_read=bytes_read,
             elapsed_seconds=elapsed,
             novel_eed=float(novel_eed),
@@ -668,7 +816,7 @@ class MeasuredYieldScoutExecutor:
 
     async def __call__(self, candidate: SourceCandidate) -> ScoutResult:
         started = float(self.clock())
-        download = await self._download_prefix(candidate.canonical_entrypoint)
+        download = await self._download_sample(candidate.canonical_entrypoint)
         if download.content_type == "__permanent_missing__":
             return ScoutResult(ScoutDisposition.HOLD, reason="bulk source returned HTTP 404/410")
         try:
@@ -695,8 +843,9 @@ class MeasuredYieldScoutExecutor:
                         host_year_pairs=set(),
                         measurement_mode=MeasurementMode.HOST_ONLY,
                     ),
-                    bytes_read=len(download.payload),
+                    bytes_read=download.bytes_read,
                     elapsed=elapsed,
+                    requests=download.requests,
                 )
             return ScoutResult(
                 ScoutDisposition.HOLD,
@@ -714,8 +863,9 @@ class MeasuredYieldScoutExecutor:
         elapsed = max(0.0, float(self.clock()) - started)
         measurement = self._measurement(
             parsed=parsed,
-            bytes_read=len(download.payload),
+            bytes_read=download.bytes_read,
             elapsed=elapsed,
+            requests=download.requests,
         )
         observed_count = measurement.observed_count_for_threshold
         novel_count = measurement.novel_count_for_threshold

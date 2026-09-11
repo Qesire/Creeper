@@ -28,6 +28,35 @@ class EvidenceBacklogAdmissionTests(unittest.TestCase):
             "cdx-v1",
         )
 
+    def test_available_capacity_counts_backlog_and_live_reservations(self):
+        self.control.enqueue_evidence_tasks(
+            [self.key("queued.example"), self.key("queued-two.example")]
+        )
+        reservation = self.admission.try_reserve(
+            provider="wayback",
+            amount=2,
+            capacity=6,
+            ttl_seconds=30,
+        )
+        self.assertIsNotNone(reservation)
+
+        self.assertEqual(
+            self.admission.available_capacity(
+                provider="wayback",
+                capacity=6,
+            ),
+            2,
+        )
+
+        self.now += 31.0
+        self.assertEqual(
+            self.admission.available_capacity(
+                provider="wayback",
+                capacity=6,
+            ),
+            4,
+        )
+
     def test_concurrent_connections_cannot_oversubscribe_capacity(self):
         second_control = ControlStore(self.path, clock=lambda: self.now)
         second = EvidenceBacklogAdmission(second_control)

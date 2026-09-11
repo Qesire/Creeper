@@ -158,7 +158,74 @@ class MeasuredYieldScoutTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.measurement.novel_hosts, 1)
         self.assertEqual(result.measurement.novel_eed, 0.5)
 
+    async def test_large_cdxj_stratifies_fixed_byte_budget_across_file(self) -> None:
+        lines = []
+        for index in range(24):
+            hostname = "known.com" if index < 6 else f"novel-{index}.com"
+            year = 1997 + (index % 4)
+            lines.append(
+                f"com,{hostname.split('.')[0]})/ {year}0101000000 "
+                f'{{"url":"http://{hostname}/page-{index:02d}"}}\n'
+            )
+        body = "".join(lines).encode()
+        ranges: list[tuple[int, int]] = []
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            raw_range = request.headers["Range"]
+            span = raw_range.removeprefix("bytes=")
+            start_text, end_text = span.split("-", 1)
+            start = int(start_text)
+            requested_end = int(end_text)
+            end = min(requested_end, len(body) - 1)
+            ranges.append((start, end))
+            chunk = body[start : end + 1]
+            return streamed_response(
+                206,
+                chunk,
+                headers={
+                    "content-type": "text/plain",
+                    "content-range": f"bytes {start}-{end}/{len(body)}",
+                    "content-length": str(len(chunk)),
+                },
+            )
+
+        policy = self.policy(
+            max_download_bytes=480,
+            sample_windows=4,
+            max_records=100,
+            min_unique_hosts=2,
+            min_novel_hosts=1,
+            min_novel_fraction=0.01,
+            min_novel_eed=0.1,
+        )
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler)
+        ) as client:
+            scout = MeasuredYieldScoutExecutor(
+                client,
+                self.baseline,
+                {"com": Decimal("1")},
+                policy=policy,
+            )
+            result = await scout(
+                self.candidate("https://archive.example/large-index.cdxj")
+            )
+
+        self.assertEqual(len(ranges), 4)
+        self.assertEqual(ranges[0][0], 0)
+        self.assertGreater(ranges[-1][0], len(body) // 2)
+        self.assertLessEqual(sum(end - start + 1 for start, end in ranges), 480)
+        self.assertEqual(result.disposition, ScoutDisposition.WARM)
+        self.assertIsNotNone(result.measurement)
+        measurement = result.measurement
+        assert measurement is not None
+        self.assertEqual(measurement.requests, 4)
+        self.assertLessEqual(measurement.bytes_read, 480)
+        self.assertGreater(measurement.novel_hosts, 0)
+        self.assertGreater(measurement.novel_host_year_pairs, 0)
+
     async def test_gzipped_jsonl_uses_bounded_mature_stream_path(self) -> None:
+        calls = 0
         raw = b'\n'.join(
             [
                 json.dumps({"url": "https://known.com/a"}).encode(),
@@ -168,10 +235,15 @@ class MeasuredYieldScoutTests(unittest.IsolatedAsyncioTestCase):
         body = gzip.compress(raw)
 
         async def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal calls
+            calls += 1
             return streamed_response(
                 206,
                 body,
-                headers={"content-type": "application/gzip"},
+                headers={
+                    "content-type": "application/gzip",
+                    "content-range": f"bytes 0-{len(body) - 1}/{len(body) + 1000}",
+                },
             )
 
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
@@ -185,6 +257,8 @@ class MeasuredYieldScoutTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result.disposition, ScoutDisposition.WARM)
         self.assertEqual(result.measurement.novel_hosts if result.measurement else None, 1)
+        self.assertEqual(calls, 1)
+        self.assertEqual(result.measurement.requests if result.measurement else None, 1)
 
     async def test_gzip_content_encoding_is_not_double_decoded(self) -> None:
         raw = b'{"hostname":"known.com"}\n{"hostname":"novel.com"}\n'

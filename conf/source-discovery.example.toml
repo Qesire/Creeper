@@ -48,6 +48,10 @@ max_download_bytes = 8388608
 max_decompressed_bytes = 33554432
 max_records = 5000
 max_line_bytes = 65536
+# Spread the fixed max_download_bytes budget across safe uncompressed
+# line-oriented resources. Gzip/WARC remain prefix-only because arbitrary
+# compressed-byte ranges are not independently parseable.
+sample_windows = 4
 # These are scout promotion thresholds, not submission acceptance thresholds.
 min_unique_hosts = 100
 min_novel_hosts = 10

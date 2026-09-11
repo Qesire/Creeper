@@ -78,6 +78,8 @@ class ControlStore:
             ) WITHOUT ROWID;
             CREATE INDEX IF NOT EXISTS idx_evidence_tasks_claim
                 ON evidence_tasks(state, retry_at, lease_until);
+            CREATE INDEX IF NOT EXISTS idx_evidence_tasks_provider_claim
+                ON evidence_tasks(provider, state, retry_at, lease_until);
             CREATE TABLE IF NOT EXISTS runtime_checkpoints (
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL

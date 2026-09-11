@@ -1,0 +1,34 @@
+# One-command autonomous Creeper runtime.
+# The referenced discovery and producer configs must point at the same
+# runtime_data_root. The producer config must set source_mode = "activated".
+
+source_discovery_config = "source-discovery.example.toml"
+source_producer_config = "creeper.activated.example.toml"
+
+[supervisor]
+# Child health is checked at this cadence.
+poll_seconds = 1.0
+# Unexpected child exits are restarted with bounded exponential backoff.
+restart_base_seconds = 2.0
+restart_max_seconds = 60.0
+max_restarts = 5
+# A child that stays healthy this long clears its accumulated restart count.
+stable_reset_seconds = 300.0
+shutdown_grace_seconds = 10.0
+
+[evidence]
+# Conservative public Wayback profile. Increase only after bounded A/B tests.
+endpoint = "https://web.archive.org/cdx/search/cdx"
+claim_batch_size = 16
+lease_seconds = 300.0
+max_inflight = 2
+requests_per_second = 0.5
+max_connections = 4
+max_keepalive_connections = 2
+throttle_floor_seconds = 2.0
+timeout = 30.0
+max_retries = 3
+retry_base_seconds = 30.0
+retry_max_seconds = 3600.0
+poll_min_seconds = 0.25
+poll_max_seconds = 10.0
