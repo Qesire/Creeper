@@ -58,21 +58,24 @@ async def run_service(
             f"evidence provider worker is already running: {lock_path}"
         ) from exc
 
-    control = ControlStore(runtime_data_root / "control.sqlite3")
-    evidence = EvidenceStore(runtime_data_root / "evidence.sqlite3")
-    total = EvidenceWorkerReport()
-    stop = asyncio.Event()
-    loop = asyncio.get_running_loop()
+    control: ControlStore | None = None
+    evidence: EvidenceStore | None = None
     installed_signals: list[signal.Signals] = []
-    if not once:
-        for signum in (signal.SIGINT, signal.SIGTERM):
-            try:
-                loop.add_signal_handler(signum, stop.set)
-                installed_signals.append(signum)
-            except (NotImplementedError, RuntimeError):
-                pass
 
     try:
+        control = ControlStore(runtime_data_root / "control.sqlite3")
+        evidence = EvidenceStore(runtime_data_root / "evidence.sqlite3")
+        total = EvidenceWorkerReport()
+        stop = asyncio.Event()
+        loop = asyncio.get_running_loop()
+        if not once:
+            for signum in (signal.SIGINT, signal.SIGTERM):
+                try:
+                    loop.add_signal_handler(signum, stop.set)
+                    installed_signals.append(signum)
+                except (NotImplementedError, RuntimeError):
+                    pass
+
         async with AsyncWaybackCDXClient(
             endpoint=endpoint,
             provider="wayback",
@@ -124,10 +127,13 @@ async def run_service(
                 else:
                     return total
     finally:
-        for signum in installed_signals:
-            loop.remove_signal_handler(signum)
-        evidence.close()
-        control.close()
+        if "loop" in locals():
+            for signum in installed_signals:
+                loop.remove_signal_handler(signum)
+        if evidence is not None:
+            evidence.close()
+        if control is not None:
+            control.close()
         try:
             fcntl.flock(lock_fd, fcntl.LOCK_UN)
         finally:
