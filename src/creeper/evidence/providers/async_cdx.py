@@ -99,17 +99,15 @@ class AsyncWaybackCDXClient:
         self._cooldown_until = 0.0
         self._cooldown_lock = asyncio.Lock()
         if requests_per_second > 0:
-            # aiolimiter.acquire() always requests one token, so a sub-one
-            # rate cannot be represented as ``max_rate < 1``. Use a longer
-            # window with one token instead (for example, 0.5 req/s becomes
-            # one request per two seconds).
-            if requests_per_second < 1:
-                self._limiter = AsyncLimiter(
-                    1,
-                    time_period=1.0 / requests_per_second,
-                )
-            else:
-                self._limiter = AsyncLimiter(requests_per_second, time_period=1.0)
+            # Use one token per interval for strict pacing. A token bucket with
+            # max_rate=N permits an N-request burst at the start of each
+            # window, which is exactly the pattern that tends to trigger
+            # public-CDX throttling. Concurrency remains useful for overlapping
+            # request latency, but request *starts* are evenly spaced.
+            self._limiter = AsyncLimiter(
+                1,
+                time_period=1.0 / requests_per_second,
+            )
         else:
             self._limiter = None
         self._owns_client = client is None
