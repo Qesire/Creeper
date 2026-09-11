@@ -34,6 +34,44 @@ class RuntimeTelemetryStoreTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_resource_summary_is_window_scoped(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = RuntimeTelemetryStore(Path(tmp) / "telemetry.sqlite3")
+            try:
+                store.append_resource_sample(
+                    rss_bytes=100,
+                    disk_free_bytes=1000,
+                    governor_state="normal",
+                    sampled_at=10.0,
+                )
+                store.append_resource_sample(
+                    rss_bytes=300,
+                    disk_free_bytes=700,
+                    governor_state="throttled",
+                    sampled_at=20.0,
+                )
+                store.append_resource_sample(
+                    rss_bytes=200,
+                    disk_free_bytes=800,
+                    governor_state="normal",
+                    sampled_at=30.0,
+                )
+
+                summary = store.resource_summary(
+                    start_time=15.0,
+                    end_time=30.0,
+                )
+
+                self.assertEqual(summary["samples"], 2)
+                self.assertEqual(summary["peak_rss_bytes"], 300)
+                self.assertEqual(summary["min_disk_free_bytes"], 700)
+                self.assertEqual(
+                    summary["governor_state_samples"],
+                    {"normal": 1, "throttled": 1},
+                )
+            finally:
+                store.close()
+
     def test_independent_connections_accumulate_without_lost_updates(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "telemetry.sqlite3"
