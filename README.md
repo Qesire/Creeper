@@ -190,6 +190,7 @@ strictly paced at 0.5 starts/second, with provider-wide cooldown after HTTP
 
 ```bash
 creeper-evidence-worker <runtime-data-root> \
+  --claim-batch-size 64 \
   --max-inflight 4 \
   --requests-per-second 0.5 \
   --max-connections 8 \
@@ -198,11 +199,22 @@ creeper-evidence-worker <runtime-data-root> \
 
 Completed evidence tasks are committed as they finish rather than waiting for
 the slowest request in a claimed batch, so durable backlog headroom is released
-continuously. Telemetry also records cumulative request latency and latency
-buckets; increase request-start rate only after observed throughput reaches the
-configured pacing limit without increased throttling. Complete range probes reuse accepted
-capture rows directly and completed provider coverage suppresses later duplicate
-Wayback work for the same host-years.
+continuously. The default durable claim window is 64 tasks; only four queries
+may be in the provider section at once, so the larger claim window amortizes
+batch-tail stalls without increasing request-start rate or network concurrency.
+Same-host serialization is acquired before provider capacity, so duplicate-host
+waiters cannot occupy an otherwise usable network slot.
+
+Static long-running producers also keep BaselineIndex, SQLite handles, and the
+dataset file open across leases. This matters when a saturated evidence backlog
+frees only a few slots at a time: local runtime setup is not repeated for every
+small headroom lease.
+
+Telemetry records cumulative request latency and latency buckets; increase
+request-start rate only after observed throughput reaches the configured pacing
+limit without increased throttling. Complete range probes reuse accepted capture
+rows directly and completed provider coverage suppresses later duplicate Wayback
+work for the same host-years.
 
 The real-network pilot is intentionally bounded and single-worker. It records
 `PASS`, `EMPTY_EXHAUSTIVE`, `INCOMPLETE`, and transient failures separately;
