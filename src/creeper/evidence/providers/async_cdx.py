@@ -8,6 +8,7 @@ retains only the competition-specific exact-host/exact-year acceptance rules.
 from __future__ import annotations
 
 import asyncio
+from collections import Counter
 import hashlib
 import json
 from datetime import datetime, timezone
@@ -95,6 +96,8 @@ class AsyncWaybackCDXClient:
         self.throttle_floor_seconds = float(throttle_floor_seconds)
         self.http_requests = 0
         self.throttle_responses = 0
+        self.transport_errors = 0
+        self.http_status_counts: Counter[int] = Counter()
         self._cooldown_until = 0.0
         self._cooldown_lock = asyncio.Lock()
         if requests_per_second > 0:
@@ -212,16 +215,21 @@ class AsyncWaybackCDXClient:
         async for attempt in retrying:
             with attempt:
                 await self._wait_for_cooldown()
-                if self._limiter is None:
-                    self.http_requests += 1
-                    response = await self.client.get(self.endpoint, params=params)
-                else:
-                    async with self._limiter:
-                        # Cooldown may have been extended while this coroutine
-                        # was waiting for a rate token.
-                        await self._wait_for_cooldown()
+                try:
+                    if self._limiter is None:
                         self.http_requests += 1
                         response = await self.client.get(self.endpoint, params=params)
+                    else:
+                        async with self._limiter:
+                            # Cooldown may have been extended while this coroutine
+                            # was waiting for a rate token.
+                            await self._wait_for_cooldown()
+                            self.http_requests += 1
+                            response = await self.client.get(self.endpoint, params=params)
+                except (httpx.TimeoutException, httpx.TransportError):
+                    self.transport_errors += 1
+                    raise
+                self.http_status_counts[int(response.status_code)] += 1
                 if response.status_code == 429 or response.status_code == 503:
                     await self._register_throttle(response)
                     response.raise_for_status()
