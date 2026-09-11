@@ -300,7 +300,7 @@ class StructuredProductionAdapter:
 
                 if bytes_read + len(raw) > lease.max_bytes:
                     if bytes_read == 0:
-                        self._pending_line = (offset, raw)
+                        self.close()
                         raise ProductionAdapterError(
                             "structured source record exceeds lease max_bytes"
                         )
