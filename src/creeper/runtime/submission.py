@@ -88,7 +88,7 @@ def build_runtime_snapshot(
     """Build a snapshot from durable runtime stores using the canonical builder."""
     novel_capsules = [
         capsule
-        for capsule in evidence_store.all_capsules()
+        for capsule in evidence_store.canonical_host_year_capsules()
         if capsule.year in YEAR_BITS
         and not baseline.year_mask(capsule.hostname) & YEAR_BITS[capsule.year]
     ]
