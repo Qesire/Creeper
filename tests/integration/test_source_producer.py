@@ -3,7 +3,7 @@ import unittest
 from pathlib import Path
 
 from creeper.authority.baseline_index import BaselineIndex
-from creeper.evidence.policies import EvidenceQueryKey, TemporalScope
+from creeper.evidence.policies import CDXQueryState, EvidenceQueryKey, TemporalScope
 from creeper.records.candidates import CandidateSourceScope
 from creeper.records.models import HostObservation, SourceRecord
 from creeper.runtime.source_producer import SourceProducer
@@ -148,6 +148,29 @@ class SourceProducerTests(unittest.TestCase):
         self.assertIsNone(task.lease_owner)
         self.assertEqual(runtime.admission.reserved("wayback"), 0)
         self.assertEqual(self.evidence.count(), 0)
+
+    def test_completed_wayback_range_suppresses_redundant_exact_year_work(self):
+        range_key = EvidenceQueryKey(
+            "novel.example", TemporalScope(1996, 1998), "wayback", "cdx-v1"
+        )
+        self.control.enqueue_evidence_tasks([range_key])
+        self.control.claim_evidence_tasks(owner="evidence-a", limit=1)
+        self.control.finish_range_task(
+            range_key,
+            CDXQueryState.PASS,
+            owner="evidence-a",
+        )
+        runtime, adapter = self.build_runtime(backlog_capacity=2)
+
+        report = runtime.run_once()
+
+        exact_key = EvidenceQueryKey(
+            "novel.example", TemporalScope(1997, 1997), "wayback", "cdx-v1"
+        )
+        self.assertEqual(report.leases_succeeded, 1)
+        self.assertEqual(report.evidence_tasks_enqueued, 0)
+        self.assertEqual(adapter.executions, 1)
+        self.assertIsNone(self.control.get_evidence_task(exact_key))
 
     def test_full_backlog_blocks_source_before_adapter_execution(self):
         occupied = EvidenceQueryKey(
