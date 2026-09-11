@@ -21,6 +21,17 @@ class StaticDatasetAdapter:
         self.source_id = source_id
         self.source_year = source_year
         self.adapter_id = source_id
+        self._source = None
+
+    def _stream(self):
+        if self._source is None or self._source.closed:
+            self._source = self.path.open("rb")
+        return self._source
+
+    def close(self) -> None:
+        if self._source is not None and not self._source.closed:
+            self._source.close()
+        self._source = None
 
     def estimate(self) -> ReservoirEstimate:
         with self.path.open("rb") as source:
@@ -43,49 +54,49 @@ class StaticDatasetAdapter:
         request_allowed = lease.max_requests > 0 and lease.max_seconds > 0
 
         if request_allowed:
-            with self.path.open("rb") as source:
-                source.seek(start)
-                while True:
-                    offset = source.tell()
-                    if end is not None and offset >= end:
-                        next_cursor = str(offset)
-                        break
-                    if len(records) >= lease.max_records:
-                        break
-                    if time.monotonic() - started >= lease.max_seconds:
-                        break
+            source = self._stream()
+            source.seek(start)
+            while True:
+                offset = source.tell()
+                if end is not None and offset >= end:
+                    next_cursor = str(offset)
+                    break
+                if len(records) >= lease.max_records:
+                    break
+                if time.monotonic() - started >= lease.max_seconds:
+                    break
 
-                    raw_line = source.readline()
-                    if not raw_line:
-                        next_cursor = None
-                        break
+                raw_line = source.readline()
+                if not raw_line:
+                    next_cursor = None
+                    break
 
-                    if bytes_read + len(raw_line) > lease.max_bytes:
-                        # Leave the cursor at this record so the caller can
-                        # handle an unrepresentable lease explicitly.
-                        next_cursor = str(offset)
-                        break
+                if bytes_read + len(raw_line) > lease.max_bytes:
+                    # Leave the cursor at this record so the caller can
+                    # handle an unrepresentable lease explicitly.
+                    next_cursor = str(offset)
+                    break
 
-                    records.append(
-                        SourceRecord(
-                            source_id=self.source_id,
-                            locator=f"{self.path}:{offset}",
-                            payload=raw_line.decode("utf-8", errors="replace").rstrip("\r\n"),
-                            scope=CandidateSourceScope.LOCAL_DISCOVERY,
-                            source_year=self.source_year,
-                        )
+                records.append(
+                    SourceRecord(
+                        source_id=self.source_id,
+                        locator=f"{self.path}:{offset}",
+                        payload=raw_line.decode("utf-8", errors="replace").rstrip("\r\n"),
+                        scope=CandidateSourceScope.LOCAL_DISCOVERY,
+                        source_year=self.source_year,
                     )
-                    bytes_read += len(raw_line)
-                    next_cursor = str(source.tell())
-                    if len(records) >= lease.max_records:
-                        # Distinguish a lease boundary from EOF without
-                        # consuming the next record. This lets the runtime
-                        # mark a final bounded lease EXHAUSTED immediately.
-                        probe_position = source.tell()
-                        if not source.read(1):
-                            next_cursor = None
-                        else:
-                            source.seek(probe_position)
+                )
+                bytes_read += len(raw_line)
+                next_cursor = str(source.tell())
+                if len(records) >= lease.max_records:
+                    # Distinguish a lease boundary from EOF without
+                    # consuming the next record. This lets the runtime
+                    # mark a final bounded lease EXHAUSTED immediately.
+                    probe_position = source.tell()
+                    if not source.read(1):
+                        next_cursor = None
+                    else:
+                        source.seek(probe_position)
 
         elapsed = time.monotonic() - started
         return iter(records), LeaseResult(
