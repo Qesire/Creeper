@@ -130,6 +130,68 @@ class RuntimeSubmissionIntegrationTests(unittest.TestCase):
             evidence.close()
             baseline.close()
 
+    def test_runtime_snapshot_counts_same_hostname_once_per_novel_year(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task_root = root / "task"
+            baseline_dir = task_root / "merged260909-3"
+            baseline_dir.mkdir(parents=True)
+            for year in range(1996, 2002):
+                (baseline_dir / f"{year}.txt").write_text("", encoding="utf-8")
+            (baseline_dir / "candidate_pool.txt").write_text("", encoding="utf-8")
+            model = root / "model.json"
+            model.write_text(
+                '{"tld": ["com"], "lang": ["eng"], "perc_of_tld": ["100"]}\n',
+                encoding="utf-8",
+            )
+            baseline = BaselineIndex.build(task_root, root / "baseline.sqlite3")
+            evidence = EvidenceStore(root / "evidence.sqlite3")
+            evidence.put_many([
+                EvidenceCapsule(
+                    "repeat.com", 1998, "wayback", "capture_timestamp_year",
+                    "19980101000000", "http://repeat.com/", "a" * 64, "v1",
+                ),
+                EvidenceCapsule(
+                    "repeat.com", 2000, "wayback", "capture_timestamp_year",
+                    "20000101000000", "http://repeat.com/", "b" * 64, "v1",
+                ),
+            ])
+            context = RuntimeSubmissionContext(
+                baseline_manifest={
+                    "baseline_id": "merged260909-3",
+                    "annual_file_hashes": {
+                        f"{year}.txt": "c" * 64 for year in range(1996, 2002)
+                    },
+                },
+                code_revision="d" * 64,
+                source_report_set=("source.json",),
+                cdx_audit_set=("audit.json",),
+                eed_report={"equivalent_english_domains": "999"},
+                eed_model_path=model,
+                baseline_eed="40",
+            )
+            try:
+                snapshot = build_runtime_snapshot(
+                    context=context,
+                    evidence_store=evidence,
+                    baseline=baseline,
+                    snapshot_id="annual-host-year-eed",
+                )
+                self.assertEqual(snapshot.novel_eed, "2")
+                self.assertEqual(snapshot.growth_rate, "0.05")
+                self.assertEqual(
+                    snapshot.eed_report["annual"]["1998"]["equivalent_english_domains"],
+                    "1",
+                )
+                self.assertEqual(
+                    snapshot.eed_report["annual"]["2000"]["equivalent_english_domains"],
+                    "1",
+                )
+                self.assertTrue(snapshot.ready)
+            finally:
+                evidence.close()
+                baseline.close()
+
     def test_runtime_report_builds_submission_snapshot_after_commits(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
