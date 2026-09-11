@@ -58,6 +58,21 @@ class LinkPromotionTests(unittest.TestCase):
         self.assertEqual(item.candidate.direct_evidence_prior, 0.0)
         self.assertEqual(item.candidate.baseline_overlap_prior, 0.5)
 
+    def test_url_list_and_compressed_cdxj_are_strong_bulk_artifacts(self) -> None:
+        for url in (
+            "https://seed.example/data/webbase-2001.urls.gz",
+            "https://seed.example/data/index.cdxj.gz",
+        ):
+            acc = LinkPromotionAccumulator()
+            acc.add(self.link(url, same_site=True, anchor="historical URL export"))
+
+            promoted = acc.promoted()
+
+            self.assertEqual(len(promoted), 1)
+            self.assertTrue(promoted[0].evidence.bulk_artifact)
+            self.assertEqual(promoted[0].candidate.source_family, "BULK_ARTIFACT")
+            self.assertEqual(promoted[0].candidate.level, SourceLevel.SOURCE)
+
     def test_generic_external_page_is_never_promoted_without_resource_signal(self) -> None:
         acc = LinkPromotionAccumulator()
         for page in ("https://seed.example/a", "https://seed.example/b"):
