@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gzip
 import unittest
 import tempfile
 from pathlib import Path
@@ -93,6 +94,192 @@ class ProductionSourceAdapterTests(unittest.TestCase):
         self.assertEqual(observation.hostname, "novel.com")
         self.assertEqual(observation.year_hint_mask, 0)
         self.assertEqual(observation.direct_year_mask, 1 << (1998 - 1996))
+
+    def test_compressed_cdx_reuses_decompressor_across_leases(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "records.cdx.gz"
+            with gzip.open(path, "wt", encoding="utf-8") as target:
+                target.write(
+                    "com,first)/ 19980101000000 http://first.com/ text/html 200 digest 1 2 file.arc\n"
+                )
+                target.write(
+                    "com,second)/ 19990101000000 http://second.com/ text/html 200 digest 1 2 file.arc\n"
+                )
+            reservoir = Reservoir(
+                reservoir_id="reservoir:compressed-cdx",
+                domain_id="domain:compressed-cdx",
+                adapter_id="structured:compressed-cdx",
+                root_locator=str(path),
+                enumeration_kind="structured_records",
+                capacity_lower=2,
+                state=ReservoirState.READY,
+                evidence_mode="direct_year",
+            )
+            adapter = ProductionAdapterFactory.open(reservoir)
+            first_lease = WorkLease.create(
+                reservoir_id=reservoir.reservoir_id,
+                max_records=1,
+                max_requests=1,
+                max_bytes=4096,
+                max_seconds=10,
+            )
+            first_records, first_result = adapter.execute(first_lease)
+            first = next(iter(adapter.extract_hosts(next(first_records))))
+
+            second_lease = WorkLease.create(
+                reservoir_id=reservoir.reservoir_id,
+                cursor_start=first_result.next_cursor,
+                max_records=1,
+                max_requests=1,
+                max_bytes=4096,
+                max_seconds=10,
+            )
+            second_records, second_result = adapter.execute(second_lease)
+            second = next(iter(adapter.extract_hosts(next(second_records))))
+            adapter.close()
+
+        self.assertEqual(first.hostname, "first.com")
+        self.assertEqual(first.direct_year_mask, 1 << (1998 - 1996))
+        self.assertEqual(second.hostname, "second.com")
+        self.assertEqual(second.direct_year_mask, 1 << (1999 - 1996))
+        self.assertEqual(first_result.requests, 1)
+        self.assertEqual(second_result.requests, 0)
+
+    def test_compressed_cdx_can_resume_from_durable_logical_cursor(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "resume.cdx.gz"
+            with gzip.open(path, "wt", encoding="utf-8") as target:
+                target.write(
+                    "com,first)/ 19980101000000 http://first.com/ text/html 200 digest 1 2 file.arc\n"
+                )
+                target.write(
+                    "com,second)/ 19990101000000 http://second.com/ text/html 200 digest 1 2 file.arc\n"
+                )
+            reservoir = Reservoir(
+                reservoir_id="reservoir:resume-cdx",
+                domain_id="domain:resume-cdx",
+                adapter_id="structured:resume-cdx",
+                root_locator=str(path),
+                enumeration_kind="structured_records",
+                capacity_lower=2,
+                state=ReservoirState.READY,
+                evidence_mode="direct_year",
+            )
+            first_adapter = ProductionAdapterFactory.open(reservoir)
+            lease = WorkLease.create(
+                reservoir_id=reservoir.reservoir_id,
+                max_records=1,
+                max_requests=1,
+                max_bytes=4096,
+                max_seconds=10,
+            )
+            _records, first_result = first_adapter.execute(lease)
+            first_adapter.close()
+
+            recovered = ProductionAdapterFactory.open(reservoir)
+            resumed_lease = WorkLease.create(
+                reservoir_id=reservoir.reservoir_id,
+                cursor_start=first_result.next_cursor,
+                max_records=1,
+                max_requests=1,
+                max_bytes=4096,
+                max_seconds=10,
+            )
+            records, result = recovered.execute(resumed_lease)
+            observation = next(iter(recovered.extract_hosts(next(records))))
+            recovered.close()
+
+        self.assertEqual(observation.hostname, "second.com")
+        self.assertEqual(observation.source_time, "19990101000000")
+        self.assertEqual(result.requests, 1)
+
+    def test_compressed_url_list_uses_single_year_as_hint_not_direct_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "webbase-2001.urls.gz"
+            with gzip.open(path, "wt", encoding="utf-8") as target:
+                target.write("http://novel.example/path\n")
+            reservoir = Reservoir(
+                reservoir_id="reservoir:webbase",
+                domain_id="domain:webbase",
+                adapter_id="structured:webbase",
+                root_locator=str(path),
+                enumeration_kind="structured_records",
+                capacity_lower=1,
+                state=ReservoirState.READY,
+                evidence_mode="discovery_only",
+            )
+            adapter = ProductionAdapterFactory.open(
+                reservoir,
+                temporal_scope=(2001, 2001),
+            )
+            lease = WorkLease.create(
+                reservoir_id=reservoir.reservoir_id,
+                max_records=1,
+                max_requests=1,
+                max_bytes=4096,
+                max_seconds=10,
+            )
+            records, _result = adapter.execute(lease)
+            observation = next(iter(adapter.extract_hosts(next(records))))
+            adapter.close()
+
+        self.assertEqual(observation.hostname, "novel.example")
+        self.assertEqual(observation.source_year, 2001)
+        self.assertEqual(observation.year_hint_mask, 1 << (2001 - 1996))
+        self.assertEqual(observation.direct_year_mask, 0)
+
+    def test_jsonl_and_csv_explicit_years_become_hints(self) -> None:
+        fixtures = (
+            (
+                "records.jsonl",
+                '{"url":"https://json.example/a","year":1999}\n',
+                "json.example",
+                1999,
+            ),
+            (
+                "records.csv",
+                "https://csv.example/a,1998\n",
+                "csv.example",
+                1998,
+            ),
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            observations = []
+            for index, (name, content, hostname, year) in enumerate(fixtures):
+                path = root / name
+                path.write_text(content, encoding="utf-8")
+                reservoir = Reservoir(
+                    reservoir_id=f"reservoir:structured-{index}",
+                    domain_id=f"domain:structured-{index}",
+                    adapter_id=f"structured:structured-{index}",
+                    root_locator=str(path),
+                    enumeration_kind="structured_records",
+                    capacity_lower=1,
+                    state=ReservoirState.READY,
+                    evidence_mode="discovery_only",
+                )
+                adapter = ProductionAdapterFactory.open(
+                    reservoir,
+                    temporal_scope=(1996, 2001),
+                )
+                lease = WorkLease.create(
+                    reservoir_id=reservoir.reservoir_id,
+                    max_records=1,
+                    max_requests=1,
+                    max_bytes=4096,
+                    max_seconds=10,
+                )
+                records, _result = adapter.execute(lease)
+                observation = next(iter(adapter.extract_hosts(next(records))))
+                adapter.close()
+                observations.append((observation, hostname, year))
+
+        for observation, hostname, year in observations:
+            self.assertEqual(observation.hostname, hostname)
+            self.assertEqual(observation.source_year, year)
+            self.assertEqual(observation.year_hint_mask, 1 << (year - 1996))
+            self.assertEqual(observation.direct_year_mask, 0)
 
     def test_structured_cdx_adapter_parses_jisc_style_rows(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
