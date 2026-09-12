@@ -17,6 +17,20 @@ from creeper.source_discovery.coordinator import (
     TriageResult,
 )
 from creeper.source_discovery.expander import ExpansionResult, expand_scrapy_spool
+from creeper.source_discovery.index_registry import IndexSpaceRegistry
+from creeper.source_discovery.index_space import (
+    CompiledIndexSpace,
+    HarvestRegion,
+    QueryCapabilityHints,
+    RegionKind,
+    RegionSynopsis,
+    SourceAccessMode,
+    SourceCapabilities,
+    SourceFactorySpec,
+    SourceIndexSpec,
+    child_region,
+    compile_candidate_index_space,
+)
 from creeper.source_discovery.manager import (
     ReservoirPlan,
     SearchDirective,
@@ -77,6 +91,16 @@ __all__ = [
     "HttpSourceTriageExecutor",
     "HttpTriagePolicy",
     "LinkPromotionAccumulator",
+    "CompiledIndexSpace",
+    "HarvestRegion",
+    "IndexSpaceRegistry",
+    "QueryCapabilityHints",
+    "RegionKind",
+    "RegionSynopsis",
+    "SourceAccessMode",
+    "SourceCapabilities",
+    "SourceFactorySpec",
+    "SourceIndexSpec",
     "MeasuredYieldScoutExecutor",
     "MeasuredYieldScoutPolicy",
     "MeasurementMode",
@@ -114,6 +138,8 @@ __all__ = [
     "TriageResult",
     "TriageTransientError",
     "canonicalize_source_entrypoint",
+    "child_region",
+    "compile_candidate_index_space",
     "expand_scrapy_spool",
     "iter_scrapy_link_discoveries",
     "prepare_append_spool",

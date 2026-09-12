@@ -106,6 +106,35 @@ class SourceActivationCompilerTests(unittest.TestCase):
 
                 self.assertEqual(spec.adapter_kind, "structured")
                 self.assertEqual(spec.evidence_mode, "direct_year")
+                index_row = control.connection.execute(
+                    """
+                    SELECT source_format, access_mode,
+                           direct_evidence_authority
+                    FROM source_indexes_v1
+                    WHERE source_key = ?
+                    """,
+                    (candidate.source_key,),
+                ).fetchone()
+                self.assertIsNotNone(index_row)
+                self.assertEqual(index_row["source_format"], "CDXJ")
+                self.assertEqual(index_row["access_mode"], "SORTED_INDEX")
+                self.assertEqual(index_row["direct_evidence_authority"], 1)
+                synopsis_row = control.connection.execute(
+                    """
+                    SELECT measurement_mode, novel_hosts, novel_eed,
+                           sampled_records, complete
+                    FROM source_region_synopses_v1
+                    """
+                ).fetchone()
+                self.assertIsNotNone(synopsis_row)
+                # Capability and measurement authority stay separate. This
+                # shared fixture used a HOST_ONLY scout measurement, so
+                # activation must not invent year-aware scout evidence.
+                self.assertEqual(synopsis_row["measurement_mode"], "HOST_ONLY")
+                self.assertEqual(synopsis_row["novel_hosts"], 200)
+                self.assertEqual(synopsis_row["novel_eed"], 100.0)
+                self.assertEqual(synopsis_row["sampled_records"], 256)
+                self.assertEqual(synopsis_row["complete"], 0)
             finally:
                 control.close()
 

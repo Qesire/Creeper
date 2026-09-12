@@ -48,9 +48,43 @@ class SourceProducerReport:
     observation_queue_block_milliseconds: int = 0
     baseline_lookup_milliseconds: int = 0
     planning_commit_milliseconds: int = 0
+    planning_observations: int = 0
 
     def as_dict(self) -> dict[str, object]:
         return self.__dict__.copy()
+
+
+def _coalesce_planning_observations(
+    observations: Iterable[HostObservation],
+) -> list[HostObservation]:
+    """Keep one deterministic witness for each planner-equivalent observation.
+
+    Archive indexes often contain many captures of the same hostname in the
+    same year. Baseline lookup was already hostname-deduplicated, but the
+    EvidencePlanner still saw every capture. The planner only depends on the
+    fields in this key; locator/time affect provenance, not the decision.
+    Keeping the first observation therefore preserves one real witness while
+    removing redundant planning work.
+
+    Distinct source years, direct masks, hint masks, source scopes, or sources
+    remain separate so no temporal/evidence semantics are merged.
+    """
+
+    selected: dict[
+        tuple[str, str, object, int | None, int, int],
+        HostObservation,
+    ] = {}
+    for observation in observations:
+        key = (
+            observation.hostname,
+            observation.source_id,
+            observation.scope,
+            observation.source_year,
+            int(observation.direct_year_mask),
+            int(observation.year_hint_mask),
+        )
+        selected.setdefault(key, observation)
+    return list(selected.values())
 
 
 class SourceProducer:
@@ -233,7 +267,8 @@ class SourceProducer:
         origin_source_key = candidate.source_key or candidate.reservoir_id
         running = lease.start()
         self.control_store.save_lease(running)
-        source_records = observations = enqueued = direct_committed = 0
+        source_records = observations = planning_observations = 0
+        enqueued = direct_committed = 0
         max_source = max_observations = 0
         pipeline_batches = 0
         source_queue_block_ms = observation_queue_block_ms = 0
@@ -331,10 +366,12 @@ class SourceProducer:
                     self.admission.release(aux_reservation)
 
             def resolve_pending() -> None:
-                nonlocal direct_committed, pipeline_batches
+                nonlocal direct_committed, pipeline_batches, planning_observations
                 nonlocal baseline_lookup_ms, planning_commit_ms
                 if not pending:
                     return
+                planning_pending = _coalesce_planning_observations(pending)
+                planning_observations += len(planning_pending)
                 keep_ownership_live()
                 pipeline_batches += 1
                 # High-frequency archive indexes may repeat the same host
@@ -342,7 +379,7 @@ class SourceProducer:
                 # unique hostname once, then update the in-memory masks as work
                 # is planned so later observations in this batch are free.
                 hostnames = list(
-                    dict.fromkeys(observation.hostname for observation in pending)
+                    dict.fromkeys(observation.hostname for observation in planning_pending)
                 )
                 self.control_store.record_domain_fanout_observations(
                     hostnames,
@@ -374,7 +411,7 @@ class SourceProducer:
                     candidate.reservoir is not None
                     and candidate.reservoir.evidence_mode == "direct_year"
                 )
-                for item in pending:
+                for item in planning_pending:
                     annual_mask, _candidate = resolved.get(item.hostname, (0, False))
                     plan = self.evidence_planner.plan(
                         item,
@@ -413,7 +450,7 @@ class SourceProducer:
                 if not allow_direct:
                     domain_parents = self.control_store.ready_domain_fanout_candidates(
                         min_children=self.domain_fanout_min_children,
-                        limit=min(self.domain_fanout_batch_size, len(pending)),
+                        limit=min(self.domain_fanout_batch_size, len(planning_pending)),
                     )
                     if domain_parents:
                         domain_keys = tuple(
@@ -661,6 +698,7 @@ class SourceProducer:
                 leases_succeeded=1,
                 source_records=source_records,
                 observations=observations,
+                planning_observations=planning_observations,
                 evidence_tasks_enqueued=enqueued,
                 direct_capsules_committed=direct_committed,
                 max_source_record_queue_depth=max_source,
@@ -701,6 +739,9 @@ class SourceProducer:
                 leases_succeeded=total.leases_succeeded + report.leases_succeeded,
                 source_records=total.source_records + report.source_records,
                 observations=total.observations + report.observations,
+                planning_observations=(
+                    total.planning_observations + report.planning_observations
+                ),
                 evidence_tasks_enqueued=(
                     total.evidence_tasks_enqueued + report.evidence_tasks_enqueued
                 ),
