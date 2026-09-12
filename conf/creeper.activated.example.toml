@@ -3,6 +3,10 @@ source_mode = "activated"
 runtime_data_root = "/path/to/Creeper-data/v3-merged260909-3"
 baseline_index = "/path/to/Creeper-data/v3-merged260909-3/baseline.sqlite3"
 
+# Require this many distinct subdomains plus the observed root in one source
+# batch before scheduling one bounded matchType=domain probe.
+domain_amplification_min_hosts = 4
+
 [limits]
 queue_source_records = 1000
 queue_observations = 1000
