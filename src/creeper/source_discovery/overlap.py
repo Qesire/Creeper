@@ -23,6 +23,25 @@ class MinHashSketch:
         )
         return matches / len(self.values)
 
+    def union(self, *others: "MinHashSketch") -> "MinHashSketch":
+        """Return the MinHash signature of the union.
+
+        For independent min-wise hash functions, the union signature is the
+        element-wise minimum of the member signatures. This lets the portfolio
+        planner maintain one compact virtual coverage set without materializing
+        host-year keys.
+        """
+
+        minima = list(self.values)
+        for other in others:
+            if len(other.values) != len(minima):
+                raise ValueError("MinHash sketches must use the same width")
+            minima = [
+                min(left, right)
+                for left, right in zip(minima, other.values, strict=True)
+            ]
+        return MinHashSketch(tuple(minima))
+
 
 def _hash64(seed: int, value: str) -> int:
     digest = hashlib.blake2b(
