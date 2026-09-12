@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 import csv
 from dataclasses import replace
 import io
@@ -67,6 +67,22 @@ class WarcProductionAdapter:
             elapsed_seconds=0.0,
             next_cursor=result.next_cursor,
         )
+
+    def execute_stream(
+        self,
+        lease: WorkLease,
+        emit_record: Callable[[SourceRecord], None],
+    ) -> LeaseResult:
+        """Emit WARC-derived records into the runtime pipeline.
+
+        The current WARC metadata reader materializes one bounded archive lease
+        internally, but emission begins immediately afterwards and shares the
+        same SourceProducer pipeline contract as structured/static sources.
+        """
+        records, result = self.execute(lease)
+        for record in records:
+            emit_record(record)
+        return result
 
     def extract_hosts(self, record: SourceRecord) -> Iterable[HostObservation]:
         parsed = urlsplit(record.payload)
@@ -287,18 +303,28 @@ class StructuredProductionAdapter:
             artifact_ref=self.source,
         )
 
-    def execute(self, lease: WorkLease) -> tuple[Iterator[SourceRecord], LeaseResult]:
+    def execute_stream(
+        self,
+        lease: WorkLease,
+        emit_record: Callable[[SourceRecord], None],
+    ) -> LeaseResult:
+        """Read and emit one bounded structured lease incrementally.
+
+        This is the production fast path for large CDX/CDXJ resources: source
+        I/O overlaps hostname extraction, baseline lookup, planning and durable
+        authority commits through SourceProducer's bounded queues.
+        """
         start = self._cursor_value(lease.cursor_start)
-        records: list[SourceRecord] = []
+        emitted = 0
         started = time.monotonic()
         bytes_read = 0
         next_cursor: str | None = f"byte:{start}"
         if lease.max_requests <= 0 or lease.max_seconds <= 0:
-            return iter(()), LeaseResult(lease.lease_id, next_cursor=next_cursor)
+            return LeaseResult(lease.lease_id, next_cursor=next_cursor)
 
         source, opened = self._ensure_stream(start)
         try:
-            while len(records) < lease.max_records and bytes_read < lease.max_bytes:
+            while emitted < lease.max_records and bytes_read < lease.max_bytes:
                 if time.monotonic() - started >= lease.max_seconds:
                     break
 
@@ -351,7 +377,8 @@ class StructuredProductionAdapter:
                         year_hint_mask=1 << (record.source_year - 1996),
                     )
                 if record is not None:
-                    records.append(record)
+                    emit_record(record)
+                    emitted += 1
                 bytes_read += len(raw)
                 next_cursor = f"byte:{source.tell()}"
         except BaseException:
@@ -361,14 +388,19 @@ class StructuredProductionAdapter:
                 self.close()
             raise
 
-        return iter(records), LeaseResult(
+        return LeaseResult(
             lease_id=lease.lease_id,
-            records=len(records),
+            records=emitted,
             requests=1 if opened else 0,
             bytes_read=bytes_read,
             elapsed_seconds=time.monotonic() - started,
             next_cursor=next_cursor,
         )
+
+    def execute(self, lease: WorkLease) -> tuple[Iterator[SourceRecord], LeaseResult]:
+        records: list[SourceRecord] = []
+        result = self.execute_stream(lease, records.append)
+        return iter(records), result
 
     def extract_hosts(self, record: SourceRecord) -> Iterable[HostObservation]:
         raw = record.payload.strip()
