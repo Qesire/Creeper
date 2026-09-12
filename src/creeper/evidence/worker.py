@@ -142,6 +142,14 @@ class AsyncEvidenceWorker:
             return []
 
         providers = tuple(self.providers)
+        if len(providers) == 1:
+            return self.queue.claim(
+                owner=self.owner,
+                limit=limit,
+                providers=providers,
+                lease_seconds=self.lease_seconds,
+            )
+
         quotas = {provider: 0 for provider in providers}
         reserve_budget = min(
             limit,
