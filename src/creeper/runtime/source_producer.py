@@ -10,9 +10,11 @@ producer processes cannot outrun the evidence backlog high-water mark.
 
 from __future__ import annotations
 
+import queue
 import time
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
+from threading import Event, Lock, Thread
 
 from creeper.authority.baseline_index import BaselineIndex, YEAR_BITS
 from creeper.evidence.planner import EvidencePlanner
@@ -41,6 +43,11 @@ class SourceProducerReport:
     admission_blocked: bool = False
     max_source_record_queue_depth: int = 0
     max_observation_queue_depth: int = 0
+    pipeline_batches: int = 0
+    source_queue_block_milliseconds: int = 0
+    observation_queue_block_milliseconds: int = 0
+    baseline_lookup_milliseconds: int = 0
+    planning_commit_milliseconds: int = 0
 
     def as_dict(self) -> dict[str, object]:
         return self.__dict__.copy()
@@ -68,10 +75,20 @@ class SourceProducer:
         rdap_batch_size: int = 16,
         owner: str = "source-producer",
         baseline_batch_size: int = 50_000,
+        pipeline_batch_size: int = 1_000,
+        extract_workers: int = 2,
         reservation_grace_seconds: float = 30.0,
     ) -> None:
         if baseline_batch_size < 1:
             raise ValueError("baseline_batch_size must be positive")
+        if pipeline_batch_size < 1:
+            raise ValueError("pipeline_batch_size must be positive")
+        if (
+            not isinstance(extract_workers, int)
+            or isinstance(extract_workers, bool)
+            or extract_workers < 1
+        ):
+            raise ValueError("extract_workers must be a positive integer")
         if reservation_grace_seconds < 0:
             raise ValueError("reservation_grace_seconds must be non-negative")
         if not 0.0 <= float(range_first_fraction) <= 1.0:
@@ -105,6 +122,8 @@ class SourceProducer:
         self.rdap_batch_size = int(rdap_batch_size)
         self.owner = owner
         self.baseline_batch_size = baseline_batch_size
+        self.pipeline_batch_size = pipeline_batch_size
+        self.extract_workers = extract_workers
         self.reservation_grace_seconds = reservation_grace_seconds
         self.evidence_planner = EvidencePlanner()
         self.admission = EvidenceBacklogAdmission(control_store)
@@ -124,10 +143,6 @@ class SourceProducer:
         self.candidates = tuple(candidates)
         self.adapters = dict(adapters)
 
-    @staticmethod
-    def _put(queue, value: object) -> int:
-        queue.put_nowait(value)
-        return queue.qsize()
 
     def _adapter_for(self, candidate: LeaseCandidate) -> object:
         if candidate.reservoir is None:
@@ -220,7 +235,9 @@ class SourceProducer:
         self.control_store.save_lease(running)
         source_records = observations = enqueued = direct_committed = 0
         max_source = max_observations = 0
-        direct_capsules = []
+        pipeline_batches = 0
+        source_queue_block_ms = observation_queue_block_ms = 0
+        baseline_lookup_ms = planning_commit_ms = 0
         scheduled_keys: dict[EvidenceQueryKey, None] = {}
         result = None
         source_finalized = False
@@ -319,10 +336,12 @@ class SourceProducer:
                     self.admission.release(aux_reservation)
 
             def resolve_pending() -> None:
-                nonlocal direct_capsules
+                nonlocal direct_committed, pipeline_batches
+                nonlocal baseline_lookup_ms, planning_commit_ms
                 if not pending:
                     return
                 keep_ownership_live()
+                pipeline_batches += 1
                 # High-frequency archive indexes may repeat the same host
                 # tens of thousands of times inside one lease. Resolve each
                 # unique hostname once, then update the in-memory masks as work
@@ -335,6 +354,7 @@ class SourceProducer:
                     source_key=origin_source_key,
                 )
                 resolved: dict[str, tuple[int, bool]] = {}
+                lookup_started = time.monotonic()
                 local_masks = self.evidence_store.resolve_year_masks(hostnames)
                 provider_coverage_masks = (
                     self.control_store.resolve_provider_coverage_masks(
@@ -349,6 +369,12 @@ class SourceProducer:
                 ):
                     resolved.update(batch)
                     keep_ownership_live()
+                baseline_lookup_ms += max(
+                    0,
+                    int(round((time.monotonic() - lookup_started) * 1000.0)),
+                )
+                planning_started = time.monotonic()
+                batch_direct_capsules = []
                 allow_direct = (
                     candidate.reservoir is not None
                     and candidate.reservoir.evidence_mode == "direct_year"
@@ -372,7 +398,7 @@ class SourceProducer:
                             bit = YEAR_BITS.get(capsule.year, 0)
                             if local_masks.get(item.hostname, 0) & bit:
                                 continue
-                            direct_capsules.append(capsule)
+                            batch_direct_capsules.append(capsule)
                             local_masks[item.hostname] = (
                                 local_masks.get(item.hostname, 0) | bit
                             )
@@ -430,37 +456,165 @@ class SourceProducer:
                         # deduplication, so RDAP discovery needs no per-host
                         # side table or enqueue flag.
                         enqueue_auxiliary_keys("rdap", rdap_keys)
+
+                if batch_direct_capsules:
+                    self.control_store.attribute_direct_host_years(
+                        (
+                            (capsule.hostname, capsule.year, capsule.provider)
+                            for capsule in batch_direct_capsules
+                        ),
+                        source_key=origin_source_key,
+                        reservoir_id=candidate.reservoir_id,
+                        lease_id=running.lease_id,
+                    )
+                    direct_committed += self.evidence_store.put_many(
+                        batch_direct_capsules
+                    )
+                planning_commit_ms += max(
+                    0,
+                    int(round((time.monotonic() - planning_started) * 1000.0)),
+                )
                 pending.clear()
 
-            for record in records:
-                max_source = max(
-                    max_source,
-                    self._put(queues.source_record_queue, record),
-                )
-                current = queues.source_record_queue.get_nowait()
-                source_records += 1
-                for observation in extract_hosts(current):
-                    max_observations = max(
-                        max_observations,
-                        self._put(queues.observation_queue, observation),
-                    )
-                    pending.append(queues.observation_queue.get_nowait())
-                    observations += 1
-                    if len(pending) >= self.baseline_batch_size:
-                        resolve_pending()
-            resolve_pending()
+            # True bounded producer-consumer pipeline:
+            #
+            # adapter records -> source_record_queue -> extraction workers
+            # -> observation_queue -> batched lookup/planning/authority writer.
+            #
+            # SQLite authority stays on this thread; source iteration and host
+            # extraction continue concurrently until bounded queues apply
+            # backpressure.
+            source_sentinel = object()
+            observation_sentinel = object()
+            pipeline_stop = Event()
+            pipeline_lock = Lock()
+            pipeline_errors: queue.Queue[BaseException] = queue.Queue()
 
-            if direct_capsules:
-                self.control_store.attribute_direct_host_years(
-                    (
-                        (capsule.hostname, capsule.year, capsule.provider)
-                        for capsule in direct_capsules
-                    ),
-                    source_key=origin_source_key,
-                    reservoir_id=candidate.reservoir_id,
-                    lease_id=running.lease_id,
+            def put_with_backpressure(target, value, *, kind: str) -> None:
+                nonlocal source_queue_block_ms, observation_queue_block_ms
+                started_wait = time.monotonic()
+                while not pipeline_stop.is_set():
+                    try:
+                        target.put(value, timeout=0.1)
+                        waited = max(
+                            0,
+                            int(round((time.monotonic() - started_wait) * 1000.0)),
+                        )
+                        with pipeline_lock:
+                            if kind == "source":
+                                source_queue_block_ms += waited
+                            else:
+                                observation_queue_block_ms += waited
+                        return
+                    except queue.Full:
+                        continue
+                raise RuntimeError("source pipeline cancelled")
+
+            def acquire_records() -> None:
+                nonlocal source_records, max_source
+                try:
+                    for record in records:
+                        put_with_backpressure(
+                            queues.source_record_queue,
+                            record,
+                            kind="source",
+                        )
+                        with pipeline_lock:
+                            source_records += 1
+                            max_source = max(
+                                max_source,
+                                queues.source_record_queue.qsize(),
+                            )
+                except BaseException as exc:
+                    pipeline_errors.put(exc)
+                    pipeline_stop.set()
+                finally:
+                    for _ in range(self.extract_workers):
+                        try:
+                            put_with_backpressure(
+                                queues.source_record_queue,
+                                source_sentinel,
+                                kind="source",
+                            )
+                        except BaseException:
+                            break
+
+            def extract_observations() -> None:
+                nonlocal observations, max_observations
+                try:
+                    while not pipeline_stop.is_set():
+                        try:
+                            current = queues.source_record_queue.get(timeout=0.1)
+                        except queue.Empty:
+                            continue
+                        if current is source_sentinel:
+                            break
+                        for observation in extract_hosts(current):
+                            put_with_backpressure(
+                                queues.observation_queue,
+                                observation,
+                                kind="observation",
+                            )
+                            with pipeline_lock:
+                                observations += 1
+                                max_observations = max(
+                                    max_observations,
+                                    queues.observation_queue.qsize(),
+                                )
+                except BaseException as exc:
+                    pipeline_errors.put(exc)
+                    pipeline_stop.set()
+                finally:
+                    try:
+                        put_with_backpressure(
+                            queues.observation_queue,
+                            observation_sentinel,
+                            kind="observation",
+                        )
+                    except BaseException:
+                        pass
+
+            acquisition = Thread(
+                target=acquire_records,
+                name=f"{self.owner}-source-acquire",
+                daemon=True,
+            )
+            extractors = [
+                Thread(
+                    target=extract_observations,
+                    name=f"{self.owner}-extract-{index}",
+                    daemon=True,
                 )
-                direct_committed += self.evidence_store.put_many(direct_capsules)
+                for index in range(self.extract_workers)
+            ]
+            acquisition.start()
+            for worker in extractors:
+                worker.start()
+
+            finished_extractors = 0
+            try:
+                while finished_extractors < self.extract_workers:
+                    if not pipeline_errors.empty():
+                        raise pipeline_errors.get()
+                    try:
+                        item = queues.observation_queue.get(timeout=0.1)
+                    except queue.Empty:
+                        keep_ownership_live()
+                        continue
+                    if item is observation_sentinel:
+                        finished_extractors += 1
+                        continue
+                    pending.append(item)
+                    if len(pending) >= self.pipeline_batch_size:
+                        resolve_pending()
+                resolve_pending()
+                if not pipeline_errors.empty():
+                    raise pipeline_errors.get()
+            finally:
+                pipeline_stop.set()
+                acquisition.join(timeout=5.0)
+                for worker in extractors:
+                    worker.join(timeout=5.0)
             assert result is not None
             self.control_store.finalize_lease(
                 running,
@@ -478,6 +632,11 @@ class SourceProducer:
                 direct_capsules_committed=direct_committed,
                 max_source_record_queue_depth=max_source,
                 max_observation_queue_depth=max_observations,
+                pipeline_batches=pipeline_batches,
+                source_queue_block_milliseconds=source_queue_block_ms,
+                observation_queue_block_milliseconds=observation_queue_block_ms,
+                baseline_lookup_milliseconds=baseline_lookup_ms,
+                planning_commit_milliseconds=planning_commit_ms,
             )
         except BaseException:
             if not source_finalized:
@@ -523,6 +682,23 @@ class SourceProducer:
                 max_observation_queue_depth=max(
                     total.max_observation_queue_depth,
                     report.max_observation_queue_depth,
+                ),
+                pipeline_batches=total.pipeline_batches + report.pipeline_batches,
+                source_queue_block_milliseconds=(
+                    total.source_queue_block_milliseconds
+                    + report.source_queue_block_milliseconds
+                ),
+                observation_queue_block_milliseconds=(
+                    total.observation_queue_block_milliseconds
+                    + report.observation_queue_block_milliseconds
+                ),
+                baseline_lookup_milliseconds=(
+                    total.baseline_lookup_milliseconds
+                    + report.baseline_lookup_milliseconds
+                ),
+                planning_commit_milliseconds=(
+                    total.planning_commit_milliseconds
+                    + report.planning_commit_milliseconds
                 ),
             )
             if report.leases_succeeded:
