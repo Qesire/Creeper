@@ -17,6 +17,16 @@ from creeper.source_discovery.coordinator import (
     TriageResult,
 )
 from creeper.source_discovery.expander import ExpansionResult, expand_scrapy_spool
+from creeper.source_discovery.harvest import (
+    RegionHarvestError,
+    RegionHarvestExecutor,
+    RegionHarvestPolicy,
+    RegionHarvestReport,
+)
+from creeper.source_discovery.harvest_service import (
+    RegionHarvestService,
+    RegionHarvestServiceReport,
+)
 from creeper.source_discovery.index_registry import IndexSpaceRegistry
 from creeper.source_discovery.index_space import (
     CompiledIndexSpace,
@@ -116,6 +126,12 @@ __all__ = [
     "ExpansionResult",
     "HttpSourceTriageExecutor",
     "HttpTriagePolicy",
+    "RegionHarvestError",
+    "RegionHarvestExecutor",
+    "RegionHarvestPolicy",
+    "RegionHarvestReport",
+    "RegionHarvestService",
+    "RegionHarvestServiceReport",
     "LinkPromotionAccumulator",
     "CompiledIndexSpace",
     "HarvestRegion",
