@@ -141,7 +141,7 @@ class RegionHarvestExecutor:
         counters: dict[str, int],
         source_key: str | None = None,
         reservoir_id: str | None = None,
-        lease_id: str | None = None,
+        origin_unit_id: str | None = None,
     ) -> None:
         if not groups:
             return
@@ -198,21 +198,22 @@ class RegionHarvestExecutor:
         counters["planned"] += len(capsules)
         if capsules:
             if source_key is not None:
-                if reservoir_id is None or lease_id is None:
+                if reservoir_id is None or origin_unit_id is None:
                     raise RegionHarvestError(
-                        "direct region attribution requires reservoir and lease identity"
+                        "direct region attribution requires reservoir and origin identity"
                     )
                 # Publish lineage before EvidenceStore makes the host-year visible
                 # to readiness. This matches SourceProducer's authority ordering
                 # and prevents a racing readiness cycle from losing source credit.
-                self.registry.control_store.attribute_direct_host_years(
+                self.registry.control_store.attribute_direct_origin_unit_host_years(
                     (
                         (capsule.hostname, capsule.year, capsule.provider)
                         for capsule in capsules
                     ),
                     source_key=source_key,
                     reservoir_id=reservoir_id,
-                    lease_id=lease_id,
+                    origin_kind="region_harvest",
+                    origin_unit_id=origin_unit_id,
                 )
             counters["inserted"] += self.evidence_store.put_many(capsules)
         groups.clear()
@@ -725,7 +726,7 @@ class RegionHarvestExecutor:
                     else None
                 ),
                 reservoir_id=origin_reservoir_id,
-                lease_id=lease.lease_id,
+                origin_unit_id=region_key,
             )
 
         def emit(record: SourceRecord) -> None:
