@@ -33,23 +33,46 @@ def _hash64(seed: int, value: str) -> int:
     return int.from_bytes(digest, "big", signed=False)
 
 
+class MinHashAccumulator:
+    """Streaming MinHash builder with O(width) memory.
+
+    Region synopsis construction can consume millions of host-year keys.  The
+    original build_minhash helper was already iterator-friendly, but this
+    stateful form lets a caller update the sketch while simultaneously doing
+    baseline reconciliation and histograms without retaining observation keys.
+    """
+
+    def __init__(self, *, width: int = 64) -> None:
+        if width < 1:
+            raise ValueError("MinHash width must be positive")
+        self.width = int(width)
+        self._minima = [(1 << 64) - 1] * self.width
+        self._seen = False
+
+    def update(self, value: str) -> None:
+        if not isinstance(value, str) or not value:
+            return
+        self._seen = True
+        for seed in range(self.width):
+            hashed = _hash64(seed, value)
+            if hashed < self._minima[seed]:
+                self._minima[seed] = hashed
+
+    def extend(self, values: Iterable[str]) -> None:
+        for value in values:
+            self.update(value)
+
+    def sketch(self) -> MinHashSketch:
+        if not self._seen:
+            return MinHashSketch((0,) * self.width)
+        return MinHashSketch(tuple(self._minima))
+
+
 def build_minhash(
     values: Iterable[str],
     *,
     width: int = 64,
 ) -> MinHashSketch:
-    if width < 1:
-        raise ValueError("MinHash width must be positive")
-    minima = [(1 << 64) - 1] * width
-    seen = False
-    for value in values:
-        if not isinstance(value, str) or not value:
-            continue
-        seen = True
-        for seed in range(width):
-            hashed = _hash64(seed, value)
-            if hashed < minima[seed]:
-                minima[seed] = hashed
-    if not seen:
-        minima = [0] * width
-    return MinHashSketch(tuple(minima))
+    accumulator = MinHashAccumulator(width=width)
+    accumulator.extend(values)
+    return accumulator.sketch()
