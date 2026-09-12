@@ -350,5 +350,31 @@ class AsyncWaybackCDXClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.candidate_years, ())
 
 
+    async def test_wait_state_counters_measure_retry_and_shared_cooldown(self):
+        calls = 0
+
+        async def handler(request):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return httpx.Response(503, request=request)
+            return httpx.Response(200, content=b"[]", request=request)
+
+        async with AsyncWaybackCDXClient(
+            transport=httpx.MockTransport(handler),
+            max_retries=1,
+            backoff=0.005,
+            max_backoff=0.005,
+            throttle_floor_seconds=0.03,
+            requests_per_second=0,
+        ) as client:
+            result = await client.query_key(self.key())
+
+        self.assertEqual(result.state, CDXQueryState.EMPTY_EXHAUSTIVE)
+        self.assertEqual(calls, 2)
+        self.assertGreater(client.retry_backoff_wait_milliseconds, 0)
+        self.assertGreater(client.cooldown_wait_milliseconds, 0)
+
+
 if __name__ == "__main__":
     unittest.main()
