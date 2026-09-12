@@ -225,6 +225,8 @@ class IncrementalReadinessTests(unittest.TestCase):
                 max_requests=1,
                 max_bytes=1024,
                 max_seconds=30,
+                now=100.0,
+                expires_at=130.0,
             )
             control.save_lease(lease)
             control.attribute_direct_host_years(
