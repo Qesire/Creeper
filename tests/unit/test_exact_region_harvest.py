@@ -12,14 +12,24 @@ from creeper.source_discovery.harvest import (
     RegionHarvestExecutor,
     RegionHarvestPolicy,
 )
+from creeper.source_discovery.harvest_service import RegionHarvestService
 from creeper.source_discovery.index_registry import IndexSpaceRegistry
 from creeper.source_discovery.index_space import (
     RegionKind,
     RegionState,
+    RegionSynopsis,
     child_region,
     compile_candidate_index_space,
 )
-from creeper.source_discovery.models import SourceCandidate, SourceLevel
+from creeper.source_discovery.models import (
+    MeasurementMode,
+    SourceCandidate,
+    SourceLevel,
+)
+from creeper.source_discovery.portfolio import (
+    RegionPortfolioPlanner,
+    RegionPortfolioPolicy,
+)
 from creeper.storage.control_store import ControlStore
 from creeper.storage.evidence_store import EvidenceStore
 
@@ -303,6 +313,70 @@ class ExactRegionHarvestTests(unittest.TestCase):
         self.assertEqual(
             [item.year for item in self.evidence.for_hostname("novel.com")],
             [1998, 1999],
+        )
+
+    def test_service_closes_portfolio_selection_to_harvested_evidence(self) -> None:
+        path = self.root / "service.cdxj"
+        path.write_text(
+            self._line("novel", 1998, "0101000000"),
+            encoding="utf-8",
+        )
+        compiled = self._compiled_local(path)
+        self.registry.register_index_space(compiled)
+        self.registry.record_synopsis(
+            RegionSynopsis(
+                region_key=compiled.root_region.region_key,
+                sampled_records=1,
+                unique_hosts=1,
+                novel_hosts=1,
+                observed_host_year_pairs=1,
+                novel_host_year_pairs=1,
+                novel_eed=1.0,
+                bytes_read=path.stat().st_size,
+                requests=1,
+                measurement_mode=MeasurementMode.HOST_YEAR,
+                minhash_values=(11, 13, 17, 19),
+                confidence=1.0,
+                complete=True,
+            )
+        )
+        self.registry.mark_region_state(
+            compiled.root_region.region_key,
+            RegionState.HARVEST_READY,
+        )
+        portfolio = RegionPortfolioPlanner(
+            self.registry,
+            policy=RegionPortfolioPolicy(confidence_floor=1.0),
+        )
+        harvest = RegionHarvestExecutor(
+            registry=self.registry,
+            baseline=self.baseline,
+            evidence_store=self.evidence,
+        )
+        service = RegionHarvestService(
+            self.registry,
+            portfolio_planner=portfolio,
+            harvest_executor=harvest,
+        )
+
+        report = service.run_once(max_regions=1)
+
+        self.assertEqual(
+            report.selected_regions,
+            (compiled.root_region.region_key,),
+        )
+        self.assertEqual(
+            report.completed_regions,
+            (compiled.root_region.region_key,),
+        )
+        self.assertEqual(report.incomplete_regions, ())
+        self.assertEqual(report.failed_regions, ())
+        self.assertEqual(report.claim_skipped_regions, ())
+        self.assertEqual(report.direct_capsules_inserted, 1)
+        self.assertEqual(self.evidence.host_year_count(), 1)
+        self.assertEqual(
+            self.registry.get_region(compiled.root_region.region_key).state,
+            RegionState.HARVESTED,
         )
 
     def test_direct_authority_failure_releases_claim_immediately(self) -> None:
