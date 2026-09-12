@@ -287,24 +287,13 @@ class RegionHarvestExecutor:
                 source.seek(start)
                 if previous != b"\n":
                     # The record began before this region, so it is not owned
-                    # here. Search only inside the core partition; if there is
-                    # no newline before the end, this region owns zero rows.
-                    remaining = end_exclusive - start
-                    while remaining > 0:
-                        chunk = source.read(min(64 * 1024, remaining))
-                        if not chunk:
-                            cursor = end_exclusive
-                            break
-                        bytes_read += len(chunk)
-                        boundary = chunk.find(b"\n")
-                        if boundary >= 0:
-                            consumed = boundary + 1
-                            cursor += consumed
-                            source.seek(cursor)
-                            break
-                        cursor += len(chunk)
-                        remaining -= len(chunk)
-                    if cursor >= end_exclusive:
+                    # here. readline(size) stops at the first newline without
+                    # over-reading bytes that would then be read a second time.
+                    core_remaining = end_exclusive - start
+                    skipped = source.readline(core_remaining)
+                    bytes_read += len(skipped)
+                    cursor += len(skipped)
+                    if not skipped.endswith(b"\n"):
                         return LeaseResult(
                             lease_id=lease.lease_id,
                             records=0,
