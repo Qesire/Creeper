@@ -153,6 +153,17 @@ class SourceProducerTests(unittest.TestCase):
         self.assertIsNone(task.lease_owner)
         self.assertEqual(runtime.admission.reserved("wayback"), 0)
         self.assertEqual(self.evidence.count(), 0)
+        origin = self.control.connection.execute(
+            """
+            SELECT source_key, reservoir_id
+            FROM evidence_task_origins
+            WHERE hostname = ? AND year_from = ? AND year_to = ?
+            """,
+            ("novel.example", 1997, 1997),
+        ).fetchone()
+        self.assertIsNotNone(origin)
+        self.assertEqual(origin["source_key"], "fixture-reservoir")
+        self.assertEqual(origin["reservoir_id"], "fixture-reservoir")
 
     def test_single_year_discovery_hint_enqueues_exact_year_without_direct_capsule(self):
         record = SourceRecord(

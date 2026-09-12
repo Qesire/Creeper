@@ -226,6 +226,48 @@ def _readiness_delta(
     return delta, False, None
 
 
+def _source_attribution_delta(
+    start: dict[str, object],
+    end: dict[str, object],
+) -> dict[str, dict[str, object]]:
+    """Return monotonic per-source readiness deltas under one authority."""
+    before = start.get("readiness")
+    after = end.get("readiness")
+    if not isinstance(before, dict) or not isinstance(after, dict):
+        return {}
+    left_sources = before.get("source_attribution", {})
+    right_sources = after.get("source_attribution", {})
+    if not isinstance(left_sources, dict) or not isinstance(right_sources, dict):
+        return {}
+
+    result: dict[str, dict[str, object]] = {}
+    for source_key in sorted(set(left_sources) | set(right_sources)):
+        left = left_sources.get(source_key, {})
+        right = right_sources.get(source_key, {})
+        if not isinstance(left, dict) or not isinstance(right, dict):
+            continue
+        left_eed = _decimal(left.get("novel_eed", "0"))
+        right_eed = _decimal(right.get("novel_eed", "0"))
+        if left_eed is None or right_eed is None or right_eed < left_eed:
+            continue
+        try:
+            left_count = int(left.get("novel_host_years", 0))
+            right_count = int(right.get("novel_host_years", 0))
+        except (TypeError, ValueError):
+            continue
+        if right_count < left_count:
+            continue
+        eed_delta = right_eed - left_eed
+        count_delta = right_count - left_count
+        if eed_delta == 0 and count_delta == 0:
+            continue
+        result[str(source_key)] = {
+            "novel_host_years_delta": count_delta,
+            "novel_eed_delta": format(eed_delta, "f"),
+        }
+    return result
+
+
 def build_validation_report(
     *,
     start: dict[str, object],
@@ -256,6 +298,21 @@ def build_validation_report(
     http_5xx = deltas.get("wayback_http_5xx", 0)
     transport_errors = deltas.get("wayback_transport_errors", 0)
     http_elapsed_ms = deltas.get("wayback_http_elapsed_ms", 0)
+    source_attribution = _source_attribution_delta(start, end)
+    attributed_eed_delta = sum(
+        (
+            Decimal(str(item["novel_eed_delta"]))
+            for item in source_attribution.values()
+        ),
+        Decimal("0"),
+    )
+    observed_rps = Decimal(http_requests) / Decimal(str(elapsed))
+    end_gauges = end.get("telemetry_gauges", {})
+    configured_rps = Decimal("0")
+    if isinstance(end_gauges, dict):
+        configured_rps = _decimal(
+            end_gauges.get("wayback_configured_requests_per_second")
+        ) or Decimal("0")
 
     valid = (
         not counter_resets
@@ -309,7 +366,7 @@ def build_validation_report(
         )
 
     return {
-        "report_version": "runtime-validation-report-v1",
+        "report_version": "runtime-validation-report-v2",
         "label": label,
         "code_revision": code_revision,
         "runtime_data_root": end.get("runtime_data_root"),
@@ -350,6 +407,40 @@ def build_validation_report(
             None
             if eed_per_1000_requests is None
             else format(eed_per_1000_requests, "f")
+        ),
+        "provider_request_starts_per_second": format(observed_rps, "f"),
+        "configured_provider_request_starts_per_second": (
+            None if configured_rps <= 0 else format(configured_rps, "f")
+        ),
+        "provider_pacing_utilization": (
+            None
+            if configured_rps <= 0
+            else format(observed_rps / configured_rps, "f")
+        ),
+        "wait_state_milliseconds": {
+            "wayback_rate_limit": deltas.get("wayback_rate_limit_wait_ms", 0),
+            "wayback_cooldown": deltas.get("wayback_cooldown_wait_ms", 0),
+            "wayback_retry_backoff": deltas.get(
+                "wayback_retry_backoff_wait_ms", 0
+            ),
+            "host_lock": deltas.get("evidence_host_lock_wait_ms", 0),
+            "provider_inflight": deltas.get(
+                "evidence_provider_inflight_wait_ms", 0
+            ),
+            "claim": deltas.get("evidence_claim_wait_ms", 0),
+            "poll_idle": deltas.get("evidence_poll_idle_ms", 0),
+        },
+        "wait_state_semantics": (
+            "cumulative coroutine/service wait; categories may overlap in wall time"
+        ),
+        "source_attribution": source_attribution,
+        "attributed_novel_eed_delta": (
+            None if not valid else format(attributed_eed_delta, "f")
+        ),
+        "unattributed_novel_eed_delta": (
+            None
+            if not valid or eed_delta is None
+            else format(max(Decimal("0"), eed_delta - attributed_eed_delta), "f")
         ),
         "source_records_per_second": format(
             Decimal(source_records) / Decimal(str(elapsed)),

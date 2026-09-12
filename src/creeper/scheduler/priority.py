@@ -63,6 +63,7 @@ class LeaseCandidate:
     evidence_mode: str = "discovery_only"
     evidence_provider: str = "wayback"
     expected_evidence_tasks: int = 0
+    source_key: str | None = None
 
     def __post_init__(self) -> None:
         if not self.reservoir_id.strip():
@@ -75,6 +76,8 @@ class LeaseCandidate:
             raise ValueError("expected_evidence_tasks must be non-negative")
         if not self.evidence_provider.strip():
             raise ValueError("evidence_provider is required")
+        if self.source_key is not None and not self.source_key.strip():
+            raise ValueError("source_key must be non-empty when provided")
 
 
 @dataclass(frozen=True)

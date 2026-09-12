@@ -140,6 +140,47 @@ class ControlStore:
             ) WITHOUT ROWID;
             CREATE INDEX IF NOT EXISTS idx_work_leases_recovery
                 ON work_leases(state, expires_at);
+            CREATE TABLE IF NOT EXISTS evidence_task_origins (
+                hostname TEXT NOT NULL,
+                year_from INTEGER NOT NULL,
+                year_to INTEGER NOT NULL,
+                provider TEXT NOT NULL,
+                policy_version TEXT NOT NULL,
+                source_key TEXT NOT NULL,
+                reservoir_id TEXT NOT NULL,
+                lease_id TEXT NOT NULL,
+                first_observed_at REAL NOT NULL,
+                PRIMARY KEY(
+                    hostname, year_from, year_to, provider, policy_version,
+                    source_key, reservoir_id, lease_id
+                ),
+                FOREIGN KEY(
+                    hostname, year_from, year_to, provider, policy_version
+                ) REFERENCES evidence_tasks(
+                    hostname, year_from, year_to, provider, policy_version
+                ),
+                FOREIGN KEY(reservoir_id) REFERENCES reservoirs(reservoir_id),
+                FOREIGN KEY(lease_id) REFERENCES work_leases(lease_id)
+            ) WITHOUT ROWID;
+            CREATE INDEX IF NOT EXISTS idx_evidence_task_origins_source
+                ON evidence_task_origins(source_key, first_observed_at);
+            CREATE TABLE IF NOT EXISTS evidence_host_year_origins (
+                hostname TEXT NOT NULL,
+                year INTEGER NOT NULL,
+                source_key TEXT NOT NULL,
+                reservoir_id TEXT NOT NULL,
+                lease_id TEXT NOT NULL,
+                evidence_provider TEXT NOT NULL,
+                task_year_from INTEGER,
+                task_year_to INTEGER,
+                task_policy_version TEXT,
+                attributed_at REAL NOT NULL,
+                PRIMARY KEY(hostname, year),
+                FOREIGN KEY(reservoir_id) REFERENCES reservoirs(reservoir_id),
+                FOREIGN KEY(lease_id) REFERENCES work_leases(lease_id)
+            ) WITHOUT ROWID;
+            CREATE INDEX IF NOT EXISTS idx_evidence_host_year_origins_source
+                ON evidence_host_year_origins(source_key, year);
             """
         )
         self.connection.commit()
@@ -242,6 +283,181 @@ class ControlStore:
                 rows,
             )
         return self.connection.total_changes - before
+
+    def record_evidence_task_origins(
+        self,
+        keys: Iterable[EvidenceQueryKey],
+        *,
+        source_key: str,
+        reservoir_id: str,
+        lease_id: str,
+        observed_at: float | None = None,
+    ) -> int:
+        """Record non-authoritative source lineage for durable evidence work."""
+        if not source_key.strip() or not reservoir_id.strip() or not lease_id.strip():
+            raise ValueError("source_key, reservoir_id, and lease_id are required")
+        key_list = list(dict.fromkeys(keys))
+        if not key_list:
+            return 0
+        when = float(self.clock()) if observed_at is None else float(observed_at)
+        before = self.connection.total_changes
+        with self.connection:
+            self.connection.executemany(
+                """
+                INSERT OR IGNORE INTO evidence_task_origins(
+                    hostname, year_from, year_to, provider, policy_version,
+                    source_key, reservoir_id, lease_id, first_observed_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        *self._values(key),
+                        source_key,
+                        reservoir_id,
+                        lease_id,
+                        when,
+                    )
+                    for key in key_list
+                ],
+            )
+        return self.connection.total_changes - before
+
+    def attribute_task_host_years(
+        self,
+        key: EvidenceQueryKey,
+        years: Iterable[int],
+        *,
+        attributed_at: float | None = None,
+    ) -> int:
+        """Assign first-touch source credit to positive host-years from a task.
+
+        Attribution is operational metadata only. INSERT OR IGNORE makes the
+        first persisted host-year origin deterministic and immutable.
+        """
+        year_list = sorted(set(int(year) for year in years))
+        if not year_list:
+            return 0
+        scope = key.temporal_scope
+        if any(year < scope.year_from or year > scope.year_to for year in year_list):
+            raise ValueError("attributed year falls outside evidence task scope")
+        origin = self.connection.execute(
+            """
+            SELECT source_key, reservoir_id, lease_id
+            FROM evidence_task_origins
+            WHERE hostname = ? AND year_from = ? AND year_to = ?
+              AND provider = ? AND policy_version = ?
+            ORDER BY first_observed_at, source_key, reservoir_id, lease_id
+            LIMIT 1
+            """,
+            self._values(key),
+        ).fetchone()
+        if origin is None:
+            return 0
+        when = float(self.clock()) if attributed_at is None else float(attributed_at)
+        before = self.connection.total_changes
+        with self.connection:
+            self.connection.executemany(
+                """
+                INSERT OR IGNORE INTO evidence_host_year_origins(
+                    hostname, year, source_key, reservoir_id, lease_id,
+                    evidence_provider, task_year_from, task_year_to,
+                    task_policy_version, attributed_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        key.hostname,
+                        year,
+                        str(origin["source_key"]),
+                        str(origin["reservoir_id"]),
+                        str(origin["lease_id"]),
+                        key.provider,
+                        scope.year_from,
+                        scope.year_to,
+                        key.policy_version,
+                        when,
+                    )
+                    for year in year_list
+                ],
+            )
+        return self.connection.total_changes - before
+
+    def attribute_direct_host_years(
+        self,
+        host_years: Iterable[tuple[str, int, str]],
+        *,
+        source_key: str,
+        reservoir_id: str,
+        lease_id: str,
+        attributed_at: float | None = None,
+    ) -> int:
+        """Assign first-touch source credit for direct-year evidence capsules."""
+        if not source_key.strip() or not reservoir_id.strip() or not lease_id.strip():
+            raise ValueError("source_key, reservoir_id, and lease_id are required")
+        values = list(dict.fromkeys(
+            (str(hostname), int(year), str(provider))
+            for hostname, year, provider in host_years
+        ))
+        if not values:
+            return 0
+        when = float(self.clock()) if attributed_at is None else float(attributed_at)
+        before = self.connection.total_changes
+        with self.connection:
+            self.connection.executemany(
+                """
+                INSERT OR IGNORE INTO evidence_host_year_origins(
+                    hostname, year, source_key, reservoir_id, lease_id,
+                    evidence_provider, task_year_from, task_year_to,
+                    task_policy_version, attributed_at
+                ) VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, NULL, ?)
+                """,
+                [
+                    (
+                        hostname,
+                        year,
+                        source_key,
+                        reservoir_id,
+                        lease_id,
+                        provider,
+                        when,
+                    )
+                    for hostname, year, provider in values
+                ],
+            )
+        return self.connection.total_changes - before
+
+    def resolve_primary_source_origins(
+        self,
+        host_years: Iterable[tuple[str, int]],
+        *,
+        chunk_size: int = 400,
+    ) -> dict[tuple[str, int], str]:
+        """Resolve first-touch source keys for host-years in bounded SQL chunks."""
+        if chunk_size < 1:
+            raise ValueError("chunk_size must be positive")
+        values = list(dict.fromkeys(
+            (str(hostname), int(year)) for hostname, year in host_years
+        ))
+        result: dict[tuple[str, int], str] = {}
+        limit = min(int(chunk_size), 400)
+        for start in range(0, len(values), limit):
+            chunk = values[start:start + limit]
+            predicates = " OR ".join("(hostname = ? AND year = ?)" for _ in chunk)
+            params: list[object] = []
+            for hostname, year in chunk:
+                params.extend((hostname, year))
+            for row in self.connection.execute(
+                f"""
+                SELECT hostname, year, source_key
+                FROM evidence_host_year_origins
+                WHERE {predicates}
+                """,
+                params,
+            ):
+                result[(str(row["hostname"]), int(row["year"]))] = str(
+                    row["source_key"]
+                )
+        return result
 
     def claim_evidence_tasks(
         self,
@@ -391,6 +607,24 @@ class ControlStore:
                 [(*self._values(followup), CDXQueryState.PENDING.value) for followup in exact],
             )
             created = self.connection.total_changes - before
+            # Exact-year follow-ups are a refinement of the same source work.
+            # Preserve every parent origin so later first-touch host-year
+            # attribution remains connected to the original reservoir/lease.
+            for followup in exact:
+                self.connection.execute(
+                    """
+                    INSERT OR IGNORE INTO evidence_task_origins(
+                        hostname, year_from, year_to, provider, policy_version,
+                        source_key, reservoir_id, lease_id, first_observed_at
+                    )
+                    SELECT ?, ?, ?, ?, ?,
+                           source_key, reservoir_id, lease_id, first_observed_at
+                    FROM evidence_task_origins
+                    WHERE hostname = ? AND year_from = ? AND year_to = ?
+                      AND provider = ? AND policy_version = ?
+                    """,
+                    (*self._values(followup), *self._values(key)),
+                )
             self.connection.commit()
             return created
         except BaseException:

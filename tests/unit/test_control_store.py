@@ -526,5 +526,76 @@ class ControlStoreTests(unittest.TestCase):
             store.close()
 
 
+    def test_range_followups_inherit_source_origin_and_credit_host_year(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ControlStore(Path(tmp) / "control.sqlite3", clock=lambda: 100.0)
+            store.save_domain(self._domain())
+            ready = self._ready_reservoir()
+            store.save_reservoir(ready)
+            lease = store.grant_fresh_lease(
+                ready.reservoir_id,
+                owner="source-worker",
+                now=100.0,
+                **self._lease_limits(),
+            )
+            self.assertIsNotNone(lease)
+            assert lease is not None
+
+            range_key = EvidenceQueryKey(
+                "example.com",
+                TemporalScope(1996, 1998),
+                "wayback",
+                "v1",
+            )
+            followup = EvidenceQueryKey(
+                "example.com",
+                TemporalScope(1997, 1997),
+                "wayback",
+                "v1",
+            )
+            store.enqueue_evidence_tasks([range_key])
+            store.record_evidence_task_origins(
+                [range_key],
+                source_key="source-a",
+                reservoir_id=ready.reservoir_id,
+                lease_id=lease.lease_id,
+            )
+            store.claim_evidence_tasks(
+                owner="evidence-worker",
+                limit=1,
+                keys=[range_key],
+            )
+            store.finish_range_task(
+                range_key,
+                CDXQueryState.PASS,
+                followup_keys=[followup],
+                owner="evidence-worker",
+            )
+
+            inherited = store.connection.execute(
+                """
+                SELECT source_key, reservoir_id, lease_id
+                FROM evidence_task_origins
+                WHERE hostname = ? AND year_from = ? AND year_to = ?
+                  AND provider = ? AND policy_version = ?
+                """,
+                store._values(followup),
+            ).fetchone()
+            self.assertIsNotNone(inherited)
+            self.assertEqual(inherited["source_key"], "source-a")
+
+            self.assertEqual(
+                store.attribute_task_host_years(followup, [1997]),
+                1,
+            )
+            self.assertEqual(
+                store.resolve_primary_source_origins(
+                    [("example.com", 1997)]
+                ),
+                {("example.com", 1997): "source-a"},
+            )
+            store.close()
+
+
 if __name__ == "__main__":
     unittest.main()

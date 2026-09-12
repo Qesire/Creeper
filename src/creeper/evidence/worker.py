@@ -98,6 +98,11 @@ class AsyncEvidenceWorker:
         self.heartbeat_interval = float(heartbeat_interval)
         self.clock = clock
         self.queue = DurableEvidenceQueue(control_store)
+        # Cumulative operational wait-state counters. The service snapshots
+        # deltas into RuntimeTelemetryStore; they never affect evidence state.
+        self.host_lock_wait_milliseconds = 0
+        self.provider_inflight_wait_milliseconds = 0
+        self.claim_wait_milliseconds = 0
 
         limits = dict(provider_inflight or {})
         unknown_limits = set(limits) - set(self.providers)
@@ -155,22 +160,38 @@ class AsyncEvidenceWorker:
         # Same-host serialization is a semantic guard, not provider capacity.
         # Acquire it before the provider semaphore so a duplicate/same-stripe
         # waiter cannot consume an inflight slot while doing no network work.
-        async with host_lock:
-            async with semaphore:
-                try:
-                    scope = task.key.temporal_scope
-                    if scope.year_from != scope.year_to:
-                        query_range = getattr(provider, "query_range", None)
-                        if query_range is None:
-                            raise ValueError(
-                                f"provider {task.key.provider!r} does not support range probes"
-                            )
-                        return await query_range(task.key)
-                    return await provider.query_key(task.key)
-                except asyncio.CancelledError:
-                    raise
-                except Exception as exc:  # operational failure, never evidence INVALID
-                    return self._transient_for(task, str(exc) or type(exc).__name__)
+        loop = asyncio.get_running_loop()
+        host_started = loop.time()
+        await host_lock.acquire()
+        self.host_lock_wait_milliseconds += max(
+            0,
+            int(round((loop.time() - host_started) * 1000.0)),
+        )
+        try:
+            inflight_started = loop.time()
+            await semaphore.acquire()
+            self.provider_inflight_wait_milliseconds += max(
+                0,
+                int(round((loop.time() - inflight_started) * 1000.0)),
+            )
+            try:
+                scope = task.key.temporal_scope
+                if scope.year_from != scope.year_to:
+                    query_range = getattr(provider, "query_range", None)
+                    if query_range is None:
+                        raise ValueError(
+                            f"provider {task.key.provider!r} does not support range probes"
+                        )
+                    return await query_range(task.key)
+                return await provider.query_key(task.key)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # operational failure, never evidence INVALID
+                return self._transient_for(task, str(exc) or type(exc).__name__)
+            finally:
+                semaphore.release()
+        finally:
+            host_lock.release()
 
     async def _heartbeat(
         self,
@@ -214,11 +235,17 @@ class AsyncEvidenceWorker:
         and its queue slot is released. A slow tail request therefore no longer
         holds the rest of the batch before SourceProducer can observe headroom.
         """
+        loop = asyncio.get_running_loop()
+        claim_started = loop.time()
         tasks = self.queue.claim(
             owner=self.owner,
             limit=self.claim_batch_size,
             providers=self.providers,
             lease_seconds=self.lease_seconds,
+        )
+        self.claim_wait_milliseconds += max(
+            0,
+            int(round((loop.time() - claim_started) * 1000.0)),
         )
         if not tasks:
             return EvidenceWorkerReport()
@@ -259,6 +286,10 @@ class AsyncEvidenceWorker:
 
                 if isinstance(result, RangeEvidenceQueryResult):
                     if result.capsules:
+                        self.control_store.attribute_task_host_years(
+                            result.key,
+                            (capsule.year for capsule in result.capsules),
+                        )
                         range_inserted_capsules += self.evidence_store.put_many(
                             result.capsules
                         )

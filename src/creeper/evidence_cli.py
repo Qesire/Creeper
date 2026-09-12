@@ -102,6 +102,12 @@ async def run_service(
                 retry_base_seconds=retry_base_seconds,
                 retry_max_seconds=retry_max_seconds,
             )
+            telemetry.set_gauges(
+                {
+                    "wayback_configured_requests_per_second": requests_per_second,
+                    "wayback_max_inflight": max_inflight,
+                }
+            )
             idle_delay = poll_min_seconds
             previous_http_requests = 0
             previous_throttle_responses = 0
@@ -110,6 +116,12 @@ async def run_service(
             previous_http_503 = 0
             previous_http_5xx = 0
             previous_http_elapsed_ms = 0
+            previous_cooldown_wait_ms = 0
+            previous_rate_limit_wait_ms = 0
+            previous_retry_backoff_wait_ms = 0
+            previous_host_lock_wait_ms = 0
+            previous_inflight_wait_ms = 0
+            previous_claim_wait_ms = 0
             previous_latency_buckets = {
                 name: 0
                 for name in (
@@ -163,6 +175,31 @@ async def run_service(
                             provider.http_elapsed_milliseconds
                             - previous_http_elapsed_ms
                         ),
+                        "wayback_cooldown_wait_ms": (
+                            provider.cooldown_wait_milliseconds
+                            - previous_cooldown_wait_ms
+                        ),
+                        "wayback_rate_limit_wait_ms": (
+                            provider.rate_limit_wait_milliseconds
+                            - previous_rate_limit_wait_ms
+                        ),
+                        "wayback_retry_backoff_wait_ms": (
+                            provider.retry_backoff_wait_milliseconds
+                            - previous_retry_backoff_wait_ms
+                        ),
+                        "evidence_host_lock_wait_ms": (
+                            worker.host_lock_wait_milliseconds
+                            - previous_host_lock_wait_ms
+                        ),
+                        "evidence_provider_inflight_wait_ms": (
+                            worker.provider_inflight_wait_milliseconds
+                            - previous_inflight_wait_ms
+                        ),
+                        "evidence_claim_wait_ms": (
+                            worker.claim_wait_milliseconds
+                            - previous_claim_wait_ms
+                        ),
+                        "evidence_batches_empty": int(report.claimed == 0),
                         **{
                             f"wayback_latency_{name}": (
                                 current_latency_buckets[name]
@@ -179,6 +216,12 @@ async def run_service(
                 previous_http_503 = current_http_503
                 previous_http_5xx = current_http_5xx
                 previous_http_elapsed_ms = provider.http_elapsed_milliseconds
+                previous_cooldown_wait_ms = provider.cooldown_wait_milliseconds
+                previous_rate_limit_wait_ms = provider.rate_limit_wait_milliseconds
+                previous_retry_backoff_wait_ms = provider.retry_backoff_wait_milliseconds
+                previous_host_lock_wait_ms = worker.host_lock_wait_milliseconds
+                previous_inflight_wait_ms = worker.provider_inflight_wait_milliseconds
+                previous_claim_wait_ms = worker.claim_wait_milliseconds
                 previous_latency_buckets = current_latency_buckets
                 total = EvidenceWorkerReport(
                     claimed=total.claimed + report.claimed,
@@ -211,11 +254,28 @@ async def run_service(
                     continue
                 if stop.is_set():
                     return total
+                poll_started = loop.time()
                 try:
                     await asyncio.wait_for(stop.wait(), timeout=idle_delay)
                 except TimeoutError:
+                    telemetry.add_counters(
+                        {
+                            "evidence_poll_idle_ms": max(
+                                0,
+                                int(round((loop.time() - poll_started) * 1000.0)),
+                            )
+                        }
+                    )
                     idle_delay = min(poll_max_seconds, idle_delay * 2.0)
                 else:
+                    telemetry.add_counters(
+                        {
+                            "evidence_poll_idle_ms": max(
+                                0,
+                                int(round((loop.time() - poll_started) * 1000.0)),
+                            )
+                        }
+                    )
                     return total
     finally:
         if "loop" in locals():
