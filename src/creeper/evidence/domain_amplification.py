@@ -41,6 +41,7 @@ def plan_domain_amplification(
     *,
     provider: str,
     min_distinct_hosts: int = 4,
+    eligible_hostnames: Iterable[str] | None = None,
 ) -> tuple[EvidenceQueryKey, ...]:
     """Create one bounded 1996-2001 domain task for each high-fanout parent."""
     if min_distinct_hosts < 2:
@@ -48,6 +49,13 @@ def plan_domain_amplification(
 
     groups: dict[str, set[str]] = defaultdict(set)
     observed: set[str] = set()
+    eligible = None
+    if eligible_hostnames is not None:
+        eligible = {
+            hostname
+            for raw in eligible_hostnames
+            if (hostname := normalize_official(raw)) is not None
+        }
     for raw in hostnames:
         hostname = normalize_official(raw)
         if hostname is None:
@@ -65,6 +73,8 @@ def plan_domain_amplification(
         if parent not in observed:
             continue
         if len(members) < min_distinct_hosts:
+            continue
+        if eligible is not None and not (members & eligible):
             continue
         keys.append(
             EvidenceQueryKey(
