@@ -510,13 +510,15 @@ class SourceProducer:
 
                 def emit_record(record) -> None:
                     nonlocal source_records, max_source
+                    with pipeline_lock:
+                        sequence = source_records
+                        source_records += 1
                     put_with_backpressure(
                         queues.source_record_queue,
-                        record,
+                        (sequence, record),
                         kind="source",
                     )
                     with pipeline_lock:
-                        source_records += 1
                         max_source = max(
                             max_source,
                             queues.source_record_queue.qsize(),
@@ -553,18 +555,19 @@ class SourceProducer:
                             continue
                         if current is source_sentinel:
                             break
-                        for observation in extract_hosts(current):
-                            put_with_backpressure(
-                                queues.observation_queue,
-                                observation,
-                                kind="observation",
+                        sequence, record = current
+                        extracted = tuple(extract_hosts(record))
+                        put_with_backpressure(
+                            queues.observation_queue,
+                            (sequence, extracted),
+                            kind="observation",
+                        )
+                        with pipeline_lock:
+                            observations += len(extracted)
+                            max_observations = max(
+                                max_observations,
+                                queues.observation_queue.qsize(),
                             )
-                            with pipeline_lock:
-                                observations += 1
-                                max_observations = max(
-                                    max_observations,
-                                    queues.observation_queue.qsize(),
-                                )
                 except BaseException as exc:
                     pipeline_errors.put(exc)
                     pipeline_stop.set()
@@ -596,6 +599,8 @@ class SourceProducer:
                 worker.start()
 
             finished_extractors = 0
+            next_sequence = 0
+            reorder_buffer: dict[int, tuple[HostObservation, ...]] = {}
             try:
                 while finished_extractors < self.extract_workers:
                     if not pipeline_errors.empty():
@@ -608,9 +613,27 @@ class SourceProducer:
                     if item is observation_sentinel:
                         finished_extractors += 1
                         continue
-                    pending.append(item)
-                    if len(pending) >= self.pipeline_batch_size:
-                        resolve_pending()
+                    sequence, extracted = item
+                    reorder_buffer[int(sequence)] = tuple(extracted)
+                    while next_sequence in reorder_buffer:
+                        pending.extend(reorder_buffer.pop(next_sequence))
+                        next_sequence += 1
+                        if len(pending) >= self.pipeline_batch_size:
+                            resolve_pending()
+                # Every emitted source record must reach the deterministic
+                # reorder boundary exactly once before lease finalization.
+                if reorder_buffer:
+                    for sequence in sorted(reorder_buffer):
+                        if sequence != next_sequence:
+                            raise RuntimeError(
+                                "source extraction pipeline lost record ordering"
+                            )
+                        pending.extend(reorder_buffer[sequence])
+                        next_sequence += 1
+                if next_sequence != source_records:
+                    raise RuntimeError(
+                        "source extraction pipeline lost source records"
+                    )
                 resolve_pending()
                 if not pipeline_errors.empty():
                     raise pipeline_errors.get()
