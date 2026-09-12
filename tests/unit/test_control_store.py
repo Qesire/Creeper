@@ -25,6 +25,61 @@ class ControlStoreTests(unittest.TestCase):
             policy,
         )
 
+    def test_historical_cleanup_migrations_run_only_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "control.sqlite3"
+            first = ControlStore(path)
+            try:
+                markers = {
+                    str(row["key"])
+                    for row in first.connection.execute(
+                        """
+                        SELECT key FROM runtime_checkpoints
+                        WHERE key LIKE 'migration:%'
+                        """
+                    )
+                }
+                self.assertIn(
+                    "migration:domain-fanout-fixed-sketch-cleanup-v1",
+                    markers,
+                )
+                self.assertIn(
+                    "migration:evidence-action-cost-backfill-v1",
+                    markers,
+                )
+                # Seed an obsolete-table row *after* migration completion.
+                # Reopening the DB must not run the cleanup scan again.
+                first.connection.execute(
+                    """
+                    INSERT INTO domain_fanout_state(
+                        parent_hostname, observed_self, child_count,
+                        child_sketch, query_enqueued, rdap_enqueued,
+                        first_source_key, updated_at
+                    ) VALUES ('example.com', 0, 1, 1, 0, 0, NULL, 1)
+                    """
+                )
+                first.connection.execute(
+                    """
+                    INSERT INTO domain_fanout_members(
+                        parent_hostname, child_hostname
+                    ) VALUES ('example.com', 'a.example.com')
+                    """
+                )
+                first.connection.commit()
+            finally:
+                first.close()
+
+            second = ControlStore(path)
+            try:
+                self.assertEqual(
+                    second.connection.execute(
+                        "SELECT COUNT(*) FROM domain_fanout_members"
+                    ).fetchone()[0],
+                    1,
+                )
+            finally:
+                second.close()
+
     def test_enqueue_and_claim_preserve_full_query_identity(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = ControlStore(Path(tmp) / "control.sqlite3")
