@@ -157,6 +157,69 @@ class MeasuredYieldScoutTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.measurement.unique_hosts, 2)
         self.assertEqual(result.measurement.novel_hosts, 1)
         self.assertEqual(result.measurement.novel_eed, 0.5)
+        self.assertEqual(result.measurement.singleton_observations, 1)
+        self.assertEqual(result.measurement.doubleton_observations, 1)
+        self.assertAlmostEqual(
+            result.measurement.estimated_unseen_fraction,
+            1 / 3,
+        )
+        self.assertEqual(len(result.measurement.minhash_values), 64)
+
+    async def test_progressive_scout_early_accepts_strong_low_fidelity_sample(self) -> None:
+        body = (
+            b"https://novel-a.org/a\n"
+            b"https://novel-b.org/b\n"
+            b"https://novel-c.org/c\n"
+            + b"x" * 2048
+        )
+        calls: list[str] = []
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            raw_range = request.headers["Range"]
+            calls.append(raw_range)
+            start_text, end_text = raw_range.removeprefix("bytes=").split("-", 1)
+            start = int(start_text)
+            end = min(int(end_text), len(body) - 1)
+            chunk = body[start : end + 1]
+            return streamed_response(
+                206,
+                chunk,
+                headers={
+                    "content-type": "text/plain",
+                    "content-range": f"bytes {start}-{end}/{len(body)}",
+                    "content-length": str(len(chunk)),
+                },
+            )
+
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler)
+        ) as client:
+            scout = MeasuredYieldScoutExecutor(
+                client,
+                self.baseline,
+                {"org": Decimal("1")},
+                policy=self.policy(
+                    max_download_bytes=1024,
+                    progressive_initial_bytes=128,
+                    sample_windows=4,
+                    min_unique_hosts=1,
+                    min_novel_hosts=1,
+                    min_novel_fraction=0.01,
+                    min_novel_eed=0.1,
+                    early_accept_multiplier=1.0,
+                ),
+            )
+            result = await scout(
+                self.candidate("https://data.example/strong.urls")
+            )
+
+        self.assertEqual(result.disposition, ScoutDisposition.WARM)
+        self.assertIn("early-accepted", result.reason)
+        self.assertEqual(len(calls), 1)
+        self.assertLessEqual(
+            result.measurement.bytes_read if result.measurement else 0,
+            128,
+        )
 
     async def test_large_cdxj_stratifies_fixed_byte_budget_across_file(self) -> None:
         lines = []
