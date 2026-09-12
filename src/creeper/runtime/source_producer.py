@@ -307,7 +307,6 @@ class SourceProducer:
             resolve_pending()
 
             if direct_capsules:
-                direct_committed += self.evidence_store.put_many(direct_capsules)
                 self.control_store.attribute_direct_host_years(
                     (
                         (capsule.hostname, capsule.year, capsule.provider)
@@ -317,6 +316,7 @@ class SourceProducer:
                     reservoir_id=candidate.reservoir_id,
                     lease_id=running.lease_id,
                 )
+                direct_committed += self.evidence_store.put_many(direct_capsules)
             assert result is not None
             self.control_store.finalize_lease(
                 running,
