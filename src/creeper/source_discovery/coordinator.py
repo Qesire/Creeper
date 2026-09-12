@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Generic, TypeVar
 
 from creeper.source_discovery.manager import SearchDirective, SourceReservoirManager
+from creeper.source_discovery.motifs import infer_year_sibling_candidates
 from creeper.source_discovery.models import (
     ScoutMeasurement,
     SourceCandidate,
@@ -359,6 +360,38 @@ class SourceDiscoveryCoordinator:
                 continue
             counts["scout_edges_added"] += int(added)
 
+    def _commit_year_motif_siblings(
+        self,
+        parent: SourceCandidate,
+        counts: dict[str, int],
+    ) -> None:
+        """Exploit an exact annual URL pattern without another LLM call."""
+        for proposed in infer_year_sibling_candidates(parent):
+            existing = self.registry.get_candidate(proposed.source_key)
+            effective = existing or proposed
+            if self.registry.suppression_reason(effective) is not None:
+                counts["scout_children_dropped"] += 1
+                continue
+            inserted = False
+            if existing is None:
+                effective, inserted = self.registry.register_proposal(proposed)
+                counts["scout_children_registered"] += int(inserted)
+            try:
+                added = self.registry.add_edge(
+                    parent.source_key,
+                    effective.source_key,
+                    relation="year_sibling_of",
+                )
+            except ValueError:
+                counts["scout_children_dropped"] += 1
+                if inserted:
+                    self.registry.transition(
+                        effective.source_key,
+                        SourceState.REJECTED,
+                    )
+                continue
+            counts["scout_edges_added"] += int(added)
+
     def _commit_scouts(
         self,
         candidates: list[SourceCandidate],
@@ -380,6 +413,7 @@ class SourceDiscoveryCoordinator:
             self._commit_scout_children(current, result, counts)
             if result.disposition is ScoutDisposition.WARM:
                 self.registry.transition(candidate.source_key, SourceState.WARM)
+                self._commit_year_motif_siblings(current, counts)
                 counts["scouted_warm"] += 1
             elif result.disposition is ScoutDisposition.HOLD:
                 self.registry.transition(candidate.source_key, SourceState.HOLD)
