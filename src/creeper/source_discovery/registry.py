@@ -578,6 +578,18 @@ class SourceDiscoveryRegistry:
                 (float(final_accepted_eed), source_key),
             )
 
+    def reset_final_rewards(self) -> None:
+        """Zero final rewards after baseline/EED authority identity changes."""
+        rows = self.connection.execute(
+            "SELECT source_key FROM source_final_rewards"
+        ).fetchall()
+        for row in rows:
+            self.record_final_reward(
+                str(row["source_key"]),
+                final_accepted_eed=0.0,
+                cost_seconds=0.0,
+            )
+
     def llm_task_rewards(self) -> list[dict[str, object]]:
         rows = self.connection.execute(
             """
