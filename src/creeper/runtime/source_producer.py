@@ -136,11 +136,22 @@ class SourceProducer:
             except KeyError as exc:
                 raise KeyError(f"no backlog capacity configured for {provider}") from exc
 
+            reservation_amount = (
+                candidate.expected_evidence_tasks
+                if candidate.reservation_evidence_tasks is None
+                else candidate.reservation_evidence_tasks
+            )
+            postprocess_ttl = max(
+                60.0,
+                min(300.0, float(template.max_seconds)),
+                self.reservation_grace_seconds,
+            )
+            ownership_ttl = float(template.max_seconds) + postprocess_ttl
             reservation = self.admission.try_reserve(
                 provider=provider,
-                amount=candidate.expected_evidence_tasks,
+                amount=reservation_amount,
                 capacity=capacity,
-                ttl_seconds=template.max_seconds + self.reservation_grace_seconds,
+                ttl_seconds=ownership_ttl,
             )
             if reservation is None:
                 continue
@@ -156,6 +167,7 @@ class SourceProducer:
                     expected_evidence_tasks=candidate.expected_evidence_tasks,
                     expected_novel_eed=candidate.expected_novel_eed,
                     now=time.time(),
+                    lease_ttl_seconds=ownership_ttl,
                 )
                 if lease is None:
                     self.admission.release(reservation)
@@ -197,12 +209,39 @@ class SourceProducer:
         scheduled_keys: dict[EvidenceQueryKey, None] = {}
         result = None
         source_finalized = False
+        postprocess_ttl = max(
+            60.0,
+            min(300.0, float(running.max_seconds)),
+            self.reservation_grace_seconds,
+        )
+        next_renew_at = 0.0
+
+        def keep_ownership_live(*, force: bool = False) -> None:
+            nonlocal reservation, next_renew_at
+            now = float(self.control_store.clock())
+            if not force and now < next_renew_at:
+                return
+            reservation = self.admission.renew(
+                reservation,
+                ttl_seconds=postprocess_ttl,
+            )
+            self.control_store.renew_lease(
+                running,
+                ttl_seconds=postprocess_ttl,
+                now=now,
+            )
+            next_renew_at = now + max(1.0, postprocess_ttl / 3.0)
 
         try:
             adapter = self._adapter_for(candidate)
             execute = getattr(adapter, "execute")
             extract_hosts = getattr(adapter, "extract_hosts")
             records, result = execute(running)
+            # max_seconds is the adapter work budget, not the full source
+            # transaction lifetime. Refresh ownership before baseline/planning
+            # post-processing so a live producer cannot lose its reservation
+            # merely because source execution consumed most of that budget.
+            keep_ownership_live(force=True)
             if (
                 result.records == 0
                 and result.next_cursor == running.cursor_start
@@ -231,6 +270,7 @@ class SourceProducer:
                 nonlocal direct_capsules
                 if not pending:
                     return
+                keep_ownership_live()
                 # High-frequency archive indexes may repeat the same host
                 # tens of thousands of times inside one lease. Resolve each
                 # unique hostname once, then update the in-memory masks as work
@@ -252,11 +292,13 @@ class SourceProducer:
                     input_batch_size=self.baseline_batch_size,
                 ):
                     resolved.update(batch)
+                    keep_ownership_live()
                 allow_direct = (
                     candidate.reservoir is not None
                     and candidate.reservoir.evidence_mode == "direct_year"
                 )
                 for item in pending:
+                    keep_ownership_live()
                     annual_mask, _candidate = resolved.get(item.hostname, (0, False))
                     plan = self.evidence_planner.plan(
                         item,
@@ -323,6 +365,7 @@ class SourceProducer:
                 )
                 direct_committed += self.evidence_store.put_many(direct_capsules)
             assert result is not None
+            keep_ownership_live()
             self.control_store.finalize_lease(
                 running,
                 next_cursor=result.next_cursor,
