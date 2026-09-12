@@ -39,6 +39,10 @@ from creeper.source_discovery.region_probe import (
     RegionProbeResult,
     SampledByteRange,
 )
+from creeper.source_discovery.tomography_service import (
+    RegionTomographyReport,
+    RegionTomographyService,
+)
 from creeper.source_discovery.tomography import (
     RegionTomographyPlanner,
     RegionTomographyPolicy,
@@ -119,6 +123,8 @@ __all__ = [
     "RegionProbeResult",
     "RegionTomographyPlanner",
     "RegionTomographyPolicy",
+    "RegionTomographyReport",
+    "RegionTomographyService",
     "RegionSynopsis",
     "SampledByteRange",
     "SourceAccessMode",
