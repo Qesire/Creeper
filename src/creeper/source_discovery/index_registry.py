@@ -11,6 +11,8 @@ from creeper.source_discovery.index_space import (
     HarvestRegion,
     RegionKind,
     RegionSynopsis,
+    SourceCapabilities,
+    SourceIndexSpec,
 )
 from creeper.storage.control_store import ControlStore
 
@@ -60,6 +62,7 @@ class IndexSpaceRegistry:
                 expected_year_from INTEGER,
                 expected_year_to INTEGER,
                 expected_volume INTEGER,
+                content_length INTEGER,
                 created_at REAL NOT NULL,
                 updated_at REAL NOT NULL,
                 FOREIGN KEY(factory_key)
@@ -113,6 +116,16 @@ class IndexSpaceRegistry:
             ) WITHOUT ROWID;
             """
         )
+        columns = {
+            str(row[1])
+            for row in self.connection.execute(
+                "PRAGMA table_info(source_indexes_v1)"
+            ).fetchall()
+        }
+        if "content_length" not in columns:
+            self.connection.execute(
+                "ALTER TABLE source_indexes_v1 ADD COLUMN content_length INTEGER"
+            )
         self.connection.commit()
 
     def register_index_space(self, compiled: CompiledIndexSpace) -> None:
@@ -149,8 +162,8 @@ class IndexSpaceRegistry:
                     sorted_keyspace, supports_query, supports_prefix,
                     supports_domain, supports_date_filter,
                     expected_year_from, expected_year_to, expected_volume,
-                    created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    content_length, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(index_key) DO UPDATE SET
                     factory_key = excluded.factory_key,
                     source_key = excluded.source_key,
@@ -169,6 +182,7 @@ class IndexSpaceRegistry:
                     expected_year_from = excluded.expected_year_from,
                     expected_year_to = excluded.expected_year_to,
                     expected_volume = excluded.expected_volume,
+                    content_length = excluded.content_length,
                     updated_at = excluded.updated_at
                 """,
                 (
@@ -190,11 +204,53 @@ class IndexSpaceRegistry:
                     index.expected_year_from,
                     index.expected_year_to,
                     index.expected_volume,
+                    index.content_length,
                     now,
                     now,
                 ),
             )
             self._put_region(compiled.root_region, now=now)
+
+    def get_index(self, index_key: str) -> SourceIndexSpec | None:
+        row = self.connection.execute(
+            "SELECT * FROM source_indexes_v1 WHERE index_key = ?",
+            (index_key,),
+        ).fetchone()
+        if row is None:
+            return None
+        capabilities = SourceCapabilities(
+            access_mode=str(row["access_mode"]),
+            format=str(row["source_format"]),
+            hierarchical=bool(row["hierarchical"]),
+            range_supported=bool(row["range_supported"]),
+            timestamp_bearing=bool(row["timestamp_bearing"]),
+            direct_evidence_authority=bool(row["direct_evidence_authority"]),
+            sorted_keyspace=row["sorted_keyspace"],
+            supports_query=bool(row["supports_query"]),
+            supports_prefix=bool(row["supports_prefix"]),
+            supports_domain=bool(row["supports_domain"]),
+            supports_date_filter=bool(row["supports_date_filter"]),
+        )
+        return SourceIndexSpec(
+            index_key=str(row["index_key"]),
+            factory_key=str(row["factory_key"]),
+            source_key=str(row["source_key"]),
+            locator=str(row["locator"]),
+            capabilities=capabilities,
+            expected_year_from=row["expected_year_from"],
+            expected_year_to=row["expected_year_to"],
+            expected_volume=row["expected_volume"],
+            content_length=row["content_length"],
+        )
+
+    def get_index_for_source(self, source_key: str) -> SourceIndexSpec | None:
+        row = self.connection.execute(
+            "SELECT index_key FROM source_indexes_v1 WHERE source_key = ?",
+            (source_key,),
+        ).fetchone()
+        if row is None:
+            return None
+        return self.get_index(str(row["index_key"]))
 
     def _put_region(self, region: HarvestRegion, *, now: float) -> None:
         self.connection.execute(
