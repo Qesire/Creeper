@@ -150,5 +150,50 @@ class RangeEvidenceQueryResult:
             capsule_years.add(capsule.year)
 
 
+
+@dataclass(frozen=True)
+class DomainEvidenceQueryResult:
+    """One bounded domain-scope CDX page yielding exact host-year positives.
+
+    The task key names only the seed domain. Every returned capsule is still an
+    exact concrete hostname/year claim validated from its own CDX row. Domain
+    tasks never create negative coverage for member hostnames.
+    """
+
+    key: EvidenceQueryKey
+    state: CDXQueryState
+    capsules: tuple[EvidenceCapsule, ...] = ()
+    pages_seen: int = 0
+    records_seen: int = 0
+    provider_requests: int = 0
+    provider_elapsed_milliseconds: int = 0
+    error: str | None = None
+
+    def __post_init__(self) -> None:
+        scope = self.key.temporal_scope
+        if scope.year_from == scope.year_to:
+            raise ValueError("domain amplification requires a multi-year scope")
+        if self.provider_requests < 0 or self.provider_elapsed_milliseconds < 0:
+            raise ValueError("provider request accounting must be non-negative")
+        seen: set[tuple[str, int]] = set()
+        suffix = "." + self.key.hostname
+        for capsule in self.capsules:
+            if not (
+                capsule.hostname == self.key.hostname
+                or capsule.hostname.endswith(suffix)
+            ):
+                raise ValueError("domain capsule must belong to the seed domain")
+            if not scope.year_from <= capsule.year <= scope.year_to:
+                raise ValueError("domain capsule year must be inside query scope")
+            if capsule.provider != self.key.provider:
+                raise ValueError("domain capsule provider must match query provider")
+            if capsule.policy_version != self.key.policy_version:
+                raise ValueError("domain capsule policy must match query policy")
+            identity = (capsule.hostname, capsule.year)
+            if identity in seen:
+                raise ValueError("domain result keeps at most one capsule per host-year")
+            seen.add(identity)
+
+
 def is_year_timestamp(timestamp: str, year: int) -> bool:
     return len(timestamp) >= 4 and timestamp[:4].isdigit() and int(timestamp[:4]) == year
