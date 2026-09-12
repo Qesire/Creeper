@@ -58,6 +58,7 @@ class SourceProducer:
         backlog_capacities: Mapping[str, int],
         queue_capacities: Mapping[str, int],
         evidence_policy_version: str = "cdx-v1",
+        range_first_fraction: float = 0.0,
         owner: str = "source-producer",
         baseline_batch_size: int = 50_000,
         reservation_grace_seconds: float = 30.0,
@@ -66,6 +67,8 @@ class SourceProducer:
             raise ValueError("baseline_batch_size must be positive")
         if reservation_grace_seconds < 0:
             raise ValueError("reservation_grace_seconds must be non-negative")
+        if not 0.0 <= float(range_first_fraction) <= 1.0:
+            raise ValueError("range_first_fraction must be between 0 and 1")
         capacities = dict(backlog_capacities)
         if any(
             not provider or not isinstance(value, int) or value < 0
@@ -84,6 +87,7 @@ class SourceProducer:
         self.backlog_capacities = capacities
         self.queue_capacities = dict(queue_capacities)
         self.evidence_policy_version = evidence_policy_version
+        self.range_first_fraction = float(range_first_fraction)
         self.owner = owner
         self.baseline_batch_size = baseline_batch_size
         self.reservation_grace_seconds = reservation_grace_seconds
@@ -264,6 +268,7 @@ class SourceProducer:
                         external_covered_mask=provider_coverage_masks.get(
                             item.hostname, 0
                         ),
+                        range_first_fraction=self.range_first_fraction,
                     )
                     if plan.direct_capsules:
                         for capsule in plan.direct_capsules:
