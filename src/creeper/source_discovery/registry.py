@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import time
 import uuid
@@ -113,6 +114,55 @@ class SourceDiscoveryRegistry:
             ) WITHOUT ROWID;
             CREATE INDEX IF NOT EXISTS idx_source_search_strategy
                 ON source_search_episodes(strategy, finished_at);
+
+            CREATE TABLE IF NOT EXISTS source_llm_episodes (
+                episode_id TEXT PRIMARY KEY,
+                task_type TEXT NOT NULL,
+                backend TEXT NOT NULL,
+                actor TEXT NOT NULL,
+                context_hash TEXT NOT NULL,
+                prompt_version TEXT NOT NULL,
+                started_at REAL NOT NULL,
+                finished_at REAL,
+                cost_seconds REAL NOT NULL DEFAULT 0
+            ) WITHOUT ROWID;
+
+            CREATE TABLE IF NOT EXISTS source_llm_hypotheses (
+                hypothesis_id TEXT PRIMARY KEY,
+                episode_id TEXT NOT NULL,
+                action TEXT NOT NULL,
+                confidence REAL NOT NULL,
+                raw_json TEXT NOT NULL,
+                created_at REAL NOT NULL,
+                FOREIGN KEY(episode_id) REFERENCES source_llm_episodes(episode_id)
+            ) WITHOUT ROWID;
+            CREATE INDEX IF NOT EXISTS idx_source_llm_hypothesis_episode
+                ON source_llm_hypotheses(episode_id, created_at);
+
+            CREATE TABLE IF NOT EXISTS source_llm_source_attribution (
+                source_key TEXT NOT NULL,
+                hypothesis_id TEXT NOT NULL,
+                credited_eed REAL NOT NULL DEFAULT 0,
+                PRIMARY KEY(source_key, hypothesis_id),
+                FOREIGN KEY(source_key) REFERENCES source_candidates(source_key),
+                FOREIGN KEY(hypothesis_id) REFERENCES source_llm_hypotheses(hypothesis_id)
+            ) WITHOUT ROWID;
+
+            CREATE TABLE IF NOT EXISTS source_final_rewards (
+                source_key TEXT PRIMARY KEY,
+                final_accepted_eed REAL NOT NULL,
+                cost_seconds REAL NOT NULL DEFAULT 0,
+                updated_at REAL NOT NULL,
+                FOREIGN KEY(source_key) REFERENCES source_candidates(source_key)
+            ) WITHOUT ROWID;
+
+            CREATE TABLE IF NOT EXISTS source_overlap_sketches (
+                source_key TEXT PRIMARY KEY,
+                width INTEGER NOT NULL,
+                sketch_json TEXT NOT NULL,
+                updated_at REAL NOT NULL,
+                FOREIGN KEY(source_key) REFERENCES source_candidates(source_key)
+            ) WITHOUT ROWID;
 
             CREATE TABLE IF NOT EXISTS source_proposals (
                 proposal_id TEXT PRIMARY KEY,
@@ -351,6 +401,248 @@ class SourceDiscoveryRegistry:
             for row in rows
         ]
 
+    def begin_llm_episode(
+        self,
+        *,
+        episode_id: str,
+        task_type: str,
+        backend: str,
+        actor: str,
+        context_hash: str,
+        prompt_version: str,
+    ) -> None:
+        """Persist the parent-process decision to invoke one Codex subagent."""
+        if not all(
+            isinstance(value, str) and value.strip()
+            for value in (
+                episode_id,
+                task_type,
+                backend,
+                actor,
+                prompt_version,
+            )
+        ):
+            raise ValueError("LLM episode identity fields are required")
+        with self.connection:
+            self.connection.execute(
+                """
+                INSERT INTO source_llm_episodes(
+                    episode_id, task_type, backend, actor, context_hash,
+                    prompt_version, started_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    episode_id,
+                    task_type,
+                    backend,
+                    actor,
+                    context_hash,
+                    prompt_version,
+                    float(self.clock()),
+                ),
+            )
+
+    def finish_llm_episode(
+        self,
+        episode_id: str,
+        *,
+        cost_seconds: float,
+    ) -> None:
+        if cost_seconds < 0:
+            raise ValueError("LLM episode cost must be non-negative")
+        with self.connection:
+            changed = self.connection.execute(
+                """
+                UPDATE source_llm_episodes
+                SET finished_at = ?, cost_seconds = ?
+                WHERE episode_id = ? AND finished_at IS NULL
+                """,
+                (float(self.clock()), float(cost_seconds), episode_id),
+            ).rowcount
+        if changed != 1:
+            raise KeyError(f"unknown or finished LLM episode: {episode_id}")
+
+    def register_llm_hypothesis(
+        self,
+        episode_id: str,
+        hypothesis: dict[str, object],
+    ) -> None:
+        hypothesis_id = hypothesis.get("hypothesis_id")
+        action = hypothesis.get("action")
+        confidence = hypothesis.get("confidence", 0.0)
+        if not isinstance(hypothesis_id, str) or not hypothesis_id.strip():
+            raise ValueError("LLM hypothesis_id is required")
+        if not isinstance(action, str) or not action.strip():
+            raise ValueError("LLM hypothesis action is required")
+        if (
+            isinstance(confidence, bool)
+            or not isinstance(confidence, (int, float))
+            or not 0 <= float(confidence) <= 1
+        ):
+            raise ValueError("LLM hypothesis confidence must be within [0, 1]")
+        raw_json = json.dumps(
+            hypothesis,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        with self.connection:
+            self.connection.execute(
+                """
+                INSERT INTO source_llm_hypotheses(
+                    hypothesis_id, episode_id, action, confidence,
+                    raw_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    hypothesis_id,
+                    episode_id,
+                    action,
+                    float(confidence),
+                    raw_json,
+                    float(self.clock()),
+                ),
+            )
+
+    def link_llm_source(
+        self,
+        source_key: str,
+        *,
+        hypothesis_id: str,
+    ) -> None:
+        with self.connection:
+            self.connection.execute(
+                """
+                INSERT OR IGNORE INTO source_llm_source_attribution(
+                    source_key, hypothesis_id, credited_eed
+                ) VALUES (?, ?, 0)
+                """,
+                (source_key, hypothesis_id),
+            )
+
+    def record_final_reward(
+        self,
+        source_key: str,
+        *,
+        final_accepted_eed: float,
+        cost_seconds: float = 0.0,
+    ) -> None:
+        """Close proxy reward with final accepted competition value.
+
+        Until this method is called, measured scout EED is an explicit proxy.
+        Once a final value exists it becomes the reward attributed to the
+        originating search strategy and Codex hypothesis.
+        """
+        if final_accepted_eed < 0 or cost_seconds < 0:
+            raise ValueError("final reward and cost must be non-negative")
+        if self.get_candidate(source_key) is None:
+            raise KeyError(f"unknown source: {source_key}")
+        now = float(self.clock())
+        with self.connection:
+            self.connection.execute(
+                """
+                INSERT INTO source_final_rewards(
+                    source_key, final_accepted_eed, cost_seconds, updated_at
+                ) VALUES (?, ?, ?, ?)
+                ON CONFLICT(source_key) DO UPDATE SET
+                    final_accepted_eed = excluded.final_accepted_eed,
+                    cost_seconds = excluded.cost_seconds,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    source_key,
+                    float(final_accepted_eed),
+                    float(cost_seconds),
+                    now,
+                ),
+            )
+            self._attribute_search_reward_locked(
+                source_key,
+                accepted_novel_eed=float(final_accepted_eed),
+            )
+            self.connection.execute(
+                """
+                UPDATE source_llm_source_attribution
+                SET credited_eed = ?
+                WHERE source_key = ?
+                """,
+                (float(final_accepted_eed), source_key),
+            )
+
+    def llm_task_rewards(self) -> list[dict[str, object]]:
+        rows = self.connection.execute(
+            """
+            SELECT e.task_type,
+                   COUNT(DISTINCT e.episode_id) AS episodes,
+                   COALESCE(SUM(a.credited_eed), 0) AS credited_eed,
+                   COALESCE(SUM(DISTINCT e.cost_seconds), 0) AS cost_seconds
+            FROM source_llm_episodes e
+            LEFT JOIN source_llm_hypotheses h
+              ON h.episode_id = e.episode_id
+            LEFT JOIN source_llm_source_attribution a
+              ON a.hypothesis_id = h.hypothesis_id
+            WHERE e.finished_at IS NOT NULL
+            GROUP BY e.task_type
+            ORDER BY e.task_type
+            """
+        ).fetchall()
+        return [
+            {
+                "task_type": str(row["task_type"]),
+                "episodes": int(row["episodes"]),
+                "credited_eed": float(row["credited_eed"] or 0.0),
+                "cost_seconds": float(row["cost_seconds"] or 0.0),
+            }
+            for row in rows
+        ]
+
+    def record_overlap_sketch(
+        self,
+        source_key: str,
+        values: tuple[int, ...],
+    ) -> None:
+        if not values:
+            raise ValueError("overlap sketch cannot be empty")
+        if self.get_candidate(source_key) is None:
+            raise KeyError(f"unknown source: {source_key}")
+        with self.connection:
+            self.connection.execute(
+                """
+                INSERT INTO source_overlap_sketches(
+                    source_key, width, sketch_json, updated_at
+                ) VALUES (?, ?, ?, ?)
+                ON CONFLICT(source_key) DO UPDATE SET
+                    width = excluded.width,
+                    sketch_json = excluded.sketch_json,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    source_key,
+                    len(values),
+                    json.dumps(list(values), separators=(",", ":")),
+                    float(self.clock()),
+                ),
+            )
+
+    def get_overlap_sketch(
+        self,
+        source_key: str,
+    ) -> tuple[int, ...] | None:
+        row = self.connection.execute(
+            """
+            SELECT width, sketch_json
+            FROM source_overlap_sketches
+            WHERE source_key = ?
+            """,
+            (source_key,),
+        ).fetchone()
+        if row is None:
+            return None
+        values = tuple(int(value) for value in json.loads(row["sketch_json"]))
+        if len(values) != int(row["width"]):
+            raise ValueError("stored overlap sketch width mismatch")
+        return values
+
     def register_proposal(
         self,
         candidate: SourceCandidate,
@@ -558,12 +850,21 @@ class SourceDiscoveryRegistry:
         *,
         accepted_novel_eed: float,
     ) -> None:
-        """Idempotently attribute measured yield to one originating search.
+        """Idempotently attribute proxy/final yield to one originating search.
 
-        Duplicate proposals do not multiply reward. The earliest search episode
-        that introduced the source receives the source's current measured
-        reward, and remeasurement adjusts only the delta.
+        A final accepted reward, when present, always supersedes scout proxy
+        yield. Duplicate proposals do not multiply reward.
         """
+        final_row = self.connection.execute(
+            """
+            SELECT final_accepted_eed
+            FROM source_final_rewards
+            WHERE source_key = ?
+            """,
+            (source_key,),
+        ).fetchone()
+        if final_row is not None:
+            accepted_novel_eed = float(final_row["final_accepted_eed"])
         attribution = self.connection.execute(
             """
             SELECT episode_id, credited_eed
