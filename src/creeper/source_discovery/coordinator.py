@@ -26,6 +26,7 @@ from creeper.source_discovery.models import (
     SourceCandidate,
     SourceState,
     is_common_crawl_provenance,
+    source_key,
 )
 from creeper.source_discovery.registry import SourceDiscoveryRegistry
 
@@ -496,7 +497,26 @@ class SourceDiscoveryCoordinator:
                 ):
                     dropped += 1
                     continue
-                self.registry.register_proposal(candidate, episode_id=episode.episode_id)
+                self.registry.register_proposal(
+                    candidate,
+                    episode_id=episode.episode_id,
+                )
+                if (
+                    directive.task_type.value == "INTERPRET_STRUCTURE"
+                    and directive.subject
+                ):
+                    try:
+                        parent_key = source_key(directive.subject)
+                        if self.registry.get_candidate(parent_key) is not None:
+                            self.registry.add_edge(
+                                parent_key,
+                                candidate.source_key,
+                                relation="llm_interprets_to",
+                            )
+                    except ValueError:
+                        # Search admission still owns candidate acceptance; an
+                        # invalid/non-source subject simply cannot add lineage.
+                        pass
                 if batch.llm_episode_id is not None:
                     attribution = dict(batch.hypothesis_attribution)
                     hypothesis_id = attribution.get(candidate.source_key)
