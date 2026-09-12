@@ -8,7 +8,7 @@ from pathlib import PurePosixPath
 from urllib.parse import urlsplit
 
 from creeper.source_discovery.index_registry import IndexSpaceRegistry
-from creeper.source_discovery.index_space import compile_candidate_index_space
+from creeper.source_discovery.index_space import RegionSynopsis, compile_candidate_index_space
 from creeper.source_discovery.models import SourceCandidate, SourceState
 from creeper.sources.domains import DomainState, SourceDomain
 from creeper.sources.reservoirs import Reservoir, ReservoirState
@@ -105,6 +105,23 @@ class SourceActivationCompiler:
             ),
         )
         self.index_registry.register_index_space(compiled_index_space)
+        self.index_registry.record_synopsis(
+            RegionSynopsis(
+                region_key=compiled_index_space.root_region.region_key,
+                sampled_records=measurement.sampled_records,
+                unique_hosts=measurement.unique_hosts,
+                novel_hosts=measurement.novel_hosts,
+                observed_host_year_pairs=measurement.observed_host_year_pairs,
+                novel_host_year_pairs=measurement.novel_host_year_pairs,
+                novel_eed=measurement.novel_eed_for_ranking,
+                bytes_read=measurement.bytes_read,
+                requests=measurement.requests,
+                measurement_mode=measurement.measurement_mode,
+                minhash_values=measurement.minhash_values,
+                confidence=stored.confidence,
+                complete=False,
+            )
+        )
         domain_id = f"domain:{source_key.removeprefix('src:')}"
         reservoir_id = f"reservoir:{source_key.removeprefix('src:')}"
         adapter_id = f"{adapter_kind}:{source_key.removeprefix('src:')}"
