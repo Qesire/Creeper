@@ -9,13 +9,12 @@ from __future__ import annotations
 
 import itertools
 import re
-from dataclasses import dataclass
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from typing import Any
 
 from creeper.source_discovery.models import SourceCandidate, SourceState
 
-_PLACEHOLDER_RE = re.compile(r"\\{([A-Z][A-Z0-9_]*)\\}")
+_PLACEHOLDER_RE = re.compile(r"\{([A-Z][A-Z0-9_]*)\}")
 
 
 class MotifProtocolError(ValueError):
