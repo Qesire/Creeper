@@ -96,7 +96,10 @@ max_returned_candidates = 17
         self.assertEqual(config.coordinator.scout_parallelism, 2)
         self.assertEqual(config.scrapy.max_pages, 20)
         self.assertFalse(config.scrapy.follow_query)
-        self.assertEqual(\n            config.agent.command,\n            ("python", str((self.root / "agent.py").resolve())),\n        )
+        self.assertEqual(
+            config.agent.command,
+            ("python", str((self.root / "agent.py").resolve())),
+        )
         self.assertEqual(config.agent.policy.max_returned_candidates, 17)
         self.assertEqual(config.agent.admission.min_expected_volume, 123456)
         self.assertEqual(config.agent.admission.direct_min_expected_volume, 12345)
