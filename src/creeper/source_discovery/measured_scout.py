@@ -10,6 +10,7 @@ remain HOLD rather than being guessed.
 from __future__ import annotations
 
 import csv
+from collections import Counter
 import gzip
 import io
 import json
@@ -25,6 +26,7 @@ import httpx
 from creeper.authority.baseline_index import BaselineIndex, YEAR_BITS
 from creeper.authority.normalizer import normalize_official
 from creeper.source_discovery.coordinator import ScoutDisposition, ScoutResult
+from creeper.source_discovery.overlap import build_minhash
 from creeper.source_discovery.models import (
     MeasurementMode,
     ScoutMeasurement,
@@ -49,6 +51,9 @@ class MeasuredYieldScoutPolicy:
     min_novel_fraction: float = 0.01
     min_novel_eed: float = 1.0
     timeout_seconds: float = 30.0
+    progressive_initial_bytes: int = 64 * 1024
+    early_accept_multiplier: float = 4.0
+    early_reject_unseen_fraction: float = 0.01
 
     def __post_init__(self) -> None:
         for name in (
@@ -59,6 +64,7 @@ class MeasuredYieldScoutPolicy:
             "sample_windows",
             "min_unique_hosts",
             "min_novel_hosts",
+            "progressive_initial_bytes",
         ):
             value = getattr(self, name)
             if not isinstance(value, int) or isinstance(value, bool) or value < 1:
@@ -77,6 +83,18 @@ class MeasuredYieldScoutPolicy:
             raise ValueError("min_novel_eed must be finite and non-negative")
         if not math.isfinite(self.timeout_seconds) or self.timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be positive")
+        if (
+            not math.isfinite(self.early_accept_multiplier)
+            or self.early_accept_multiplier < 1.0
+        ):
+            raise ValueError("early_accept_multiplier must be at least one")
+        if (
+            not math.isfinite(self.early_reject_unseen_fraction)
+            or not 0.0 <= self.early_reject_unseen_fraction <= 1.0
+        ):
+            raise ValueError(
+                "early_reject_unseen_fraction must be within [0, 1]"
+            )
 
 
 @dataclass(frozen=True)
@@ -116,6 +134,7 @@ class ParsedHostSample:
     hosts: set[str]
     host_year_pairs: set[tuple[str, int]]
     measurement_mode: MeasurementMode
+    observation_keys: tuple[str, ...] = ()
 
     def __iter__(self):
         yield self.sampled_records
