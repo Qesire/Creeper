@@ -87,6 +87,10 @@ class StaticSourceRuntime:
             limits.get("evidence_backlog_capacity"),
             "evidence_backlog_capacity",
         )
+        self.rdap_backlog_capacity = _positive_int(
+            limits.get("rdap_backlog_capacity", 4096),
+            "rdap_backlog_capacity",
+        )
         self.queue_capacities = {
             "source_records": _positive_int(
                 limits.get("queue_source_records"), "queue_source_records"
@@ -193,7 +197,10 @@ class StaticSourceRuntime:
             ),
             candidates=(),
             adapters={self.adapter.adapter_id: self.adapter},
-            backlog_capacities={"wayback": self.backlog_capacity},
+            backlog_capacities={
+                "wayback": self.backlog_capacity,
+                "rdap": self.rdap_backlog_capacity,
+            },
             queue_capacities=self.queue_capacities,
             range_first_fraction=self.range_first_fraction,
             owner=self.owner,
@@ -299,6 +306,10 @@ class ActivatedSourceRuntime:
             limits.get("evidence_backlog_capacity"),
             "evidence_backlog_capacity",
         )
+        self.rdap_backlog_capacity = _positive_int(
+            limits.get("rdap_backlog_capacity", 4096),
+            "rdap_backlog_capacity",
+        )
         self.queue_capacities = {
             "source_records": _positive_int(
                 limits.get("queue_source_records"), "queue_source_records"
@@ -357,7 +368,10 @@ class ActivatedSourceRuntime:
             ),
             candidates=(),
             adapters={},
-            backlog_capacities={"wayback": self.backlog_capacity},
+            backlog_capacities={
+                "wayback": self.backlog_capacity,
+                "rdap": self.rdap_backlog_capacity,
+            },
             queue_capacities=self.queue_capacities,
             range_first_fraction=self.range_first_fraction,
             owner=self.owner,

@@ -491,6 +491,10 @@ class IncrementalReadinessRuntime:
         self._baseline_signature = ""
         self._model_signature = ""
         self._refresh_authority(force=True)
+        # Publish official EED weights immediately, even when there is no new
+        # evidence batch yet. Pending evidence work can then be value-ranked
+        # from service startup rather than waiting for the first readiness row.
+        self._control_store()
 
     def _refresh_authority(self, *, force: bool = False) -> bool:
         baseline_signature = _metadata_signature(self.baseline_path)
@@ -513,18 +517,28 @@ class IncrementalReadinessRuntime:
             baseline_signature=baseline_signature,
             model_signature=model_signature,
         )
+        if self.control is not None:
+            self.control.set_eed_tld_weights(self.weights)
         return True
+
+    def _control_store(self) -> ControlStore | None:
+        control_path = self.runtime_data_root / "control.sqlite3"
+        if self.control is None and control_path.exists():
+            self.control = ControlStore(control_path)
+            # Persist the same official EED weights used by readiness so the
+            # durable evidence queue can prioritize higher score value without
+            # implementing a second weighting model.
+            self.control.set_eed_tld_weights(self.weights)
+        return self.control
 
     def _task_kinds(
         self,
         rows: list[EvidenceHostYear],
     ) -> dict[tuple[str, int], str]:
-        control_path = self.runtime_data_root / "control.sqlite3"
-        if self.control is None and control_path.exists():
-            self.control = ControlStore(control_path)
-        if self.control is None:
+        control = self._control_store()
+        if control is None:
             return {}
-        return self.control.resolve_host_year_task_kinds(
+        return control.resolve_host_year_task_kinds(
             (row.hostname, row.year) for row in rows
         )
 
@@ -532,12 +546,10 @@ class IncrementalReadinessRuntime:
         self,
         rows: list[EvidenceHostYear],
     ) -> dict[tuple[str, int], str]:
-        control_path = self.runtime_data_root / "control.sqlite3"
-        if self.control is None and control_path.exists():
-            self.control = ControlStore(control_path)
-        if self.control is None:
+        control = self._control_store()
+        if control is None:
             return {}
-        return self.control.resolve_primary_source_origins(
+        return control.resolve_primary_source_origins(
             (row.hostname, row.year) for row in rows
         )
 

@@ -325,7 +325,10 @@ class EvidenceBacklogAdmission:
 
             fanout_capacity = sum(
                 0
-                if key.policy_version.startswith("cdx-domain-")
+                if (
+                    key.policy_version.startswith("cdx-domain-")
+                    or key.provider == "rdap"
+                )
                 else max(
                     0,
                     key.temporal_scope.year_to - key.temporal_scope.year_from,
@@ -341,7 +344,10 @@ class EvidenceBacklogAdmission:
             for key in inserted_keys:
                 extra = (
                     0
-                    if key.policy_version.startswith("cdx-domain-")
+                    if (
+                        key.policy_version.startswith("cdx-domain-")
+                        or key.provider == "rdap"
+                    )
                     else max(
                         0,
                         key.temporal_scope.year_to - key.temporal_scope.year_from,

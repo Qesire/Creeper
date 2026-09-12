@@ -61,6 +61,8 @@ class SourceProducer:
         range_first_fraction: float = 0.0,
         domain_fanout_min_children: int = 4,
         domain_fanout_batch_size: int = 16,
+        rdap_fanout_min_children: int = 1,
+        rdap_batch_size: int = 16,
         owner: str = "source-producer",
         baseline_batch_size: int = 50_000,
         reservation_grace_seconds: float = 30.0,
@@ -73,6 +75,8 @@ class SourceProducer:
             raise ValueError("range_first_fraction must be between 0 and 1")
         if domain_fanout_min_children < 2 or domain_fanout_batch_size < 1:
             raise ValueError("invalid domain fanout thresholds")
+        if rdap_fanout_min_children < 1 or rdap_batch_size < 1:
+            raise ValueError("invalid RDAP candidate thresholds")
         capacities = dict(backlog_capacities)
         if any(
             not provider or not isinstance(value, int) or value < 0
@@ -94,6 +98,8 @@ class SourceProducer:
         self.range_first_fraction = float(range_first_fraction)
         self.domain_fanout_min_children = int(domain_fanout_min_children)
         self.domain_fanout_batch_size = int(domain_fanout_batch_size)
+        self.rdap_fanout_min_children = int(rdap_fanout_min_children)
+        self.rdap_batch_size = int(rdap_batch_size)
         self.owner = owner
         self.baseline_batch_size = baseline_batch_size
         self.reservation_grace_seconds = reservation_grace_seconds
@@ -272,6 +278,43 @@ class SourceProducer:
                     lease_id=running.lease_id,
                 )
 
+            def enqueue_auxiliary_keys(
+                aux_provider: str,
+                keys: Iterable[EvidenceQueryKey],
+            ) -> int | None:
+                """Enqueue independently budgeted provider work with source lineage."""
+                nonlocal enqueued
+                rows = list(dict.fromkeys(keys))
+                if not rows:
+                    return 0
+                capacity = self.backlog_capacities.get(aux_provider, 0)
+                if capacity <= 0:
+                    return None
+                aux_reservation = self.admission.try_reserve(
+                    provider=aux_provider,
+                    amount=len(rows),
+                    capacity=capacity,
+                    ttl_seconds=postprocess_ttl,
+                )
+                if aux_reservation is None:
+                    return None
+                try:
+                    self.admission.bind_lease(
+                        aux_reservation,
+                        running.lease_id,
+                    )
+                    inserted = self.admission.enqueue_reserved(
+                        aux_reservation,
+                        rows,
+                        source_key=origin_source_key,
+                        reservoir_id=candidate.reservoir_id,
+                        lease_id=running.lease_id,
+                    )
+                    enqueued += inserted
+                    return inserted
+                finally:
+                    self.admission.release(aux_reservation)
+
             def resolve_pending() -> None:
                 nonlocal direct_capsules
                 if not pending:
@@ -362,6 +405,27 @@ class SourceProducer:
                         self.control_store.mark_domain_fanout_enqueued(
                             domain_parents
                         )
+
+                    rdap_hosts = self.control_store.ready_rdap_candidates(
+                        min_children=self.rdap_fanout_min_children,
+                        limit=min(self.rdap_batch_size, len(pending)),
+                    )
+                    if rdap_hosts:
+                        rdap_keys = tuple(
+                            EvidenceQueryKey(
+                                hostname=hostname,
+                                temporal_scope=TemporalScope(1996, 2001),
+                                provider="rdap",
+                                policy_version="rdap-registration-v1",
+                            )
+                            for hostname in rdap_hosts
+                        )
+                        # Mark only after the durable admission call succeeds.
+                        # Duplicates are still safe to mark because the same
+                        # provider/key identity is already durable.
+                        rdap_inserted = enqueue_auxiliary_keys("rdap", rdap_keys)
+                        if rdap_inserted is not None:
+                            self.control_store.mark_rdap_enqueued(rdap_hosts)
                 pending.clear()
 
             for record in records:

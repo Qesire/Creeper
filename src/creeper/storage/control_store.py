@@ -60,6 +60,16 @@ class ControlStore:
         path.parent.mkdir(parents=True, exist_ok=True)
         self.connection = sqlite3.connect(path)
         self.connection.row_factory = sqlite3.Row
+        self.connection.create_function(
+            "creeper_tld",
+            1,
+            lambda hostname: (
+                str(hostname).rsplit(".", 1)[-1].lower()
+                if isinstance(hostname, str) and "." in hostname
+                else ""
+            ),
+            deterministic=True,
+        )
         self.default_lease_seconds = default_lease_seconds
         self.clock = clock
         self.connection.execute("PRAGMA journal_mode=WAL")
@@ -77,6 +87,7 @@ class ControlStore:
                 retry_at REAL,
                 lease_owner TEXT,
                 lease_until REAL,
+                eed_weight REAL NOT NULL DEFAULT 0,
                 PRIMARY KEY(hostname, year_from, year_to, provider, policy_version)
             ) WITHOUT ROWID;
             CREATE INDEX IF NOT EXISTS idx_evidence_tasks_claim
@@ -105,6 +116,7 @@ class ControlStore:
             FROM evidence_tasks
             WHERE year_to > year_from
               AND policy_version NOT LIKE 'cdx-domain-%'
+              AND provider <> 'rdap'
               AND state IN ('pending', 'incomplete', 'transient_error');
             CREATE TABLE IF NOT EXISTS runtime_checkpoints (
                 key TEXT PRIMARY KEY,
@@ -251,6 +263,7 @@ class ControlStore:
                 observed_self INTEGER NOT NULL DEFAULT 0 CHECK(observed_self IN (0,1)),
                 child_count INTEGER NOT NULL DEFAULT 0 CHECK(child_count >= 0),
                 query_enqueued INTEGER NOT NULL DEFAULT 0 CHECK(query_enqueued IN (0,1)),
+                rdap_enqueued INTEGER NOT NULL DEFAULT 0 CHECK(rdap_enqueued IN (0,1)),
                 first_source_key TEXT,
                 updated_at REAL NOT NULL
             ) WITHOUT ROWID;
@@ -263,6 +276,54 @@ class ControlStore:
             ) WITHOUT ROWID;
             CREATE INDEX IF NOT EXISTS idx_domain_fanout_ready
                 ON domain_fanout_state(query_enqueued, observed_self, child_count);
+            """
+        )
+        evidence_columns = {
+            str(row["name"])
+            for row in self.connection.execute(
+                "PRAGMA table_info(evidence_tasks)"
+            ).fetchall()
+        }
+        if "eed_weight" not in evidence_columns:
+            self.connection.execute(
+                "ALTER TABLE evidence_tasks ADD COLUMN "
+                "eed_weight REAL NOT NULL DEFAULT 0"
+            )
+        fanout_columns = {
+            str(row["name"])
+            for row in self.connection.execute(
+                "PRAGMA table_info(domain_fanout_state)"
+            ).fetchall()
+        }
+        if "rdap_enqueued" not in fanout_columns:
+            self.connection.execute(
+                "ALTER TABLE domain_fanout_state ADD COLUMN "
+                "rdap_enqueued INTEGER NOT NULL DEFAULT 0 "
+                "CHECK(rdap_enqueued IN (0,1))"
+            )
+        self.connection.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS eed_tld_weights (
+                tld TEXT PRIMARY KEY,
+                weight REAL NOT NULL CHECK(weight >= 0)
+            ) WITHOUT ROWID;
+            CREATE TRIGGER IF NOT EXISTS trg_evidence_task_eed_weight
+            AFTER INSERT ON evidence_tasks
+            BEGIN
+                UPDATE evidence_tasks
+                SET eed_weight = COALESCE(
+                    (
+                        SELECT weight FROM eed_tld_weights
+                        WHERE tld = creeper_tld(NEW.hostname)
+                    ),
+                    0
+                )
+                WHERE hostname = NEW.hostname
+                  AND year_from = NEW.year_from
+                  AND year_to = NEW.year_to
+                  AND provider = NEW.provider
+                  AND policy_version = NEW.policy_version;
+            END;
             """
         )
         self.connection.commit()
@@ -426,6 +487,86 @@ class ControlStore:
             )
         return self.connection.total_changes - before
 
+    def ready_rdap_candidates(
+        self,
+        *,
+        min_children: int = 1,
+        limit: int = 16,
+    ) -> list[str]:
+        """Return likely registrable parent hosts not yet sent to RDAP."""
+        if min_children < 1 or limit < 1:
+            raise ValueError("RDAP fanout thresholds must be positive")
+        rows = self.connection.execute(
+            """
+            SELECT parent_hostname
+            FROM domain_fanout_state
+            WHERE observed_self = 1
+              AND rdap_enqueued = 0
+              AND (
+                    child_count >= ?
+                    OR (
+                        LENGTH(parent_hostname)
+                        - LENGTH(REPLACE(parent_hostname, '.', ''))
+                    ) = 1
+              )
+            ORDER BY child_count DESC, parent_hostname
+            LIMIT ?
+            """,
+            (int(min_children), int(limit)),
+        ).fetchall()
+        return [str(row["parent_hostname"]) for row in rows]
+
+    def mark_rdap_enqueued(self, hostnames: Iterable[str]) -> int:
+        values = list(dict.fromkeys(
+            hostname
+            for raw in hostnames
+            if (hostname := normalize_official(str(raw))) is not None
+        ))
+        if not values:
+            return 0
+        before = self.connection.total_changes
+        now = float(self.clock())
+        with self.connection:
+            self.connection.executemany(
+                """
+                UPDATE domain_fanout_state
+                SET rdap_enqueued = 1, updated_at = ?
+                WHERE parent_hostname = ? AND rdap_enqueued = 0
+                """,
+                [(now, hostname) for hostname in values],
+            )
+        return self.connection.total_changes - before
+
+    def set_eed_tld_weights(self, weights: dict[str, object]) -> int:
+        """Persist official EED weights and revalue all durable evidence work."""
+        normalized: dict[str, float] = {}
+        for raw_tld, raw_weight in weights.items():
+            tld = str(raw_tld).strip().lower().lstrip(".")
+            weight = float(raw_weight)
+            if tld and weight >= 0:
+                normalized[tld] = weight
+        before = self.connection.total_changes
+        with self.connection:
+            self.connection.execute("DELETE FROM eed_tld_weights")
+            self.connection.executemany(
+                "INSERT INTO eed_tld_weights(tld, weight) VALUES (?, ?)",
+                sorted(normalized.items()),
+            )
+            self.connection.execute(
+                """
+                UPDATE evidence_tasks
+                SET eed_weight = COALESCE(
+                    (
+                        SELECT weight
+                        FROM eed_tld_weights
+                        WHERE tld = creeper_tld(evidence_tasks.hostname)
+                    ),
+                    0
+                )
+                """
+            )
+        return self.connection.total_changes - before
+
     def resolve_provider_coverage_masks(
         self,
         hostnames: Iterable[str],
@@ -482,9 +623,8 @@ class ControlStore:
         rows = [(*self._values(key), CDXQueryState.PENDING.value) for key in keys]
         if not rows:
             return 0
-        before = self.connection.total_changes
         with self.connection:
-            self.connection.executemany(
+            cursor = self.connection.executemany(
                 """
                 INSERT OR IGNORE INTO evidence_tasks(
                     hostname, year_from, year_to, provider, policy_version, state
@@ -492,7 +632,10 @@ class ControlStore:
                 """,
                 rows,
             )
-        return self.connection.total_changes - before
+        # rowcount reflects direct task inserts only; total_changes would also
+        # include the operational EED-weight trigger and break this API's
+        # long-standing "number of new tasks" contract.
+        return max(0, int(cursor.rowcount))
 
 
     def record_evidence_task_attempt_metric(
@@ -524,7 +667,9 @@ class ControlStore:
             raise ValueError("attempt metrics must be non-negative")
         value = state.value if isinstance(state, CDXQueryState) else str(state)
         task_kind = (
-            "domain"
+            "rdap"
+            if key.provider == "rdap"
+            else "domain"
             if key.policy_version.startswith("cdx-domain-")
             else "exact"
             if key.temporal_scope.year_from == key.temporal_scope.year_to
@@ -707,7 +852,13 @@ class ControlStore:
         if any(year < scope.year_from or year > scope.year_to for year in year_list):
             raise ValueError("attributed year falls outside evidence task scope")
         when = float(self.clock()) if attributed_at is None else float(attributed_at)
-        task_kind = "exact" if scope.year_from == scope.year_to else "range"
+        task_kind = (
+            "rdap"
+            if key.provider == "rdap"
+            else "exact"
+            if scope.year_from == scope.year_to
+            else "range"
+        )
 
         with self.connection:
             self.connection.executemany(
@@ -1019,7 +1170,13 @@ class ControlStore:
         query = (
             "SELECT * FROM evidence_tasks WHERE "
             + " AND ".join(clauses)
-            + " ORDER BY (year_to - year_from) DESC, year_from, hostname, "
+            + " ORDER BY "
+            + "CASE "
+            + "WHEN policy_version LIKE 'cdx-domain-%' THEN 3 "
+            + "WHEN provider = 'rdap' THEN 2 "
+            + "WHEN year_to > year_from THEN 1 ELSE 0 END DESC, "
+            + "eed_weight DESC, "
+            + "(year_to - year_from) DESC, year_from, hostname, "
             + "year_to, provider, policy_version LIMIT ?"
         )
         lease_until = now + float(lease_seconds)
@@ -1113,8 +1270,7 @@ class ControlStore:
                 """,
                 (value, *self._values(key), owner),
             )
-            before = self.connection.total_changes
-            self.connection.executemany(
+            cursor = self.connection.executemany(
                 """
                 INSERT OR IGNORE INTO evidence_tasks(
                     hostname, year_from, year_to, provider, policy_version, state
@@ -1122,7 +1278,7 @@ class ControlStore:
                 """,
                 [(*self._values(followup), CDXQueryState.PENDING.value) for followup in exact],
             )
-            created = self.connection.total_changes - before
+            created = max(0, int(cursor.rowcount))
             # Range tasks reserve their worst-case net fanout capacity at
             # initial admission. The parent is becoming terminal in this same
             # transaction, so deleting the token after child insertion converts

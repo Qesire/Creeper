@@ -89,6 +89,79 @@ class ControlStoreTests(unittest.TestCase):
             )
             store.close()
 
+    def test_claim_order_uses_official_eed_weight_for_equal_work(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ControlStore(Path(tmp) / "control.sqlite3")
+            low = EvidenceQueryKey(
+                "example.low",
+                TemporalScope(1997, 1997),
+                "wayback",
+                "v1",
+            )
+            high = EvidenceQueryKey(
+                "example.high",
+                TemporalScope(1997, 1997),
+                "wayback",
+                "v1",
+            )
+            store.enqueue_evidence_tasks([low, high])
+            store.set_eed_tld_weights({"low": 0.1, "high": 2.5})
+
+            claimed = store.claim_evidence_tasks(
+                owner="worker-eed",
+                limit=1,
+            )
+
+            self.assertEqual([task.key for task in claimed], [high])
+            weight = store.connection.execute(
+                """
+                SELECT eed_weight FROM evidence_tasks
+                WHERE hostname = 'example.high'
+                """
+            ).fetchone()[0]
+            self.assertAlmostEqual(float(weight), 2.5)
+            store.close()
+
+    def test_claim_order_prefers_domain_then_rdap_then_regular_range(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ControlStore(Path(tmp) / "control.sqlite3")
+            exact = EvidenceQueryKey(
+                "exact.example",
+                TemporalScope(1997, 1997),
+                "wayback",
+                "v1",
+            )
+            ranged = EvidenceQueryKey(
+                "range.example",
+                TemporalScope(1996, 2001),
+                "wayback",
+                "v1",
+            )
+            rdap = EvidenceQueryKey(
+                "registration.example",
+                TemporalScope(1996, 2001),
+                "rdap",
+                "rdap-registration-v1",
+            )
+            domain = EvidenceQueryKey(
+                "domain.example",
+                TemporalScope(1996, 2001),
+                "wayback",
+                "cdx-domain-v1",
+            )
+            store.enqueue_evidence_tasks([exact, ranged, rdap, domain])
+
+            claimed = store.claim_evidence_tasks(
+                owner="worker-strategy",
+                limit=4,
+            )
+
+            self.assertEqual(
+                [task.key for task in claimed],
+                [domain, rdap, ranged, exact],
+            )
+            store.close()
+
     def test_terminal_tasks_are_not_claimed_but_retryable_tasks_are(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = ControlStore(Path(tmp) / "control.sqlite3")
@@ -279,6 +352,36 @@ class ControlStoreTests(unittest.TestCase):
                     ("range.example", 1996): "range",
                     ("range.example", 1998): "range",
                 },
+            )
+            store.close()
+
+    def test_rdap_positive_uses_its_own_task_kind(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ControlStore(Path(tmp) / "control.sqlite3")
+            key = EvidenceQueryKey(
+                "example.com",
+                TemporalScope(1996, 2001),
+                "rdap",
+                "rdap-registration-v1",
+            )
+            store.enqueue_evidence_tasks([key])
+            store.attribute_task_host_years(key, [1998])
+            self.assertEqual(
+                store.resolve_host_year_task_kinds([("example.com", 1998)]),
+                {("example.com", 1998): "rdap"},
+            )
+            store.record_evidence_task_attempt_metric(
+                key,
+                attempt=1,
+                state=CDXQueryState.PASS,
+                provider_requests=1,
+                provider_elapsed_milliseconds=10,
+                pages_seen=1,
+                records_seen=1,
+            )
+            self.assertEqual(
+                store.evidence_attempt_metric_summary()["rdap"]["provider_requests"],
+                1,
             )
             store.close()
 

@@ -19,3 +19,5 @@ lease_max_seconds = 300
 # Durable provider backlog high-water. Discovery/source acquisition pauses
 # before this queue is over-admitted.
 evidence_backlog_capacity = 10000
+# RDAP registration-year evidence uses a separate provider/network budget.
+rdap_backlog_capacity = 4096
