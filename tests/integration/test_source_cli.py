@@ -262,6 +262,7 @@ class SourceProducerCliTests(unittest.TestCase):
             ) as runtime:
                 count = runtime.refresh_workset()
                 self.assertEqual(count, 1)
+                self.assertAlmostEqual(runtime.producer.range_first_fraction, 0.10)
                 lease = runtime.producer.candidates[0].lease
                 assert lease is not None
                 self.assertEqual(lease.max_records, 2)
