@@ -159,6 +159,7 @@ class HistoricalIndexOptimizerTests(unittest.IsolatedAsyncioTestCase):
                     "min_observations_to_stop = 1",
                     "max_harvest_regions_per_cycle = 4",
                     "harvest_byte_budget = 1048576",
+                    "boundary_record_max_bytes = 65536",
                     "harvest_max_records_per_lease = 1000",
                     "busy_poll_seconds = 0.01",
                     "idle_poll_seconds = 0.01",
