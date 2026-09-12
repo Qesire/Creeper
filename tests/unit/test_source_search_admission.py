@@ -45,6 +45,31 @@ class SearchAdmissionPolicyTests(unittest.TestCase):
             or "",
         )
 
+
+    def test_direct_evidence_bulk_uses_lower_volume_floor(self) -> None:
+        policy = SearchAdmissionPolicy(
+            min_expected_volume=100_000,
+            direct_min_expected_volume=10_000,
+        )
+        direct = self.candidate(
+            canonical_entrypoint="https://archive.example/index-2000.cdx.gz",
+            source_family="BULK_ARTIFACT",
+            level=SourceLevel.SOURCE,
+            expected_volume=25_000,
+            direct_evidence_prior=1.0,
+        )
+        self.assertTrue(policy.accepts(direct))
+        self.assertIn(
+            "direct-evidence floor=10000",
+            policy.rejection_reason(
+                self.candidate(
+                    canonical_entrypoint="https://archive.example/index.cdxj",
+                    expected_volume=9_999,
+                )
+            )
+            or "",
+        )
+
     def test_rejects_common_crawl_corpus_before_scout(self) -> None:
         policy = SearchAdmissionPolicy(min_expected_volume=100_000)
         reason = policy.rejection_reason(
@@ -67,6 +92,9 @@ p.add_argument("--response", required=True)
 a = p.parse_args()
 request = json.loads(Path(a.request).read_text(encoding="utf-8"))
 assert request["admission"]["min_expected_volume"] == 100000
+assert request["admission"]["direct_min_expected_volume"] == 10000
+assert request["requirements"]["prefer_direct_evidence_bulk"] is True
+assert ".cdxj.gz" in request["requirements"]["direct_evidence_suffixes"]
 payload = {
     "query": "large historical web collection",
     "candidates": [
