@@ -148,6 +148,12 @@ def _positive_int(value: object, *, name: str) -> int:
     return value
 
 
+def _nonnegative_int(value: object, *, name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError(f"{name} must be a non-negative integer")
+    return value
+
+
 def _optional_positive_int(value: object, *, name: str) -> int | None:
     if value is None:
         return None
@@ -285,7 +291,10 @@ def load_historical_index_optimizer_config(
             ),
         ),
         tomography=RegionTomographyPolicy(
-            max_depth=int(raw.get("max_depth", tomography_default.max_depth)),
+            max_depth=_nonnegative_int(
+                raw.get("max_depth", tomography_default.max_depth),
+                name="historical_index.max_depth",
+            ),
             min_child_bytes=_positive_int(
                 raw.get(
                     "min_child_bytes",
@@ -571,7 +580,8 @@ class HistoricalIndexOptimizerRuntime:
         return exhausted
 
     async def run_once(self) -> HistoricalIndexCycleReport:
-        compiled, errors = self._compile_active_sources()
+        compiled, compile_errors = self._compile_active_sources()
+        errors = list(compile_errors)
         eligible = self._eligible_ready_indexes()
         selected = self._rotate_indexes(eligible)
 
@@ -583,7 +593,7 @@ class HistoricalIndexOptimizerRuntime:
                     index.index_key,
                     max_probe_actions=self.config.max_probe_actions_per_index,
                 )
-            except BaseException as exc:
+            except Exception as exc:
                 errors.append(
                     f"{index.index_key}: {type(exc).__name__}: {exc}"
                 )
@@ -612,9 +622,7 @@ class HistoricalIndexOptimizerRuntime:
 
         return HistoricalIndexCycleReport(
             compiled_active_sources=compiled,
-            compile_failures=len(
-                [item for item in errors if item.startswith("src:")]
-            ),
+            compile_failures=len(compile_errors),
             eligible_ready_indexes=len(eligible),
             selected_probe_indexes=tuple(
                 index.index_key for index, _ in selected
