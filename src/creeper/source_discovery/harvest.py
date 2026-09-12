@@ -36,6 +36,7 @@ class RegionHarvestError(ValueError):
 class RegionHarvestPolicy:
     max_seconds: float = 300.0
     baseline_batch_size: int = 20_000
+    max_records_per_lease: int = 100_000
     policy_version: str = "historical-region-v1"
     claim_grace_seconds: float = 60.0
 
@@ -44,6 +45,8 @@ class RegionHarvestPolicy:
             raise ValueError("max_seconds must be positive")
         if self.baseline_batch_size < 1:
             raise ValueError("baseline_batch_size must be positive")
+        if self.max_records_per_lease < 1:
+            raise ValueError("max_records_per_lease must be positive")
         if not self.policy_version.strip():
             raise ValueError("policy_version is required")
         if self.claim_grace_seconds < 0:
@@ -260,7 +263,10 @@ class RegionHarvestExecutor:
             reservoir_id=reservoir.reservoir_id,
             cursor_start=f"byte:{start}",
             cursor_end=f"byte:{end_exclusive}",
-            max_records=max(1, logical_bytes + 1),
+            max_records=min(
+                max(1, logical_bytes + 1),
+                self.policy.max_records_per_lease,
+            ),
             max_requests=1,
             max_bytes=max_bytes,
             max_seconds=self.policy.max_seconds,
