@@ -113,12 +113,28 @@ class ScrapyStructuralScoutExecutor:
             discovered_by="scrapy_sidecar",
             discovery_strategy="DETERMINISTIC_LINK_EXPANSION",
         )
+        children = []
+        for item in promotions:
+            child = item.candidate
+            if (
+                child.expected_year_from is None
+                and candidate.expected_year_from is not None
+                and candidate.expected_year_to is not None
+                and candidate.source_family == "PUBLIC_ARCHIVE_INDEX_CATALOG"
+            ):
+                child = replace(
+                    child,
+                    expected_year_from=candidate.expected_year_from,
+                    expected_year_to=candidate.expected_year_to,
+                )
+            children.append(child)
+
         return ScoutResult(
             ScoutDisposition.HOLD,
             reason=(
                 f"structural scout inspected {accumulator.input_links} committed links; "
                 f"promoted {len(promotions)} child sources"
             ),
-            discovered_candidates=tuple(item.candidate for item in promotions),
+            discovered_candidates=tuple(children),
             edge_relation="links_to_resource",
         )
