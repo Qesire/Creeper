@@ -515,6 +515,11 @@ def build_validation_report(
             if configured_rps <= 0
             else format(observed_rps / configured_rps, "f")
         ),
+        "provider_active_pacing_utilization": (
+            None
+            if configured_rps <= 0 or active_request_rps is None
+            else format(active_request_rps / configured_rps, "f")
+        ),
         "provider_request_start_gap": {
             "count": request_start_gaps,
             "mean_seconds": (
