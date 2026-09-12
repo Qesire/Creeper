@@ -237,6 +237,120 @@ class ControlStoreTests(unittest.TestCase):
             )
             store.close()
 
+
+    def test_attempt_metrics_and_origin_coverage_are_operational_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ControlStore(Path(tmp) / "control.sqlite3", clock=lambda: 123.0)
+            store.save_domain(self._domain())
+            reservoir = self._reservoir()
+            store.save_reservoir(reservoir)
+            lease = WorkLease.create(
+                reservoir_id=reservoir.reservoir_id,
+                max_records=10,
+                max_requests=2,
+                max_bytes=4096,
+                max_seconds=30,
+                now=100.0,
+                expires_at=130.0,
+            )
+            store.save_lease(lease)
+            key = self._key()
+            store.enqueue_evidence_tasks([key])
+            store.record_evidence_task_origins(
+                [key],
+                source_key="source-a",
+                reservoir_id=reservoir.reservoir_id,
+                lease_id=lease.lease_id,
+            )
+
+            inserted = store.record_evidence_task_attempt_metric(
+                key,
+                attempt=1,
+                state=CDXQueryState.PASS,
+                provider_requests=2,
+                provider_elapsed_milliseconds=50,
+                pages_seen=2,
+                records_seen=3,
+            )
+
+            self.assertTrue(inserted)
+            self.assertFalse(
+                store.record_evidence_task_attempt_metric(
+                    key,
+                    attempt=1,
+                    state=CDXQueryState.PASS,
+                    provider_requests=99,
+                    provider_elapsed_milliseconds=99,
+                    pages_seen=99,
+                    records_seen=99,
+                )
+            )
+            self.assertEqual(
+                store.evidence_attempt_metric_summary()["exact"],
+                {
+                    "attempts": 1,
+                    "provider_requests": 2,
+                    "provider_elapsed_milliseconds": 50,
+                    "pages_seen": 2,
+                    "records_seen": 3,
+                },
+            )
+            self.assertEqual(store.source_provider_request_totals(), {"source-a": 2})
+            self.assertEqual(
+                store.evidence_task_origin_coverage()[CDXQueryState.PENDING.value],
+                {"tasks": 1, "with_origin": 1},
+            )
+            store.close()
+
+    def test_decomposed_range_is_terminal_but_not_provider_coverage(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ControlStore(Path(tmp) / "control.sqlite3")
+            parent = EvidenceQueryKey(
+                "range.example",
+                TemporalScope(1996, 1998),
+                "wayback",
+                "v1",
+            )
+            children = [
+                EvidenceQueryKey(
+                    "range.example",
+                    TemporalScope(year, year),
+                    "wayback",
+                    "v1",
+                )
+                for year in (1996, 1998)
+            ]
+            store.enqueue_evidence_tasks([parent])
+            claimed = store.claim_evidence_tasks(owner="worker", limit=1)
+            self.assertEqual([task.key for task in claimed], [parent])
+
+            store.finish_range_task(
+                parent,
+                CDXQueryState.DECOMPOSED,
+                followup_keys=children,
+                owner="worker",
+            )
+
+            parent_task = store.get_evidence_task(parent)
+            self.assertEqual(parent_task.state, CDXQueryState.DECOMPOSED.value)
+            self.assertEqual(
+                store.resolve_provider_coverage_masks(
+                    ["range.example"],
+                    provider="wayback",
+                    policy_version="v1",
+                )["range.example"],
+                0,
+            )
+            self.assertEqual(
+                {
+                    task.key.temporal_scope.year_from
+                    for task in store.list_evidence_tasks()
+                    if task.state == CDXQueryState.PENDING.value
+                },
+                {1996, 1998},
+            )
+            store.close()
+
     def test_running_requires_granted_lease_and_recovery_expires_only_active(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = ControlStore(Path(tmp) / "control.sqlite3", clock=lambda: 200.0)
