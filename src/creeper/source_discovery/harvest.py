@@ -218,6 +218,20 @@ class RegionHarvestExecutor:
                 )
         groups.clear()
 
+    def _expected_content_length(self, index) -> int | None:
+        if index.content_length is not None:
+            return int(index.content_length)
+        roots = [
+            region
+            for region in self.registry.list_regions(index.index_key)
+            if region.depth == 0
+            and region.byte_start == 0
+            and region.byte_end is not None
+        ]
+        if len(roots) == 1:
+            return int(roots[0].byte_end) + 1
+        return None
+
     @staticmethod
     def _parse_region_record(index, raw: bytes, *, line_start: int) -> SourceRecord | None:
         line = raw.decode("utf-8", errors="replace").rstrip("\r\n")
@@ -266,9 +280,17 @@ class RegionHarvestExecutor:
         else:
             path = Path(index.locator)
         size = path.stat().st_size
-        if end_exclusive > size:
+        expected_size = self._expected_content_length(index)
+        if (
+            expected_size is not None
+            and size != expected_size
+        ):
             raise RegionHarvestError(
                 "local source size changed after region bounds were established"
+            )
+        if end_exclusive > size:
+            raise RegionHarvestError(
+                "local source is shorter than the selected region"
             )
 
         emitted = 0
@@ -390,11 +412,12 @@ class RegionHarvestExecutor:
             return LeaseResult(lease.lease_id, next_cursor=None)
 
         request_start = start - 1 if start > 0 else start
+        expected_size = self._expected_content_length(index)
         request_end = (
             end_exclusive - 1 + self.policy.boundary_record_max_bytes
         )
-        if index.content_length is not None:
-            request_end = min(request_end, int(index.content_length) - 1)
+        if expected_size is not None:
+            request_end = min(request_end, expected_size - 1)
         headers = {
             "Range": f"bytes={request_start}-{request_end}",
             "Accept-Encoding": "identity",
@@ -491,11 +514,11 @@ class RegionHarvestExecutor:
                         "remote Range response exceeded requested byte interval"
                     )
                 if (
-                    index.content_length is not None
-                    and total_size != int(index.content_length)
+                    expected_size is not None
+                    and total_size != expected_size
                 ):
                     raise RegionHarvestError(
-                        "remote source size changed after index compilation"
+                        "remote source size changed after region bounds were established"
                     )
 
                 for chunk in response.iter_raw(chunk_size=64 * 1024):
