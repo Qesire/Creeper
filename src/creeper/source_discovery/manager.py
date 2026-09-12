@@ -7,7 +7,9 @@ from enum import StrEnum
 import math
 
 from creeper.source_discovery.models import SourceCandidate, SourceState
+from creeper.source_discovery.overlap import MinHashSketch
 from creeper.source_discovery.registry import SourceDiscoveryRegistry
+from creeper.source_discovery.value import InterpretableSourceValueModel
 
 
 class SearchDirectiveKind(StrEnum):
@@ -132,6 +134,7 @@ class SourceReservoirManager:
         self.search_cooldown_seconds = float(search_cooldown_seconds)
         self.search_ucb_exploration = float(search_ucb_exploration)
         self.stagnation_window = int(stagnation_window)
+        self.value_model = InterpretableSourceValueModel(registry)
 
     def _usable(self, candidates: list[SourceCandidate]) -> list[SourceCandidate]:
         return [
@@ -140,18 +143,57 @@ class SourceReservoirManager:
             if self.registry.suppression_reason(candidate) is None
         ]
 
-    def _rank_warm(self, candidates: list[SourceCandidate]) -> list[SourceCandidate]:
-        def key(candidate: SourceCandidate) -> tuple[float, int, str]:
-            measurement = self.registry.get_scout_measurement(candidate.source_key)
-            if measurement is None:
-                return (0.0, 0, candidate.source_key)
-            return (
-                measurement.novel_eed_per_second,
-                measurement.direct_host_years,
-                candidate.source_key,
+    def _overlap_penalty(
+        self,
+        candidate: SourceCandidate,
+        active: list[SourceCandidate],
+    ) -> float:
+        raw = self.registry.get_overlap_sketch(candidate.source_key)
+        if raw is None:
+            return 0.0
+        sketch = MinHashSketch(raw)
+        similarities: list[float] = []
+        for other in active:
+            other_raw = self.registry.get_overlap_sketch(other.source_key)
+            if other_raw is None or len(other_raw) != len(raw):
+                continue
+            similarities.append(
+                sketch.similarity(MinHashSketch(other_raw))
             )
+        return max(similarities, default=0.0)
 
-        return sorted(candidates, key=key, reverse=True)
+    def _candidate_value(
+        self,
+        candidate: SourceCandidate,
+        *,
+        active: list[SourceCandidate],
+    ) -> float:
+        estimate = self.value_model.estimate(
+            candidate,
+            overlap_penalty=self._overlap_penalty(candidate, active),
+        )
+        measurement = self.registry.get_scout_measurement(candidate.source_key)
+        residual_bonus = (
+            0.0
+            if measurement is None
+            else 0.01 * measurement.residual_opportunity
+        )
+        return estimate.score + residual_bonus
+
+    def _rank_warm(
+        self,
+        candidates: list[SourceCandidate],
+        *,
+        active: list[SourceCandidate],
+    ) -> list[SourceCandidate]:
+        return sorted(
+            candidates,
+            key=lambda candidate: (
+                self._candidate_value(candidate, active=active),
+                candidate.source_key,
+            ),
+            reverse=True,
+        )
 
     def _best_measured_family(
         self,
@@ -411,20 +453,32 @@ class SourceReservoirManager:
         warm = by_state[SourceState.WARM]
         cold_count = sum(len(by_state[state]) for state in self._COLD_STATES)
 
-        warm_ranked = self._rank_warm(warm)
+        warm_ranked = self._rank_warm(warm, active=active)
         activation_slots = max(0, self.targets.active_target - len(active))
         activate = warm_ranked[:activation_slots]
         projected_warm = len(warm) - len(activate)
 
         discovered = sorted(
             by_state[SourceState.DISCOVERED],
-            key=lambda item: (-item.scout_priority, item.source_key),
+            key=lambda item: (
+                -self._candidate_value(item, active=active),
+                item.source_key,
+            ),
         )
         triage = discovered[: self.targets.triage_batch]
 
         scouting_now = len(by_state[SourceState.SCOUTING])
         scout_slots = max(0, self.targets.scout_parallelism - scouting_now)
-        scout = self.registry.rank_scout_candidates(limit=scout_slots)
+        scout_candidates = self._usable(
+            by_state[SourceState.SCOUT_READY]
+        )
+        scout_candidates.sort(
+            key=lambda item: (
+                -self._candidate_value(item, active=active),
+                item.source_key,
+            )
+        )
+        scout = scout_candidates[:scout_slots]
 
         directives = self._search_directives(
             cold_count=cold_count,
