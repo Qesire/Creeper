@@ -309,6 +309,17 @@ class ControlStore:
                 "child_sketch INTEGER NOT NULL DEFAULT 0 "
                 "CHECK(child_sketch >= 0)"
             )
+        # V3 initially persisted every parent/child pair plus self-only host
+        # rows. child_count is already materialized, so those rows are no
+        # longer needed after the fixed-sketch migration. DELETE makes their
+        # pages reusable by SQLite without an unsafe blocking VACUUM.
+        self.connection.executescript(
+            """
+            DELETE FROM domain_fanout_members;
+            DELETE FROM domain_fanout_state
+            WHERE child_count = 0 AND query_enqueued = 0;
+            """
+        )
         self.connection.executescript(
             """
             CREATE TABLE IF NOT EXISTS eed_tld_weights (
