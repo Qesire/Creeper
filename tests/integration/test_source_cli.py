@@ -347,7 +347,7 @@ class SourceProducerCliTests(unittest.TestCase):
 
             self.assertEqual(report["leases_succeeded"], 1)
             self.assertEqual(report["source_records"], 1)
-            self.assertEqual(report["evidence_tasks_enqueued"], 1)
+            self.assertEqual(report["evidence_tasks_enqueued"], 2)
             control = ControlStore(runtime_root / "control.sqlite3")
             try:
                 reservoir = control.get_reservoir("webbase-static")
@@ -357,7 +357,7 @@ class SourceProducerCliTests(unittest.TestCase):
                     sum(
                         control.evidence_task_state_counts().values()
                     ),
-                    4,
+                    5,
                 )
             finally:
                 control.close()
@@ -484,7 +484,7 @@ class SourceProducerCliTests(unittest.TestCase):
             report = run_once(config, owner="source-cli-test")
 
             self.assertEqual(report["leases_succeeded"], 1)
-            self.assertEqual(report["evidence_tasks_enqueued"], 1)
+            self.assertEqual(report["evidence_tasks_enqueued"], 2)
             control = ControlStore(runtime_root / "control.sqlite3")
             try:
                 key = EvidenceQueryKey(
