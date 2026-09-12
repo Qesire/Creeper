@@ -128,6 +128,9 @@ async def run_service(
             previous_http_requests = 0
             previous_throttle_responses = 0
             previous_transport_errors = 0
+            previous_circuit_open_events = 0
+            previous_circuit_fast_failures = 0
+            previous_transport_error_counts: dict[str, int] = {}
             previous_http_429 = 0
             previous_http_503 = 0
             previous_http_5xx = 0
@@ -176,6 +179,9 @@ async def run_service(
                 nonlocal total
                 nonlocal previous_http_requests, previous_throttle_responses
                 nonlocal previous_transport_errors, previous_http_429
+                nonlocal previous_circuit_open_events
+                nonlocal previous_circuit_fast_failures
+                nonlocal previous_transport_error_counts
                 nonlocal previous_http_503, previous_http_5xx
                 nonlocal previous_http_elapsed_ms
                 nonlocal previous_rdap_http_requests, previous_rdap_transport_errors
@@ -208,6 +214,10 @@ async def run_service(
                     for status, count in rdap_provider.http_status_counts.items()
                     if 500 <= int(status) <= 599
                 )
+                current_transport_error_counts = {
+                    str(name): int(count)
+                    for name, count in provider.transport_error_counts.items()
+                }
                 current_latency_buckets = {
                     name: int(provider.http_latency_buckets.get(name, 0))
                     for name in previous_latency_buckets
@@ -237,6 +247,14 @@ async def run_service(
                         ),
                         "wayback_transport_errors": (
                             provider.transport_errors - previous_transport_errors
+                        ),
+                        "wayback_circuit_open_events": (
+                            provider.circuit_open_events
+                            - previous_circuit_open_events
+                        ),
+                        "wayback_circuit_fast_failures": (
+                            provider.circuit_fast_failures
+                            - previous_circuit_fast_failures
                         ),
                         "wayback_http_429": current_http_429 - previous_http_429,
                         "wayback_http_503": current_http_503 - previous_http_503,
@@ -313,6 +331,13 @@ async def run_service(
                         ),
                         "evidence_batches_empty": int(report.claimed == 0),
                         **{
+                            f"wayback_transport_error_{name}": (
+                                current_transport_error_counts.get(name, 0)
+                                - previous_transport_error_counts.get(name, 0)
+                            )
+                            for name in current_transport_error_counts
+                        },
+                        **{
                             f"wayback_latency_{name}": (
                                 current_latency_buckets[name]
                                 - previous_latency_buckets[name]
@@ -331,6 +356,9 @@ async def run_service(
                 previous_http_requests = provider.http_requests
                 previous_throttle_responses = provider.throttle_responses
                 previous_transport_errors = provider.transport_errors
+                previous_circuit_open_events = provider.circuit_open_events
+                previous_circuit_fast_failures = provider.circuit_fast_failures
+                previous_transport_error_counts = current_transport_error_counts
                 previous_http_429 = current_http_429
                 previous_http_503 = current_http_503
                 previous_http_5xx = current_http_5xx
