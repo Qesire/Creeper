@@ -261,7 +261,11 @@ class HistoricalIndexOptimizerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(report.eligible_ready_indexes, 1)
         self.assertGreaterEqual(report.probes_succeeded, 1)
         self.assertEqual(report.probes_failed, 0)
-        self.assertEqual(report.harvest_failed_regions, ())
+        self.assertEqual(
+            report.harvest_failed_regions,
+            (),
+            msg=report.errors,
+        )
         self.assertEqual(report.direct_capsules_inserted, 3)
         self.assertEqual(report.exhausted_reservoirs, 1)
         self.assertEqual(report.errors, ())
