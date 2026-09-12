@@ -69,6 +69,13 @@ class CommitWriter:
         capsules = [capsule for capsule, _ in pending if capsule is not None]
         if capsules:
             self.inserted_capsules += self.evidence_store.put_many(capsules)
+            for capsule, result in pending:
+                if capsule is None or result.key is None:
+                    continue
+                self.control_store.attribute_task_host_years(
+                    result.key,
+                    (capsule.year,),
+                )
         results = [result for _, result in pending if result.key is not None]
         if results:
             self.finished_tasks += self.control_store.finish_evidence_tasks(
