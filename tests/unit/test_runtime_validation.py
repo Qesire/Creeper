@@ -177,6 +177,20 @@ class RuntimeValidationTests(unittest.TestCase):
                         "rdap_rate_limit_wait_ms": 12000,
                         "rdap_adaptive_rate_decreases": 4,
                         "rdap_adaptive_rate_increases": 2,
+                        "historical_index_cycles": 3,
+                        "historical_index_probe_attempts": 4,
+                        "historical_index_probe_requests": 3,
+                        "historical_index_probe_bytes": 12000,
+                        "historical_index_probe_failures": 1,
+                        "historical_index_harvest_requests": 2,
+                        "historical_index_harvest_bytes": 88000,
+                        "historical_index_harvest_failures": 0,
+                        "historical_index_network_requests": 5,
+                        "historical_index_network_bytes": 100000,
+                        "historical_index_direct_capsules_inserted": 7,
+                        "historical_index_exhausted_reservoirs": 1,
+                        "historical_index_compile_failures": 0,
+                        "historical_index_wall_milliseconds": 9000,
                         "wayback_rate_limit_wait_ms": 1200,
                         "wayback_cooldown_wait_ms": 300,
                         "wayback_retry_backoff_wait_ms": 100,
@@ -274,7 +288,12 @@ class RuntimeValidationTests(unittest.TestCase):
                 float(report["provider_pacing_utilization"]),
                 (500 / 3600) / 0.5,
             )
-            self.assertEqual(report["report_version"], "runtime-validation-report-v6")
+            self.assertEqual(report["report_version"], "runtime-validation-report-v7")
+            self.assertEqual(report["measured_network_requests"], 605)
+            self.assertEqual(
+                report["novel_eed_per_1000_measured_network_requests"],
+                "165.2892561983471074380165289",
+            )
             self.assertAlmostEqual(
                 float(report["provider_active_request_starts_per_second"]),
                 400 / 1200,
@@ -295,6 +314,25 @@ class RuntimeValidationTests(unittest.TestCase):
             self.assertTrue(report["source_progress_observed"])
             self.assertTrue(report["integrated_capacity_baseline_eligible"])
             self.assertEqual(report["provider_transport_error_types"], {})
+            self.assertEqual(
+                report["historical_index"],
+                {
+                    "cycles": 3,
+                    "probe_attempts": 4,
+                    "probe_requests": 3,
+                    "probe_bytes": 12000,
+                    "probe_failures": 1,
+                    "harvest_requests": 2,
+                    "harvest_bytes": 88000,
+                    "harvest_failures": 0,
+                    "network_requests": 5,
+                    "network_bytes": 100000,
+                    "direct_capsules_inserted": 7,
+                    "exhausted_reservoirs": 1,
+                    "compile_failures": 0,
+                    "wall_milliseconds": 9000,
+                },
+            )
             self.assertEqual(
                 report["rdap_provider"],
                 {
