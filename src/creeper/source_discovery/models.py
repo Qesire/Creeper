@@ -94,6 +94,22 @@ def canonicalize_source_entrypoint(value: str) -> str:
     return urlunsplit(canonical)
 
 
+
+
+
+_DIRECT_EVIDENCE_SUFFIXES = (
+    ".cdx", ".cdx.gz", ".cdxj", ".cdxj.gz"
+)
+
+
+def is_direct_evidence_entrypoint(value: str) -> bool:
+    """Whether a source resource encodes exact capture timestamp + URL rows."""
+    try:
+        path = urlsplit(canonicalize_source_entrypoint(value)).path.lower()
+    except ValueError:
+        return False
+    return path.endswith(_DIRECT_EVIDENCE_SUFFIXES)
+
 def source_key(entrypoint: str) -> str:
     canonical = canonicalize_source_entrypoint(entrypoint)
     return "src:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
