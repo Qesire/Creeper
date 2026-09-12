@@ -198,6 +198,7 @@ async def run_service(
                         "evidence_invalid_results": report.invalid_count,
                         "evidence_incomplete_results": report.incomplete_count,
                         "evidence_transient_error_results": report.transient_error_count,
+                        "evidence_domain_amplification_tasks": report.domain_amplification_count,
                         "wayback_http_requests": (
                             provider.http_requests - previous_http_requests
                         ),
