@@ -95,6 +95,14 @@ class ControlStore:
                     hostname, year_from, year_to, provider, policy_version
                 )
             ) WITHOUT ROWID;
+            INSERT OR IGNORE INTO evidence_task_fanout_reservations(
+                hostname, year_from, year_to, provider, policy_version, amount
+            )
+            SELECT hostname, year_from, year_to, provider, policy_version,
+                   (year_to - year_from)
+            FROM evidence_tasks
+            WHERE year_to > year_from
+              AND state IN ('pending', 'incomplete', 'transient_error');
             CREATE TABLE IF NOT EXISTS runtime_checkpoints (
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
