@@ -504,7 +504,8 @@ class ControlStore:
         query = (
             "SELECT * FROM evidence_tasks WHERE "
             + " AND ".join(clauses)
-            + " ORDER BY hostname, year_from, year_to, provider, policy_version LIMIT ?"
+            + " ORDER BY (year_to - year_from) DESC, year_from, hostname, "
+            + "year_to, provider, policy_version LIMIT ?"
         )
         lease_until = now + float(lease_seconds)
         self.connection.execute("BEGIN IMMEDIATE")

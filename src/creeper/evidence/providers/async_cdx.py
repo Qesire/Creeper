@@ -100,6 +100,15 @@ class AsyncWaybackCDXClient:
         self.throttle_responses = 0
         self.transport_errors = 0
         self.http_elapsed_milliseconds = 0
+        self.requests_per_second = float(requests_per_second)
+        # Request-start timeline telemetry. Unlike coroutine wait counters,
+        # these values live on the provider's real request-start clock and can
+        # therefore expose limiter starvation without concurrency double-counting.
+        self.request_start_gaps = 0
+        self.request_start_gap_milliseconds = 0
+        self.request_start_excess_gap_milliseconds = 0
+        self.request_start_gap_buckets: Counter[str] = Counter()
+        self._last_request_start: float | None = None
         # Operational wait-state telemetry only. These counters never
         # participate in evidence or submission authority.
         self.cooldown_wait_milliseconds = 0
@@ -245,6 +254,29 @@ class AsyncWaybackCDXClient:
                 async def request_once() -> httpx.Response:
                     loop = asyncio.get_running_loop()
                     started = loop.time()
+                    if self._last_request_start is not None:
+                        gap = max(0.0, started - self._last_request_start)
+                        gap_ms = int(round(gap * 1000.0))
+                        self.request_start_gaps += 1
+                        self.request_start_gap_milliseconds += gap_ms
+                        if self.requests_per_second > 0:
+                            ideal_gap = 1.0 / self.requests_per_second
+                            self.request_start_excess_gap_milliseconds += max(
+                                0,
+                                int(round((gap - ideal_gap) * 1000.0)),
+                            )
+                        if gap <= 2.5:
+                            gap_bucket = "le_2_5s"
+                        elif gap <= 4.0:
+                            gap_bucket = "le_4s"
+                        elif gap <= 8.0:
+                            gap_bucket = "le_8s"
+                        elif gap <= 16.0:
+                            gap_bucket = "le_16s"
+                        else:
+                            gap_bucket = "gt_16s"
+                        self.request_start_gap_buckets[gap_bucket] += 1
+                    self._last_request_start = started
                     self.http_requests += 1
                     try:
                         return await self.client.get(
