@@ -298,6 +298,11 @@ def build_validation_report(
     http_5xx = deltas.get("wayback_http_5xx", 0)
     transport_errors = deltas.get("wayback_transport_errors", 0)
     http_elapsed_ms = deltas.get("wayback_http_elapsed_ms", 0)
+    request_start_gaps = deltas.get("wayback_request_start_gaps", 0)
+    request_start_gap_ms = deltas.get("wayback_request_start_gap_ms", 0)
+    request_start_excess_gap_ms = deltas.get(
+        "wayback_request_start_excess_gap_ms", 0
+    )
     source_attribution = _source_attribution_delta(start, end)
     attributed_eed_delta = sum(
         (
@@ -366,7 +371,7 @@ def build_validation_report(
         )
 
     return {
-        "report_version": "runtime-validation-report-v2",
+        "report_version": "runtime-validation-report-v3",
         "label": label,
         "code_revision": code_revision,
         "runtime_data_root": end.get("runtime_data_root"),
@@ -417,6 +422,35 @@ def build_validation_report(
             if configured_rps <= 0
             else format(observed_rps / configured_rps, "f")
         ),
+        "provider_request_start_gap": {
+            "count": request_start_gaps,
+            "mean_seconds": (
+                None
+                if request_start_gaps <= 0
+                else format(
+                    Decimal(request_start_gap_ms)
+                    / Decimal(request_start_gaps)
+                    / Decimal("1000"),
+                    "f",
+                )
+            ),
+            "excess_seconds": format(
+                Decimal(request_start_excess_gap_ms) / Decimal("1000"),
+                "f",
+            ),
+            "buckets": {
+                name.removeprefix("wayback_request_gap_"): value
+                for name, value in deltas.items()
+                if name.startswith("wayback_request_gap_")
+            },
+        },
+        "streaming_pump": {
+            "refill_claims": deltas.get("evidence_stream_refill_claims", 0),
+            "refill_tasks": deltas.get("evidence_stream_refill_tasks", 0),
+            "empty_refill_claims": deltas.get(
+                "evidence_stream_refill_empty_claims", 0
+            ),
+        },
         "wait_state_milliseconds": {
             "wayback_rate_limit": deltas.get("wayback_rate_limit_wait_ms", 0),
             "wayback_cooldown": deltas.get("wayback_cooldown_wait_ms", 0),
