@@ -448,12 +448,10 @@ class AsyncEvidenceWorker:
             return
 
         active_keys: set[EvidenceQueryKey] = set()
-        task_by_key: dict[EvidenceQueryKey, EvidenceTask] = {}
         executions: dict[asyncio.Task, EvidenceTask] = {}
 
         def launch(tasks: list[EvidenceTask]) -> None:
             for task in tasks:
-                task_by_key[task.key] = task
                 active_keys.add(task.key)
                 execution = asyncio.create_task(self._execute(task))
                 executions[execution] = task
@@ -604,7 +602,6 @@ class AsyncEvidenceWorker:
                         )
 
                     active_keys.discard(result.key)
-                    task_by_key.pop(result.key, None)
                     completed_since_yield += 1
 
                 if (
@@ -612,10 +609,12 @@ class AsyncEvidenceWorker:
                     and len(executions) <= low_watermark
                 ):
                     capacity = self.claim_batch_size - len(executions)
-                    refill = claim(
-                        min(refill_batch_size, capacity),
-                        refill=True,
-                    )
+                    # Refill all the way to the durable claim-window high
+                    # watermark. The refill_batch_size is a hysteresis/reporting
+                    # threshold, not a cap: multiple tasks can complete in one
+                    # event-loop turn, and replacing only one fixed chunk would
+                    # recreate a smaller batch-tail starvation window.
+                    refill = claim(capacity, refill=True)
                     launch(refill)
                     claimed += len(refill)
 
