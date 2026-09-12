@@ -223,7 +223,7 @@ class AsyncRDAPClient:
         self.http_status_counts[status] = (
             self.http_status_counts.get(status, 0) + 1
         )
-        if status == 429:
+        if status in {429, 503}:
             await self._register_throttle(response)
         elif status < 500:
             await self._register_success()
