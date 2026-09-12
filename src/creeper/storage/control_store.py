@@ -623,9 +623,8 @@ class ControlStore:
         rows = [(*self._values(key), CDXQueryState.PENDING.value) for key in keys]
         if not rows:
             return 0
-        before = self.connection.total_changes
         with self.connection:
-            self.connection.executemany(
+            cursor = self.connection.executemany(
                 """
                 INSERT OR IGNORE INTO evidence_tasks(
                     hostname, year_from, year_to, provider, policy_version, state
@@ -633,7 +632,10 @@ class ControlStore:
                 """,
                 rows,
             )
-        return self.connection.total_changes - before
+        # rowcount reflects direct task inserts only; total_changes would also
+        # include the operational EED-weight trigger and break this API's
+        # long-standing "number of new tasks" contract.
+        return max(0, int(cursor.rowcount))
 
 
     def record_evidence_task_attempt_metric(
@@ -1268,8 +1270,7 @@ class ControlStore:
                 """,
                 (value, *self._values(key), owner),
             )
-            before = self.connection.total_changes
-            self.connection.executemany(
+            cursor = self.connection.executemany(
                 """
                 INSERT OR IGNORE INTO evidence_tasks(
                     hostname, year_from, year_to, provider, policy_version, state
@@ -1277,7 +1278,7 @@ class ControlStore:
                 """,
                 [(*self._values(followup), CDXQueryState.PENDING.value) for followup in exact],
             )
-            created = self.connection.total_changes - before
+            created = max(0, int(cursor.rowcount))
             # Range tasks reserve their worst-case net fanout capacity at
             # initial admission. The parent is becoming terminal in this same
             # transaction, so deleting the token after child insertion converts
