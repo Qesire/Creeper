@@ -64,6 +64,21 @@ def _fraction(value: object, name: str) -> float:
 
 
 
+def _backfill_rdap_shadow(runtime) -> int:
+    """Keep RDAP productive from already-discovered Wayback backlog."""
+    headroom = runtime.producer.admission.available_capacity(
+        provider="rdap",
+        capacity=runtime.rdap_backlog_capacity,
+    )
+    if headroom <= 0:
+        return 0
+    limit = min(
+        headroom,
+        max(16, int(runtime.producer.rdap_batch_size) * 4),
+    )
+    return runtime.control.backfill_rdap_tasks_from_wayback(limit=limit)
+
+
 class StaticSourceRuntime:
     """Persistent runtime for one configured static discovery reservoir.
 
@@ -221,13 +236,16 @@ class StaticSourceRuntime:
         self.close()
 
     def run_once(self) -> dict[str, object]:
+        rdap_shadow = _backfill_rdap_shadow(self)
         reservoir = self.control.get_reservoir(self.reservoir_id)
         if reservoir is None:
             raise RuntimeError(
                 f"static reservoir disappeared: {self.reservoir_id}"
             )
         if reservoir.state is ReservoirState.EXHAUSTED:
-            return SourceProducerReport().as_dict()
+            report = SourceProducerReport().as_dict()
+            report["rdap_shadow_tasks_enqueued"] = rdap_shadow
+            return report
 
         headroom = self.producer.admission.available_capacity(
             provider="wayback",
@@ -241,9 +259,11 @@ class StaticSourceRuntime:
             headroom // capacity_per_record,
         )
         if lease_records < 1:
-            return SourceProducerReport(
+            report = SourceProducerReport(
                 admission_blocked=reservoir.state is ReservoirState.READY
             ).as_dict()
+            report["rdap_shadow_tasks_enqueued"] = rdap_shadow
+            return report
         expected_tasks = lease_records
         reservation_tasks = lease_records * capacity_per_record
 
@@ -280,7 +300,9 @@ class StaticSourceRuntime:
             candidates=(candidate,),
             adapters={self.adapter.adapter_id: self.adapter},
         )
-        return self.producer.run_once().as_dict()
+        report = self.producer.run_once().as_dict()
+        report["rdap_shadow_tasks_enqueued"] = rdap_shadow
+        return report
 
 
 class ActivatedSourceRuntime:
@@ -506,8 +528,11 @@ class ActivatedSourceRuntime:
         return len(candidates)
 
     def run_once(self) -> dict[str, object]:
+        rdap_shadow = _backfill_rdap_shadow(self)
         self.refresh_workset()
-        return self.producer.run_once().as_dict()
+        report = self.producer.run_once().as_dict()
+        report["rdap_shadow_tasks_enqueued"] = rdap_shadow
+        return report
 
 
 def run_once(config_path: Path, *, owner: str) -> dict[str, object]:
@@ -558,6 +583,7 @@ def _empty_watch_total() -> dict[str, object]:
         "observations": 0,
         "evidence_tasks_enqueued": 0,
         "direct_capsules_committed": 0,
+        "rdap_shadow_tasks_enqueued": 0,
         "admission_blocked": False,
         "max_source_record_queue_depth": 0,
         "max_observation_queue_depth": 0,
@@ -574,6 +600,7 @@ def _accumulate_watch_report(
         "observations",
         "evidence_tasks_enqueued",
         "direct_capsules_committed",
+        "rdap_shadow_tasks_enqueued",
     ):
         total[key] = int(total[key]) + int(report[key])
     total["admission_blocked"] = bool(total["admission_blocked"]) or bool(
@@ -600,6 +627,9 @@ def _record_source_telemetry(
             ),
             "source_direct_capsules_committed": int(
                 report["direct_capsules_committed"]
+            ),
+            "source_rdap_shadow_tasks_enqueued": int(
+                report.get("rdap_shadow_tasks_enqueued", 0)
             ),
             "source_admission_blocked_events": int(
                 bool(report["admission_blocked"])
