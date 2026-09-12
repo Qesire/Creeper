@@ -420,6 +420,7 @@ class ActivatedSourceRuntime:
                     lease=template,
                     evidence_mode=reservoir.evidence_mode,
                     expected_evidence_tasks=expected_tasks,
+                    source_key=spec.source_key,
                 )
             )
         # Do not retain adapter objects for exhausted/deactivated sources
