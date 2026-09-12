@@ -296,6 +296,7 @@ def compile_candidate_index_space(
     candidate: SourceCandidate,
     *,
     triage: TriageResult | None = None,
+    range_supported: bool | None = None,
     query_hints: QueryCapabilityHints | None = None,
     direct_evidence_authority: bool | None = None,
 ) -> CompiledIndexSpace:
@@ -314,7 +315,12 @@ def compile_candidate_index_space(
     source_format, timestamp_bearing, sorted_index = _source_format(
         candidate.canonical_entrypoint
     )
-    range_supported = bool(triage and triage.range_supported)
+    observed_range = (
+        range_supported
+        if range_supported is not None
+        else (triage.range_supported if triage is not None else None)
+    )
+    range_supported = bool(observed_range)
     hierarchical = (
         candidate.level in {SourceLevel.COLLECTION, SourceLevel.METASOURCE}
         or candidate.source_family in {"RESOURCE_CATALOG", "RESOURCE_DIRECTORY"}
