@@ -8,7 +8,7 @@ path.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from creeper.source_discovery.coordinator import ScoutDisposition, ScoutResult
@@ -87,7 +87,17 @@ class ScrapyStructuralScoutExecutor:
                 f"Scrapy structural scout failed rc={run.returncode} for {candidate.source_key}"
             )
 
-        accumulator = LinkPromotionAccumulator(policy=self.promotion_policy)
+        promotion_policy = self.promotion_policy
+        if candidate.source_family == "PUBLIC_ARCHIVE_INDEX_CATALOG":
+            # Audited official catalogs can enumerate thousands of exact bulk
+            # resources on one page (for example year manifests). Preserve the
+            # whole bounded catalog instead of truncating it to the generic
+            # 64-child navigation-noise limit.
+            promotion_policy = replace(
+                promotion_policy,
+                max_promotions=max(promotion_policy.max_promotions, 4096),
+            )
+        accumulator = LinkPromotionAccumulator(policy=promotion_policy)
         if run.spool_end_offset > 0 and run.spool_path.exists():
             for link in iter_scrapy_link_discoveries(
                 run.spool_path,
@@ -95,7 +105,7 @@ class ScrapyStructuralScoutExecutor:
                 start_offset=0,
                 end_offset=run.spool_end_offset,
             ):
-                if accumulator.input_links >= self.promotion_policy.max_input_links:
+                if accumulator.input_links >= promotion_policy.max_input_links:
                     break
                 accumulator.add(link)
 
@@ -103,12 +113,28 @@ class ScrapyStructuralScoutExecutor:
             discovered_by="scrapy_sidecar",
             discovery_strategy="DETERMINISTIC_LINK_EXPANSION",
         )
+        children = []
+        for item in promotions:
+            child = item.candidate
+            if (
+                child.expected_year_from is None
+                and candidate.expected_year_from is not None
+                and candidate.expected_year_to is not None
+                and candidate.source_family == "PUBLIC_ARCHIVE_INDEX_CATALOG"
+            ):
+                child = replace(
+                    child,
+                    expected_year_from=candidate.expected_year_from,
+                    expected_year_to=candidate.expected_year_to,
+                )
+            children.append(child)
+
         return ScoutResult(
             ScoutDisposition.HOLD,
             reason=(
                 f"structural scout inspected {accumulator.input_links} committed links; "
                 f"promoted {len(promotions)} child sources"
             ),
-            discovered_candidates=tuple(item.candidate for item in promotions),
+            discovered_candidates=tuple(children),
             edge_relation="links_to_resource",
         )

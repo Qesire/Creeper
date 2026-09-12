@@ -168,6 +168,15 @@ class RuntimeValidationTests(unittest.TestCase):
                         "wayback_http_429": 5,
                         "wayback_http_5xx": 8,
                         "wayback_transport_errors": 2,
+                        "rdap_http_requests": 100,
+                        "rdap_http_429": 4,
+                        "rdap_http_5xx": 1,
+                        "rdap_transport_errors": 2,
+                        "rdap_throttle_events": 5,
+                        "rdap_cooldown_wait_ms": 7000,
+                        "rdap_rate_limit_wait_ms": 12000,
+                        "rdap_adaptive_rate_decreases": 4,
+                        "rdap_adaptive_rate_increases": 2,
                         "wayback_rate_limit_wait_ms": 1200,
                         "wayback_cooldown_wait_ms": 300,
                         "wayback_retry_backoff_wait_ms": 100,
@@ -193,7 +202,11 @@ class RuntimeValidationTests(unittest.TestCase):
                     }
                 )
                 telemetry.set_gauges(
-                    {"wayback_configured_requests_per_second": 0.5}
+                    {
+                        "wayback_configured_requests_per_second": 0.5,
+                        "rdap_configured_requests_per_second": 1.0,
+                        "rdap_effective_requests_per_second": 0.7,
+                    }
                 )
                 telemetry.append_resource_sample(
                     rss_bytes=200,
@@ -282,6 +295,25 @@ class RuntimeValidationTests(unittest.TestCase):
             self.assertTrue(report["source_progress_observed"])
             self.assertTrue(report["integrated_capacity_baseline_eligible"])
             self.assertEqual(report["provider_transport_error_types"], {})
+            self.assertEqual(
+                report["rdap_provider"],
+                {
+                    "requests": 100,
+                    "configured_requests_per_second": "1.0",
+                    "effective_requests_per_second_end": "0.7",
+                    "http_429": 4,
+                    "http_429_fraction": "0.04",
+                    "http_5xx": 1,
+                    "http_5xx_fraction": "0.01",
+                    "transport_errors": 2,
+                    "transport_error_fraction": "0.02",
+                    "throttle_events": 5,
+                    "cooldown_wait_milliseconds": 7000,
+                    "rate_limit_wait_milliseconds": 12000,
+                    "adaptive_rate_decreases": 4,
+                    "adaptive_rate_increases": 2,
+                },
+            )
             self.assertEqual(report["provider_request_stream_seconds"], "1200")
             self.assertEqual(report["provider_non_stream_seconds"], "2400.0")
             self.assertEqual(report["provider_request_stream_segments"], 1)

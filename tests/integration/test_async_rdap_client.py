@@ -131,6 +131,57 @@ class AsyncRDAPClientTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result.state, CDXQueryState.INVALID)
 
+    async def test_429_reduces_effective_rate_and_records_retry_after(self):
+        async def handler(request):
+            return httpx.Response(
+                429,
+                headers={"Retry-After": "7"},
+                request=request,
+            )
+
+        async with AsyncRDAPClient(
+            transport=httpx.MockTransport(handler),
+            requests_per_second=1.0,
+            min_requests_per_second=0.1,
+            decrease_factor=0.5,
+            throttle_floor_seconds=2.0,
+        ) as client:
+            result = await client.query_range(self.key())
+
+        self.assertEqual(result.state, CDXQueryState.TRANSIENT_ERROR)
+        self.assertEqual(client.throttle_events, 1)
+        self.assertEqual(client.adaptive_rate_decreases, 1)
+        self.assertEqual(client.effective_requests_per_second, 0.5)
+
+    async def test_success_streak_recovers_effective_rate(self):
+        async def handler(request):
+            payload = {
+                "ldhName": "example.com",
+                "events": [{
+                    "eventAction": "registration",
+                    "eventDate": "1998-04-05T00:00:00Z",
+                }],
+            }
+            return httpx.Response(
+                200,
+                content=json.dumps(payload).encode(),
+                request=request,
+            )
+
+        async with AsyncRDAPClient(
+            transport=httpx.MockTransport(handler),
+            requests_per_second=10.0,
+            min_requests_per_second=1.0,
+            recovery_successes=2,
+            recovery_step_fraction=0.2,
+        ) as client:
+            client.effective_requests_per_second = 5.0
+            await client.query_range(self.key())
+            await client.query_range(self.key())
+
+        self.assertEqual(client.adaptive_rate_increases, 1)
+        self.assertAlmostEqual(client.effective_requests_per_second, 7.0)
+
     async def test_server_error_is_retryable(self):
         async def handler(request):
             return httpx.Response(503, request=request)

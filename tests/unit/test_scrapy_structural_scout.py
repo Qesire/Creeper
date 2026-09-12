@@ -66,6 +66,44 @@ class _ReplayLauncher:
         )
 
 
+
+class _CatalogLauncher:
+    def __init__(self, count: int = 100) -> None:
+        self.count = count
+
+    async def run_async(self, spec: ScrapyScoutSpec) -> ScrapyScoutRun:
+        spec.spool_path.parent.mkdir(parents=True, exist_ok=True)
+        rows = []
+        for index in range(self.count):
+            payload = {
+                "record_type": "LINK_DISCOVERY",
+                "source_key": spec.source_key,
+                "page_url": spec.start_url,
+                "discovered_url": (
+                    f"https://data.example/cdx/file-{index:04d}.cdx.gz"
+                ),
+                "anchor_text": "CDX index",
+                "depth": 1,
+                "same_site": False,
+            }
+            rows.append(
+                (json.dumps(payload, separators=(",", ":")) + "\n").encode(
+                    "utf-8"
+                )
+            )
+        data = b"".join(rows)
+        spec.spool_path.write_bytes(data)
+        return ScrapyScoutRun(
+            returncode=0,
+            elapsed_seconds=0.2,
+            timed_out=False,
+            spool_path=spec.spool_path,
+            jobdir=spec.jobdir,
+            spool_start_offset=0,
+            spool_end_offset=len(data),
+        )
+
+
 class ScrapyStructuralScoutExecutorTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
@@ -97,6 +135,41 @@ class ScrapyStructuralScoutExecutorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(child.source_family, "RESOURCE_DIRECTORY")
         self.assertIn("inspected 2 committed links", result.reason)
         self.assertEqual(len(launcher.specs), 1)
+
+    async def test_audited_archive_catalog_is_not_truncated_to_generic_64_children(self) -> None:
+        catalog = SourceCandidate(
+            canonical_entrypoint="https://data.example/manifest.html",
+            source_family="PUBLIC_ARCHIVE_INDEX_CATALOG",
+            level=SourceLevel.METASOURCE,
+            discovered_by="curated-official-seed",
+            discovery_strategy="CURATED_DIRECT_CATALOG",
+            expected_year_from=2000,
+            expected_year_to=2001,
+            expected_volume=100,
+            confidence=1.0,
+        )
+        executor = ScrapyStructuralScoutExecutor(
+            _CatalogLauncher(count=100),
+            self.root / "work-catalog",
+        )
+
+        result = await executor(catalog)
+
+        self.assertEqual(result.disposition, ScoutDisposition.HOLD)
+        self.assertEqual(len(result.discovered_candidates), 100)
+        self.assertTrue(
+            all(
+                child.direct_evidence_prior == 1.0
+                for child in result.discovered_candidates
+            )
+        )
+        self.assertTrue(
+            all(
+                (child.expected_year_from, child.expected_year_to)
+                == (2000, 2001)
+                for child in result.discovered_candidates
+            )
+        )
 
     async def test_timeout_is_retryable_executor_failure_not_partial_result(self) -> None:
         executor = ScrapyStructuralScoutExecutor(

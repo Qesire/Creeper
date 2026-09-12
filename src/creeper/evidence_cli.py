@@ -121,6 +121,7 @@ async def run_service(
                     "wayback_configured_requests_per_second": requests_per_second,
                     "wayback_max_inflight": max_inflight,
                     "rdap_configured_requests_per_second": rdap_requests_per_second,
+                    "rdap_effective_requests_per_second": rdap_requests_per_second,
                     "rdap_max_inflight": rdap_max_inflight,
                 }
             )
@@ -140,6 +141,11 @@ async def run_service(
             previous_rdap_http_429 = 0
             previous_rdap_http_5xx = 0
             previous_rdap_http_elapsed_ms = 0
+            previous_rdap_throttle_events = 0
+            previous_rdap_cooldown_wait_ms = 0
+            previous_rdap_rate_limit_wait_ms = 0
+            previous_rdap_rate_decreases = 0
+            previous_rdap_rate_increases = 0
             previous_cooldown_wait_ms = 0
             previous_rate_limit_wait_ms = 0
             previous_retry_backoff_wait_ms = 0
@@ -187,6 +193,11 @@ async def run_service(
                 nonlocal previous_rdap_http_requests, previous_rdap_transport_errors
                 nonlocal previous_rdap_http_429, previous_rdap_http_5xx
                 nonlocal previous_rdap_http_elapsed_ms
+                nonlocal previous_rdap_throttle_events
+                nonlocal previous_rdap_cooldown_wait_ms
+                nonlocal previous_rdap_rate_limit_wait_ms
+                nonlocal previous_rdap_rate_decreases
+                nonlocal previous_rdap_rate_increases
                 nonlocal previous_cooldown_wait_ms
                 nonlocal previous_rate_limit_wait_ms
                 nonlocal previous_retry_backoff_wait_ms
@@ -276,6 +287,26 @@ async def run_service(
                         "rdap_http_elapsed_ms": (
                             rdap_provider.http_elapsed_milliseconds
                             - previous_rdap_http_elapsed_ms
+                        ),
+                        "rdap_throttle_events": (
+                            rdap_provider.throttle_events
+                            - previous_rdap_throttle_events
+                        ),
+                        "rdap_cooldown_wait_ms": (
+                            rdap_provider.cooldown_wait_milliseconds
+                            - previous_rdap_cooldown_wait_ms
+                        ),
+                        "rdap_rate_limit_wait_ms": (
+                            rdap_provider.rate_limit_wait_milliseconds
+                            - previous_rdap_rate_limit_wait_ms
+                        ),
+                        "rdap_adaptive_rate_decreases": (
+                            rdap_provider.adaptive_rate_decreases
+                            - previous_rdap_rate_decreases
+                        ),
+                        "rdap_adaptive_rate_increases": (
+                            rdap_provider.adaptive_rate_increases
+                            - previous_rdap_rate_increases
                         ),
                         "wayback_cooldown_wait_ms": (
                             provider.cooldown_wait_milliseconds
@@ -369,6 +400,26 @@ async def run_service(
                 previous_rdap_http_5xx = current_rdap_5xx
                 previous_rdap_http_elapsed_ms = (
                     rdap_provider.http_elapsed_milliseconds
+                )
+                previous_rdap_throttle_events = rdap_provider.throttle_events
+                previous_rdap_cooldown_wait_ms = (
+                    rdap_provider.cooldown_wait_milliseconds
+                )
+                previous_rdap_rate_limit_wait_ms = (
+                    rdap_provider.rate_limit_wait_milliseconds
+                )
+                previous_rdap_rate_decreases = (
+                    rdap_provider.adaptive_rate_decreases
+                )
+                previous_rdap_rate_increases = (
+                    rdap_provider.adaptive_rate_increases
+                )
+                telemetry.set_gauges(
+                    {
+                        "rdap_effective_requests_per_second": (
+                            rdap_provider.effective_requests_per_second
+                        )
+                    }
                 )
                 previous_cooldown_wait_ms = provider.cooldown_wait_milliseconds
                 previous_rate_limit_wait_ms = provider.rate_limit_wait_milliseconds
