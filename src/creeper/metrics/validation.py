@@ -404,6 +404,25 @@ def build_validation_report(
     rdap_429 = deltas.get("rdap_http_429", 0)
     rdap_5xx = deltas.get("rdap_http_5xx", 0)
     rdap_transport_errors = deltas.get("rdap_transport_errors", 0)
+    historical_probe_requests = deltas.get(
+        "historical_index_probe_requests", 0
+    )
+    historical_harvest_requests = deltas.get(
+        "historical_index_harvest_requests", 0
+    )
+    historical_requests = deltas.get(
+        "historical_index_network_requests",
+        historical_probe_requests + historical_harvest_requests,
+    )
+    historical_probe_bytes = deltas.get("historical_index_probe_bytes", 0)
+    historical_harvest_bytes = deltas.get("historical_index_harvest_bytes", 0)
+    historical_bytes = deltas.get(
+        "historical_index_network_bytes",
+        historical_probe_bytes + historical_harvest_bytes,
+    )
+    measured_network_requests = (
+        http_requests + rdap_requests + historical_requests
+    )
     request_start_segments = deltas.get("wayback_request_start_segments", 0)
     request_start_gaps = deltas.get("wayback_request_start_gaps", 0)
     request_start_gap_ms = deltas.get("wayback_request_start_gap_ms", 0)
@@ -467,6 +486,15 @@ def build_validation_report(
         if not valid or http_requests <= 0
         else eed_delta * Decimal("1000") / Decimal(http_requests)
     )
+    eed_per_1000_measured_network_requests = (
+        None
+        if not valid or measured_network_requests <= 0
+        else (
+            eed_delta
+            * Decimal("1000")
+            / Decimal(measured_network_requests)
+        )
+    )
 
     def ratio(numerator: int, denominator: int) -> str | None:
         if denominator <= 0:
@@ -506,6 +534,7 @@ def build_validation_report(
     source_progress_observed = (
         source_records > 0
         or deltas.get("source_direct_capsules_committed", 0) > 0
+        or deltas.get("historical_index_direct_capsules_inserted", 0) > 0
     )
     integrated_capacity_baseline_eligible = (
         valid
@@ -589,7 +618,7 @@ def build_validation_report(
         )
 
     return {
-        "report_version": "runtime-validation-report-v6",
+        "report_version": "runtime-validation-report-v7",
         "label": label,
         "code_revision": code_revision,
         "runtime_data_root": end.get("runtime_data_root"),
@@ -630,6 +659,15 @@ def build_validation_report(
             None
             if eed_per_1000_requests is None
             else format(eed_per_1000_requests, "f")
+        ),
+        "measured_network_requests": measured_network_requests,
+        "novel_eed_per_1000_measured_network_requests": (
+            None
+            if eed_per_1000_measured_network_requests is None
+            else format(
+                eed_per_1000_measured_network_requests,
+                "f",
+            )
         ),
         "provider_request_starts_per_second": format(observed_rps, "f"),
         "provider_active_request_starts_per_second": (
@@ -741,6 +779,36 @@ def build_validation_report(
             "circuit_open_events": deltas.get("wayback_circuit_open_events", 0),
             "circuit_fast_failures": deltas.get(
                 "wayback_circuit_fast_failures", 0
+            ),
+        },
+        "historical_index": {
+            "cycles": deltas.get("historical_index_cycles", 0),
+            "probe_attempts": deltas.get(
+                "historical_index_probe_attempts", 0
+            ),
+            "probe_requests": historical_probe_requests,
+            "probe_bytes": historical_probe_bytes,
+            "probe_failures": deltas.get(
+                "historical_index_probe_failures", 0
+            ),
+            "harvest_requests": historical_harvest_requests,
+            "harvest_bytes": historical_harvest_bytes,
+            "harvest_failures": deltas.get(
+                "historical_index_harvest_failures", 0
+            ),
+            "network_requests": historical_requests,
+            "network_bytes": historical_bytes,
+            "direct_capsules_inserted": deltas.get(
+                "historical_index_direct_capsules_inserted", 0
+            ),
+            "exhausted_reservoirs": deltas.get(
+                "historical_index_exhausted_reservoirs", 0
+            ),
+            "compile_failures": deltas.get(
+                "historical_index_compile_failures", 0
+            ),
+            "wall_milliseconds": deltas.get(
+                "historical_index_wall_milliseconds", 0
             ),
         },
         "rdap_provider": {
