@@ -320,7 +320,10 @@ class RuntimeValidationTests(unittest.TestCase):
                     },
                 },
             )
-            self.assertEqual(report["source_provider_request_deltas"], {})
+            self.assertEqual(
+                report["source_provider_request_deltas"],
+                {"__unattributed__": 6},
+            )
             self.assertEqual(
                 report["source_yield"],
                 {
@@ -368,6 +371,7 @@ class RuntimeValidationTests(unittest.TestCase):
                     },
                 },
             )
+            self.assertEqual(report["unattributed_provider_requests_delta"], 6)
             self.assertEqual(report["attributed_novel_eed_delta"], "70")
             self.assertEqual(report["unattributed_novel_eed_delta"], "30")
             self.assertEqual(report["target_source_records_progress"], "1")
