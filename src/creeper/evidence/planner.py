@@ -23,6 +23,16 @@ class EvidencePlan:
 class EvidencePlanner:
     """Convert host-year masks into deterministic evidence work.
 
+    Over the six competition years, any unresolved-year bit mask can contain at
+    most three disjoint contiguous runs (for example 1996/1998/2000). This is
+    the hard external-task expansion bound for one HostObservation and is used
+    by source admission to reserve queue capacity safely.
+    """
+
+    MAX_EXTERNAL_TASKS_PER_OBSERVATION = 3
+
+    """Convert host-year masks into deterministic evidence work.
+
     A record-level ``direct_year_mask`` is only a temporal claim. It becomes
     accepted direct evidence when the control plane explicitly authorizes the
     owning Reservoir for direct-year evidence. ISC/Network Wizards reference
