@@ -207,6 +207,7 @@ class HistoricalIndexSpaceTests(unittest.TestCase):
 
         self.assertEqual(synopsis.sampled_records, 5)
         self.assertEqual(synopsis.unique_hosts, 2)
+        self.assertEqual(synopsis.novel_hosts, 2)
         self.assertEqual(synopsis.observed_host_year_pairs, 4)
         self.assertEqual(synopsis.novel_host_year_pairs, 3)
         self.assertEqual(synopsis.novel_eed, 3.0)
