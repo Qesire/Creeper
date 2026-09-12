@@ -54,6 +54,34 @@ def _positive_float(value: object, name: str) -> float:
     return float(value)
 
 
+def _domain_task_bound(records: int, min_hosts: int) -> int:
+    if records < 1:
+        return 0
+    return records // (min_hosts + 1)
+
+
+def _lease_records_for_headroom(
+    headroom: int,
+    *,
+    max_records: int,
+    min_hosts: int,
+) -> int:
+    """Largest lease whose exact/range plus domain reservations fit."""
+    lo = 0
+    hi = min(max_records, headroom // EvidencePlanner.MAX_BACKLOG_CAPACITY_PER_OBSERVATION)
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        required = (
+            mid * EvidencePlanner.MAX_BACKLOG_CAPACITY_PER_OBSERVATION
+            + _domain_task_bound(mid, min_hosts)
+        )
+        if required <= headroom:
+            lo = mid
+        else:
+            hi = mid - 1
+    return lo
+
+
 def _fraction(value: object, name: str) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise ValueError(f"{name} must be a number between 0 and 1")
@@ -236,16 +264,18 @@ class StaticSourceRuntime:
         capacity_per_record = (
             EvidencePlanner.MAX_BACKLOG_CAPACITY_PER_OBSERVATION
         )
-        lease_records = min(
-            self.max_records,
-            headroom // capacity_per_record,
+        lease_records = _lease_records_for_headroom(
+            headroom,
+            max_records=self.max_records,
+            min_hosts=self.domain_amplification_min_hosts,
         )
         if lease_records < 1:
             return SourceProducerReport(
                 admission_blocked=reservoir.state is ReservoirState.READY
             ).as_dict()
-        amplification_task_bound = (
-            lease_records // (self.domain_amplification_min_hosts + 1)
+        amplification_task_bound = _domain_task_bound(
+            lease_records,
+            self.domain_amplification_min_hosts,
         )
         expected_tasks = lease_records + amplification_task_bound
         reservation_tasks = (
@@ -444,12 +474,14 @@ class ActivatedSourceRuntime:
                 capacity_per_record = (
                     EvidencePlanner.MAX_BACKLOG_CAPACITY_PER_OBSERVATION
                 )
-                lease_records = min(
-                    self.max_records,
-                    wayback_headroom // capacity_per_record,
+                lease_records = _lease_records_for_headroom(
+                    wayback_headroom,
+                    max_records=self.max_records,
+                    min_hosts=self.domain_amplification_min_hosts,
                 )
-                amplification_task_bound = (
-                    lease_records // (self.domain_amplification_min_hosts + 1)
+                amplification_task_bound = _domain_task_bound(
+                    lease_records,
+                    self.domain_amplification_min_hosts,
                 )
                 expected_tasks = lease_records + amplification_task_bound
                 reservation_tasks = (
