@@ -102,6 +102,7 @@ class WarcProductionAdapter:
                 artifact_ref=record.artifact_ref,
                 direct_year_mask=record.direct_year_mask,
                 year_hint_mask=record.year_hint_mask,
+                original_url=record.payload,
             ),
         )
 
@@ -485,6 +486,7 @@ class StructuredProductionAdapter:
                 artifact_ref=record.artifact_ref,
                 direct_year_mask=record.direct_year_mask,
                 year_hint_mask=record.year_hint_mask,
+                original_url=record.payload,
             ),
         )
 
