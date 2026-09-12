@@ -3,7 +3,9 @@
   "type": "object",
   "additionalProperties": false,
   "properties": {
-    "query": {"type": "string"},
+    "query": {
+      "type": "string"
+    },
     "hypotheses": {
       "type": "array",
       "maxItems": 128,
@@ -11,7 +13,9 @@
         "type": "object",
         "additionalProperties": false,
         "properties": {
-          "hypothesis_id": {"type": "string"},
+          "hypothesis_id": {
+            "type": "string"
+          },
           "action": {
             "type": "string",
             "enum": [
@@ -23,27 +27,66 @@
           },
           "candidate": {
             "anyOf": [
-              {"type": "null"},
+              {
+                "type": "null"
+              },
               {
                 "type": "object",
                 "additionalProperties": false,
                 "properties": {
-                  "canonical_entrypoint": {"type": "string"},
-                  "source_family": {"type": "string"},
+                  "canonical_entrypoint": {
+                    "type": "string"
+                  },
+                  "source_family": {
+                    "type": "string"
+                  },
                   "level": {
                     "type": "string",
-                    "enum": ["SOURCE", "COLLECTION", "METASOURCE"]
+                    "enum": [
+                      "SOURCE",
+                      "COLLECTION",
+                      "METASOURCE"
+                    ]
                   },
-                  "expected_year_from": {"type": ["integer", "null"]},
-                  "expected_year_to": {"type": ["integer", "null"]},
-                  "expected_volume": {"type": ["integer", "null"]},
-                  "temporal_semantics_prior": {"type": "number"},
-                  "enumerability_prior": {"type": "number"},
-                  "direct_evidence_prior": {"type": "number"},
-                  "baseline_overlap_prior": {"type": "number"},
-                  "access_cost_prior": {"type": "number"},
-                  "adapter_cost_prior": {"type": "number"},
-                  "confidence": {"type": "number"}
+                  "expected_year_from": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  },
+                  "expected_year_to": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  },
+                  "expected_volume": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  },
+                  "temporal_semantics_prior": {
+                    "type": "number"
+                  },
+                  "enumerability_prior": {
+                    "type": "number"
+                  },
+                  "direct_evidence_prior": {
+                    "type": "number"
+                  },
+                  "baseline_overlap_prior": {
+                    "type": "number"
+                  },
+                  "access_cost_prior": {
+                    "type": "number"
+                  },
+                  "adapter_cost_prior": {
+                    "type": "number"
+                  },
+                  "confidence": {
+                    "type": "number"
+                  }
                 },
                 "required": [
                   "canonical_entrypoint",
@@ -63,49 +106,177 @@
               }
             ]
           },
-          "template": {"type": ["string", "null"]},
+          "template": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "variables": {
             "anyOf": [
-              {"type": "null"},
+              {
+                "type": "null"
+              },
               {
                 "type": "object",
                 "additionalProperties": false,
                 "properties": {
                   "YEAR": {
-                    "type": ["array", "null"],
-                    "items": {"type": ["integer", "string"]}
+                    "type": [
+                      "array",
+                      "null"
+                    ],
+                    "items": {
+                      "type": [
+                        "integer",
+                        "string"
+                      ]
+                    }
                   },
                   "SHARD": {
-                    "type": ["array", "null"],
-                    "items": {"type": ["integer", "string"]}
+                    "type": [
+                      "array",
+                      "null"
+                    ],
+                    "items": {
+                      "type": [
+                        "integer",
+                        "string"
+                      ]
+                    }
+                  },
+                  "PART": {
+                    "type": [
+                      "array",
+                      "null"
+                    ],
+                    "items": {
+                      "type": [
+                        "integer",
+                        "string"
+                      ]
+                    }
+                  },
+                  "INDEX": {
+                    "type": [
+                      "array",
+                      "null"
+                    ],
+                    "items": {
+                      "type": [
+                        "integer",
+                        "string"
+                      ]
+                    }
+                  },
+                  "FILE": {
+                    "type": [
+                      "array",
+                      "null"
+                    ],
+                    "items": {
+                      "type": [
+                        "integer",
+                        "string"
+                      ]
+                    }
+                  },
+                  "DATASET": {
+                    "type": [
+                      "array",
+                      "null"
+                    ],
+                    "items": {
+                      "type": [
+                        "integer",
+                        "string"
+                      ]
+                    }
+                  },
+                  "COLLECTION": {
+                    "type": [
+                      "array",
+                      "null"
+                    ],
+                    "items": {
+                      "type": [
+                        "integer",
+                        "string"
+                      ]
+                    }
                   }
                 },
-                "required": ["YEAR", "SHARD"]
+                "required": [
+                  "YEAR",
+                  "SHARD",
+                  "PART",
+                  "INDEX",
+                  "FILE",
+                  "DATASET",
+                  "COLLECTION"
+                ]
               }
             ]
           },
           "candidate_defaults": {
             "anyOf": [
-              {"type": "null"},
+              {
+                "type": "null"
+              },
               {
                 "type": "object",
                 "additionalProperties": false,
                 "properties": {
-                  "source_family": {"type": "string"},
+                  "source_family": {
+                    "type": "string"
+                  },
                   "level": {
                     "type": "string",
-                    "enum": ["SOURCE", "COLLECTION", "METASOURCE"]
+                    "enum": [
+                      "SOURCE",
+                      "COLLECTION",
+                      "METASOURCE"
+                    ]
                   },
-                  "expected_year_from": {"type": ["integer", "null"]},
-                  "expected_year_to": {"type": ["integer", "null"]},
-                  "expected_volume": {"type": ["integer", "null"]},
-                  "temporal_semantics_prior": {"type": "number"},
-                  "enumerability_prior": {"type": "number"},
-                  "direct_evidence_prior": {"type": "number"},
-                  "baseline_overlap_prior": {"type": "number"},
-                  "access_cost_prior": {"type": "number"},
-                  "adapter_cost_prior": {"type": "number"},
-                  "confidence": {"type": "number"}
+                  "expected_year_from": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  },
+                  "expected_year_to": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  },
+                  "expected_volume": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  },
+                  "temporal_semantics_prior": {
+                    "type": "number"
+                  },
+                  "enumerability_prior": {
+                    "type": "number"
+                  },
+                  "direct_evidence_prior": {
+                    "type": "number"
+                  },
+                  "baseline_overlap_prior": {
+                    "type": "number"
+                  },
+                  "access_cost_prior": {
+                    "type": "number"
+                  },
+                  "adapter_cost_prior": {
+                    "type": "number"
+                  },
+                  "confidence": {
+                    "type": "number"
+                  }
                 },
                 "required": [
                   "source_family",
@@ -124,17 +295,31 @@
               }
             ]
           },
-          "expected_mechanism": {"type": "string"},
-          "confidence": {"type": "number"},
+          "expected_mechanism": {
+            "type": "string"
+          },
+          "confidence": {
+            "type": "number"
+          },
           "validation": {
             "type": "object",
             "additionalProperties": false,
             "properties": {
-              "method": {"type": "string"},
-              "max_requests": {"type": "integer"},
-              "max_bytes": {"type": "integer"}
+              "method": {
+                "type": "string"
+              },
+              "max_requests": {
+                "type": "integer"
+              },
+              "max_bytes": {
+                "type": "integer"
+              }
             },
-            "required": ["method", "max_requests", "max_bytes"]
+            "required": [
+              "method",
+              "max_requests",
+              "max_bytes"
+            ]
           }
         },
         "required": [
@@ -151,5 +336,8 @@
       }
     }
   },
-  "required": ["query", "hypotheses"]
+  "required": [
+    "query",
+    "hypotheses"
+  ]
 }
