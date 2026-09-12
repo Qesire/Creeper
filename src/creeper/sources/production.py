@@ -317,6 +317,7 @@ class StructuredProductionAdapter:
         start = self._cursor_value(lease.cursor_start)
         emitted = 0
         started = time.monotonic()
+        downstream_wait_seconds = 0.0
         bytes_read = 0
         next_cursor: str | None = f"byte:{start}"
         if lease.max_requests <= 0 or lease.max_seconds <= 0:
@@ -325,7 +326,10 @@ class StructuredProductionAdapter:
         source, opened = self._ensure_stream(start)
         try:
             while emitted < lease.max_records and bytes_read < lease.max_bytes:
-                if time.monotonic() - started >= lease.max_seconds:
+                if (
+                    time.monotonic() - started - downstream_wait_seconds
+                    >= lease.max_seconds
+                ):
                     break
 
                 if self._pending_line is not None:
@@ -377,7 +381,9 @@ class StructuredProductionAdapter:
                         year_hint_mask=1 << (record.source_year - 1996),
                     )
                 if record is not None:
+                    emit_started = time.monotonic()
                     emit_record(record)
+                    downstream_wait_seconds += time.monotonic() - emit_started
                     emitted += 1
                 bytes_read += len(raw)
                 next_cursor = f"byte:{source.tell()}"
@@ -393,7 +399,10 @@ class StructuredProductionAdapter:
             records=emitted,
             requests=1 if opened else 0,
             bytes_read=bytes_read,
-            elapsed_seconds=time.monotonic() - started,
+            elapsed_seconds=max(
+                0.0,
+                time.monotonic() - started - downstream_wait_seconds,
+            ),
             next_cursor=next_cursor,
         )
 
