@@ -277,7 +277,11 @@ class IndexSpaceRegistry:
                 index_key = excluded.index_key,
                 kind = excluded.kind,
                 locator = excluded.locator,
-                state = excluded.state,
+                state = CASE
+                    WHEN source_regions_v1.state = 'DISCOVERED'
+                        THEN excluded.state
+                    ELSE source_regions_v1.state
+                END,
                 parent_region_key = excluded.parent_region_key,
                 depth = excluded.depth,
                 byte_start = excluded.byte_start,
