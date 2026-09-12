@@ -276,6 +276,59 @@ class EvidenceStore:
         ).fetchall()
         return [EvidenceCapsule(**dict(row)) for row in rows]
 
+    def resolve_direct_source_origins(
+        self,
+        host_years: Iterable[tuple[str, int]],
+        *,
+        chunk_size: int = 400,
+    ) -> dict[tuple[str, int], tuple[str, ...]]:
+        """Resolve direct-evidence source ids from persisted capsules.
+
+        This is the crash-safe provenance fallback for the cross-database
+        ControlStore attribution ledger. Evidence capsules themselves are the
+        durable proof object, so readiness can recover source credit even when
+        a process dies between EvidenceStore and ControlStore commits.
+        """
+
+        if chunk_size < 1:
+            raise ValueError("chunk_size must be positive")
+        values = list(dict.fromkeys(
+            (hostname, int(year))
+            for raw_hostname, year in host_years
+            if isinstance(raw_hostname, str)
+            and (hostname := normalize_official(raw_hostname)) is not None
+        ))
+        result: dict[tuple[str, int], set[str]] = {}
+        limit = min(int(chunk_size), 400)
+        for start in range(0, len(values), limit):
+            chunk = values[start:start + limit]
+            predicates = " OR ".join(
+                "(hostname = ? AND year = ?)" for _ in chunk
+            )
+            params: list[object] = []
+            for hostname, year in chunk:
+                params.extend((hostname, year))
+            for row in self.connection.execute(
+                f"""
+                SELECT hostname, year, source_id
+                FROM evidence_capsules
+                WHERE provider LIKE 'direct:%'
+                  AND ({predicates})
+                """,
+                params,
+            ):
+                source_id = str(row["source_id"])
+                if not source_id:
+                    continue
+                result.setdefault(
+                    (str(row["hostname"]), int(row["year"])),
+                    set(),
+                ).add(source_id)
+        return {
+            key: tuple(sorted(source_ids))
+            for key, source_ids in result.items()
+        }
+
     def resolve_year_masks(
         self, hostnames: Iterable[str], chunk_size: int = 900
     ) -> dict[str, int]:
