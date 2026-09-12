@@ -188,6 +188,66 @@ class AsyncEvidenceWorkerTests(unittest.IsolatedAsyncioTestCase):
             "cdx-v1",
         )
 
+
+    async def test_durable_claim_prefers_wide_probe_and_host_diversity(self):
+        keys = [
+            EvidenceQueryKey(
+                "same.example",
+                TemporalScope(1997, 1997),
+                "wayback",
+                "cdx-v1",
+            ),
+            EvidenceQueryKey(
+                "same.example",
+                TemporalScope(1998, 1998),
+                "wayback",
+                "cdx-v1",
+            ),
+            EvidenceQueryKey(
+                "other.example",
+                TemporalScope(1997, 1997),
+                "wayback",
+                "cdx-v1",
+            ),
+            EvidenceQueryKey(
+                "wide.example",
+                TemporalScope(1996, 2001),
+                "wayback",
+                "cdx-v1",
+            ),
+        ]
+        self.control.enqueue_evidence_tasks(keys)
+        worker = AsyncEvidenceWorker(
+            control_store=self.control,
+            evidence_store=self.evidence,
+            providers={"wayback": FakeProvider()},
+            owner="worker-claim-priority",
+            claim_batch_size=3,
+        )
+
+        claimed = worker.queue.claim(
+            owner=worker.owner,
+            limit=3,
+            providers=worker.providers,
+            lease_seconds=worker.lease_seconds,
+        )
+
+        self.assertEqual(
+            [
+                (
+                    task.key.hostname,
+                    task.key.temporal_scope.year_from,
+                    task.key.temporal_scope.year_to,
+                )
+                for task in claimed
+            ],
+            [
+                ("wide.example", 1996, 2001),
+                ("other.example", 1997, 1997),
+                ("same.example", 1997, 1997),
+            ],
+        )
+
     async def test_worker_drains_preexisting_durable_backlog_with_bounded_inflight(self):
         keys = [self.key(f"host-{index}.example") for index in range(6)]
         self.assertEqual(self.control.enqueue_evidence_tasks(keys), 6)
