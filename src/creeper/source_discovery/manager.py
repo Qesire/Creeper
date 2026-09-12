@@ -10,6 +10,7 @@ from creeper.source_discovery.registry import SourceDiscoveryRegistry
 
 
 class SearchDirectiveKind(StrEnum):
+    DIRECT_EVIDENCE = "DIRECT_EVIDENCE"
     REFILL_RESERVOIR = "REFILL_RESERVOIR"
     EXPLOIT_SOURCE_FAMILY = "EXPLOIT_SOURCE_FAMILY"
     DISCOVER_NEW_FAMILY = "DISCOVER_NEW_FAMILY"
@@ -222,6 +223,16 @@ class SourceReservoirManager:
                 return
             seen.add(dedup_key)
             specs.append((kind, strategy, subject, reason))
+
+        # Direct timestamp-bearing bulk indexes bypass the scarce per-host
+        # Wayback evidence lane entirely, so always reserve the first refill arm
+        # for them while the cold pool is below target.
+        add_spec(
+            SearchDirectiveKind.DIRECT_EVIDENCE,
+            "DIRECT_EVIDENCE_BULK",
+            "cdx/cdxj archive indexes",
+            "prioritize timestamp-bearing bulk indexes that can directly produce host-year evidence",
+        )
 
         best_family = self._best_measured_family(candidates)
         if projected_warm < self.targets.warm_min and best_family is not None:
