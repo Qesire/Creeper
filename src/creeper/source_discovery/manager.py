@@ -293,6 +293,46 @@ class SourceReservoirManager:
             return False
         return sum(float(row["accepted_novel_eed"]) for row in rows) <= 0.0
 
+    def _llm_task_ucb(
+        self,
+        task_type: SourceIntelligenceTask,
+    ) -> float:
+        """Estimate value of spending one more Codex call on this task."""
+        rewards = {
+            str(item["task_type"]): item
+            for item in self.registry.llm_task_rewards()
+        }
+        item = rewards.get(task_type.value)
+        if item is None or int(item["episodes"]) < 1:
+            # Every task class gets at least one exploration opportunity.
+            return float("inf")
+        episodes = int(item["episodes"])
+        cost = float(item["cost_seconds"])
+        credited = float(item["credited_eed"])
+        mean = credited / cost if cost > 0 else 0.0
+        total_episodes = sum(
+            max(0, int(row["episodes"]))
+            for row in rewards.values()
+        )
+        scale = max(
+            1.0,
+            max(
+                (
+                    float(row["credited_eed"])
+                    / float(row["cost_seconds"])
+                    if float(row["cost_seconds"]) > 0
+                    else 0.0
+                )
+                for row in rewards.values()
+            ),
+        )
+        bonus = (
+            self.search_ucb_exploration
+            * scale
+            * (math.log(total_episodes + 1.0) / episodes) ** 0.5
+        )
+        return mean + bonus
+
     def _strategy_available(self, strategy: str) -> bool:
         """Rate-limit completed search strategies without adding another broker."""
         if self.search_cooldown_seconds <= 0:
@@ -345,8 +385,6 @@ class SourceReservoirManager:
             reason: str,
             task_type: SourceIntelligenceTask,
         ) -> None:
-            if len(specs) >= self.targets.max_search_directives:
-                return
             dedup_key = f"{strategy}:{subject or '*'}"
             if dedup_key in seen or not self._strategy_available(strategy):
                 return
@@ -443,9 +481,33 @@ class SourceReservoirManager:
                 SourceIntelligenceTask.RECOVER_STAGNATION,
             )
 
-        # If the remaining gap is smaller than the strategy set, fewer searches
-        # are launched rather than assigning a fake minimum of one to every arm.
-        selected = specs[: min(len(specs), gap)]
+        # Reserve one direct-evidence arm, then let observed final-EED/cost
+        # rewards choose among the remaining Codex task classes with UCB.
+        direct = [
+            spec
+            for spec in specs
+            if spec[1] == "DIRECT_EVIDENCE_BULK"
+        ][:1]
+        remaining = [
+            spec
+            for spec in specs
+            if spec not in direct
+        ]
+        remaining.sort(
+            key=lambda spec: (
+                -self._llm_task_ucb(spec[4]),
+                spec[1],
+                spec[2] or "",
+            )
+        )
+        ordered = direct + remaining
+        selected = ordered[
+            : min(
+                len(ordered),
+                gap,
+                self.targets.max_search_directives,
+            )
+        ]
         if not selected:
             return ()
         base, remainder = divmod(gap, len(selected))
