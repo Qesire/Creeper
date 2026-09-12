@@ -1,0 +1,155 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "query": {"type": "string"},
+    "hypotheses": {
+      "type": "array",
+      "maxItems": 128,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "hypothesis_id": {"type": "string"},
+          "action": {
+            "type": "string",
+            "enum": [
+              "PROBE_URL",
+              "SEARCH_WEB_RESULT",
+              "EXPAND_CATALOG",
+              "ENUMERATE_TEMPLATE"
+            ]
+          },
+          "candidate": {
+            "anyOf": [
+              {"type": "null"},
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "canonical_entrypoint": {"type": "string"},
+                  "source_family": {"type": "string"},
+                  "level": {
+                    "type": "string",
+                    "enum": ["SOURCE", "COLLECTION", "METASOURCE"]
+                  },
+                  "expected_year_from": {"type": ["integer", "null"]},
+                  "expected_year_to": {"type": ["integer", "null"]},
+                  "expected_volume": {"type": ["integer", "null"]},
+                  "temporal_semantics_prior": {"type": "number"},
+                  "enumerability_prior": {"type": "number"},
+                  "direct_evidence_prior": {"type": "number"},
+                  "baseline_overlap_prior": {"type": "number"},
+                  "access_cost_prior": {"type": "number"},
+                  "adapter_cost_prior": {"type": "number"},
+                  "confidence": {"type": "number"}
+                },
+                "required": [
+                  "canonical_entrypoint",
+                  "source_family",
+                  "level",
+                  "expected_year_from",
+                  "expected_year_to",
+                  "expected_volume",
+                  "temporal_semantics_prior",
+                  "enumerability_prior",
+                  "direct_evidence_prior",
+                  "baseline_overlap_prior",
+                  "access_cost_prior",
+                  "adapter_cost_prior",
+                  "confidence"
+                ]
+              }
+            ]
+          },
+          "template": {"type": ["string", "null"]},
+          "variables": {
+            "anyOf": [
+              {"type": "null"},
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "YEAR": {
+                    "type": ["array", "null"],
+                    "items": {"type": ["integer", "string"]}
+                  },
+                  "SHARD": {
+                    "type": ["array", "null"],
+                    "items": {"type": ["integer", "string"]}
+                  }
+                },
+                "required": ["YEAR", "SHARD"]
+              }
+            ]
+          },
+          "candidate_defaults": {
+            "anyOf": [
+              {"type": "null"},
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "source_family": {"type": "string"},
+                  "level": {
+                    "type": "string",
+                    "enum": ["SOURCE", "COLLECTION", "METASOURCE"]
+                  },
+                  "expected_year_from": {"type": ["integer", "null"]},
+                  "expected_year_to": {"type": ["integer", "null"]},
+                  "expected_volume": {"type": ["integer", "null"]},
+                  "temporal_semantics_prior": {"type": "number"},
+                  "enumerability_prior": {"type": "number"},
+                  "direct_evidence_prior": {"type": "number"},
+                  "baseline_overlap_prior": {"type": "number"},
+                  "access_cost_prior": {"type": "number"},
+                  "adapter_cost_prior": {"type": "number"},
+                  "confidence": {"type": "number"}
+                },
+                "required": [
+                  "source_family",
+                  "level",
+                  "expected_year_from",
+                  "expected_year_to",
+                  "expected_volume",
+                  "temporal_semantics_prior",
+                  "enumerability_prior",
+                  "direct_evidence_prior",
+                  "baseline_overlap_prior",
+                  "access_cost_prior",
+                  "adapter_cost_prior",
+                  "confidence"
+                ]
+              }
+            ]
+          },
+          "expected_mechanism": {"type": "string"},
+          "confidence": {"type": "number"},
+          "validation": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "method": {"type": "string"},
+              "max_requests": {"type": "integer"},
+              "max_bytes": {"type": "integer"}
+            },
+            "required": ["method", "max_requests", "max_bytes"]
+          }
+        },
+        "required": [
+          "hypothesis_id",
+          "action",
+          "candidate",
+          "template",
+          "variables",
+          "candidate_defaults",
+          "expected_mechanism",
+          "confidence",
+          "validation"
+        ]
+      }
+    }
+  },
+  "required": ["query", "hypotheses"]
+}
