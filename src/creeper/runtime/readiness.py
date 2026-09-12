@@ -60,10 +60,11 @@ class IncrementalReadinessReport:
     formal_gate_reached: bool
     annual: dict[str, dict[str, object]]
     source_attribution: dict[str, dict[str, object]]
+    task_kind_attribution: dict[str, dict[str, object]]
 
     def as_dict(self) -> dict[str, object]:
         return {
-            "report_version": "incremental-readiness-v1",
+            "report_version": "incremental-readiness-v2",
             "baseline_signature": self.baseline_signature,
             "model_signature": self.model_signature,
             "evidence_cursor": self.evidence_cursor,
@@ -81,6 +82,7 @@ class IncrementalReadinessReport:
             "formal_gate_reached": self.formal_gate_reached,
             "annual": self.annual,
             "source_attribution": self.source_attribution,
+            "task_kind_attribution": self.task_kind_attribution,
         }
 
 
@@ -116,6 +118,11 @@ class IncrementalReadinessLedger:
                 novel_host_years INTEGER NOT NULL,
                 novel_eed TEXT NOT NULL
             ) WITHOUT ROWID;
+            CREATE TABLE IF NOT EXISTS readiness_task_kind (
+                task_kind TEXT PRIMARY KEY,
+                novel_host_years INTEGER NOT NULL,
+                novel_eed TEXT NOT NULL
+            ) WITHOUT ROWID;
             """
         )
         self.connection.commit()
@@ -142,6 +149,7 @@ class IncrementalReadinessLedger:
         try:
             self.connection.execute("DELETE FROM readiness_annual")
             self.connection.execute("DELETE FROM readiness_source")
+            self.connection.execute("DELETE FROM readiness_task_kind")
             self.connection.execute("DELETE FROM readiness_state")
             self.connection.execute(
                 """
@@ -153,6 +161,45 @@ class IncrementalReadinessLedger:
                 """,
                 (baseline_signature, model_signature),
             )
+            for task_kind in sorted(task_kind_counts):
+                current_kind = self.connection.execute(
+                    """
+                    SELECT novel_host_years, novel_eed
+                    FROM readiness_task_kind WHERE task_kind = ?
+                    """,
+                    (task_kind,),
+                ).fetchone()
+                if current_kind is None:
+                    self.connection.execute(
+                        """
+                        INSERT INTO readiness_task_kind(
+                            task_kind, novel_host_years, novel_eed
+                        ) VALUES (?, ?, ?)
+                        """,
+                        (
+                            task_kind,
+                            task_kind_counts[task_kind],
+                            format(task_kind_eed[task_kind], "f"),
+                        ),
+                    )
+                else:
+                    self.connection.execute(
+                        """
+                        UPDATE readiness_task_kind
+                        SET novel_host_years = ?, novel_eed = ?
+                        WHERE task_kind = ?
+                        """,
+                        (
+                            int(current_kind["novel_host_years"])
+                            + task_kind_counts[task_kind],
+                            format(
+                                Decimal(str(current_kind["novel_eed"]))
+                                + task_kind_eed[task_kind],
+                                "f",
+                            ),
+                            task_kind,
+                        ),
+                    )
             for year in YEAR_BITS:
                 self.connection.execute(
                     """
@@ -182,6 +229,7 @@ class IncrementalReadinessLedger:
         baseline: BaselineIndex,
         weights: dict[str, Decimal],
         source_origins: dict[tuple[str, int], str] | None = None,
+        task_kinds: dict[tuple[str, int], str] | None = None,
     ) -> int:
         if not rows:
             return 0
@@ -197,8 +245,11 @@ class IncrementalReadinessLedger:
         novel_count = 0
         novel_eed = Decimal("0")
         source_origins = source_origins or {}
+        task_kinds = task_kinds or {}
         source_counts: dict[str, int] = {}
         source_eed: dict[str, Decimal] = {}
+        task_kind_counts: dict[str, int] = {}
+        task_kind_eed: dict[str, Decimal] = {}
 
         for row in rows:
             bit = YEAR_BITS.get(row.year)
@@ -220,6 +271,12 @@ class IncrementalReadinessLedger:
                 source_counts[source_key] = source_counts.get(source_key, 0) + 1
                 source_eed[source_key] = (
                     source_eed.get(source_key, Decimal("0")) + contribution
+                )
+            task_kind = task_kinds.get((row.hostname, row.year))
+            if task_kind is not None:
+                task_kind_counts[task_kind] = task_kind_counts.get(task_kind, 0) + 1
+                task_kind_eed[task_kind] = (
+                    task_kind_eed.get(task_kind, Decimal("0")) + contribution
                 )
 
         new_cursor = rows[-1].sequence
@@ -357,6 +414,15 @@ class IncrementalReadinessLedger:
                 "SELECT * FROM readiness_source ORDER BY source_key"
             )
         }
+        task_kind_attribution = {
+            str(row["task_kind"]): {
+                "novel_host_years": int(row["novel_host_years"]),
+                "novel_eed": str(row["novel_eed"]),
+            }
+            for row in self.connection.execute(
+                "SELECT * FROM readiness_task_kind ORDER BY task_kind"
+            )
+        }
         novel_eed = Decimal(str(state["novel_eed"]))
         five_percent = baseline_eed * FORMAL_GROWTH_RATE
         growth_rate = (
@@ -385,6 +451,7 @@ class IncrementalReadinessLedger:
             formal_gate_reached=growth_rate >= FORMAL_GROWTH_RATE,
             annual=annual,
             source_attribution=source_attribution,
+            task_kind_attribution=task_kind_attribution,
         )
 
     def close(self) -> None:
@@ -448,6 +515,19 @@ class IncrementalReadinessRuntime:
         )
         return True
 
+    def _task_kinds(
+        self,
+        rows: list[EvidenceHostYear],
+    ) -> dict[tuple[str, int], str]:
+        control_path = self.runtime_data_root / "control.sqlite3"
+        if self.control is None and control_path.exists():
+            self.control = ControlStore(control_path)
+        if self.control is None:
+            return {}
+        return self.control.resolve_host_year_task_kinds(
+            (row.hostname, row.year) for row in rows
+        )
+
     def _source_origins(
         self,
         rows: list[EvidenceHostYear],
@@ -475,6 +555,7 @@ class IncrementalReadinessRuntime:
                 baseline=self.baseline,
                 weights=self.weights,
                 source_origins=self._source_origins(rows),
+                task_kinds=self._task_kinds(rows),
             )
         return self.ledger.report(
             latest_evidence_sequence=self.evidence.max_host_year_sequence(),
