@@ -90,12 +90,22 @@ class SearchBatch:
     actor: str
     candidates: tuple[SourceCandidate, ...] = ()
     search_cost_seconds: float | None = None
+    llm_episode_id: str | None = None
+    llm_task_type: str | None = None
+    context_hash: str | None = None
+    prompt_version: str | None = None
+    hypotheses: tuple[dict[str, object], ...] = ()
+    hypothesis_attribution: tuple[tuple[str, str], ...] = ()
 
     def __post_init__(self) -> None:
         if not self.backend.strip() or not self.query.strip() or not self.actor.strip():
             raise ValueError("search batch attribution fields are required")
         if self.search_cost_seconds is not None and self.search_cost_seconds < 0:
             raise ValueError("search_cost_seconds must be non-negative")
+        if self.llm_episode_id is not None and not self.llm_episode_id.strip():
+            raise ValueError("llm_episode_id must be non-empty when provided")
+        if self.llm_episode_id is not None and not self.llm_task_type:
+            raise ValueError("llm_task_type is required for LLM batches")
 
 
 @dataclass(frozen=True)
@@ -408,7 +418,22 @@ class SourceDiscoveryCoordinator:
                 backend=batch.backend,
                 query=batch.query,
                 actor=batch.actor,
+                episode_id=batch.llm_episode_id,
             )
+            if batch.llm_episode_id is not None:
+                self.registry.begin_llm_episode(
+                    episode_id=batch.llm_episode_id,
+                    task_type=batch.llm_task_type or directive.task_type.value,
+                    backend=batch.backend,
+                    actor=batch.actor,
+                    context_hash=batch.context_hash or "",
+                    prompt_version=batch.prompt_version or "unknown",
+                )
+                for hypothesis in batch.hypotheses:
+                    self.registry.register_llm_hypothesis(
+                        batch.llm_episode_id,
+                        hypothesis,
+                    )
             seen: set[str] = set()
             accepted: list[SourceCandidate] = []
             dropped = 0
@@ -438,10 +463,23 @@ class SourceDiscoveryCoordinator:
                     dropped += 1
                     continue
                 self.registry.register_proposal(candidate, episode_id=episode.episode_id)
+                if batch.llm_episode_id is not None:
+                    attribution = dict(batch.hypothesis_attribution)
+                    hypothesis_id = attribution.get(candidate.source_key)
+                    if hypothesis_id is not None:
+                        self.registry.link_llm_source(
+                            candidate.source_key,
+                            hypothesis_id=hypothesis_id,
+                        )
             self.registry.finish_search_episode(
                 episode.episode_id,
                 search_cost_seconds=cost,
             )
+            if batch.llm_episode_id is not None:
+                self.registry.finish_llm_episode(
+                    batch.llm_episode_id,
+                    cost_seconds=cost,
+                )
             counts["search_episodes"] += 1
             counts["search_candidates_registered"] += len(accepted)
             counts["search_candidates_dropped"] += dropped
