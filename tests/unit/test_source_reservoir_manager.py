@@ -109,6 +109,56 @@ class SourceReservoirManagerTests(unittest.TestCase):
         self.assertEqual(self.registry.get_candidate(fast.source_key).state, SourceState.WARM)
         self.assertFalse(plan.needs_search)
 
+    def test_direct_bulk_without_volume_hint_scouts_before_generic_source(self) -> None:
+        direct = SourceCandidate(
+            canonical_entrypoint="https://archive.example/index.cdxj",
+            source_family="BULK_ARTIFACT",
+            level=SourceLevel.SOURCE,
+            discovered_by="scrapy_sidecar",
+            discovery_strategy="DETERMINISTIC_LINK_EXPANSION",
+            expected_volume=None,
+            temporal_semantics_prior=1.0,
+            enumerability_prior=0.95,
+            direct_evidence_prior=1.0,
+            baseline_overlap_prior=0.5,
+            access_cost_prior=0.5,
+            adapter_cost_prior=0.75,
+            confidence=0.8,
+        )
+        generic = SourceCandidate(
+            canonical_entrypoint="https://archive.example/huge-list.txt.gz",
+            source_family="BULK_ARTIFACT",
+            level=SourceLevel.SOURCE,
+            discovered_by="agent:test",
+            discovery_strategy="META_SOURCE_SEARCH",
+            expected_volume=10_000_000,
+            temporal_semantics_prior=0.4,
+            enumerability_prior=0.9,
+            direct_evidence_prior=0.0,
+            baseline_overlap_prior=0.5,
+            access_cost_prior=0.5,
+            adapter_cost_prior=0.75,
+            confidence=0.8,
+        )
+        self.to_scout_ready(generic)
+        self.to_scout_ready(direct)
+        manager = SourceReservoirManager(
+            self.registry,
+            targets=SourcePoolTargets(
+                active_min=0,
+                active_target=0,
+                warm_min=0,
+                warm_target=0,
+                cold_min=0,
+                cold_target=0,
+                scout_parallelism=1,
+            ),
+        )
+
+        plan = manager.plan()
+
+        self.assertEqual(plan.scout_source_keys, (direct.source_key,))
+
     def test_existing_cold_reserve_is_consumed_before_agent_search(self) -> None:
         first = self.candidate("cold-a", confidence=0.9)
         second = self.candidate("cold-b", confidence=0.4)
