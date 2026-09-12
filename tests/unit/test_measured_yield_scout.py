@@ -221,6 +221,63 @@ class MeasuredYieldScoutTests(unittest.IsolatedAsyncioTestCase):
             128,
         )
 
+    async def test_progressive_scout_uses_all_fidelity_stages_within_total_budget(self) -> None:
+        total_size = 8 * 1024 * 1024
+        requested: list[tuple[int, int]] = []
+        record = b"https://known.com/repeated\n"
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            span = request.headers["Range"].removeprefix("bytes=")
+            start_text, end_text = span.split("-", 1)
+            start = int(start_text)
+            end = int(end_text)
+            requested.append((start, end))
+            size = end - start + 1
+            repetitions = (size // len(record)) + 1
+            chunk = (record * repetitions)[:size]
+            return streamed_response(
+                206,
+                chunk,
+                headers={
+                    "content-type": "text/plain",
+                    "content-range": f"bytes {start}-{end}/{total_size}",
+                    "content-length": str(len(chunk)),
+                },
+            )
+
+        budget = 3 * 1024 * 1024
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler)
+        ) as client:
+            scout = MeasuredYieldScoutExecutor(
+                client,
+                self.baseline,
+                {"com": Decimal("1")},
+                policy=self.policy(
+                    max_download_bytes=budget,
+                    progressive_initial_bytes=64 * 1024,
+                    sample_windows=4,
+                    max_records=100,
+                    min_unique_hosts=1000,
+                    min_novel_hosts=1000,
+                    min_novel_fraction=0.9,
+                    min_novel_eed=1000.0,
+                ),
+            )
+            result = await scout(
+                self.candidate("https://data.example/progressive.urls")
+            )
+
+        self.assertEqual(result.disposition, ScoutDisposition.HOLD)
+        self.assertIsNotNone(result.measurement)
+        measurement = result.measurement
+        assert measurement is not None
+        # Four fidelity targets use 1+2+3+4 distributed range requests.
+        self.assertEqual(measurement.requests, 10)
+        self.assertEqual(len(requested), 10)
+        self.assertLessEqual(measurement.bytes_read, budget)
+        self.assertGreater(measurement.bytes_read, 2 * 1024 * 1024)
+
     async def test_large_cdxj_stratifies_fixed_byte_budget_across_file(self) -> None:
         lines = []
         for index in range(24):
