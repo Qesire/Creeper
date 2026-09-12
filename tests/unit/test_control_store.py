@@ -162,6 +162,30 @@ class ControlStoreTests(unittest.TestCase):
             )
             store.close()
 
+    def test_rdap_shadow_backfill_uses_wayback_backlog(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ControlStore(Path(tmp) / "control.sqlite3")
+            wayback = EvidenceQueryKey(
+                "www.example.com",
+                TemporalScope(2001, 2001),
+                "wayback",
+                "cdx-v1",
+            )
+            store.enqueue_evidence_tasks([wayback])
+
+            created = store.backfill_rdap_tasks_from_wayback(limit=8)
+
+            self.assertEqual(created, 1)
+            rdap = EvidenceQueryKey(
+                "example.com",
+                TemporalScope(1996, 2001),
+                "rdap",
+                "rdap-registration-v1",
+            )
+            self.assertIsNotNone(store.get_evidence_task(rdap))
+            self.assertEqual(store.backfill_rdap_tasks_from_wayback(limit=8), 0)
+            store.close()
+
     def test_domain_fanout_uses_bounded_parent_sketch_without_child_rows(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = ControlStore(Path(tmp) / "control.sqlite3")
