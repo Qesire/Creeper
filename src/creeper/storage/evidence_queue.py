@@ -9,6 +9,13 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
+from creeper.evidence.actions import (
+    ACTION_PRIOR_STRENGTH,
+    ACTION_RETRY_PENALTY,
+    EvidenceActionKind,
+    action_prior_yield,
+)
+
 from creeper.evidence.policies import (
     CDXQueryState,
     EvidenceQueryKey,
@@ -102,30 +109,76 @@ class DurableEvidenceQueue:
             limit,
         ]
         query = f"""
-            SELECT * FROM evidence_tasks
-            WHERE state IN (?, ?, ?)
-              AND (lease_until IS NULL OR lease_until <= ?)
-              AND (retry_at IS NULL OR retry_at <= ?)
-              AND provider IN ({placeholders})
-            -- Competition-value order:
-            -- 1) domain amplification can return many host-years/request;
-            -- 2) RDAP runs on an independent provider budget;
-            -- 3) wider probes can return multiple years;
-            -- 4) official EED weight breaks ties toward higher score value.
+            WITH eligible AS (
+                SELECT e.*,
+                       CASE
+                           WHEN e.policy_version LIKE 'cdx-domain-%'
+                               THEN 'domain'
+                           WHEN e.provider = 'rdap' THEN 'rdap'
+                           WHEN e.year_to > e.year_from THEN 'range'
+                           ELSE 'exact'
+                       END AS action_kind
+                FROM evidence_tasks e
+                WHERE e.state IN (?, ?, ?)
+                  AND (e.lease_until IS NULL OR e.lease_until <= ?)
+                  AND (e.retry_at IS NULL OR e.retry_at <= ?)
+                  AND e.provider IN ({placeholders})
+            )
+            SELECT eligible.*
+            FROM eligible
+            LEFT JOIN evidence_action_cost_stats cost
+              ON cost.task_kind = eligible.action_kind
+            LEFT JOIN evidence_action_final_rewards reward
+              ON reward.task_kind = eligible.action_kind
+            -- Empirical-Bayes competition-value order:
+            -- posterior final novel host-years/request, scaled by this task's
+            -- official TLD EED weight and discounted after repeated attempts.
             ORDER BY
-                     CASE
-                         WHEN policy_version LIKE 'cdx-domain-%' THEN 3
-                         WHEN provider = 'rdap' THEN 2
-                         WHEN year_to > year_from THEN 1
-                         ELSE 0
-                     END DESC,
-                     eed_weight DESC,
-                     (year_to - year_from) DESC,
-                     year_from,
-                     hostname,
-                     year_to,
-                     provider,
-                     policy_version
+                (
+                    eligible.eed_weight
+                    * (
+                        COALESCE(reward.final_novel_host_years, 0)
+                        + {ACTION_PRIOR_STRENGTH}
+                          * CASE eligible.action_kind
+                                WHEN 'domain' THEN {
+                                    action_prior_yield(EvidenceActionKind.DOMAIN)
+                                }
+                                WHEN 'rdap' THEN {
+                                    action_prior_yield(EvidenceActionKind.RDAP)
+                                }
+                                WHEN 'range' THEN {
+                                    action_prior_yield(EvidenceActionKind.RANGE)
+                                }
+                                ELSE {
+                                    action_prior_yield(EvidenceActionKind.EXACT)
+                                }
+                            END
+                    )
+                    / (
+                        MAX(
+                            COALESCE(cost.provider_requests, 0),
+                            COALESCE(cost.attempts, 0)
+                        )
+                        + {ACTION_PRIOR_STRENGTH}
+                    )
+                    / (
+                        1.0
+                        + {ACTION_RETRY_PENALTY} * eligible.attempt
+                    )
+                ) DESC,
+                CASE eligible.action_kind
+                    WHEN 'domain' THEN 3
+                    WHEN 'rdap' THEN 2
+                    WHEN 'range' THEN 1
+                    ELSE 0
+                END DESC,
+                eligible.eed_weight DESC,
+                (eligible.year_to - eligible.year_from) DESC,
+                eligible.year_from,
+                eligible.hostname,
+                eligible.year_to,
+                eligible.provider,
+                eligible.policy_version
             LIMIT ?
         """
 
