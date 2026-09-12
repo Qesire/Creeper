@@ -10,10 +10,9 @@ from creeper.source_discovery.index_registry import IndexSpaceRegistry
 from creeper.source_discovery.index_space import (
     RegionState,
     RegionSynopsis,
-    SourceCandidate,
-    SourceLevel,
     compile_candidate_index_space,
 )
+from creeper.source_discovery.models import SourceCandidate, SourceLevel
 from creeper.source_discovery.region_probe import (
     RegionProbeError,
     RegionProbeExecutor,
