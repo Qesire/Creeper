@@ -25,6 +25,8 @@ lease_max_seconds = 300
 # opening a SourceLease. It is deliberately independent from EvidenceWorker
 # max_inflight/RPS/HTTP connection limits.
 evidence_backlog_capacity = 10000
+# RDAP registration-year evidence uses a separate provider/network budget.
+rdap_backlog_capacity = 4096
 
 # Legacy synchronous `creeper run --once` evidence execution bound. Production
 # source/evidence processes do not use this as network concurrency.
