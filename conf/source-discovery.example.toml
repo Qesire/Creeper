@@ -25,6 +25,10 @@ search_parallelism = 3
 failure_retry_seconds = 30.0
 # Completed strategies, including valid empty-result searches, are durably cooled down.
 search_cooldown_seconds = 30.0
+# UCB exploration over historically observed search strategies.
+search_ucb_exploration = 0.35
+# A zero-credit tail of this many completed search episodes triggers RECOVER_STAGNATION.
+stagnation_window = 6
 
 [triage]
 # HEAD first, then a tiny ranged GET only when the server rejects HEAD.
@@ -74,14 +78,20 @@ min_confidence = 0.35
 require_year_bounds = true
 
 [agent]
-# Contract: <command...> --request REQUEST.json --response RESPONSE.json
-# The process may propose SourceCandidate metadata only; it never receives SQLite authority.
-# The request contains the [admission] thresholds so the Agent can search toward them.
-command = ["python", "/path/to/creeper_source_search_agent.py"]
-backend = "configured-search-agent"
-actor = "agent:source-search"
-# cwd = "/optional/agent/working/directory"
-timeout_seconds = 120.0
+# Parent -> child contract:
+#   <command...> --request REQUEST.json --response RESPONSE.json
+# The Creeper parent process explicitly launches a fresh Codex child agent for
+# DISCOVER_NEW_SOURCE / EXPLOIT_SUCCESS_PATTERN / INTERPRET_STRUCTURE /
+# RECOVER_STAGNATION. The child receives only a bounded state snapshot and has
+# proposal-only authority; SQLite, baseline authority and submission stay hidden.
+command = ["python", "../scripts/creeper_codex_subagent.py"]
+backend = "codex-cli-subagent"
+actor = "codex:source-intelligence"
+# cwd should normally be the Creeper checkout so the wrapper can find its schema.
+# cwd = "/path/to/Creeper"
+timeout_seconds = 180.0
 termination_grace_seconds = 2.0
 max_response_bytes = 2097152
 max_returned_candidates = 2000
+max_returned_hypotheses = 128
+max_motif_expansions = 256
