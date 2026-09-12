@@ -147,6 +147,8 @@ class SourceDiscoveryRegistry:
                 FOREIGN KEY(source_key) REFERENCES source_candidates(source_key),
                 FOREIGN KEY(hypothesis_id) REFERENCES source_llm_hypotheses(hypothesis_id)
             ) WITHOUT ROWID;
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_source_llm_single_credit
+                ON source_llm_source_attribution(source_key);
 
             CREATE TABLE IF NOT EXISTS source_final_rewards (
                 source_key TEXT PRIMARY KEY,
@@ -593,18 +595,30 @@ class SourceDiscoveryRegistry:
     def llm_task_rewards(self) -> list[dict[str, object]]:
         rows = self.connection.execute(
             """
-            SELECT e.task_type,
-                   COUNT(DISTINCT e.episode_id) AS episodes,
-                   COALESCE(SUM(a.credited_eed), 0) AS credited_eed,
-                   COALESCE(SUM(DISTINCT e.cost_seconds), 0) AS cost_seconds
-            FROM source_llm_episodes e
-            LEFT JOIN source_llm_hypotheses h
-              ON h.episode_id = e.episode_id
-            LEFT JOIN source_llm_source_attribution a
-              ON a.hypothesis_id = h.hypothesis_id
-            WHERE e.finished_at IS NOT NULL
-            GROUP BY e.task_type
-            ORDER BY e.task_type
+            WITH episode_cost AS (
+                SELECT task_type,
+                       COUNT(*) AS episodes,
+                       SUM(cost_seconds) AS cost_seconds
+                FROM source_llm_episodes
+                WHERE finished_at IS NOT NULL
+                GROUP BY task_type
+            ),
+            task_reward AS (
+                SELECT e.task_type,
+                       COALESCE(SUM(a.credited_eed), 0) AS credited_eed
+                FROM source_llm_episodes e
+                LEFT JOIN source_llm_hypotheses h
+                  ON h.episode_id = e.episode_id
+                LEFT JOIN source_llm_source_attribution a
+                  ON a.hypothesis_id = h.hypothesis_id
+                WHERE e.finished_at IS NOT NULL
+                GROUP BY e.task_type
+            )
+            SELECT c.task_type, c.episodes, c.cost_seconds,
+                   COALESCE(r.credited_eed, 0) AS credited_eed
+            FROM episode_cost c
+            LEFT JOIN task_reward r ON r.task_type = c.task_type
+            ORDER BY c.task_type
             """
         ).fetchall()
         return [
