@@ -169,7 +169,7 @@ class ExactRegionHarvestTests(unittest.TestCase):
         self.assertEqual(novel[1].original_url, "http://novel.com/last")
         self.assertNotEqual(novel[0].record_locator, novel[1].record_locator)
 
-    def test_region_boundaries_never_turn_partial_lines_into_evidence(self) -> None:
+    def test_region_owns_records_by_start_offset_without_partial_evidence(self) -> None:
         lines = [
             self._line("alpha", 1998, "0101000000"),
             self._line("beta", 1998, "0101000000"),
@@ -215,9 +215,11 @@ class ExactRegionHarvestTests(unittest.TestCase):
         beta = self.evidence.for_hostname("beta.com")
         self.assertEqual(len(beta), 1)
         self.assertEqual(beta[0].year, 1998)
-        self.assertEqual(self.evidence.for_hostname("gamma.com"), [])
+        gamma = self.evidence.for_hostname("gamma.com")
+        self.assertEqual(len(gamma), 1)
+        self.assertEqual(gamma[0].year, 1998)
 
-    def test_remote_range_harvest_discards_partial_boundary_rows(self) -> None:
+    def test_remote_range_harvest_owns_trailing_cross_boundary_row(self) -> None:
         lines = [
             self._line("alpha", 1998, "0101000000"),
             self._line("beta", 1998, "0101000000"),
@@ -270,7 +272,7 @@ class ExactRegionHarvestTests(unittest.TestCase):
             bounds = raw.removeprefix("bytes=")
             left, right = bounds.split("-", 1)
             request_start = int(left)
-            request_end = int(right)
+            request_end = min(int(right), len(payload) - 1)
             body = payload[request_start:request_end + 1]
             return httpx.Response(
                 206,
@@ -305,7 +307,69 @@ class ExactRegionHarvestTests(unittest.TestCase):
         beta = self.evidence.for_hostname("beta.com")
         self.assertEqual(len(beta), 1)
         self.assertEqual(beta[0].year, 1998)
-        self.assertEqual(self.evidence.for_hostname("gamma.com"), [])
+        gamma = self.evidence.for_hostname("gamma.com")
+        self.assertEqual(len(gamma), 1)
+        self.assertEqual(gamma[0].year, 1998)
+
+    def test_adjacent_regions_cover_crossing_record_exactly_once(self) -> None:
+        lines = [
+            self._line("alpha", 1997, "0101000000"),
+            self._line("beta", 1998, "0101000000"),
+            self._line("gamma", 1999, "0101000000"),
+        ]
+        path = self.root / "adjacent.cdxj"
+        payload = "".join(lines).encode("utf-8")
+        path.write_bytes(payload)
+        compiled = self._compiled_local(path)
+        self.registry.register_index_space(compiled)
+
+        alpha_end = len(lines[0].encode("utf-8"))
+        beta_end = alpha_end + len(lines[1].encode("utf-8"))
+        # Split in the middle of beta. Left owns beta because beta starts
+        # before the split; right must discard the beta tail and begin at gamma.
+        split = alpha_end + max(1, (beta_end - alpha_end) // 2)
+        left = child_region(
+            compiled.root_region,
+            kind=RegionKind.BYTE_RANGE,
+            byte_start=0,
+            byte_end=split - 1,
+        )
+        right = child_region(
+            compiled.root_region,
+            kind=RegionKind.BYTE_RANGE,
+            byte_start=split,
+            byte_end=len(payload) - 1,
+        )
+        for region in (left, right):
+            self.registry.put_region(region)
+            self.registry.mark_region_state(
+                region.region_key,
+                RegionState.HARVEST_READY,
+            )
+
+        executor = RegionHarvestExecutor(
+            registry=self.registry,
+            baseline=self.baseline,
+            evidence_store=self.evidence,
+        )
+        left_report = executor.harvest(left.region_key)
+        right_report = executor.harvest(right.region_key)
+
+        self.assertIsNotNone(left_report)
+        self.assertIsNotNone(right_report)
+        assert left_report is not None and right_report is not None
+        self.assertTrue(left_report.completed)
+        self.assertTrue(right_report.completed)
+        self.assertEqual(self.evidence.host_year_count(), 3)
+        self.assertEqual(
+            [(item.hostname, item.year) for item in self.evidence.host_years_after(0)],
+            [
+                ("alpha.com", 1997),
+                ("beta.com", 1998),
+                ("gamma.com", 1999),
+            ],
+        )
+        self.assertEqual(len(self.evidence.for_hostname("beta.com")), 1)
 
     def test_small_record_limit_resumes_at_exact_line_boundary(self) -> None:
         path = self.root / "resume.cdxj"
