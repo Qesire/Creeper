@@ -296,8 +296,11 @@ class EvidenceStore:
         for start in range(0, len(values), limit):
             chunk = values[start:start + limit]
             placeholders = ",".join("?" for _ in chunk)
+            # evidence_host_years is the compact deduplicated authority
+            # projection maintained by put_many(). Querying it avoids scanning
+            # multiple capsule witnesses for the same proven host-year.
             rows = self.connection.execute(
-                f"SELECT hostname, year FROM evidence_capsules "
+                f"SELECT hostname, year FROM evidence_host_years "
                 f"WHERE hostname IN ({placeholders})",
                 chunk,
             ).fetchall()
