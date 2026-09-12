@@ -28,6 +28,20 @@ from creeper.storage.control_store import ControlStore
 from creeper.storage.evidence_store import EvidenceStore
 
 
+def _rdap_parent_candidate(hostname: str) -> str | None:
+    """Conservative registrable-domain candidate without a PSL dependency."""
+    labels = hostname.split(".")
+    if len(labels) < 2:
+        return None
+    tld = labels[-1]
+    if len(tld) == 2:
+        # Avoid querying bare ccTLD public-suffix-like pairs such as co.uk.
+        if len(labels) < 3:
+            return None
+        return ".".join(labels[-3:])
+    return ".".join(labels[-2:])
+
+
 @dataclass(frozen=True)
 class SourceProducerReport:
     leases_succeeded: int = 0
@@ -406,10 +420,11 @@ class SourceProducer:
                             domain_parents
                         )
 
-                    rdap_hosts = self.control_store.ready_rdap_candidates(
-                        min_children=self.rdap_fanout_min_children,
-                        limit=min(self.rdap_batch_size, len(pending)),
-                    )
+                    rdap_hosts = list(dict.fromkeys(
+                        candidate
+                        for hostname in hostnames
+                        if (candidate := _rdap_parent_candidate(hostname)) is not None
+                    ))[: self.rdap_batch_size]
                     if rdap_hosts:
                         rdap_keys = tuple(
                             EvidenceQueryKey(
@@ -420,12 +435,10 @@ class SourceProducer:
                             )
                             for hostname in rdap_hosts
                         )
-                        # Mark only after the durable admission call succeeds.
-                        # Duplicates are still safe to mark because the same
-                        # provider/key identity is already durable.
-                        rdap_inserted = enqueue_auxiliary_keys("rdap", rdap_keys)
-                        if rdap_inserted is not None:
-                            self.control_store.mark_rdap_enqueued(rdap_hosts)
+                        # EvidenceTask identity already provides durable global
+                        # deduplication, so RDAP discovery needs no per-host
+                        # side table or enqueue flag.
+                        enqueue_auxiliary_keys("rdap", rdap_keys)
                 pending.clear()
 
             for record in records:
