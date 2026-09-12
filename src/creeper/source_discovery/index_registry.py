@@ -360,6 +360,41 @@ class IndexSpaceRegistry:
             year_to=row["year_to"],
         )
 
+    def list_regions_by_state(
+        self,
+        state: RegionState,
+        *,
+        index_key: str | None = None,
+    ) -> tuple[HarvestRegion, ...]:
+        """Return regions in one lifecycle state across one or all indexes."""
+
+        state = RegionState(state)
+        if index_key is None:
+            rows = self.connection.execute(
+                """
+                SELECT region_key
+                FROM source_regions_v1
+                WHERE state = ?
+                ORDER BY index_key, depth, region_key
+                """,
+                (state.value,),
+            ).fetchall()
+        else:
+            rows = self.connection.execute(
+                """
+                SELECT region_key
+                FROM source_regions_v1
+                WHERE state = ? AND index_key = ?
+                ORDER BY depth, region_key
+                """,
+                (state.value, index_key),
+            ).fetchall()
+        return tuple(
+            region
+            for row in rows
+            if (region := self.get_region(str(row["region_key"]))) is not None
+        )
+
     def list_regions(self, index_key: str) -> tuple[HarvestRegion, ...]:
         rows = self.connection.execute(
             """
