@@ -13,6 +13,11 @@ class CDXQueryState(StrEnum):
     PENDING = "pending"
     PASS = "pass"
     EMPTY_EXHAUSTIVE = "empty_exhaustive"
+    # A bounded multi-year probe produced all immediately reusable positive
+    # evidence, but did not exhaust the range. Missing years were refined into
+    # exact-year child tasks. This is terminal queue state, never negative
+    # provider coverage.
+    DECOMPOSED = "decomposed"
     INCOMPLETE = "incomplete"
     TRANSIENT_ERROR = "transient_error"
     INVALID = "invalid"
@@ -87,6 +92,8 @@ class EvidenceQueryResult:
     capsule: EvidenceCapsule | None = None
     pages_seen: int = 0
     records_seen: int = 0
+    provider_requests: int = 0
+    provider_elapsed_milliseconds: int = 0
     error: str | None = None
     key: EvidenceQueryKey | None = None
 
@@ -104,9 +111,14 @@ class RangeEvidenceQueryResult:
     key: EvidenceQueryKey
     state: CDXQueryState
     candidate_years: tuple[int, ...] = ()
+    # Exact-year refinements required after a deliberately bounded probe.
+    # These years are not positive claims and carry no negative authority.
+    followup_years: tuple[int, ...] = ()
     capsules: tuple[EvidenceCapsule, ...] = ()
     pages_seen: int = 0
     records_seen: int = 0
+    provider_requests: int = 0
+    provider_elapsed_milliseconds: int = 0
     error: str | None = None
 
     def __post_init__(self) -> None:
@@ -117,6 +129,12 @@ class RangeEvidenceQueryResult:
             raise ValueError("range result requires a multi-year temporal scope")
         if any(year not in range(scope.year_from, scope.year_to + 1) for year in self.candidate_years):
             raise ValueError("range candidate years must be inside the query scope")
+        if any(year not in range(scope.year_from, scope.year_to + 1) for year in self.followup_years):
+            raise ValueError("range follow-up years must be inside the query scope")
+        if set(self.candidate_years) & set(self.followup_years):
+            raise ValueError("range positive and follow-up years must be disjoint")
+        if self.provider_requests < 0 or self.provider_elapsed_milliseconds < 0:
+            raise ValueError("provider request accounting must be non-negative")
         capsule_years: set[int] = set()
         for capsule in self.capsules:
             if capsule.hostname != self.hostname:
