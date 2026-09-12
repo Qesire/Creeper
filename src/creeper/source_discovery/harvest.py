@@ -139,6 +139,9 @@ class RegionHarvestExecutor:
         groups: list[HostYearWitnessGroup],
         *,
         counters: dict[str, int],
+        source_key: str | None = None,
+        reservoir_id: str | None = None,
+        lease_id: str | None = None,
     ) -> None:
         if not groups:
             return
@@ -194,6 +197,23 @@ class RegionHarvestExecutor:
 
         counters["planned"] += len(capsules)
         if capsules:
+            if source_key is not None:
+                if reservoir_id is None or lease_id is None:
+                    raise RegionHarvestError(
+                        "direct region attribution requires reservoir and lease identity"
+                    )
+                # Publish lineage before EvidenceStore makes the host-year visible
+                # to readiness. This matches SourceProducer's authority ordering
+                # and prevents a racing readiness cycle from losing source credit.
+                self.registry.control_store.attribute_direct_host_years(
+                    (
+                        (capsule.hostname, capsule.year, capsule.provider)
+                        for capsule in capsules
+                    ),
+                    source_key=source_key,
+                    reservoir_id=reservoir_id,
+                    lease_id=lease_id,
+                )
             counters["inserted"] += self.evidence_store.put_many(capsules)
         groups.clear()
 
@@ -593,6 +613,7 @@ class RegionHarvestExecutor:
     def harvest(self, region_key: str) -> RegionHarvestReport | None:
         """Claim and advance one region; return None when another owner won."""
 
+        harvest_started = time.monotonic()
         ttl = self.policy.max_seconds + self.policy.claim_grace_seconds
         claimed = self.registry.claim_region_for_harvest(
             region_key,
@@ -646,13 +667,21 @@ class RegionHarvestExecutor:
                 direct_capsules_inserted=0,
                 bytes_read=0,
                 requests=0,
-                elapsed_seconds=0.0,
+                elapsed_seconds=max(
+                    0.0,
+                    time.monotonic() - harvest_started,
+                ),
                 resume_cursor=None,
             )
 
-        # One preceding-byte boundary check is permitted for nonzero starts.
+        # The transport may read one preceding byte plus a bounded tail to
+        # complete the last record whose start offset belongs to this region.
         logical_bytes = end_exclusive - start
-        max_bytes = logical_bytes + (1 if start > 0 else 0)
+        max_bytes = (
+            logical_bytes
+            + (1 if start > 0 else 0)
+            + self.policy.boundary_record_max_bytes
+        )
         lease = WorkLease.create(
             reservoir_id=index.source_key,
             cursor_start=f"byte:{start}",
@@ -677,14 +706,35 @@ class RegionHarvestExecutor:
         }
         prior_cursor = start
 
+        activation = self.registry.control_store.get_activation(
+            index.source_key
+        )
+        origin_reservoir_id = (
+            None
+            if activation is None
+            else str(activation["reservoir_id"])
+        )
+
+        def flush_pending() -> None:
+            self._flush_groups(
+                pending,
+                counters=counters,
+                source_key=(
+                    index.source_key
+                    if origin_reservoir_id is not None
+                    else None
+                ),
+                reservoir_id=origin_reservoir_id,
+                lease_id=lease.lease_id,
+            )
+
         def emit(record: SourceRecord) -> None:
             group = reducer.feed(record)
             if group is not None:
                 pending.append(group)
                 if len(pending) >= self.policy.baseline_batch_size:
-                    self._flush_groups(pending, counters=counters)
+                    flush_pending()
 
-        adapter: StructuredProductionAdapter | None = None
         try:
             scheme = urlsplit(index.locator).scheme.lower()
             if scheme in {"http", "https"}:
@@ -693,25 +743,20 @@ class RegionHarvestExecutor:
                     lease=lease,
                     emit_record=emit,
                 )
-            else:
-                reservoir = Reservoir(
-                    reservoir_id=index.source_key,
-                    domain_id=index.factory_key,
-                    adapter_id=(
-                        f"structured:region:"
-                        f"{index.capabilities.format.lower()}"
-                    ),
-                    root_locator=index.locator,
-                    enumeration_kind="byte_region",
-                    capacity_lower=0,
-                    evidence_mode="direct_year",
+            elif scheme in {"", "file"}:
+                result = self._execute_local_region(
+                    index=index,
+                    lease=lease,
+                    emit_record=emit,
                 )
-                adapter = StructuredProductionAdapter(reservoir)
-                result = adapter.execute_stream(lease, emit)
+            else:
+                raise RegionHarvestError(
+                    f"unsupported exact region transport: {scheme}"
+                )
             final_group = reducer.finish()
             if final_group is not None:
                 pending.append(final_group)
-            self._flush_groups(pending, counters=counters)
+            flush_pending()
 
             resume_cursor = _cursor_value(result.next_cursor)
             completed = resume_cursor is None
@@ -746,12 +791,13 @@ class RegionHarvestExecutor:
                 direct_capsules_inserted=counters["inserted"],
                 bytes_read=result.bytes_read,
                 requests=result.requests,
-                elapsed_seconds=result.elapsed_seconds,
+                elapsed_seconds=max(
+                    0.0,
+                    time.monotonic() - harvest_started,
+                ),
                 resume_cursor=resume_cursor,
             )
         except BaseException:
-            if adapter is not None:
-                adapter.close()
             # Keep any pre-existing resume cursor. Evidence writes are
             # idempotent, so replay after a hard failure is safe.
             try:
@@ -765,6 +811,3 @@ class RegionHarvestExecutor:
             except (KeyError, ValueError):
                 pass
             raise
-        finally:
-            if adapter is not None:
-                adapter.close()
