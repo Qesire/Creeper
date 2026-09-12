@@ -280,6 +280,20 @@ class ControlStore:
             ) WITHOUT ROWID;
             CREATE INDEX IF NOT EXISTS idx_evidence_host_year_origins_source
                 ON evidence_host_year_origins(source_key, year);
+            CREATE TABLE IF NOT EXISTS evidence_host_year_origin_units (
+                hostname TEXT NOT NULL,
+                year INTEGER NOT NULL,
+                source_key TEXT NOT NULL,
+                reservoir_id TEXT NOT NULL,
+                origin_kind TEXT NOT NULL,
+                origin_unit_id TEXT NOT NULL,
+                evidence_provider TEXT NOT NULL,
+                attributed_at REAL NOT NULL,
+                PRIMARY KEY(hostname, year),
+                FOREIGN KEY(reservoir_id) REFERENCES reservoirs(reservoir_id)
+            ) WITHOUT ROWID;
+            CREATE INDEX IF NOT EXISTS idx_evidence_host_year_origin_units_source
+                ON evidence_host_year_origin_units(source_key, year);
             CREATE TABLE IF NOT EXISTS evidence_host_year_task_kinds (
                 hostname TEXT NOT NULL,
                 year INTEGER NOT NULL,
@@ -1439,6 +1453,83 @@ class ControlStore:
             )
         return self.connection.total_changes - before
 
+    def attribute_direct_origin_unit_host_years(
+        self,
+        host_years: Iterable[tuple[str, int, str]],
+        *,
+        source_key: str,
+        reservoir_id: str,
+        origin_kind: str,
+        origin_unit_id: str,
+        attributed_at: float | None = None,
+    ) -> int:
+        """Assign first-touch direct credit from a non-WorkLease execution unit.
+
+        Region harvests have their own durable claim/cursor state and must not
+        fabricate rows in work_leases just to satisfy source-lineage foreign
+        keys. The legacy work-lease origin table remains authoritative for
+        SourceProducer; this companion table represents other durable work-unit
+        identities and resolve_primary_source_origins merges both by first
+        attribution time.
+        """
+
+        fields = (source_key, reservoir_id, origin_kind, origin_unit_id)
+        if any(not isinstance(value, str) or not value.strip() for value in fields):
+            raise ValueError(
+                "source_key, reservoir_id, origin_kind, and origin_unit_id are required"
+            )
+        values = list(dict.fromkeys(
+            (str(hostname), int(year), str(provider))
+            for hostname, year, provider in host_years
+        ))
+        if not values:
+            return 0
+        when = float(self.clock()) if attributed_at is None else float(attributed_at)
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            self.connection.executemany(
+                """
+                INSERT OR IGNORE INTO evidence_host_year_task_kinds(
+                    hostname, year, task_kind, evidence_provider,
+                    task_year_from, task_year_to, task_policy_version,
+                    attributed_at
+                ) VALUES (?, ?, 'direct', ?, NULL, NULL, NULL, ?)
+                """,
+                [
+                    (hostname, year, provider, when)
+                    for hostname, year, provider in values
+                ],
+            )
+            before = self.connection.total_changes
+            self.connection.executemany(
+                """
+                INSERT OR IGNORE INTO evidence_host_year_origin_units(
+                    hostname, year, source_key, reservoir_id,
+                    origin_kind, origin_unit_id, evidence_provider,
+                    attributed_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        hostname,
+                        year,
+                        source_key,
+                        reservoir_id,
+                        origin_kind,
+                        origin_unit_id,
+                        provider,
+                        when,
+                    )
+                    for hostname, year, provider in values
+                ],
+            )
+            inserted = self.connection.total_changes - before
+            self.connection.commit()
+            return inserted
+        except BaseException:
+            self.connection.rollback()
+            raise
+
     def attribute_direct_host_years(
         self,
         host_years: Iterable[tuple[str, int, str]],
@@ -1550,13 +1641,35 @@ class ControlStore:
             params: list[object] = []
             for hostname, year in chunk:
                 params.extend((hostname, year))
+            union_predicates = predicates
+            union_params = [*params, *params]
             for row in self.connection.execute(
                 f"""
+                WITH candidates AS (
+                    SELECT hostname, year, source_key, attributed_at,
+                           'work_lease' AS origin_kind, lease_id AS origin_unit_id
+                    FROM evidence_host_year_origins
+                    WHERE {union_predicates}
+                    UNION ALL
+                    SELECT hostname, year, source_key, attributed_at,
+                           origin_kind, origin_unit_id
+                    FROM evidence_host_year_origin_units
+                    WHERE {union_predicates}
+                ),
+                ranked AS (
+                    SELECT hostname, year, source_key,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY hostname, year
+                               ORDER BY attributed_at, source_key,
+                                        origin_kind, origin_unit_id
+                           ) AS rn
+                    FROM candidates
+                )
                 SELECT hostname, year, source_key
-                FROM evidence_host_year_origins
-                WHERE {predicates}
+                FROM ranked
+                WHERE rn = 1
                 """,
-                params,
+                union_params,
             ):
                 result[(str(row["hostname"]), int(row["year"]))] = str(
                     row["source_key"]
