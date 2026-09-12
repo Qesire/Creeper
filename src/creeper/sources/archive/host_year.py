@@ -79,6 +79,145 @@ class NovelHostYearMask:
         return self.novel_year_mask.bit_count()
 
 
+@dataclass(frozen=True)
+class HostYearWitness:
+    """One real source record retained as the witness for one host-year."""
+
+    hostname: str
+    year: int
+    source_id: str
+    locator: str
+    source_time: str | None
+    record_type: str
+    artifact_ref: str
+    original_url: str
+
+    def __post_init__(self) -> None:
+        normalized = normalize_official(self.hostname)
+        if normalized is None or normalized != self.hostname:
+            raise ValueError("hostname must be official-normalized")
+        if self.year not in YEAR_BITS:
+            raise ValueError("witness year must be a competition year")
+        if not self.source_id or not self.locator or not self.original_url:
+            raise ValueError("witness source, locator and URL are required")
+
+
+@dataclass(frozen=True)
+class HostYearWitnessGroup:
+    """At most one exact witness per target year for one contiguous host."""
+
+    hostname: str
+    witnesses: tuple[HostYearWitness, ...]
+    capture_count: int
+
+    def __post_init__(self) -> None:
+        normalized = normalize_official(self.hostname)
+        if normalized is None or normalized != self.hostname:
+            raise ValueError("hostname must be official-normalized")
+        years = [item.year for item in self.witnesses]
+        if years != sorted(set(years)):
+            raise ValueError("witness years must be unique and sorted")
+        if self.capture_count < len(self.witnesses):
+            raise ValueError("capture_count cannot be below witness count")
+
+    @property
+    def year_mask(self) -> int:
+        mask = 0
+        for witness in self.witnesses:
+            mask |= YEAR_BITS[witness.year]
+        return mask
+
+
+class ContiguousHostYearWitnessReducer:
+    """Keep the first real capture for every year in a contiguous host run.
+
+    The state is bounded by six SourceRecord-derived witnesses regardless of
+    how many captures a hostname has. This is the evidence-grade counterpart to
+    ContiguousHostYearReducer: synopsis code may collapse to a bit mask, while
+    harvest code retains each year's actual timestamp and record locator.
+    """
+
+    def __init__(self, *, target_mask: int = ALL_YEAR_MASK) -> None:
+        if target_mask <= 0 or target_mask & ~ALL_YEAR_MASK:
+            raise ValueError("target_mask must contain target-year bits")
+        self.target_mask = int(target_mask)
+        self._hostname: str | None = None
+        self._witnesses: dict[int, HostYearWitness] = {}
+        self._capture_count = 0
+
+    def _emit(self) -> HostYearWitnessGroup | None:
+        if self._hostname is None or not self._witnesses:
+            return None
+        return HostYearWitnessGroup(
+            hostname=self._hostname,
+            witnesses=tuple(
+                self._witnesses[year]
+                for year in sorted(self._witnesses)
+            ),
+            capture_count=self._capture_count,
+        )
+
+    def feed(self, record: SourceRecord) -> HostYearWitnessGroup | None:
+        hostname = _hostname_from_record(record)
+        year = record.source_year
+        bit = YEAR_BITS.get(year, 0) if year is not None else 0
+        bit &= self.target_mask
+        if (
+            hostname is None
+            or bit == 0
+            or not (record.direct_year_mask & bit)
+        ):
+            return None
+
+        emitted: HostYearWitnessGroup | None = None
+        if self._hostname is not None and hostname != self._hostname:
+            emitted = self._emit()
+            self._witnesses = {}
+            self._capture_count = 0
+
+        if self._hostname != hostname:
+            self._hostname = hostname
+
+        self._capture_count += 1
+        assert year is not None
+        self._witnesses.setdefault(
+            year,
+            HostYearWitness(
+                hostname=hostname,
+                year=year,
+                source_id=record.source_id,
+                locator=record.locator,
+                source_time=record.source_time,
+                record_type=record.record_type,
+                artifact_ref=record.artifact_ref,
+                original_url=record.payload,
+            ),
+        )
+        return emitted
+
+    def finish(self) -> HostYearWitnessGroup | None:
+        emitted = self._emit()
+        self._hostname = None
+        self._witnesses = {}
+        self._capture_count = 0
+        return emitted
+
+
+def iter_host_year_witness_groups(
+    records: Iterable[SourceRecord],
+    *,
+    target_mask: int = ALL_YEAR_MASK,
+) -> Iterator[HostYearWitnessGroup]:
+    reducer = ContiguousHostYearWitnessReducer(target_mask=target_mask)
+    for record in records:
+        emitted = reducer.feed(record)
+        if emitted is not None:
+            yield emitted
+    emitted = reducer.finish()
+    if emitted is not None:
+        yield emitted
+
+
 def _hostname_from_record(record: SourceRecord) -> str | None:
     payload = record.payload.strip()
     if not payload:
