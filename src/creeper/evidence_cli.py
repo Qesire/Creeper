@@ -18,6 +18,7 @@ from pathlib import Path
 import signal
 
 from creeper.evidence.providers.async_cdx import AsyncWaybackCDXClient
+from creeper.evidence.providers.async_rdap import AsyncRDAPClient
 from creeper.evidence.worker import AsyncEvidenceWorker, EvidenceWorkerReport
 from creeper.storage.control_store import ControlStore
 from creeper.storage.evidence_store import EvidenceStore
@@ -44,6 +45,9 @@ async def run_service(
     poll_min_seconds: float,
     poll_max_seconds: float,
     keepalive_expiry_seconds: float = 30.0,
+    rdap_endpoint: str = "https://rdap.org/domain",
+    rdap_requests_per_second: float = 1.0,
+    rdap_max_inflight: int = 2,
 ) -> EvidenceWorkerReport:
     if poll_min_seconds <= 0 or poll_max_seconds < poll_min_seconds:
         raise ValueError("invalid evidence worker poll bounds")
@@ -80,25 +84,35 @@ async def run_service(
                 except (NotImplementedError, RuntimeError):
                     pass
 
-        async with AsyncWaybackCDXClient(
-            endpoint=endpoint,
-            provider="wayback",
-            timeout=timeout,
-            max_retries=max_retries,
-            requests_per_second=requests_per_second,
-            max_connections=max_connections,
-            max_keepalive_connections=max_keepalive_connections,
-            keepalive_expiry_seconds=keepalive_expiry_seconds,
-            throttle_floor_seconds=throttle_floor_seconds,
-        ) as provider:
+        async with (
+            AsyncWaybackCDXClient(
+                endpoint=endpoint,
+                provider="wayback",
+                timeout=timeout,
+                max_retries=max_retries,
+                requests_per_second=requests_per_second,
+                max_connections=max_connections,
+                max_keepalive_connections=max_keepalive_connections,
+                keepalive_expiry_seconds=keepalive_expiry_seconds,
+                throttle_floor_seconds=throttle_floor_seconds,
+            ) as provider,
+            AsyncRDAPClient(
+                endpoint=rdap_endpoint,
+                timeout=min(timeout, 20.0),
+                requests_per_second=rdap_requests_per_second,
+            ) as rdap_provider,
+        ):
             worker = AsyncEvidenceWorker(
                 control_store=control,
                 evidence_store=evidence,
-                providers={"wayback": provider},
+                providers={"wayback": provider, "rdap": rdap_provider},
                 owner=owner,
                 claim_batch_size=claim_batch_size,
                 lease_seconds=lease_seconds,
-                provider_inflight={"wayback": max_inflight},
+                provider_inflight={
+                    "wayback": max_inflight,
+                    "rdap": rdap_max_inflight,
+                },
                 retry_base_seconds=retry_base_seconds,
                 retry_max_seconds=retry_max_seconds,
             )
@@ -106,6 +120,8 @@ async def run_service(
                 {
                     "wayback_configured_requests_per_second": requests_per_second,
                     "wayback_max_inflight": max_inflight,
+                    "rdap_configured_requests_per_second": rdap_requests_per_second,
+                    "rdap_max_inflight": rdap_max_inflight,
                 }
             )
             idle_delay = poll_min_seconds
@@ -116,6 +132,11 @@ async def run_service(
             previous_http_503 = 0
             previous_http_5xx = 0
             previous_http_elapsed_ms = 0
+            previous_rdap_http_requests = 0
+            previous_rdap_transport_errors = 0
+            previous_rdap_http_429 = 0
+            previous_rdap_http_5xx = 0
+            previous_rdap_http_elapsed_ms = 0
             previous_cooldown_wait_ms = 0
             previous_rate_limit_wait_ms = 0
             previous_retry_backoff_wait_ms = 0
@@ -156,7 +177,11 @@ async def run_service(
                 nonlocal previous_http_requests, previous_throttle_responses
                 nonlocal previous_transport_errors, previous_http_429
                 nonlocal previous_http_503, previous_http_5xx
-                nonlocal previous_http_elapsed_ms, previous_cooldown_wait_ms
+                nonlocal previous_http_elapsed_ms
+                nonlocal previous_rdap_http_requests, previous_rdap_transport_errors
+                nonlocal previous_rdap_http_429, previous_rdap_http_5xx
+                nonlocal previous_rdap_http_elapsed_ms
+                nonlocal previous_cooldown_wait_ms
                 nonlocal previous_rate_limit_wait_ms
                 nonlocal previous_retry_backoff_wait_ms
                 nonlocal previous_host_lock_wait_ms, previous_inflight_wait_ms
@@ -175,6 +200,12 @@ async def run_service(
                 current_http_5xx = sum(
                     int(count)
                     for status, count in provider.http_status_counts.items()
+                    if 500 <= int(status) <= 599
+                )
+                current_rdap_429 = int(rdap_provider.http_status_counts.get(429, 0))
+                current_rdap_5xx = sum(
+                    int(count)
+                    for status, count in rdap_provider.http_status_counts.items()
                     if 500 <= int(status) <= 599
                 )
                 current_latency_buckets = {
@@ -213,6 +244,20 @@ async def run_service(
                         "wayback_http_elapsed_ms": (
                             provider.http_elapsed_milliseconds
                             - previous_http_elapsed_ms
+                        ),
+                        "rdap_http_requests": (
+                            rdap_provider.http_requests
+                            - previous_rdap_http_requests
+                        ),
+                        "rdap_transport_errors": (
+                            rdap_provider.transport_errors
+                            - previous_rdap_transport_errors
+                        ),
+                        "rdap_http_429": current_rdap_429 - previous_rdap_http_429,
+                        "rdap_http_5xx": current_rdap_5xx - previous_rdap_http_5xx,
+                        "rdap_http_elapsed_ms": (
+                            rdap_provider.http_elapsed_milliseconds
+                            - previous_rdap_http_elapsed_ms
                         ),
                         "wayback_cooldown_wait_ms": (
                             provider.cooldown_wait_milliseconds
@@ -290,6 +335,13 @@ async def run_service(
                 previous_http_503 = current_http_503
                 previous_http_5xx = current_http_5xx
                 previous_http_elapsed_ms = provider.http_elapsed_milliseconds
+                previous_rdap_http_requests = rdap_provider.http_requests
+                previous_rdap_transport_errors = rdap_provider.transport_errors
+                previous_rdap_http_429 = current_rdap_429
+                previous_rdap_http_5xx = current_rdap_5xx
+                previous_rdap_http_elapsed_ms = (
+                    rdap_provider.http_elapsed_milliseconds
+                )
                 previous_cooldown_wait_ms = provider.cooldown_wait_milliseconds
                 previous_rate_limit_wait_ms = provider.rate_limit_wait_milliseconds
                 previous_retry_backoff_wait_ms = provider.retry_backoff_wait_milliseconds
@@ -417,6 +469,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--throttle-floor-seconds", type=float, default=2.0)
     parser.add_argument("--timeout", type=float, default=30.0)
     parser.add_argument("--max-retries", type=int, default=3)
+    parser.add_argument(
+        "--rdap-endpoint",
+        default="https://rdap.org/domain",
+    )
+    parser.add_argument("--rdap-requests-per-second", type=float, default=1.0)
+    parser.add_argument("--rdap-max-inflight", type=int, default=2)
     parser.add_argument("--retry-base-seconds", type=float, default=30.0)
     parser.add_argument("--retry-max-seconds", type=float, default=3600.0)
     parser.add_argument("--poll-min-seconds", type=float, default=0.25)
@@ -440,6 +498,9 @@ def main(argv: list[str] | None = None) -> int:
                 timeout=args.timeout,
                 max_retries=args.max_retries,
                 retry_base_seconds=args.retry_base_seconds,
+                rdap_endpoint=args.rdap_endpoint,
+                rdap_requests_per_second=args.rdap_requests_per_second,
+                rdap_max_inflight=args.rdap_max_inflight,
                 retry_max_seconds=args.retry_max_seconds,
                 poll_min_seconds=args.poll_min_seconds,
                 poll_max_seconds=args.poll_max_seconds,
