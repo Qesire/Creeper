@@ -337,7 +337,7 @@ class SourceProducerCliTests(unittest.TestCase):
                         "lease_max_requests = 4",
                         "lease_max_bytes = 4096",
                         "lease_max_seconds = 30",
-                        "evidence_backlog_capacity = 9",
+                        "evidence_backlog_capacity = 10",
                     ]
                 ),
                 encoding="utf-8",
