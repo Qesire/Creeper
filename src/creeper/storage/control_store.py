@@ -230,6 +230,19 @@ class ControlStore:
             ) WITHOUT ROWID;
             CREATE INDEX IF NOT EXISTS idx_evidence_host_year_origins_source
                 ON evidence_host_year_origins(source_key, year);
+            CREATE TABLE IF NOT EXISTS evidence_host_year_task_kinds (
+                hostname TEXT NOT NULL,
+                year INTEGER NOT NULL,
+                task_kind TEXT NOT NULL,
+                evidence_provider TEXT NOT NULL,
+                task_year_from INTEGER,
+                task_year_to INTEGER,
+                task_policy_version TEXT,
+                attributed_at REAL NOT NULL,
+                PRIMARY KEY(hostname, year)
+            ) WITHOUT ROWID;
+            CREATE INDEX IF NOT EXISTS idx_evidence_host_year_task_kinds_kind
+                ON evidence_host_year_task_kinds(task_kind, year);
             """
         )
         self.connection.commit()
@@ -530,10 +543,12 @@ class ControlStore:
         *,
         attributed_at: float | None = None,
     ) -> int:
-        """Assign first-touch source credit to positive host-years from a task.
+        """Assign first-touch operational credit to positive task host-years.
 
-        Attribution is operational metadata only. INSERT OR IGNORE makes the
-        first persisted host-year origin deterministic and immutable.
+        Task-kind attribution is independent of source lineage, so even legacy
+        backlog can be measured as exact/range yield once it completes under
+        this code. Source attribution remains optional and preserves the
+        existing deterministic primary-source semantics.
         """
         year_list = sorted(set(int(year) for year in years))
         if not year_list:
@@ -541,6 +556,33 @@ class ControlStore:
         scope = key.temporal_scope
         if any(year < scope.year_from or year > scope.year_to for year in year_list):
             raise ValueError("attributed year falls outside evidence task scope")
+        when = float(self.clock()) if attributed_at is None else float(attributed_at)
+        task_kind = "exact" if scope.year_from == scope.year_to else "range"
+
+        with self.connection:
+            self.connection.executemany(
+                """
+                INSERT OR IGNORE INTO evidence_host_year_task_kinds(
+                    hostname, year, task_kind, evidence_provider,
+                    task_year_from, task_year_to, task_policy_version,
+                    attributed_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        key.hostname,
+                        year,
+                        task_kind,
+                        key.provider,
+                        scope.year_from,
+                        scope.year_to,
+                        key.policy_version,
+                        when,
+                    )
+                    for year in year_list
+                ],
+            )
+
         origin = self.connection.execute(
             """
             SELECT source_key, reservoir_id, lease_id
@@ -554,7 +596,7 @@ class ControlStore:
         ).fetchone()
         if origin is None:
             return 0
-        when = float(self.clock()) if attributed_at is None else float(attributed_at)
+
         before = self.connection.total_changes
         with self.connection:
             self.connection.executemany(
@@ -602,6 +644,20 @@ class ControlStore:
         if not values:
             return 0
         when = float(self.clock()) if attributed_at is None else float(attributed_at)
+        with self.connection:
+            self.connection.executemany(
+                """
+                INSERT OR IGNORE INTO evidence_host_year_task_kinds(
+                    hostname, year, task_kind, evidence_provider,
+                    task_year_from, task_year_to, task_policy_version,
+                    attributed_at
+                ) VALUES (?, ?, 'direct', ?, NULL, NULL, NULL, ?)
+                """,
+                [
+                    (hostname, year, provider, when)
+                    for hostname, year, provider in values
+                ],
+            )
         before = self.connection.total_changes
         with self.connection:
             self.connection.executemany(
@@ -626,6 +682,39 @@ class ControlStore:
                 ],
             )
         return self.connection.total_changes - before
+
+    def resolve_host_year_task_kinds(
+        self,
+        host_years: Iterable[tuple[str, int]],
+        *,
+        chunk_size: int = 400,
+    ) -> dict[tuple[str, int], str]:
+        """Resolve first-touch exact/range/direct strategy for host-years."""
+        if chunk_size < 1:
+            raise ValueError("chunk_size must be positive")
+        values = list(dict.fromkeys(
+            (str(hostname), int(year)) for hostname, year in host_years
+        ))
+        result: dict[tuple[str, int], str] = {}
+        limit = min(int(chunk_size), 400)
+        for start in range(0, len(values), limit):
+            chunk = values[start:start + limit]
+            predicates = " OR ".join("(hostname = ? AND year = ?)" for _ in chunk)
+            params: list[object] = []
+            for hostname, year in chunk:
+                params.extend((hostname, year))
+            for row in self.connection.execute(
+                f"""
+                SELECT hostname, year, task_kind
+                FROM evidence_host_year_task_kinds
+                WHERE {predicates}
+                """,
+                params,
+            ):
+                result[(str(row["hostname"]), int(row["year"]))] = str(
+                    row["task_kind"]
+                )
+        return result
 
     def resolve_primary_source_origins(
         self,

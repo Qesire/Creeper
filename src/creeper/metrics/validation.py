@@ -320,6 +320,48 @@ def _source_attribution_delta(
     return result
 
 
+def _task_kind_attribution_delta(
+    start: dict[str, object],
+    end: dict[str, object],
+) -> dict[str, dict[str, object]]:
+    """Return monotonic exact/range/direct Novel EED deltas from readiness."""
+    before = start.get("readiness")
+    after = end.get("readiness")
+    if not isinstance(before, dict) or not isinstance(after, dict):
+        return {}
+    left_groups = before.get("task_kind_attribution", {})
+    right_groups = after.get("task_kind_attribution", {})
+    if not isinstance(left_groups, dict) or not isinstance(right_groups, dict):
+        return {}
+
+    result: dict[str, dict[str, object]] = {}
+    for task_kind in sorted(set(left_groups) | set(right_groups)):
+        left = left_groups.get(task_kind, {})
+        right = right_groups.get(task_kind, {})
+        if not isinstance(left, dict) or not isinstance(right, dict):
+            continue
+        left_eed = _decimal(left.get("novel_eed", "0"))
+        right_eed = _decimal(right.get("novel_eed", "0"))
+        if left_eed is None or right_eed is None or right_eed < left_eed:
+            continue
+        try:
+            left_count = int(left.get("novel_host_years", 0))
+            right_count = int(right.get("novel_host_years", 0))
+        except (TypeError, ValueError):
+            continue
+        if right_count < left_count:
+            continue
+        eed_delta = right_eed - left_eed
+        count_delta = right_count - left_count
+        if eed_delta == 0 and count_delta == 0:
+            continue
+        result[str(task_kind)] = {
+            "novel_host_years_delta": count_delta,
+            "novel_eed_delta": format(eed_delta, "f"),
+        }
+    return result
+
+
 def build_validation_report(
     *,
     start: dict[str, object],
@@ -357,6 +399,7 @@ def build_validation_report(
         "wayback_request_start_excess_gap_ms", 0
     )
     source_attribution = _source_attribution_delta(start, end)
+    task_kind_attribution = _task_kind_attribution_delta(start, end)
     source_request_deltas = _int_mapping_delta(
         start, end, "source_provider_requests"
     )
@@ -428,6 +471,34 @@ def build_validation_report(
             ),
         }
 
+    task_kind_yield: dict[str, dict[str, object]] = {}
+    for task_kind in sorted(
+        set(attempt_metric_deltas) | set(task_kind_attribution)
+    ):
+        request_metrics = attempt_metric_deltas.get(task_kind, {})
+        requests = int(request_metrics.get("provider_requests", 0))
+        attribution = task_kind_attribution.get(task_kind, {})
+        host_years = int(attribution.get("novel_host_years_delta", 0))
+        eed = _decimal(attribution.get("novel_eed_delta", "0")) or Decimal("0")
+        task_kind_yield[task_kind] = {
+            "provider_requests_delta": requests,
+            "novel_host_years_delta": host_years,
+            "novel_eed_delta": format(eed, "f"),
+            "novel_host_years_per_1000_provider_requests": (
+                None
+                if requests <= 0
+                else format(
+                    Decimal(host_years) * Decimal("1000") / Decimal(requests),
+                    "f",
+                )
+            ),
+            "novel_eed_per_1000_provider_requests": (
+                None
+                if requests <= 0
+                else format(eed * Decimal("1000") / Decimal(requests), "f")
+            ),
+        }
+
     storage_start = int(start.get("runtime_tree_bytes", 0))
     storage_end = int(end.get("runtime_tree_bytes", 0))
     state_start = int(start.get("tracked_state_bytes", 0))
@@ -458,7 +529,7 @@ def build_validation_report(
         )
 
     return {
-        "report_version": "runtime-validation-report-v4",
+        "report_version": "runtime-validation-report-v5",
         "label": label,
         "code_revision": code_revision,
         "runtime_data_root": end.get("runtime_data_root"),
@@ -572,6 +643,8 @@ def build_validation_report(
             source_request_deltas.get("__unattributed__", 0)
         ),
         "evidence_attempt_metric_deltas": attempt_metric_deltas,
+        "task_kind_attribution": task_kind_attribution,
+        "task_kind_yield": task_kind_yield,
         "evidence_task_origin_coverage_start": start.get(
             "evidence_task_origin_coverage", {}
         ),
