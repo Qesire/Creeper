@@ -8,6 +8,10 @@ domain_id = "local_static_dataset"
 reservoir_id = "local_dataset"
 source_year = 1997
 
+# Require this many distinct subdomains plus the observed root in one source
+# batch before scheduling one bounded matchType=domain probe.
+domain_amplification_min_hosts = 4
+
 [limits]
 # In-memory queues bound one process. They are not the cross-process backlog.
 queue_source_records = 1000
