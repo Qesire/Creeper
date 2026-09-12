@@ -148,6 +148,29 @@ class CommandAgentSearchExecutor:
                     "capture timestamp + original URL rows for 1996-2001"
                 ),
                 "prefer_catalogs_that_enumerate_direct_evidence_bulk": True,
+                "resource_priority": [
+                    "official archive directory or manifest enumerating CDX/CDXJ",
+                    "exact CDX/CDXJ bulk index with target-period captures",
+                    "archive collection manifest enumerating WARC/ARC or indexes",
+                    "large historical URL/domain dump overlapping 1996-2001",
+                    "generic historical source only if no bulk enumerator exists",
+                ],
+                "search_targets": [
+                    "national libraries and web archives",
+                    "university or research web-archive datasets",
+                    "public archive data-package manifests",
+                    "directory indexes and machine-readable file manifests",
+                ],
+                "avoid_low_yield": [
+                    "ordinary archived pages",
+                    "single-site snapshots",
+                    "undated seed lists without bulk provenance",
+                    "search results that do not expose a finite enumerable resource",
+                ],
+                "exploit_subject_origin": (
+                    "when strategy=EXPLOIT_DIRECT_ORIGIN, search only the "
+                    "given origin for sibling indexes, manifests, or catalogs"
+                ),
                 "source_identity": "exact resource URL",
                 "evidence_claims_are_not_authorized": True,
             },
