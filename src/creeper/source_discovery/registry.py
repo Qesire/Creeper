@@ -208,6 +208,9 @@ class SourceDiscoveryRegistry:
                 observed_host_year_pairs INTEGER NOT NULL DEFAULT 0,
                 novel_host_year_pairs INTEGER NOT NULL DEFAULT 0,
                 novel_pair_eed REAL NOT NULL DEFAULT 0,
+                singleton_observations INTEGER NOT NULL DEFAULT 0,
+                doubleton_observations INTEGER NOT NULL DEFAULT 0,
+                estimated_unseen_fraction REAL NOT NULL DEFAULT 0,
                 measured_at REAL NOT NULL,
                 FOREIGN KEY(source_key) REFERENCES source_candidates(source_key)
             ) WITHOUT ROWID;
@@ -243,6 +246,9 @@ class SourceDiscoveryRegistry:
             "observed_host_year_pairs": "ALTER TABLE source_scout_metrics ADD COLUMN observed_host_year_pairs INTEGER NOT NULL DEFAULT 0",
             "novel_host_year_pairs": "ALTER TABLE source_scout_metrics ADD COLUMN novel_host_year_pairs INTEGER NOT NULL DEFAULT 0",
             "novel_pair_eed": "ALTER TABLE source_scout_metrics ADD COLUMN novel_pair_eed REAL NOT NULL DEFAULT 0",
+            "singleton_observations": "ALTER TABLE source_scout_metrics ADD COLUMN singleton_observations INTEGER NOT NULL DEFAULT 0",
+            "doubleton_observations": "ALTER TABLE source_scout_metrics ADD COLUMN doubleton_observations INTEGER NOT NULL DEFAULT 0",
+            "estimated_unseen_fraction": "ALTER TABLE source_scout_metrics ADD COLUMN estimated_unseen_fraction REAL NOT NULL DEFAULT 0",
         }
         for name, statement in migrations.items():
             if name not in columns:
@@ -285,6 +291,10 @@ class SourceDiscoveryRegistry:
             observed_host_year_pairs=int(row["observed_host_year_pairs"]),
             novel_host_year_pairs=int(row["novel_host_year_pairs"]),
             novel_pair_eed=float(row["novel_pair_eed"]),
+            singleton_observations=int(row["singleton_observations"]),
+            doubleton_observations=int(row["doubleton_observations"]),
+            estimated_unseen_fraction=float(row["estimated_unseen_fraction"]),
+            minhash_values=self.get_overlap_sketch(str(row["source_key"])) or (),
         )
 
     def begin_search_episode(
@@ -933,8 +943,10 @@ class SourceDiscoveryRegistry:
                     source_key, sampled_records, unique_hosts, novel_hosts,
                     direct_host_years, requests, bytes_read, elapsed_seconds,
                     novel_eed, measurement_mode, observed_host_year_pairs,
-                    novel_host_year_pairs, novel_pair_eed, measured_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    novel_host_year_pairs, novel_pair_eed,
+                    singleton_observations, doubleton_observations,
+                    estimated_unseen_fraction, measured_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(source_key) DO UPDATE SET
                     sampled_records = excluded.sampled_records,
                     unique_hosts = excluded.unique_hosts,
@@ -948,6 +960,9 @@ class SourceDiscoveryRegistry:
                     observed_host_year_pairs = excluded.observed_host_year_pairs,
                     novel_host_year_pairs = excluded.novel_host_year_pairs,
                     novel_pair_eed = excluded.novel_pair_eed,
+                    singleton_observations = excluded.singleton_observations,
+                    doubleton_observations = excluded.doubleton_observations,
+                    estimated_unseen_fraction = excluded.estimated_unseen_fraction,
                     measured_at = excluded.measured_at
                 """,
                 (
@@ -964,9 +979,33 @@ class SourceDiscoveryRegistry:
                     measurement.observed_host_year_pairs,
                     measurement.novel_host_year_pairs,
                     measurement.novel_pair_eed,
+                    measurement.singleton_observations,
+                    measurement.doubleton_observations,
+                    measurement.estimated_unseen_fraction,
                     now,
                 ),
             )
+            if measurement.minhash_values:
+                self.connection.execute(
+                    """
+                    INSERT INTO source_overlap_sketches(
+                        source_key, width, sketch_json, updated_at
+                    ) VALUES (?, ?, ?, ?)
+                    ON CONFLICT(source_key) DO UPDATE SET
+                        width = excluded.width,
+                        sketch_json = excluded.sketch_json,
+                        updated_at = excluded.updated_at
+                    """,
+                    (
+                        source_key,
+                        len(measurement.minhash_values),
+                        json.dumps(
+                            list(measurement.minhash_values),
+                            separators=(",", ":"),
+                        ),
+                        now,
+                    ),
+                )
             self._attribute_search_reward_locked(
                 source_key,
                 accepted_novel_eed=measurement.novel_eed_for_ranking,
