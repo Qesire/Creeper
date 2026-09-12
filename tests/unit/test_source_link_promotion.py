@@ -39,7 +39,7 @@ class LinkPromotionTests(unittest.TestCase):
         )
         self.assertEqual(acc.promoted(), [])
 
-    def test_bulk_artifact_can_promote_from_one_link_without_claiming_direct_evidence(self) -> None:
+    def test_cdx_bulk_artifact_promotes_with_direct_evidence_prior(self) -> None:
         acc = LinkPromotionAccumulator()
         acc.add(
             self.link(
@@ -55,7 +55,8 @@ class LinkPromotionTests(unittest.TestCase):
         self.assertTrue(item.evidence.bulk_artifact)
         self.assertEqual(item.candidate.source_family, "BULK_ARTIFACT")
         self.assertEqual(item.candidate.level, SourceLevel.SOURCE)
-        self.assertEqual(item.candidate.direct_evidence_prior, 0.0)
+        self.assertEqual(item.candidate.direct_evidence_prior, 1.0)
+        self.assertEqual(item.candidate.temporal_semantics_prior, 1.0)
         self.assertEqual(item.candidate.baseline_overlap_prior, 0.5)
 
     def test_url_list_and_compressed_cdxj_are_strong_bulk_artifacts(self) -> None:
