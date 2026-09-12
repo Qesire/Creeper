@@ -12,6 +12,7 @@ import asyncio
 import hashlib
 import json
 import math
+from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from urllib.parse import quote
 
@@ -124,9 +125,7 @@ class AsyncRDAPClient:
             target = parsedate_to_datetime(text)
             if target.tzinfo is None:
                 return None
-            now = parsedate_to_datetime(response.headers.get("date", "")) if response.headers.get("date") else None
-            if now is None:
-                return None
+            now = datetime.now(timezone.utc)
             return max(0.0, (target - now).total_seconds())
         except (TypeError, ValueError, OverflowError):
             return None
