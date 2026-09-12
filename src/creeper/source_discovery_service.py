@@ -352,7 +352,10 @@ async def _open_runtime(config: SourceDiscoveryServiceConfig):
         baseline: BaselineIndex | None = None
         try:
             registry = SourceDiscoveryRegistry(control)
-            ensure_curated_direct_catalogs(registry)
+            if config.measurement is not None:
+                # Curated direct-evidence catalogs are only useful when the
+                # deterministic baseline/EED scout authority is configured.
+                ensure_curated_direct_catalogs(registry)
             manager = SourceReservoirManager(
                 registry,
                 targets=config.pool,
