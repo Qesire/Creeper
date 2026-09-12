@@ -196,6 +196,17 @@ class SourceDiscoveryRegistry:
             CREATE INDEX IF NOT EXISTS idx_source_edges_child
                 ON source_edges(child_key, parent_key);
 
+            CREATE TABLE IF NOT EXISTS source_triage_metrics (
+                source_key TEXT PRIMARY KEY,
+                status_code INTEGER,
+                method TEXT,
+                content_type TEXT,
+                content_length INTEGER,
+                range_supported INTEGER,
+                observed_at REAL NOT NULL,
+                FOREIGN KEY(source_key) REFERENCES source_candidates(source_key)
+            ) WITHOUT ROWID;
+
             CREATE TABLE IF NOT EXISTS source_scout_metrics (
                 source_key TEXT PRIMARY KEY,
                 sampled_records INTEGER NOT NULL,
@@ -952,6 +963,74 @@ class SourceDiscoveryRegistry:
                 """,
                 (delta, episode_id),
             )
+
+    def record_triage_observation(
+        self,
+        source_key: str,
+        *,
+        status_code: int | None,
+        method: str | None,
+        content_type: str | None,
+        content_length: int | None,
+        range_supported: bool | None,
+    ) -> None:
+        if self.get_candidate(source_key) is None:
+            raise KeyError(f"unknown source: {source_key}")
+        with self.connection:
+            self.connection.execute(
+                """
+                INSERT INTO source_triage_metrics(
+                    source_key, status_code, method, content_type,
+                    content_length, range_supported, observed_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(source_key) DO UPDATE SET
+                    status_code = excluded.status_code,
+                    method = excluded.method,
+                    content_type = excluded.content_type,
+                    content_length = excluded.content_length,
+                    range_supported = excluded.range_supported,
+                    observed_at = excluded.observed_at
+                """,
+                (
+                    source_key,
+                    status_code,
+                    method,
+                    content_type,
+                    content_length,
+                    None
+                    if range_supported is None
+                    else int(range_supported),
+                    float(self.clock()),
+                ),
+            )
+
+    def get_triage_observation(
+        self,
+        source_key: str,
+    ) -> dict[str, object] | None:
+        row = self.connection.execute(
+            """
+            SELECT status_code, method, content_type, content_length,
+                   range_supported, observed_at
+            FROM source_triage_metrics
+            WHERE source_key = ?
+            """,
+            (source_key,),
+        ).fetchone()
+        if row is None:
+            return None
+        return {
+            "status_code": row["status_code"],
+            "method": row["method"],
+            "content_type": row["content_type"],
+            "content_length": row["content_length"],
+            "range_supported": (
+                None
+                if row["range_supported"] is None
+                else bool(row["range_supported"])
+            ),
+            "observed_at": float(row["observed_at"]),
+        }
 
     def record_scout_measurement(
         self,
