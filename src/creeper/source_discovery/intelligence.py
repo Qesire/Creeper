@@ -126,6 +126,11 @@ class SourceIntelligenceContextBuilder:
                     "level": candidate.level.value,
                     "state": candidate.state.value,
                 }
+                triage = self.registry.get_triage_observation(
+                    candidate.source_key
+                )
+                if triage is not None:
+                    payload["http_triage"] = triage
                 if measurement is not None:
                     payload["measurement"] = {
                         "novel_eed": measurement.novel_eed_for_ranking,
