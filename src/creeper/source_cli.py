@@ -419,7 +419,8 @@ class ActivatedSourceRuntime:
             else:
                 # Supported production adapters emit at most one HostObservation
                 # per source record, but one observation can expand across six
-                # competition-year backlog slots after bounded-range fanout.
+                # competition-year backlog slots after bounded-range fanout,
+                # plus one bounded domain-amplification task.
                 # Size the lease from the hard capacity bound, not the expected
                 # request cost, so admission remains fail-closed.
                 capacity_per_record = (

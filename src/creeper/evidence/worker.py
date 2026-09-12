@@ -19,6 +19,7 @@ from typing import Protocol
 
 from creeper.evidence.policies import (
     CDXQueryState,
+    DomainEvidenceQueryResult,
     EvidenceQueryKey,
     EvidenceQueryResult,
     RangeEvidenceQueryResult,
@@ -34,7 +35,9 @@ class AsyncEvidenceProvider(Protocol):
     async def query_key(self, key: EvidenceQueryKey) -> EvidenceQueryResult:
         """Execute one already-claimed durable query key."""
 
-    async def query_range(self, key: EvidenceQueryKey) -> RangeEvidenceQueryResult:
+    async def query_range(
+        self, key: EvidenceQueryKey
+    ) -> RangeEvidenceQueryResult | DomainEvidenceQueryResult:
         """Probe a multi-year scope without committing annual evidence."""
 
 
@@ -135,7 +138,7 @@ class AsyncEvidenceWorker:
     @staticmethod
     def _transient_for(
         task: EvidenceTask, error: str
-    ) -> EvidenceQueryResult | RangeEvidenceQueryResult:
+    ) -> EvidenceQueryResult | RangeEvidenceQueryResult | DomainEvidenceQueryResult:
         scope = task.key.temporal_scope
         if scope.year_from != scope.year_to:
             return RangeEvidenceQueryResult(
@@ -155,7 +158,7 @@ class AsyncEvidenceWorker:
     def _record_attempt_metric(
         self,
         task: EvidenceTask,
-        result: EvidenceQueryResult | RangeEvidenceQueryResult,
+        result: EvidenceQueryResult | RangeEvidenceQueryResult | DomainEvidenceQueryResult,
     ) -> None:
         self.control_store.record_evidence_task_attempt_metric(
             result.key or task.key,
@@ -308,7 +311,39 @@ class AsyncEvidenceWorker:
                 task = task_by_key[result.key]
                 self._record_attempt_metric(task, result)
 
-                if isinstance(result, RangeEvidenceQueryResult):
+                if isinstance(result, DomainEvidenceQueryResult):
+                    if result.capsules:
+                        self.control_store.attribute_domain_task_host_years(
+                            result.key,
+                            result.capsules,
+                        )
+                        range_inserted_capsules += self.evidence_store.put_many(
+                            result.capsules
+                        )
+                    if result.state in {
+                        CDXQueryState.DECOMPOSED,
+                        CDXQueryState.INVALID,
+                    }:
+                        self.control_store.finish_range_task(
+                            result.key,
+                            result.state,
+                            followup_keys=(),
+                            owner=self.owner,
+                        )
+                        terminal += 1
+                    elif result.state is CDXQueryState.TRANSIENT_ERROR:
+                        self.control_store.finish_evidence_task(
+                            result.key,
+                            result.state,
+                            owner=self.owner,
+                            retry_at=self._retry_at(task.attempt),
+                        )
+                        retryable += 1
+                    else:
+                        raise ValueError(
+                            f"unsupported domain provider state: {result.state}"
+                        )
+                elif isinstance(result, RangeEvidenceQueryResult):
                     if result.capsules:
                         self.control_store.attribute_task_host_years(
                             result.key,
@@ -556,7 +591,39 @@ class AsyncEvidenceWorker:
                     state_counts[result.state] += 1
                     self._record_attempt_metric(task, result)
 
-                    if isinstance(result, RangeEvidenceQueryResult):
+                    if isinstance(result, DomainEvidenceQueryResult):
+                        if result.capsules:
+                            self.control_store.attribute_domain_task_host_years(
+                                result.key,
+                                result.capsules,
+                            )
+                            inserted_capsules += self.evidence_store.put_many(
+                                result.capsules
+                            )
+                        if result.state in {
+                            CDXQueryState.DECOMPOSED,
+                            CDXQueryState.INVALID,
+                        }:
+                            self.control_store.finish_range_task(
+                                result.key,
+                                result.state,
+                                followup_keys=(),
+                                owner=self.owner,
+                            )
+                            terminal += 1
+                        elif result.state is CDXQueryState.TRANSIENT_ERROR:
+                            self.control_store.finish_evidence_task(
+                                result.key,
+                                result.state,
+                                owner=self.owner,
+                                retry_at=self._retry_at(task.attempt),
+                            )
+                            retryable += 1
+                        else:
+                            raise ValueError(
+                                f"unsupported domain provider state: {result.state}"
+                            )
+                    elif isinstance(result, RangeEvidenceQueryResult):
                         if result.capsules:
                             self.control_store.attribute_task_host_years(
                                 result.key,

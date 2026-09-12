@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
+from urllib.parse import urlsplit
 
 import httpx
 from aiolimiter import AsyncLimiter
@@ -26,8 +27,10 @@ from tenacity import (
     wait_random_exponential,
 )
 
+from creeper.authority.normalizer import normalize_official
 from creeper.evidence.policies import (
     CDXQueryState,
+    DomainEvidenceQueryResult,
     EvidenceCapsule,
     EvidenceQueryKey,
     EvidenceQueryResult,
@@ -459,6 +462,122 @@ class AsyncWaybackCDXClient:
             extraction_method=extraction_method,
         )
 
+    async def query_domain(
+        self,
+        key: EvidenceQueryKey,
+    ) -> DomainEvidenceQueryResult:
+        """Run one bounded domain-scope query and keep one row per host-year.
+
+        This lane is intentionally amplification-only: successful completion is
+        DECOMPOSED even when the response is exhaustive, so absence never
+        becomes parent-host negative coverage.
+        """
+        if key.provider != self.provider:
+            raise ValueError("provider mismatch for domain query")
+        scope = key.temporal_scope
+        if scope.year_from == scope.year_to:
+            raise ValueError("domain amplification requires a multi-year scope")
+        accounting = _RequestAccounting()
+        pages_seen = records_seen = 0
+        capsules: dict[tuple[str, int], EvidenceCapsule] = {}
+        params = {
+            "url": f"http://{key.hostname}/",
+            "matchType": "domain",
+            "from": f"{scope.year_from}0101000000",
+            "to": f"{scope.year_to}1231235959",
+            "output": "json",
+            "fl": "urlkey,timestamp,original,statuscode,digest,length",
+            "filter": "statuscode:[23][0-9][0-9]",
+            "gzip": "false",
+            "limit": str(self.limit),
+        }
+        try:
+            response = await self._get(params, accounting=accounting)
+            pages_seen = 1
+            rows, _resume = WaybackCDXClient._parse_payload(response.content)
+            for row in rows:
+                records_seen += 1
+                timestamp = str(row.get("timestamp", ""))
+                original = str(row.get("original", ""))
+                status = str(row.get("status", row.get("statuscode", "")))
+                if (
+                    len(timestamp) < 4
+                    or not timestamp[:4].isdigit()
+                    or status[:1] not in {"2", "3"}
+                ):
+                    continue
+                year = int(timestamp[:4])
+                if not scope.year_from <= year <= scope.year_to:
+                    continue
+                try:
+                    hostname = normalize_official(urlsplit(original).hostname or "")
+                except ValueError:
+                    hostname = None
+                if hostname is None or not (
+                    hostname == key.hostname
+                    or hostname.endswith("." + key.hostname)
+                ):
+                    continue
+                identity = (hostname, year)
+                if identity in capsules:
+                    continue
+                payload = json.dumps(row, ensure_ascii=False, sort_keys=True).encode()
+                capsules[identity] = EvidenceCapsule(
+                    hostname=hostname,
+                    year=year,
+                    provider=key.provider,
+                    temporal_semantics="capture_timestamp_year",
+                    evidence_timestamp=timestamp,
+                    source_locator=original,
+                    payload_hash=hashlib.sha256(payload).hexdigest(),
+                    policy_version=key.policy_version,
+                    evidence_type="domain_scope_cdx_capture",
+                    source_id=key.provider,
+                    original_url=original,
+                    record_locator=(
+                        f"{key.provider}:domain:{key.hostname}:"
+                        f"{hostname}:{year}:record={records_seen}"
+                    ),
+                    extraction_method="cdx_query_domain_bounded",
+                )
+            return DomainEvidenceQueryResult(
+                domain=key.hostname,
+                key=key,
+                state=CDXQueryState.DECOMPOSED,
+                capsules=tuple(capsules[item] for item in sorted(capsules)),
+                pages_seen=pages_seen,
+                records_seen=records_seen,
+                provider_requests=accounting.requests,
+                provider_elapsed_milliseconds=accounting.elapsed_milliseconds,
+            )
+        except ValueError as exc:
+            return DomainEvidenceQueryResult(
+                domain=key.hostname,
+                key=key,
+                state=CDXQueryState.INVALID,
+                pages_seen=pages_seen,
+                records_seen=records_seen,
+                provider_requests=accounting.requests,
+                provider_elapsed_milliseconds=accounting.elapsed_milliseconds,
+                error=str(exc),
+            )
+        except (
+            httpx.TimeoutException,
+            httpx.TransportError,
+            httpx.HTTPStatusError,
+            ConnectionError,
+        ) as exc:
+            return DomainEvidenceQueryResult(
+                domain=key.hostname,
+                key=key,
+                state=CDXQueryState.TRANSIENT_ERROR,
+                pages_seen=pages_seen,
+                records_seen=records_seen,
+                provider_requests=accounting.requests,
+                provider_elapsed_milliseconds=accounting.elapsed_milliseconds,
+                error=str(exc) or type(exc).__name__,
+            )
+
     async def query_range(self, key: EvidenceQueryKey) -> RangeEvidenceQueryResult:
         """Execute one bounded multi-year discovery probe.
 
@@ -468,6 +587,8 @@ class AsyncWaybackCDXClient:
         the worker. Therefore an incomplete range page can never establish
         negative coverage.
         """
+        if key.policy_version.startswith("cdx-domain-"):
+            return await self.query_domain(key)
         if key.provider != self.provider:
             raise ValueError(
                 f"provider mismatch: key={key.provider!r}, client={self.provider!r}"

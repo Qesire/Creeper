@@ -16,7 +16,7 @@ from dataclasses import dataclass
 
 from creeper.authority.baseline_index import BaselineIndex, YEAR_BITS
 from creeper.evidence.planner import EvidencePlanner
-from creeper.evidence.policies import EvidenceQueryKey
+from creeper.evidence.policies import EvidenceQueryKey, TemporalScope
 from creeper.records.models import HostObservation
 from creeper.runtime.queues import BoundedQueues
 from creeper.scheduler.admission import CapacityReservation, EvidenceBacklogAdmission
@@ -59,6 +59,8 @@ class SourceProducer:
         queue_capacities: Mapping[str, int],
         evidence_policy_version: str = "cdx-v1",
         range_first_fraction: float = 0.0,
+        domain_fanout_min_children: int = 4,
+        domain_fanout_batch_size: int = 16,
         owner: str = "source-producer",
         baseline_batch_size: int = 50_000,
         reservation_grace_seconds: float = 30.0,
@@ -69,6 +71,8 @@ class SourceProducer:
             raise ValueError("reservation_grace_seconds must be non-negative")
         if not 0.0 <= float(range_first_fraction) <= 1.0:
             raise ValueError("range_first_fraction must be between 0 and 1")
+        if domain_fanout_min_children < 2 or domain_fanout_batch_size < 1:
+            raise ValueError("invalid domain fanout thresholds")
         capacities = dict(backlog_capacities)
         if any(
             not provider or not isinstance(value, int) or value < 0
@@ -88,6 +92,8 @@ class SourceProducer:
         self.queue_capacities = dict(queue_capacities)
         self.evidence_policy_version = evidence_policy_version
         self.range_first_fraction = float(range_first_fraction)
+        self.domain_fanout_min_children = int(domain_fanout_min_children)
+        self.domain_fanout_batch_size = int(domain_fanout_batch_size)
         self.owner = owner
         self.baseline_batch_size = baseline_batch_size
         self.reservation_grace_seconds = reservation_grace_seconds
@@ -278,6 +284,10 @@ class SourceProducer:
                 hostnames = list(
                     dict.fromkeys(observation.hostname for observation in pending)
                 )
+                self.control_store.record_domain_fanout_observations(
+                    hostnames,
+                    source_key=origin_source_key,
+                )
                 resolved: dict[str, tuple[int, bool]] = {}
                 local_masks = self.evidence_store.resolve_year_masks(hostnames)
                 provider_coverage_masks = (
@@ -332,6 +342,26 @@ class SourceProducer:
                             ):
                                 scheduled_mask |= YEAR_BITS.get(year, 0)
                         provider_coverage_masks[item.hostname] = scheduled_mask
+
+                if not allow_direct:
+                    domain_parents = self.control_store.ready_domain_fanout_candidates(
+                        min_children=self.domain_fanout_min_children,
+                        limit=min(self.domain_fanout_batch_size, len(pending)),
+                    )
+                    if domain_parents:
+                        domain_keys = tuple(
+                            EvidenceQueryKey(
+                                hostname=parent,
+                                temporal_scope=TemporalScope(1996, 2001),
+                                provider=provider,
+                                policy_version="cdx-domain-v1",
+                            )
+                            for parent in domain_parents
+                        )
+                        enqueue_external_keys(domain_keys)
+                        self.control_store.mark_domain_fanout_enqueued(
+                            domain_parents
+                        )
                 pending.clear()
 
             for record in records:

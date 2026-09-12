@@ -378,6 +378,109 @@ class SourceProducerTests(unittest.TestCase):
         self.assertEqual(self.evidence.count(), 1)
         self.assertEqual(report.evidence_tasks_enqueued, 0)
 
+
+    def test_high_fanout_parent_enqueues_one_domain_probe(self):
+        records = [
+            SourceRecord(
+                source_id="webbase-fanout",
+                locator=f"fixture://fanout/{index}",
+                payload=hostname,
+                scope=CandidateSourceScope.LOCAL_DISCOVERY,
+                source_year=2001,
+                year_hint_mask=1 << (2001 - 1996),
+            )
+            for index, hostname in enumerate(
+                (
+                    "example.com",
+                    "a.example.com",
+                    "b.example.com",
+                    "c.example.com",
+                    "d.example.com",
+                ),
+                1,
+            )
+        ]
+        adapter = FakeSource(records)
+        domain = SourceDomain(
+            domain_id="fanout-domain",
+            family="RESEARCH_CRAWL",
+            discovery_mechanism="test",
+            temporal_scope=(2001, 2001),
+            state=DomainState.EXPLORING,
+        )
+        reservoir = Reservoir(
+            reservoir_id="fanout-reservoir",
+            domain_id=domain.domain_id,
+            adapter_id=adapter.adapter_id,
+            root_locator="fixture://fanout",
+            enumeration_kind="finite_list",
+            capacity_lower=5,
+            capacity_upper=5,
+            evidence_mode="discovery_only",
+            state=ReservoirState.READY,
+        )
+        self.control.save_domain(domain)
+        self.control.save_reservoir(reservoir)
+        template = WorkLease.create(
+            reservoir_id=reservoir.reservoir_id,
+            max_records=5,
+            max_requests=1,
+            max_bytes=4096,
+            max_seconds=30,
+            expected_evidence_tasks=5,
+            expected_novel_eed=5.0,
+        )
+        candidate = LeaseCandidate(
+            reservoir_id=reservoir.reservoir_id,
+            expected_novel_eed=5.0,
+            costs=ResourceCost(0, 5, 1, 1),
+            reservoir=reservoir,
+            lease=template,
+            evidence_provider="wayback",
+            expected_evidence_tasks=5,
+            reservation_evidence_tasks=35,
+        )
+        runtime = SourceProducer(
+            baseline=self.baseline,
+            control_store=self.control,
+            evidence_store=self.evidence,
+            scheduler=GlobalScheduler(CreditLedger({"wayback": 35})),
+            candidates=[candidate],
+            adapters={adapter.adapter_id: adapter},
+            backlog_capacities={"wayback": 35},
+            queue_capacities={
+                "source_records": 8,
+                "observations": 8,
+                "evidence_tasks": 8,
+                "commits": 8,
+            },
+            baseline_batch_size=10,
+            domain_fanout_min_children=4,
+        )
+
+        report = runtime.run_once()
+
+        domain_key = EvidenceQueryKey(
+            "example.com",
+            TemporalScope(1996, 2001),
+            "wayback",
+            "cdx-domain-v1",
+        )
+        self.assertEqual(report.leases_succeeded, 1)
+        self.assertEqual(report.evidence_tasks_enqueued, 6)
+        self.assertIsNotNone(self.control.get_evidence_task(domain_key))
+        state = self.control.connection.execute(
+            """
+            SELECT observed_self, child_count, query_enqueued
+            FROM domain_fanout_state
+            WHERE parent_hostname = 'example.com'
+            """
+        ).fetchone()
+        self.assertEqual(
+            (state["observed_self"], state["child_count"], state["query_enqueued"]),
+            (1, 4, 1),
+        )
+
     def test_full_backlog_blocks_source_before_adapter_execution(self):
         occupied = EvidenceQueryKey(
             "occupied.example", TemporalScope(1997, 1997), "wayback", "cdx-v1"
