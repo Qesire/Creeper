@@ -79,8 +79,13 @@ class SourceValueModelTests(unittest.TestCase):
             self.registry
         ).estimate(target)
 
-        self.assertAlmostEqual(estimate.direct_value, 10.0)
-        self.assertAlmostEqual(estimate.expected_final_eed, 10.0)
+        # One positive observation is intentionally shrunk by the
+        # Beta(1,1) hurdle prior: P(success)=(1+1)/(1+2)=2/3, while the
+        # positive final/scout conversion is 5/10=1/2.
+        self.assertAlmostEqual(estimate.success_probability, 2 / 3)
+        self.assertAlmostEqual(estimate.positive_conversion, 0.5)
+        self.assertAlmostEqual(estimate.direct_value, 20.0 / 3.0)
+        self.assertAlmostEqual(estimate.expected_final_eed, 20.0 / 3.0)
         self.assertGreater(estimate.uncertainty_bonus, 0.0)
 
     def test_gateway_receives_discounted_descendant_final_value(self) -> None:
