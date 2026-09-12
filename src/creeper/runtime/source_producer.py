@@ -267,19 +267,14 @@ class SourceProducer:
         try:
             adapter = self._adapter_for(candidate)
             execute = getattr(adapter, "execute")
+            execute_stream = getattr(adapter, "execute_stream", None)
             extract_hosts = getattr(adapter, "extract_hosts")
-            records, result = execute(running)
-            # max_seconds is the adapter work budget, not the full source
-            # transaction lifetime. Refresh ownership before baseline/planning
-            # post-processing so a live producer cannot lose its reservation
-            # merely because source execution consumed most of that budget.
+            records = None
+            if not callable(execute_stream):
+                records, result = execute(running)
+            # Renew before launching pipeline threads. Streaming adapters may
+            # remain active while downstream queues are backpressured.
             keep_ownership_live(force=True)
-            if (
-                result.records == 0
-                and result.next_cursor == running.cursor_start
-                and result.next_cursor is not None
-            ):
-                raise RuntimeError("lease made no cursor progress")
 
             pending: list[HostObservation] = []
 
@@ -511,20 +506,29 @@ class SourceProducer:
                 raise RuntimeError("source pipeline cancelled")
 
             def acquire_records() -> None:
-                nonlocal source_records, max_source
-                try:
-                    for record in records:
-                        put_with_backpressure(
-                            queues.source_record_queue,
-                            record,
-                            kind="source",
+                nonlocal source_records, max_source, result
+
+                def emit_record(record) -> None:
+                    nonlocal source_records, max_source
+                    put_with_backpressure(
+                        queues.source_record_queue,
+                        record,
+                        kind="source",
+                    )
+                    with pipeline_lock:
+                        source_records += 1
+                        max_source = max(
+                            max_source,
+                            queues.source_record_queue.qsize(),
                         )
-                        with pipeline_lock:
-                            source_records += 1
-                            max_source = max(
-                                max_source,
-                                queues.source_record_queue.qsize(),
-                            )
+
+                try:
+                    if callable(execute_stream):
+                        result = execute_stream(running, emit_record)
+                    else:
+                        assert records is not None
+                        for record in records:
+                            emit_record(record)
                 except BaseException as exc:
                     pipeline_errors.put(exc)
                     pipeline_stop.set()
@@ -616,6 +620,12 @@ class SourceProducer:
                 for worker in extractors:
                     worker.join(timeout=5.0)
             assert result is not None
+            if (
+                result.records == 0
+                and result.next_cursor == running.cursor_start
+                and result.next_cursor is not None
+            ):
+                raise RuntimeError("lease made no cursor progress")
             self.control_store.finalize_lease(
                 running,
                 next_cursor=result.next_cursor,
