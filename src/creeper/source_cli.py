@@ -117,6 +117,12 @@ class StaticSourceRuntime:
             config.get("range_first_fraction", 0.10),
             "range_first_fraction",
         )
+        self.domain_amplification_min_hosts = _positive_int(
+            config.get("domain_amplification_min_hosts", 4),
+            "domain_amplification_min_hosts",
+        )
+        if self.domain_amplification_min_hosts < 2:
+            raise ValueError("domain_amplification_min_hosts must be at least two")
 
         baseline_path = _path(
             config.get("baseline_index"),
@@ -196,6 +202,7 @@ class StaticSourceRuntime:
             backlog_capacities={"wayback": self.backlog_capacity},
             queue_capacities=self.queue_capacities,
             range_first_fraction=self.range_first_fraction,
+            domain_amplification_min_hosts=self.domain_amplification_min_hosts,
             owner=self.owner,
         )
 
@@ -237,8 +244,13 @@ class StaticSourceRuntime:
             return SourceProducerReport(
                 admission_blocked=reservoir.state is ReservoirState.READY
             ).as_dict()
-        expected_tasks = lease_records
-        reservation_tasks = lease_records * capacity_per_record
+        amplification_task_bound = (
+            lease_records // (self.domain_amplification_min_hosts + 1)
+        )
+        expected_tasks = lease_records + amplification_task_bound
+        reservation_tasks = (
+            lease_records * capacity_per_record + amplification_task_bound
+        )
 
         template = WorkLease.create(
             reservoir_id=reservoir.reservoir_id,
@@ -329,6 +341,12 @@ class ActivatedSourceRuntime:
             config.get("range_first_fraction", 0.10),
             "range_first_fraction",
         )
+        self.domain_amplification_min_hosts = _positive_int(
+            config.get("domain_amplification_min_hosts", 4),
+            "domain_amplification_min_hosts",
+        )
+        if self.domain_amplification_min_hosts < 2:
+            raise ValueError("domain_amplification_min_hosts must be at least two")
         baseline_path = _path(
             config.get("baseline_index"),
             config_path=self.config_path,
@@ -360,6 +378,7 @@ class ActivatedSourceRuntime:
             backlog_capacities={"wayback": self.backlog_capacity},
             queue_capacities=self.queue_capacities,
             range_first_fraction=self.range_first_fraction,
+            domain_amplification_min_hosts=self.domain_amplification_min_hosts,
             owner=self.owner,
         )
 
@@ -429,8 +448,14 @@ class ActivatedSourceRuntime:
                     self.max_records,
                     wayback_headroom // capacity_per_record,
                 )
-                expected_tasks = lease_records
-                reservation_tasks = lease_records * capacity_per_record
+                amplification_task_bound = (
+                    lease_records // (self.domain_amplification_min_hosts + 1)
+                )
+                expected_tasks = lease_records + amplification_task_bound
+                reservation_tasks = (
+                    lease_records * capacity_per_record
+                    + amplification_task_bound
+                )
                 if lease_records < 1:
                     continue
             expected_eed = self._expected_lease_eed(spec.source_key)
@@ -543,6 +568,7 @@ def _empty_watch_total() -> dict[str, object]:
         "observations": 0,
         "evidence_tasks_enqueued": 0,
         "direct_capsules_committed": 0,
+        "domain_amplification_tasks": 0,
         "admission_blocked": False,
         "max_source_record_queue_depth": 0,
         "max_observation_queue_depth": 0,
@@ -559,6 +585,7 @@ def _accumulate_watch_report(
         "observations",
         "evidence_tasks_enqueued",
         "direct_capsules_committed",
+        "domain_amplification_tasks",
     ):
         total[key] = int(total[key]) + int(report[key])
     total["admission_blocked"] = bool(total["admission_blocked"]) or bool(
@@ -585,6 +612,9 @@ def _record_source_telemetry(
             ),
             "source_direct_capsules_committed": int(
                 report["direct_capsules_committed"]
+            ),
+            "source_domain_amplification_tasks": int(
+                report["domain_amplification_tasks"]
             ),
             "source_admission_blocked_events": int(
                 bool(report["admission_blocked"])
