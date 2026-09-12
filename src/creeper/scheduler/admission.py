@@ -188,6 +188,63 @@ class EvidenceBacklogAdmission:
         if changed != 1:
             raise KeyError("capacity reservation not found")
 
+    def renew(
+        self,
+        reservation: CapacityReservation,
+        *,
+        ttl_seconds: float,
+    ) -> CapacityReservation:
+        """Extend one still-live reservation without reopening expired capacity.
+
+        Renewal is allowed only while the reservation is currently counted
+        against backlog capacity. An already-expired reservation must fail
+        closed because another producer may have consumed that capacity.
+        """
+        if ttl_seconds <= 0:
+            raise ValueError("ttl_seconds must be positive")
+        if reservation.reservation_id is None:
+            return CapacityReservation(
+                None,
+                reservation.provider,
+                0,
+                self._now() + float(ttl_seconds),
+            )
+        now = self._now()
+        expires_at = now + float(ttl_seconds)
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            row = self.connection.execute(
+                """
+                SELECT amount, expires_at
+                FROM evidence_capacity_reservations
+                WHERE reservation_id = ? AND provider = ?
+                """,
+                (reservation.reservation_id, reservation.provider),
+            ).fetchone()
+            if row is None or float(row["expires_at"]) <= now:
+                self.connection.rollback()
+                raise RuntimeError("capacity reservation expired before renewal")
+            effective_expiry = max(float(row["expires_at"]), expires_at)
+            self.connection.execute(
+                """
+                UPDATE evidence_capacity_reservations
+                SET expires_at = ?
+                WHERE reservation_id = ?
+                """,
+                (effective_expiry, reservation.reservation_id),
+            )
+            self.connection.commit()
+            return CapacityReservation(
+                reservation.reservation_id,
+                reservation.provider,
+                int(row["amount"]),
+                effective_expiry,
+            )
+        except BaseException:
+            if self.connection.in_transaction:
+                self.connection.rollback()
+            raise
+
     def enqueue_reserved(
         self,
         reservation: CapacityReservation,
