@@ -276,8 +276,7 @@ class SourceDiscoveryRegistry:
             state=SourceState(str(row["state"])),
         )
 
-    @staticmethod
-    def _measurement_from_row(row: sqlite3.Row) -> ScoutMeasurement:
+    def _measurement_from_row(self, row: sqlite3.Row) -> ScoutMeasurement:
         return ScoutMeasurement(
             sampled_records=int(row["sampled_records"]),
             unique_hosts=int(row["unique_hosts"]),
