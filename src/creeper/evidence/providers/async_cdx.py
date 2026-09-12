@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
+from urllib.parse import urlsplit
 
 import httpx
 from aiolimiter import AsyncLimiter
@@ -26,8 +27,10 @@ from tenacity import (
     wait_random_exponential,
 )
 
+from creeper.authority.normalizer import normalize_official
 from creeper.evidence.policies import (
     CDXQueryState,
+    DomainEvidenceQueryResult,
     EvidenceCapsule,
     EvidenceQueryKey,
     EvidenceQueryResult,
@@ -458,6 +461,134 @@ class AsyncWaybackCDXClient:
             ),
             extraction_method=extraction_method,
         )
+
+    async def query_domain(
+        self,
+        key: EvidenceQueryKey,
+    ) -> DomainEvidenceQueryResult:
+        """Consume one bounded matchType=domain page.
+
+        Every accepted row is validated as an exact concrete hostname/year
+        before becoming an EvidenceCapsule. The page is intentionally not
+        resumed: this operation maximizes multi-host positives per scarce
+        provider request and never infers negative coverage.
+        """
+        if key.provider != self.provider:
+            raise ValueError(
+                f"provider mismatch: key={key.provider!r}, client={self.provider!r}"
+            )
+        scope = key.temporal_scope
+        accounting = _RequestAccounting()
+        params = {
+            "url": f"http://{key.hostname}/",
+            "matchType": "domain",
+            "from": f"{scope.year_from}0101000000",
+            "to": f"{scope.year_to}1231235959",
+            "output": "json",
+            "fl": "urlkey,timestamp,original,statuscode,digest,length",
+            "filter": "statuscode:[23][0-9][0-9]",
+            "gzip": "false",
+            "showResumeKey": "true",
+            "limit": str(self.limit),
+            "collapse": "timestamp:4",
+        }
+        capsules: dict[tuple[str, int], EvidenceCapsule] = {}
+        records_seen = 0
+        try:
+            response = await self._get(params, accounting=accounting)
+            rows, next_key = WaybackCDXClient._parse_payload(response.content)
+            for record_no, row in enumerate(rows, 1):
+                records_seen += 1
+                timestamp = str(row.get("timestamp", ""))
+                original = str(row.get("original", ""))
+                status = str(row.get("status", row.get("statuscode", "")))
+                if (
+                    len(timestamp) < 4
+                    or not timestamp[:4].isdigit()
+                    or status[:1] not in {"2", "3"}
+                ):
+                    continue
+                year = int(timestamp[:4])
+                if not scope.year_from <= year <= scope.year_to:
+                    continue
+                try:
+                    parsed = urlsplit(original)
+                except ValueError:
+                    continue
+                hostname = normalize_official(parsed.hostname or "")
+                if hostname is None:
+                    continue
+                if not (
+                    hostname == key.hostname
+                    or hostname.endswith("." + key.hostname)
+                ):
+                    continue
+                identity = (hostname, year)
+                if identity in capsules:
+                    continue
+                payload = json.dumps(
+                    row,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                ).encode()
+                capsules[identity] = EvidenceCapsule(
+                    hostname=hostname,
+                    year=year,
+                    provider=key.provider,
+                    temporal_semantics="capture_timestamp_year",
+                    evidence_timestamp=timestamp,
+                    source_locator=original,
+                    payload_hash=hashlib.sha256(payload).hexdigest(),
+                    policy_version=key.policy_version,
+                    evidence_type="exact_host_cdx_capture",
+                    source_id=key.provider,
+                    original_url=original,
+                    record_locator=(
+                        f"{key.provider}:domain:{key.hostname}:"
+                        f"page=1:record={record_no}"
+                    ),
+                    extraction_method="cdx_query_domain_bounded",
+                )
+            if capsules:
+                state = CDXQueryState.PASS
+            elif next_key:
+                state = CDXQueryState.DECOMPOSED
+            else:
+                state = CDXQueryState.EMPTY_EXHAUSTIVE
+            return DomainEvidenceQueryResult(
+                key=key,
+                state=state,
+                capsules=tuple(capsules[item] for item in sorted(capsules)),
+                pages_seen=1,
+                records_seen=records_seen,
+                provider_requests=accounting.requests,
+                provider_elapsed_milliseconds=accounting.elapsed_milliseconds,
+            )
+        except ValueError as exc:
+            return DomainEvidenceQueryResult(
+                key=key,
+                state=CDXQueryState.INVALID,
+                pages_seen=1 if accounting.requests else 0,
+                records_seen=records_seen,
+                provider_requests=accounting.requests,
+                provider_elapsed_milliseconds=accounting.elapsed_milliseconds,
+                error=str(exc),
+            )
+        except (
+            httpx.TimeoutException,
+            httpx.TransportError,
+            httpx.HTTPStatusError,
+            ConnectionError,
+        ) as exc:
+            return DomainEvidenceQueryResult(
+                key=key,
+                state=CDXQueryState.TRANSIENT_ERROR,
+                pages_seen=1 if accounting.requests else 0,
+                records_seen=records_seen,
+                provider_requests=accounting.requests,
+                provider_elapsed_milliseconds=accounting.elapsed_milliseconds,
+                error=str(exc) or type(exc).__name__,
+            )
 
     async def query_range(self, key: EvidenceQueryKey) -> RangeEvidenceQueryResult:
         """Execute one bounded multi-year discovery probe.
