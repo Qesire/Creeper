@@ -13,6 +13,7 @@ from typing import Callable
 
 from creeper.authority.baseline_index import BaselineIndex, YEAR_BITS
 from creeper.authority.eed import load_english_weights
+from creeper.storage.control_store import ControlStore
 from creeper.storage.evidence_store import EvidenceHostYear, EvidenceStore
 
 
@@ -58,6 +59,7 @@ class IncrementalReadinessReport:
     prewarm_reached: bool
     formal_gate_reached: bool
     annual: dict[str, dict[str, object]]
+    source_attribution: dict[str, dict[str, object]]
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -78,6 +80,7 @@ class IncrementalReadinessReport:
             "prewarm_reached": self.prewarm_reached,
             "formal_gate_reached": self.formal_gate_reached,
             "annual": self.annual,
+            "source_attribution": self.source_attribution,
         }
 
 
@@ -108,6 +111,11 @@ class IncrementalReadinessLedger:
                 novel_host_years INTEGER NOT NULL,
                 novel_eed TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS readiness_source (
+                source_key TEXT PRIMARY KEY,
+                novel_host_years INTEGER NOT NULL,
+                novel_eed TEXT NOT NULL
+            ) WITHOUT ROWID;
             """
         )
         self.connection.commit()
@@ -133,6 +141,7 @@ class IncrementalReadinessLedger:
         self.connection.execute("BEGIN IMMEDIATE")
         try:
             self.connection.execute("DELETE FROM readiness_annual")
+            self.connection.execute("DELETE FROM readiness_source")
             self.connection.execute("DELETE FROM readiness_state")
             self.connection.execute(
                 """
@@ -172,6 +181,7 @@ class IncrementalReadinessLedger:
         *,
         baseline: BaselineIndex,
         weights: dict[str, Decimal],
+        source_origins: dict[tuple[str, int], str] | None = None,
     ) -> int:
         if not rows:
             return 0
@@ -186,6 +196,9 @@ class IncrementalReadinessLedger:
         }
         novel_count = 0
         novel_eed = Decimal("0")
+        source_origins = source_origins or {}
+        source_counts: dict[str, int] = {}
+        source_eed: dict[str, Decimal] = {}
 
         for row in rows:
             bit = YEAR_BITS.get(row.year)
@@ -202,6 +215,12 @@ class IncrementalReadinessLedger:
             annual_eed[row.year] += contribution
             novel_count += 1
             novel_eed += contribution
+            source_key = source_origins.get((row.hostname, row.year))
+            if source_key is not None:
+                source_counts[source_key] = source_counts.get(source_key, 0) + 1
+                source_eed[source_key] = (
+                    source_eed.get(source_key, Decimal("0")) + contribution
+                )
 
         new_cursor = rows[-1].sequence
         self.connection.execute("BEGIN IMMEDIATE")
@@ -238,6 +257,45 @@ class IncrementalReadinessLedger:
                     ),
                 ),
             )
+            for source_key in sorted(source_counts):
+                current_source = self.connection.execute(
+                    """
+                    SELECT novel_host_years, novel_eed
+                    FROM readiness_source WHERE source_key = ?
+                    """,
+                    (source_key,),
+                ).fetchone()
+                if current_source is None:
+                    self.connection.execute(
+                        """
+                        INSERT INTO readiness_source(
+                            source_key, novel_host_years, novel_eed
+                        ) VALUES (?, ?, ?)
+                        """,
+                        (
+                            source_key,
+                            source_counts[source_key],
+                            format(source_eed[source_key], "f"),
+                        ),
+                    )
+                else:
+                    self.connection.execute(
+                        """
+                        UPDATE readiness_source
+                        SET novel_host_years = ?, novel_eed = ?
+                        WHERE source_key = ?
+                        """,
+                        (
+                            int(current_source["novel_host_years"])
+                            + source_counts[source_key],
+                            format(
+                                Decimal(str(current_source["novel_eed"]))
+                                + source_eed[source_key],
+                                "f",
+                            ),
+                            source_key,
+                        ),
+                    )
             for year in YEAR_BITS:
                 current = self.connection.execute(
                     """
@@ -290,6 +348,15 @@ class IncrementalReadinessLedger:
                 "SELECT * FROM readiness_annual ORDER BY year"
             )
         }
+        source_attribution = {
+            str(row["source_key"]): {
+                "novel_host_years": int(row["novel_host_years"]),
+                "novel_eed": str(row["novel_eed"]),
+            }
+            for row in self.connection.execute(
+                "SELECT * FROM readiness_source ORDER BY source_key"
+            )
+        }
         novel_eed = Decimal(str(state["novel_eed"]))
         five_percent = baseline_eed * FORMAL_GROWTH_RATE
         growth_rate = (
@@ -317,6 +384,7 @@ class IncrementalReadinessLedger:
             prewarm_reached=fraction >= PREWARM_GATE_FRACTION,
             formal_gate_reached=growth_rate >= FORMAL_GROWTH_RATE,
             annual=annual,
+            source_attribution=source_attribution,
         )
 
     def close(self) -> None:
@@ -347,6 +415,7 @@ class IncrementalReadinessRuntime:
         self.evidence = EvidenceStore(
             self.runtime_data_root / "evidence.sqlite3"
         )
+        self.control: ControlStore | None = None
         self.ledger = IncrementalReadinessLedger(
             self.runtime_data_root / "readiness.sqlite3"
         )
@@ -379,6 +448,19 @@ class IncrementalReadinessRuntime:
         )
         return True
 
+    def _source_origins(
+        self,
+        rows: list[EvidenceHostYear],
+    ) -> dict[tuple[str, int], str]:
+        control_path = self.runtime_data_root / "control.sqlite3"
+        if self.control is None and control_path.exists():
+            self.control = ControlStore(control_path)
+        if self.control is None:
+            return {}
+        return self.control.resolve_primary_source_origins(
+            (row.hostname, row.year) for row in rows
+        )
+
     def sync_once(self) -> IncrementalReadinessReport:
         self._refresh_authority()
         cursor = self.ledger.cursor()
@@ -392,6 +474,7 @@ class IncrementalReadinessRuntime:
                 rows,
                 baseline=self.baseline,
                 weights=self.weights,
+                source_origins=self._source_origins(rows),
             )
         return self.ledger.report(
             latest_evidence_sequence=self.evidence.max_host_year_sequence(),
@@ -431,6 +514,9 @@ class IncrementalReadinessRuntime:
         if self.baseline is not None:
             self.baseline.close()
             self.baseline = None
+        if self.control is not None:
+            self.control.close()
+            self.control = None
         self.ledger.close()
         self.evidence.close()
 
