@@ -93,6 +93,21 @@ class HostLockBlockingProvider(FakeProvider):
         return await super().query_key(key)
 
 
+
+class StreamingRefillProvider(FakeProvider):
+    def __init__(self, release_slow: asyncio.Event, refill_started: asyncio.Event):
+        super().__init__(state=CDXQueryState.EMPTY_EXHAUSTIVE)
+        self.release_slow = release_slow
+        self.refill_started = refill_started
+
+    async def query_key(self, key):
+        if key.hostname == "aa-slow.example":
+            await self.release_slow.wait()
+        elif key.hostname == "cc-refill.example":
+            self.refill_started.set()
+        return await super().query_key(key)
+
+
 class FakeRangeProvider(FakeProvider):
     def __init__(self):
         super().__init__(state=CDXQueryState.PASS)
@@ -238,6 +253,52 @@ class AsyncEvidenceWorkerTests(unittest.IsolatedAsyncioTestCase):
         release_slow.set()
         report = await running
         self.assertEqual(report.terminal, 2)
+
+
+    async def test_streaming_refills_before_slow_tail_finishes(self):
+        keys = [
+            self.key("aa-slow.example"),
+            self.key("bb-fast.example"),
+            self.key("cc-refill.example"),
+        ]
+        self.control.enqueue_evidence_tasks(keys)
+        release_slow = asyncio.Event()
+        refill_started = asyncio.Event()
+        stop = asyncio.Event()
+        provider = StreamingRefillProvider(release_slow, refill_started)
+        worker = AsyncEvidenceWorker(
+            control_store=self.control,
+            evidence_store=self.evidence,
+            providers={"wayback": provider},
+            owner="worker-streaming-refill",
+            claim_batch_size=2,
+            provider_inflight={"wayback": 2},
+        )
+        reports = []
+
+        async def consume():
+            async for report in worker.run_streaming(
+                stop_event=stop,
+                refill_batch_size=1,
+            ):
+                reports.append(report)
+
+        running = asyncio.create_task(consume())
+        await asyncio.wait_for(refill_started.wait(), timeout=1.0)
+
+        # The third durable task must have entered provider execution while the
+        # slow member of the original two-task claim window is still blocked.
+        self.assertFalse(release_slow.is_set())
+        self.assertFalse(running.done())
+
+        stop.set()
+        release_slow.set()
+        await asyncio.wait_for(running, timeout=1.0)
+
+        self.assertEqual(sum(item.claimed for item in reports), 3)
+        self.assertEqual(sum(item.terminal for item in reports), 3)
+        self.assertGreaterEqual(worker.stream_refill_claims, 1)
+        self.assertEqual(worker.stream_refill_tasks, 1)
 
     async def test_same_host_waiter_does_not_consume_provider_inflight_slot(self):
         keys = [
