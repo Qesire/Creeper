@@ -171,19 +171,11 @@ class RegionPortfolioPlanner:
 
     def _reference_states(
         self,
-        *,
-        index_keys: frozenset[str] | None = None,
     ) -> tuple[dict[int, _CoverageState], int, bool]:
-        """Build one virtual union per MinHash width from HARVESTED regions."""
+        """Build the global virtual union of all already HARVESTED coverage."""
 
         states: dict[int, _CoverageState] = {}
-        harvested = tuple(
-            region
-            for region in self.registry.list_regions_by_state(
-                RegionState.HARVESTED
-            )
-            if index_keys is None or region.index_key in index_keys
-        )
+        harvested = self.registry.list_regions_by_state(RegionState.HARVESTED)
         unknown_reference = False
         for region in harvested:
             synopsis = self.registry.get_synopsis(region.region_key)
@@ -348,9 +340,7 @@ class RegionPortfolioPlanner:
                 continue
             candidates.append((region, synopsis))
 
-        states, harvested_count, unknown_reference = self._reference_states(
-            index_keys=allowed,
-        )
+        states, harvested_count, unknown_reference = self._reference_states()
         remaining = list(candidates)
         selections: list[RegionPortfolioEstimate] = []
         spent = 0
