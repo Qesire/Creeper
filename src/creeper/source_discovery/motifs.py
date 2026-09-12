@@ -10,7 +10,10 @@ from __future__ import annotations
 import itertools
 import re
 from dataclasses import dataclass
+from dataclasses import replace
 from typing import Any
+
+from creeper.source_discovery.models import SourceCandidate, SourceState
 
 _PLACEHOLDER_RE = re.compile(r"\\{([A-Z][A-Z0-9_]*)\\}")
 
@@ -136,3 +139,50 @@ def candidate_payloads_from_hypothesis(
         )
 
     raise MotifProtocolError(f"unsupported hypothesis action: {action}")
+
+
+_TARGET_YEAR_RE = re.compile(r"(?<!\d)(199[6-9]|200[01])(?!\d)")
+
+
+def infer_year_sibling_candidates(
+    candidate: SourceCandidate,
+    *,
+    years: tuple[int, ...] = (1996, 1997, 1998, 1999, 2000, 2001),
+) -> tuple[SourceCandidate, ...]:
+    """Infer finite annual siblings from one proven source URL.
+
+    This is deterministic exploitation, not an LLM call. Generated siblings are
+    tagged so they do not recursively generate another sibling fan-out.
+    """
+    if candidate.discovery_strategy == "YEAR_SIBLING_MOTIF":
+        return ()
+    matches = list(_TARGET_YEAR_RE.finditer(candidate.canonical_entrypoint))
+    if len(matches) != 1:
+        return ()
+    observed_year = int(matches[0].group(1))
+    if observed_year not in years:
+        return ()
+
+    start, end = matches[0].span()
+    result: list[SourceCandidate] = []
+    for year in years:
+        if year == observed_year:
+            continue
+        entrypoint = (
+            candidate.canonical_entrypoint[:start]
+            + str(year)
+            + candidate.canonical_entrypoint[end:]
+        )
+        result.append(
+            replace(
+                candidate,
+                canonical_entrypoint=entrypoint,
+                expected_year_from=year,
+                expected_year_to=year,
+                discovered_by="deterministic:motif",
+                discovery_strategy="YEAR_SIBLING_MOTIF",
+                confidence=max(0.5, candidate.confidence),
+                state=SourceState.DISCOVERED,
+            )
+        )
+    return tuple(result)
