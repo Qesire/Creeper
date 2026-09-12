@@ -160,6 +160,7 @@ class CommandAgentSearchExecutor:
                 "min_enumerability_prior": admission.min_enumerability_prior,
                 "min_confidence": admission.min_confidence,
                 "require_year_bounds": admission.require_year_bounds,
+                "direct_evidence_year_bounds_optional": True,
                 "target_year_from": admission.target_year_from,
                 "target_year_to": admission.target_year_to,
             }

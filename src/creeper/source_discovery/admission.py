@@ -89,7 +89,17 @@ class SearchAdmissionPolicy:
         year_from = candidate.expected_year_from
         year_to = candidate.expected_year_to
         if year_from is None or year_to is None:
-            if self.require_year_bounds:
+            # Timestamp-bearing CDX/CDXJ rows self-describe their capture year.
+            # Do not reject a high-value direct-evidence resource merely because
+            # the search backend could not infer collection-level year bounds;
+            # deterministic measured scouting still has to prove target-year
+            # host-year novelty before promotion.
+            if (
+                self.require_year_bounds
+                and not is_direct_evidence_entrypoint(
+                    candidate.canonical_entrypoint
+                )
+            ):
                 return "missing expected target-year bounds"
             return None
         if year_to < self.target_year_from or year_from > self.target_year_to:
