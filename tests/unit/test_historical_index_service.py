@@ -288,6 +288,31 @@ class HistoricalIndexOptimizerTests(unittest.IsolatedAsyncioTestCase):
                 [item.year for item in evidence.for_hostname("novel.com")],
                 [1997, 2001],
             )
+            host_years = [
+                ("known.com", 1998),
+                ("novel.com", 1997),
+                ("novel.com", 2001),
+            ]
+            self.assertEqual(
+                control.resolve_primary_source_origins(host_years),
+                {
+                    pair: candidate.source_key
+                    for pair in host_years
+                },
+            )
+            self.assertEqual(
+                control.resolve_host_year_task_kinds(host_years),
+                {pair: "direct" for pair in host_years},
+            )
+            origin_units = control.connection.execute(
+                """
+                SELECT DISTINCT origin_kind, origin_unit_id
+                FROM evidence_host_year_origin_units
+                ORDER BY origin_kind, origin_unit_id
+                """
+            ).fetchall()
+            self.assertEqual(len(origin_units), 1)
+            self.assertEqual(origin_units[0]["origin_kind"], "region_harvest")
         finally:
             evidence.close()
             control.close()
