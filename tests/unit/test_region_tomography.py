@@ -133,11 +133,7 @@ class RegionTomographyTests(unittest.IsolatedAsyncioTestCase):
             for index in range(2000)
         ]
         path.write_text("\n".join(rows) + "\n", encoding="utf-8")
-        compiled = compile_candidate_index_space(
-            self._candidate(path),
-            content_length=path.stat().st_size,
-            direct_evidence_authority=True,
-        )
+        compiled = self._compiled_local(path)
         executor = RegionProbeExecutor(
             self.baseline,
             {"com": Decimal("1")},
