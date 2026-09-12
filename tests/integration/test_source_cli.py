@@ -307,7 +307,9 @@ class SourceProducerCliTests(unittest.TestCase):
                 candidates = []
                 for path in (plain, compressed):
                     candidate = SourceCandidate(
-                        canonical_entrypoint=path.as_uri(),
+                        canonical_entrypoint=(
+                            f"https://archive.example/{path.name}"
+                        ),
                         source_family="BULK_ARTIFACT",
                         level=SourceLevel.SOURCE,
                         discovered_by="test",
@@ -332,6 +334,14 @@ class SourceProducerCliTests(unittest.TestCase):
                             elapsed_seconds=1.0,
                             novel_eed=10.0,
                         ),
+                    )
+                    registry.record_triage_observation(
+                        candidate.source_key,
+                        status_code=200,
+                        method="HEAD",
+                        content_type="application/octet-stream",
+                        content_length=path.stat().st_size,
+                        range_supported=True,
                     )
                     candidates.append(candidate)
             finally:
