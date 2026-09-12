@@ -58,6 +58,7 @@ class SourceProducer:
         backlog_capacities: Mapping[str, int],
         queue_capacities: Mapping[str, int],
         evidence_policy_version: str = "cdx-v1",
+        range_first_fraction: float = 0.0,
         owner: str = "source-producer",
         baseline_batch_size: int = 50_000,
         reservation_grace_seconds: float = 30.0,
@@ -66,6 +67,8 @@ class SourceProducer:
             raise ValueError("baseline_batch_size must be positive")
         if reservation_grace_seconds < 0:
             raise ValueError("reservation_grace_seconds must be non-negative")
+        if not 0.0 <= float(range_first_fraction) <= 1.0:
+            raise ValueError("range_first_fraction must be between 0 and 1")
         capacities = dict(backlog_capacities)
         if any(
             not provider or not isinstance(value, int) or value < 0
@@ -84,6 +87,7 @@ class SourceProducer:
         self.backlog_capacities = capacities
         self.queue_capacities = dict(queue_capacities)
         self.evidence_policy_version = evidence_policy_version
+        self.range_first_fraction = float(range_first_fraction)
         self.owner = owner
         self.baseline_batch_size = baseline_batch_size
         self.reservation_grace_seconds = reservation_grace_seconds
@@ -132,11 +136,22 @@ class SourceProducer:
             except KeyError as exc:
                 raise KeyError(f"no backlog capacity configured for {provider}") from exc
 
+            reservation_amount = (
+                candidate.expected_evidence_tasks
+                if candidate.reservation_evidence_tasks is None
+                else candidate.reservation_evidence_tasks
+            )
+            postprocess_ttl = max(
+                60.0,
+                min(300.0, float(template.max_seconds)),
+                self.reservation_grace_seconds,
+            )
+            ownership_ttl = float(template.max_seconds) + postprocess_ttl
             reservation = self.admission.try_reserve(
                 provider=provider,
-                amount=candidate.expected_evidence_tasks,
+                amount=reservation_amount,
                 capacity=capacity,
-                ttl_seconds=template.max_seconds + self.reservation_grace_seconds,
+                ttl_seconds=ownership_ttl,
             )
             if reservation is None:
                 continue
@@ -151,7 +166,8 @@ class SourceProducer:
                     resource_class=template.resource_class,
                     expected_evidence_tasks=candidate.expected_evidence_tasks,
                     expected_novel_eed=candidate.expected_novel_eed,
-                    now=time.time(),
+                    now=float(self.control_store.clock()),
+                    lease_ttl_seconds=ownership_ttl,
                 )
                 if lease is None:
                     self.admission.release(reservation)
@@ -193,12 +209,39 @@ class SourceProducer:
         scheduled_keys: dict[EvidenceQueryKey, None] = {}
         result = None
         source_finalized = False
+        postprocess_ttl = max(
+            60.0,
+            min(300.0, float(running.max_seconds)),
+            self.reservation_grace_seconds,
+        )
+        next_renew_at = 0.0
+
+        def keep_ownership_live(*, force: bool = False) -> None:
+            nonlocal reservation, next_renew_at
+            now = float(self.control_store.clock())
+            if not force and now < next_renew_at:
+                return
+            reservation = self.admission.renew(
+                reservation,
+                ttl_seconds=postprocess_ttl,
+            )
+            self.control_store.renew_lease(
+                running,
+                ttl_seconds=postprocess_ttl,
+                now=now,
+            )
+            next_renew_at = now + max(1.0, postprocess_ttl / 3.0)
 
         try:
             adapter = self._adapter_for(candidate)
             execute = getattr(adapter, "execute")
             extract_hosts = getattr(adapter, "extract_hosts")
             records, result = execute(running)
+            # max_seconds is the adapter work budget, not the full source
+            # transaction lifetime. Refresh ownership before baseline/planning
+            # post-processing so a live producer cannot lose its reservation
+            # merely because source execution consumed most of that budget.
+            keep_ownership_live(force=True)
             if (
                 result.records == 0
                 and result.next_cursor == running.cursor_start
@@ -227,6 +270,7 @@ class SourceProducer:
                 nonlocal direct_capsules
                 if not pending:
                     return
+                keep_ownership_live()
                 # High-frequency archive indexes may repeat the same host
                 # tens of thousands of times inside one lease. Resolve each
                 # unique hostname once, then update the in-memory masks as work
@@ -248,6 +292,7 @@ class SourceProducer:
                     input_batch_size=self.baseline_batch_size,
                 ):
                     resolved.update(batch)
+                    keep_ownership_live()
                 allow_direct = (
                     candidate.reservoir is not None
                     and candidate.reservoir.evidence_mode == "direct_year"
@@ -264,6 +309,7 @@ class SourceProducer:
                         external_covered_mask=provider_coverage_masks.get(
                             item.hostname, 0
                         ),
+                        range_first_fraction=self.range_first_fraction,
                     )
                     if plan.direct_capsules:
                         for capsule in plan.direct_capsules:

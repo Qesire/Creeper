@@ -151,6 +151,57 @@ class EvidencePlannerTests(unittest.TestCase):
             ALL_YEAR_MASK & ~YEAR_BITS[1997],
         )
 
+
+    def test_range_first_full_fraction_expands_hinted_host_to_all_unresolved_years(self):
+        from creeper.evidence.planner import EvidencePlanner
+
+        plan = EvidencePlanner().plan(
+            self.observation(year_hint_mask=YEAR_BITS[2001], source_year=2001),
+            official_mask=YEAR_BITS[1997],
+            local_mask=YEAR_BITS[1999],
+            provider="wayback",
+            policy_version="v1",
+            range_first_fraction=1.0,
+        )
+
+        self.assertEqual(
+            [
+                (key.temporal_scope.year_from, key.temporal_scope.year_to)
+                for key in plan.external_keys
+            ],
+            [(1996, 1996), (1998, 1998), (2000, 2001)],
+        )
+
+    def test_range_first_zero_fraction_preserves_hint_only_planning(self):
+        from creeper.evidence.planner import EvidencePlanner
+
+        plan = EvidencePlanner().plan(
+            self.observation(year_hint_mask=YEAR_BITS[2001], source_year=2001),
+            official_mask=0,
+            local_mask=0,
+            provider="wayback",
+            policy_version="v1",
+            range_first_fraction=0.0,
+        )
+
+        self.assertEqual(
+            [
+                (key.temporal_scope.year_from, key.temporal_scope.year_to)
+                for key in plan.external_keys
+            ],
+            [(2001, 2001)],
+        )
+
+    def test_range_first_selection_is_stable(self):
+        from creeper.evidence.planner import EvidencePlanner
+
+        planner = EvidencePlanner()
+        first = planner._range_first_selected("stable.example", 0.10)
+        second = planner._range_first_selected("stable.example", 0.10)
+        self.assertEqual(first, second)
+        self.assertFalse(planner._range_first_selected("stable.example", 0.0))
+        self.assertTrue(planner._range_first_selected("stable.example", 1.0))
+
     def test_contiguous_missing_years_are_one_range_and_gaps_are_separate(self):
         from creeper.evidence.planner import EvidencePlanner
 

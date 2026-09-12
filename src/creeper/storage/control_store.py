@@ -20,6 +20,7 @@ from creeper.evidence.policies import (
 TERMINAL_STATES = frozenset({
     CDXQueryState.PASS.value,
     CDXQueryState.EMPTY_EXHAUSTIVE.value,
+    CDXQueryState.DECOMPOSED.value,
     CDXQueryState.INVALID.value,
 })
 RETRYABLE_STATES = frozenset({
@@ -80,6 +81,28 @@ class ControlStore:
                 ON evidence_tasks(state, retry_at, lease_until);
             CREATE INDEX IF NOT EXISTS idx_evidence_tasks_provider_claim
                 ON evidence_tasks(provider, state, retry_at, lease_until);
+            CREATE TABLE IF NOT EXISTS evidence_task_fanout_reservations (
+                hostname TEXT NOT NULL,
+                year_from INTEGER NOT NULL,
+                year_to INTEGER NOT NULL,
+                provider TEXT NOT NULL,
+                policy_version TEXT NOT NULL,
+                amount INTEGER NOT NULL CHECK(amount > 0),
+                PRIMARY KEY(hostname, year_from, year_to, provider, policy_version),
+                FOREIGN KEY(
+                    hostname, year_from, year_to, provider, policy_version
+                ) REFERENCES evidence_tasks(
+                    hostname, year_from, year_to, provider, policy_version
+                )
+            ) WITHOUT ROWID;
+            INSERT OR IGNORE INTO evidence_task_fanout_reservations(
+                hostname, year_from, year_to, provider, policy_version, amount
+            )
+            SELECT hostname, year_from, year_to, provider, policy_version,
+                   (year_to - year_from)
+            FROM evidence_tasks
+            WHERE year_to > year_from
+              AND state IN ('pending', 'incomplete', 'transient_error');
             CREATE TABLE IF NOT EXISTS runtime_checkpoints (
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
@@ -164,6 +187,32 @@ class ControlStore:
             ) WITHOUT ROWID;
             CREATE INDEX IF NOT EXISTS idx_evidence_task_origins_source
                 ON evidence_task_origins(source_key, first_observed_at);
+            CREATE TABLE IF NOT EXISTS evidence_task_attempt_metrics (
+                hostname TEXT NOT NULL,
+                year_from INTEGER NOT NULL,
+                year_to INTEGER NOT NULL,
+                provider TEXT NOT NULL,
+                policy_version TEXT NOT NULL,
+                attempt INTEGER NOT NULL,
+                state TEXT NOT NULL,
+                task_kind TEXT NOT NULL,
+                provider_requests INTEGER NOT NULL CHECK(provider_requests >= 0),
+                provider_elapsed_milliseconds INTEGER NOT NULL
+                    CHECK(provider_elapsed_milliseconds >= 0),
+                pages_seen INTEGER NOT NULL CHECK(pages_seen >= 0),
+                records_seen INTEGER NOT NULL CHECK(records_seen >= 0),
+                recorded_at REAL NOT NULL,
+                PRIMARY KEY(
+                    hostname, year_from, year_to, provider, policy_version, attempt
+                ),
+                FOREIGN KEY(
+                    hostname, year_from, year_to, provider, policy_version
+                ) REFERENCES evidence_tasks(
+                    hostname, year_from, year_to, provider, policy_version
+                )
+            ) WITHOUT ROWID;
+            CREATE INDEX IF NOT EXISTS idx_evidence_task_attempt_metrics_kind
+                ON evidence_task_attempt_metrics(task_kind, state);
             CREATE TABLE IF NOT EXISTS evidence_host_year_origins (
                 hostname TEXT NOT NULL,
                 year INTEGER NOT NULL,
@@ -283,6 +332,158 @@ class ControlStore:
                 rows,
             )
         return self.connection.total_changes - before
+
+
+    def record_evidence_task_attempt_metric(
+        self,
+        key: EvidenceQueryKey,
+        *,
+        attempt: int,
+        state: CDXQueryState | str,
+        provider_requests: int,
+        provider_elapsed_milliseconds: int,
+        pages_seen: int,
+        records_seen: int,
+        recorded_at: float | None = None,
+    ) -> bool:
+        """Persist operational provider cost for one durable task attempt.
+
+        This table is non-authoritative. It exists only to measure the real
+        provider cost of exact/range strategies and source-origin yield.
+        """
+        if attempt < 1:
+            raise ValueError("attempt must be positive")
+        metrics = (
+            provider_requests,
+            provider_elapsed_milliseconds,
+            pages_seen,
+            records_seen,
+        )
+        if any(int(value) < 0 for value in metrics):
+            raise ValueError("attempt metrics must be non-negative")
+        value = state.value if isinstance(state, CDXQueryState) else str(state)
+        task_kind = (
+            "exact"
+            if key.temporal_scope.year_from == key.temporal_scope.year_to
+            else "range"
+        )
+        when = float(self.clock()) if recorded_at is None else float(recorded_at)
+        before = self.connection.total_changes
+        with self.connection:
+            self.connection.execute(
+                """
+                INSERT OR IGNORE INTO evidence_task_attempt_metrics(
+                    hostname, year_from, year_to, provider, policy_version,
+                    attempt, state, task_kind, provider_requests,
+                    provider_elapsed_milliseconds, pages_seen, records_seen,
+                    recorded_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    *self._values(key),
+                    int(attempt),
+                    value,
+                    task_kind,
+                    int(provider_requests),
+                    int(provider_elapsed_milliseconds),
+                    int(pages_seen),
+                    int(records_seen),
+                    when,
+                ),
+            )
+        return self.connection.total_changes > before
+
+    def evidence_attempt_metric_summary(self) -> dict[str, dict[str, int]]:
+        """Aggregate provider attempt cost by task kind without materializing rows."""
+        result: dict[str, dict[str, int]] = {}
+        for row in self.connection.execute(
+            """
+            SELECT task_kind,
+                   COUNT(*) AS attempts,
+                   COALESCE(SUM(provider_requests), 0) AS provider_requests,
+                   COALESCE(SUM(provider_elapsed_milliseconds), 0) AS elapsed_ms,
+                   COALESCE(SUM(pages_seen), 0) AS pages_seen,
+                   COALESCE(SUM(records_seen), 0) AS records_seen
+            FROM evidence_task_attempt_metrics
+            GROUP BY task_kind
+            ORDER BY task_kind
+            """
+        ):
+            result[str(row["task_kind"])] = {
+                "attempts": int(row["attempts"]),
+                "provider_requests": int(row["provider_requests"]),
+                "provider_elapsed_milliseconds": int(row["elapsed_ms"]),
+                "pages_seen": int(row["pages_seen"]),
+                "records_seen": int(row["records_seen"]),
+            }
+        return result
+
+    def evidence_task_origin_coverage(self) -> dict[str, dict[str, int]]:
+        """Count durable tasks with source lineage, grouped by task state."""
+        result: dict[str, dict[str, int]] = {}
+        for row in self.connection.execute(
+            """
+            SELECT e.state AS state,
+                   COUNT(*) AS tasks,
+                   SUM(
+                       CASE WHEN EXISTS (
+                           SELECT 1
+                           FROM evidence_task_origins o
+                           WHERE o.hostname = e.hostname
+                             AND o.year_from = e.year_from
+                             AND o.year_to = e.year_to
+                             AND o.provider = e.provider
+                             AND o.policy_version = e.policy_version
+                       ) THEN 1 ELSE 0 END
+                   ) AS with_origin
+            FROM evidence_tasks e
+            GROUP BY e.state
+            ORDER BY e.state
+            """
+        ):
+            result[str(row["state"])] = {
+                "tasks": int(row["tasks"]),
+                "with_origin": int(row["with_origin"] or 0),
+            }
+        return result
+
+    def source_provider_request_totals(self) -> dict[str, int]:
+        """Attribute provider requests to each task's deterministic primary source.
+
+        The aggregation is one SQL statement so validation remains cheap at
+        million-task scale. The scalar origin lookup uses the task-origin
+        primary-key prefix and deterministic first-touch ordering.
+        """
+        rows = self.connection.execute(
+            """
+            SELECT source_key, SUM(provider_requests) AS provider_requests
+            FROM (
+                SELECT m.provider_requests AS provider_requests,
+                       COALESCE(
+                           (
+                               SELECT o.source_key
+                               FROM evidence_task_origins o
+                               WHERE o.hostname = m.hostname
+                                 AND o.year_from = m.year_from
+                                 AND o.year_to = m.year_to
+                                 AND o.provider = m.provider
+                                 AND o.policy_version = m.policy_version
+                               ORDER BY o.first_observed_at, o.source_key,
+                                        o.reservoir_id, o.lease_id
+                               LIMIT 1
+                           ),
+                           '__unattributed__'
+                       ) AS source_key
+                FROM evidence_task_attempt_metrics m
+            )
+            GROUP BY source_key
+            ORDER BY source_key
+            """
+        ).fetchall()
+        return {
+            str(row["source_key"]): int(row["provider_requests"] or 0)
+            for row in rows
+        }
 
     def record_evidence_task_origins(
         self,
@@ -608,6 +809,18 @@ class ControlStore:
                 [(*self._values(followup), CDXQueryState.PENDING.value) for followup in exact],
             )
             created = self.connection.total_changes - before
+            # Range tasks reserve their worst-case net fanout capacity at
+            # initial admission. The parent is becoming terminal in this same
+            # transaction, so deleting the token after child insertion converts
+            # reserved capacity into durable exact-year rows atomically.
+            self.connection.execute(
+                """
+                DELETE FROM evidence_task_fanout_reservations
+                WHERE hostname = ? AND year_from = ? AND year_to = ?
+                  AND provider = ? AND policy_version = ?
+                """,
+                self._values(key),
+            )
             # Exact-year follow-ups are a refinement of the same source work.
             # Preserve every parent origin so later first-touch host-year
             # attribution remains connected to the original reservoir/lease.
@@ -1013,6 +1226,7 @@ class ControlStore:
         expected_evidence_tasks: int,
         expected_novel_eed: float,
         now: float,
+        lease_ttl_seconds: float | None = None,
     ) -> Any | None:
         """Atomically claim a READY reservoir with a new cursor-backed lease."""
         from creeper.scheduler.leases import LeaseState, WorkLease
@@ -1039,6 +1253,11 @@ class ControlStore:
                 expected_evidence_tasks=expected_evidence_tasks,
                 expected_novel_eed=expected_novel_eed,
                 now=float(now),
+                expires_at=(
+                    None
+                    if lease_ttl_seconds is None
+                    else float(now) + float(lease_ttl_seconds)
+                ),
             ).grant(owner=owner)
             self.connection.execute(
                 """
@@ -1081,6 +1300,65 @@ class ControlStore:
                 raise RuntimeError("reservoir changed while granting lease")
             self.connection.commit()
             return lease
+        except BaseException:
+            self.connection.rollback()
+            raise
+
+    def renew_lease(
+        self,
+        lease: Any,
+        *,
+        ttl_seconds: float,
+        now: float | None = None,
+    ) -> float:
+        """Extend one still-live owned source lease without reviving expiry.
+
+        max_seconds remains the adapter work budget. expires_at is an
+        ownership/visibility deadline and may be renewed while the producer is
+        alive. An already-expired deadline fails closed because another
+        producer may legally recover the reservoir.
+        """
+        from creeper.scheduler.leases import LeaseState
+
+        if ttl_seconds <= 0:
+            raise ValueError("ttl_seconds must be positive")
+        lease_id = self._field(lease, "lease_id")
+        owner = self._field(lease, "owner")
+        if not lease_id or not owner:
+            raise ValueError("an owned lease is required")
+        current = float(self.clock()) if now is None else float(now)
+        new_expiry = current + float(ttl_seconds)
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            row = self.connection.execute(
+                """
+                SELECT state, owner, expires_at
+                FROM work_leases
+                WHERE lease_id = ?
+                """,
+                (lease_id,),
+            ).fetchone()
+            if (
+                row is None
+                or row["owner"] != owner
+                or row["state"] not in {
+                    LeaseState.GRANTED.value,
+                    LeaseState.RUNNING.value,
+                }
+            ):
+                raise ValueError("lease is not live or is not owned by caller")
+            if row["expires_at"] is not None and float(row["expires_at"]) <= current:
+                raise RuntimeError("source lease expired before renewal")
+            effective_expiry = max(
+                new_expiry,
+                float(row["expires_at"] or 0.0),
+            )
+            self.connection.execute(
+                "UPDATE work_leases SET expires_at = ? WHERE lease_id = ?",
+                (effective_expiry, lease_id),
+            )
+            self.connection.commit()
+            return effective_expiry
         except BaseException:
             self.connection.rollback()
             raise

@@ -14,6 +14,7 @@ import json
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from collections.abc import AsyncIterator
+from dataclasses import dataclass
 
 import httpx
 from aiolimiter import AsyncLimiter
@@ -34,6 +35,13 @@ from creeper.evidence.policies import (
 )
 from creeper.evidence.providers.cdx import Page, WaybackCDXClient, _exact_hostname
 from creeper.runtime.http import configured_http_proxy
+
+
+
+@dataclass
+class _RequestAccounting:
+    requests: int = 0
+    elapsed_milliseconds: int = 0
 
 
 def _retryable_http_error(exc: BaseException) -> bool:
@@ -104,6 +112,7 @@ class AsyncWaybackCDXClient:
         # Request-start timeline telemetry. Unlike coroutine wait counters,
         # these values live on the provider's real request-start clock and can
         # therefore expose limiter starvation without concurrency double-counting.
+        self.request_start_segments = 0
         self.request_start_gaps = 0
         self.request_start_gap_milliseconds = 0
         self.request_start_excess_gap_milliseconds = 0
@@ -239,7 +248,12 @@ class AsyncWaybackCDXClient:
             delay = max(self.throttle_floor_seconds, self.backoff)
         await self._extend_cooldown(delay)
 
-    async def _get(self, params: dict[str, str]) -> httpx.Response:
+    async def _get(
+        self,
+        params: dict[str, str],
+        *,
+        accounting: _RequestAccounting | None = None,
+    ) -> httpx.Response:
         retrying = AsyncRetrying(
             sleep=self._sleep_retry_backoff,
             stop=stop_after_attempt(self.max_retries + 1),
@@ -254,7 +268,9 @@ class AsyncWaybackCDXClient:
                 async def request_once() -> httpx.Response:
                     loop = asyncio.get_running_loop()
                     started = loop.time()
-                    if self._last_request_start is not None:
+                    if self._last_request_start is None:
+                        self.request_start_segments += 1
+                    else:
                         gap = max(0.0, started - self._last_request_start)
                         gap_ms = int(round(gap * 1000.0))
                         self.request_start_gaps += 1
@@ -278,6 +294,8 @@ class AsyncWaybackCDXClient:
                         self.request_start_gap_buckets[gap_bucket] += 1
                     self._last_request_start = started
                     self.http_requests += 1
+                    if accounting is not None:
+                        accounting.requests += 1
                     try:
                         return await self.client.get(
                             self.endpoint,
@@ -292,6 +310,8 @@ class AsyncWaybackCDXClient:
                             int(round((loop.time() - started) * 1000.0)),
                         )
                         self.http_elapsed_milliseconds += elapsed_ms
+                        if accounting is not None:
+                            accounting.elapsed_milliseconds += elapsed_ms
                         if elapsed_ms <= 2_000:
                             bucket = "le_2s"
                         elif elapsed_ms <= 4_000:
@@ -340,6 +360,7 @@ class AsyncWaybackCDXClient:
         year_to: int,
         *,
         page_limit: int | None = None,
+        accounting: _RequestAccounting | None = None,
     ) -> AsyncIterator[Page]:
         if not 1996 <= year_from <= year_to <= 2001:
             raise ValueError("year range must be within 1996-2001")
@@ -374,7 +395,7 @@ class AsyncWaybackCDXClient:
             params = dict(query)
             if resume_key is not None:
                 params["resumeKey"] = resume_key
-            response = await self._get(params)
+            response = await self._get(params, accounting=accounting)
             rows, next_key = WaybackCDXClient._parse_payload(response.content)
             if next_key:
                 yield rows, False
@@ -439,11 +460,13 @@ class AsyncWaybackCDXClient:
         )
 
     async def query_range(self, key: EvidenceQueryKey) -> RangeEvidenceQueryResult:
-        """Probe a multi-year range and retain one accepted capture per year.
+        """Execute one bounded multi-year discovery probe.
 
-        Positive rows are individually authoritative even if a later page fails.
-        Exhaustive negative conclusions are emitted only after the range has
-        reached a complete final page.
+        Exactly one CDX page is consumed. Positive rows are authoritative
+        immediately. If that page is not exhaustive, the parent becomes
+        DECOMPOSED and missing years are refined into exact-year children by
+        the worker. Therefore an incomplete range page can never establish
+        negative coverage.
         """
         if key.provider != self.provider:
             raise ValueError(
@@ -452,15 +475,17 @@ class AsyncWaybackCDXClient:
         scope = key.temporal_scope
         if scope.year_from == scope.year_to:
             raise ValueError("range provider requires a multi-year task")
+        accounting = _RequestAccounting()
         capsules_by_year: dict[int, EvidenceCapsule] = {}
         pages_seen = records_seen = 0
-        last_page_complete: bool | None = None
         try:
             async for page, complete in self.iter_range_pages(
-                key.hostname, scope.year_from, scope.year_to
+                key.hostname,
+                scope.year_from,
+                scope.year_to,
+                accounting=accounting,
             ):
                 pages_seen += 1
-                last_page_complete = complete
                 for row in page:
                     records_seen += 1
                     year = self._accepted_year(
@@ -477,58 +502,67 @@ class AsyncWaybackCDXClient:
                         year=year,
                         page_no=pages_seen,
                         record_no=records_seen,
-                        extraction_method="cdx_query_range",
+                        extraction_method="cdx_query_range_bounded",
                     )
-                expected_years = scope.year_to - scope.year_from + 1
-                if len(capsules_by_year) == expected_years:
-                    # Every year in scope is already positively proven. There
-                    # are no absent years left that require exhaustive
-                    # pagination, so finishing the CDX scan cannot change the
-                    # competition result.
-                    complete_years = tuple(range(scope.year_from, scope.year_to + 1))
-                    return RangeEvidenceQueryResult(
-                        hostname=key.hostname,
-                        key=key,
-                        state=CDXQueryState.PASS,
-                        candidate_years=complete_years,
-                        capsules=tuple(
-                            capsules_by_year[year] for year in complete_years
-                        ),
-                        pages_seen=pages_seen,
-                        records_seen=records_seen,
-                        error=None,
+
+                positive_years = tuple(sorted(capsules_by_year))
+                expected_years = tuple(range(scope.year_from, scope.year_to + 1))
+                if len(positive_years) == len(expected_years):
+                    state = CDXQueryState.PASS
+                    followup_years: tuple[int, ...] = ()
+                elif complete:
+                    state = (
+                        CDXQueryState.PASS
+                        if positive_years
+                        else CDXQueryState.EMPTY_EXHAUSTIVE
                     )
-            complete_years = (
-                tuple(sorted(capsules_by_year))
-                if last_page_complete is True
-                else ()
-            )
+                    followup_years = ()
+                else:
+                    state = CDXQueryState.DECOMPOSED
+                    positive = set(positive_years)
+                    followup_years = tuple(
+                        year for year in expected_years if year not in positive
+                    )
+
+                return RangeEvidenceQueryResult(
+                    hostname=key.hostname,
+                    key=key,
+                    state=state,
+                    candidate_years=positive_years,
+                    followup_years=followup_years,
+                    capsules=tuple(
+                        capsules_by_year[year] for year in positive_years
+                    ),
+                    pages_seen=pages_seen,
+                    records_seen=records_seen,
+                    provider_requests=accounting.requests,
+                    provider_elapsed_milliseconds=accounting.elapsed_milliseconds,
+                    error=None,
+                )
+
+            # Defensive only: iter_range_pages normally yields at least one page.
             return RangeEvidenceQueryResult(
                 hostname=key.hostname,
                 key=key,
-                state=(
-                    CDXQueryState.PASS
-                    if complete_years
-                    else (
-                        CDXQueryState.EMPTY_EXHAUSTIVE
-                        if last_page_complete is True
-                        else CDXQueryState.INCOMPLETE
-                    )
-                ),
-                candidate_years=complete_years,
-                capsules=tuple(capsules_by_year[year] for year in sorted(capsules_by_year)),
+                state=CDXQueryState.INCOMPLETE,
                 pages_seen=pages_seen,
                 records_seen=records_seen,
-                error=None,
+                provider_requests=accounting.requests,
+                provider_elapsed_milliseconds=accounting.elapsed_milliseconds,
+                error="CDX range iterator produced no page",
             )
         except ValueError as exc:
             return RangeEvidenceQueryResult(
                 hostname=key.hostname,
                 key=key,
                 state=CDXQueryState.INVALID,
-                capsules=tuple(capsules_by_year[year] for year in sorted(capsules_by_year)),
+                capsules=tuple(
+                    capsules_by_year[year] for year in sorted(capsules_by_year)
+                ),
                 pages_seen=pages_seen,
                 records_seen=records_seen,
+                provider_requests=accounting.requests,
+                provider_elapsed_milliseconds=accounting.elapsed_milliseconds,
                 error=str(exc),
             )
         except (
@@ -541,9 +575,13 @@ class AsyncWaybackCDXClient:
                 hostname=key.hostname,
                 key=key,
                 state=CDXQueryState.TRANSIENT_ERROR,
-                capsules=tuple(capsules_by_year[year] for year in sorted(capsules_by_year)),
+                capsules=tuple(
+                    capsules_by_year[year] for year in sorted(capsules_by_year)
+                ),
                 pages_seen=pages_seen,
                 records_seen=records_seen,
+                provider_requests=accounting.requests,
+                provider_elapsed_milliseconds=accounting.elapsed_milliseconds,
                 error=str(exc) or type(exc).__name__,
             )
 
@@ -558,6 +596,7 @@ class AsyncWaybackCDXClient:
             raise ValueError("exact-year provider received a range task")
         hostname = key.hostname
         year = scope.year_from
+        accounting = _RequestAccounting()
         pages_seen = records_seen = 0
         last_page_complete: bool | None = None
         try:
@@ -566,6 +605,7 @@ class AsyncWaybackCDXClient:
                 year,
                 year,
                 page_limit=1,
+                accounting=accounting,
             ):
                 pages_seen += 1
                 last_page_complete = complete
@@ -593,6 +633,8 @@ class AsyncWaybackCDXClient:
                             capsule=capsule,
                             pages_seen=pages_seen,
                             records_seen=records_seen,
+                            provider_requests=accounting.requests,
+                            provider_elapsed_milliseconds=accounting.elapsed_milliseconds,
                             key=key,
                         )
             return EvidenceQueryResult(
@@ -603,6 +645,8 @@ class AsyncWaybackCDXClient:
                 else CDXQueryState.INCOMPLETE,
                 pages_seen=pages_seen,
                 records_seen=records_seen,
+                provider_requests=accounting.requests,
+                provider_elapsed_milliseconds=accounting.elapsed_milliseconds,
                 key=key,
             )
         except ValueError as exc:
@@ -612,6 +656,8 @@ class AsyncWaybackCDXClient:
                 CDXQueryState.INVALID,
                 pages_seen=pages_seen,
                 records_seen=records_seen,
+                provider_requests=accounting.requests,
+                provider_elapsed_milliseconds=accounting.elapsed_milliseconds,
                 error=str(exc),
                 key=key,
             )
@@ -627,6 +673,9 @@ class AsyncWaybackCDXClient:
                 CDXQueryState.TRANSIENT_ERROR,
                 pages_seen=pages_seen,
                 records_seen=records_seen,
+                provider_requests=accounting.requests,
+                provider_elapsed_milliseconds=accounting.elapsed_milliseconds,
                 error=str(exc) or type(exc).__name__,
                 key=key,
             )
+

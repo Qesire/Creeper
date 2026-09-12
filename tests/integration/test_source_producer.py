@@ -71,7 +71,14 @@ class SourceProducerTests(unittest.TestCase):
         self.baseline.close()
         self.tmp.cleanup()
 
-    def build_runtime(self, *, backlog_capacity: int, expected_tasks: int = 1):
+    def build_runtime(
+        self,
+        *,
+        backlog_capacity: int,
+        expected_tasks: int = 1,
+        reservation_tasks: int | None = None,
+        range_first_fraction: float = 0.0,
+    ):
         record = SourceRecord(
             source_id="fixture-source",
             locator="fixture://1",
@@ -118,6 +125,7 @@ class SourceProducerTests(unittest.TestCase):
             lease=template,
             evidence_provider="wayback",
             expected_evidence_tasks=expected_tasks,
+            reservation_evidence_tasks=reservation_tasks,
         )
         runtime = SourceProducer(
             baseline=self.baseline,
@@ -133,6 +141,7 @@ class SourceProducerTests(unittest.TestCase):
                 "evidence_tasks": 2,
                 "commits": 2,
             },
+            range_first_fraction=range_first_fraction,
         )
         return runtime, adapter
 
@@ -241,6 +250,33 @@ class SourceProducerTests(unittest.TestCase):
         self.assertEqual(report.evidence_tasks_enqueued, 1)
         self.assertEqual(report.direct_capsules_committed, 0)
         self.assertEqual(self.evidence.count(), 0)
+
+
+    def test_range_first_reservation_covers_parent_and_future_fanout(self):
+        runtime, adapter = self.build_runtime(
+            backlog_capacity=6,
+            expected_tasks=1,
+            reservation_tasks=6,
+            range_first_fraction=1.0,
+        )
+
+        report = runtime.run_once()
+
+        self.assertEqual(report.leases_succeeded, 1)
+        self.assertEqual(report.evidence_tasks_enqueued, 1)
+        self.assertEqual(adapter.executions, 1)
+        tasks = self.control.list_evidence_tasks()
+        self.assertEqual(len(tasks), 1)
+        self.assertEqual(
+            (
+                tasks[0].key.temporal_scope.year_from,
+                tasks[0].key.temporal_scope.year_to,
+            ),
+            (1996, 2001),
+        )
+        # One parent row is durable; five extra slots remain held for a
+        # worst-case DECOMPOSED exact-year fanout.
+        self.assertEqual(runtime.admission.reserved("wayback"), 5)
 
     def test_completed_wayback_range_suppresses_redundant_exact_year_work(self):
         range_key = EvidenceQueryKey(

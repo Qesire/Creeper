@@ -63,6 +63,11 @@ class LeaseCandidate:
     evidence_mode: str = "discovery_only"
     evidence_provider: str = "wayback"
     expected_evidence_tasks: int = 0
+    # Hard backlog-reservation bound. This is deliberately separate from
+    # expected_evidence_tasks: planner expansion can create multiple disjoint
+    # year scopes from one source observation even when the expected cost is
+    # near one task/record.
+    reservation_evidence_tasks: int | None = None
     source_key: str | None = None
 
     def __post_init__(self) -> None:
@@ -74,6 +79,17 @@ class LeaseCandidate:
             raise ValueError("expected_novel_eed must be finite and non-negative")
         if not isinstance(self.expected_evidence_tasks, int) or self.expected_evidence_tasks < 0:
             raise ValueError("expected_evidence_tasks must be non-negative")
+        if (
+            self.reservation_evidence_tasks is not None
+            and (
+                not isinstance(self.reservation_evidence_tasks, int)
+                or isinstance(self.reservation_evidence_tasks, bool)
+                or self.reservation_evidence_tasks < self.expected_evidence_tasks
+            )
+        ):
+            raise ValueError(
+                "reservation_evidence_tasks must be an integer not below expected_evidence_tasks"
+            )
         if not self.evidence_provider.strip():
             raise ValueError("evidence_provider is required")
         if self.source_key is not None and not self.source_key.strip():

@@ -47,6 +47,7 @@ class EvidenceWorkerReport:
     unknown_provider: int = 0
     pass_count: int = 0
     empty_exhaustive_count: int = 0
+    decomposed_count: int = 0
     invalid_count: int = 0
     incomplete_count: int = 0
     transient_error_count: int = 0
@@ -149,6 +150,21 @@ class AsyncEvidenceWorker:
             state=CDXQueryState.TRANSIENT_ERROR,
             error=error,
             key=task.key,
+        )
+
+    def _record_attempt_metric(
+        self,
+        task: EvidenceTask,
+        result: EvidenceQueryResult | RangeEvidenceQueryResult,
+    ) -> None:
+        self.control_store.record_evidence_task_attempt_metric(
+            result.key or task.key,
+            attempt=task.attempt,
+            state=result.state,
+            provider_requests=result.provider_requests,
+            provider_elapsed_milliseconds=result.provider_elapsed_milliseconds,
+            pages_seen=result.pages_seen,
+            records_seen=result.records_seen,
         )
 
     async def _execute(self, task: EvidenceTask) -> EvidenceQueryResult:
@@ -275,6 +291,7 @@ class AsyncEvidenceWorker:
         state_counts = {
             CDXQueryState.PASS: 0,
             CDXQueryState.EMPTY_EXHAUSTIVE: 0,
+            CDXQueryState.DECOMPOSED: 0,
             CDXQueryState.INVALID: 0,
             CDXQueryState.INCOMPLETE: 0,
             CDXQueryState.TRANSIENT_ERROR: 0,
@@ -288,6 +305,8 @@ class AsyncEvidenceWorker:
                         "provider result must preserve EvidenceQueryKey"
                     )
                 state_counts[result.state] += 1
+                task = task_by_key[result.key]
+                self._record_attempt_metric(task, result)
 
                 if isinstance(result, RangeEvidenceQueryResult):
                     if result.capsules:
@@ -304,10 +323,21 @@ class AsyncEvidenceWorker:
                     if result.state in {
                         CDXQueryState.PASS,
                         CDXQueryState.EMPTY_EXHAUSTIVE,
+                        CDXQueryState.DECOMPOSED,
                         CDXQueryState.INVALID,
                     }:
                         followups = ()
-                        if result.state is CDXQueryState.PASS:
+                        if result.state is CDXQueryState.DECOMPOSED:
+                            followups = tuple(
+                                EvidenceQueryKey(
+                                    result.hostname,
+                                    TemporalScope(year, year),
+                                    result.key.provider,
+                                    result.key.policy_version,
+                                )
+                                for year in result.followup_years
+                            )
+                        elif result.state is CDXQueryState.PASS:
                             followups = tuple(
                                 EvidenceQueryKey(
                                     result.hostname,
@@ -329,7 +359,6 @@ class AsyncEvidenceWorker:
                         CDXQueryState.INCOMPLETE,
                         CDXQueryState.TRANSIENT_ERROR,
                     }:
-                        task = task_by_key[result.key]
                         self.control_store.finish_evidence_task(
                             result.key,
                             result.state,
@@ -352,7 +381,6 @@ class AsyncEvidenceWorker:
                     CDXQueryState.INCOMPLETE,
                     CDXQueryState.TRANSIENT_ERROR,
                 }:
-                    task = task_by_key[result.key]
                     self.control_store.finish_evidence_task(
                         result.key,
                         result.state,
@@ -387,6 +415,7 @@ class AsyncEvidenceWorker:
             empty_exhaustive_count=state_counts[
                 CDXQueryState.EMPTY_EXHAUSTIVE
             ],
+            decomposed_count=state_counts[CDXQueryState.DECOMPOSED],
             invalid_count=state_counts[CDXQueryState.INVALID],
             incomplete_count=state_counts[CDXQueryState.INCOMPLETE],
             transient_error_count=state_counts[
@@ -462,6 +491,7 @@ class AsyncEvidenceWorker:
         state_counts = {
             CDXQueryState.PASS: 0,
             CDXQueryState.EMPTY_EXHAUSTIVE: 0,
+            CDXQueryState.DECOMPOSED: 0,
             CDXQueryState.INVALID: 0,
             CDXQueryState.INCOMPLETE: 0,
             CDXQueryState.TRANSIENT_ERROR: 0,
@@ -491,6 +521,7 @@ class AsyncEvidenceWorker:
                 empty_exhaustive_count=state_counts[
                     CDXQueryState.EMPTY_EXHAUSTIVE
                 ],
+                decomposed_count=state_counts[CDXQueryState.DECOMPOSED],
                 invalid_count=state_counts[CDXQueryState.INVALID],
                 incomplete_count=state_counts[CDXQueryState.INCOMPLETE],
                 transient_error_count=state_counts[
@@ -502,6 +533,7 @@ class AsyncEvidenceWorker:
             state_counts = {
                 CDXQueryState.PASS: 0,
                 CDXQueryState.EMPTY_EXHAUSTIVE: 0,
+                CDXQueryState.DECOMPOSED: 0,
                 CDXQueryState.INVALID: 0,
                 CDXQueryState.INCOMPLETE: 0,
                 CDXQueryState.TRANSIENT_ERROR: 0,
@@ -522,6 +554,7 @@ class AsyncEvidenceWorker:
                             "provider result must preserve EvidenceQueryKey"
                         )
                     state_counts[result.state] += 1
+                    self._record_attempt_metric(task, result)
 
                     if isinstance(result, RangeEvidenceQueryResult):
                         if result.capsules:
@@ -538,10 +571,21 @@ class AsyncEvidenceWorker:
                         if result.state in {
                             CDXQueryState.PASS,
                             CDXQueryState.EMPTY_EXHAUSTIVE,
+                            CDXQueryState.DECOMPOSED,
                             CDXQueryState.INVALID,
                         }:
                             followups = ()
-                            if result.state is CDXQueryState.PASS:
+                            if result.state is CDXQueryState.DECOMPOSED:
+                                followups = tuple(
+                                    EvidenceQueryKey(
+                                        result.hostname,
+                                        TemporalScope(year, year),
+                                        result.key.provider,
+                                        result.key.policy_version,
+                                    )
+                                    for year in result.followup_years
+                                )
+                            elif result.state is CDXQueryState.PASS:
                                 followups = tuple(
                                     EvidenceQueryKey(
                                         result.hostname,
@@ -654,6 +698,7 @@ class AsyncEvidenceWorker:
                 empty_exhaustive_count=(
                     total.empty_exhaustive_count + report.empty_exhaustive_count
                 ),
+                decomposed_count=total.decomposed_count + report.decomposed_count,
                 invalid_count=total.invalid_count + report.invalid_count,
                 incomplete_count=total.incomplete_count + report.incomplete_count,
                 transient_error_count=(

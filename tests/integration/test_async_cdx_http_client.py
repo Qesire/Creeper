@@ -49,6 +49,8 @@ class AsyncWaybackCDXClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.state, CDXQueryState.PASS)
         self.assertEqual(calls, 2)
         self.assertEqual(client.http_requests, 2)
+        self.assertEqual(result.provider_requests, 2)
+        self.assertGreaterEqual(result.provider_elapsed_milliseconds, 0)
         self.assertEqual(client.throttle_responses, 1)
         self.assertEqual(client.http_status_counts[429], 1)
         self.assertEqual(client.http_status_counts[200], 1)
@@ -218,7 +220,10 @@ class AsyncWaybackCDXClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.candidate_years, (1997, 1999))
         self.assertEqual(tuple(capsule.year for capsule in result.capsules), (1997, 1999))
         self.assertTrue(
-            all(capsule.extraction_method == "cdx_query_range" for capsule in result.capsules)
+            all(
+                capsule.extraction_method == "cdx_query_range_bounded"
+                for capsule in result.capsules
+            )
         )
         self.assertEqual(result.key, range_key)
 
@@ -232,7 +237,7 @@ class AsyncWaybackCDXClientTests(unittest.IsolatedAsyncioTestCase):
             ),
             max_retries=0,
         ) as client:
-            async def dense_pages(hostname, year_from, year_to):
+            async def dense_pages(hostname, year_from, year_to, **_kwargs):
                 yield (
                     [
                         {
@@ -263,12 +268,13 @@ class AsyncWaybackCDXClientTests(unittest.IsolatedAsyncioTestCase):
             with patch.object(client, "iter_range_pages", dense_pages):
                 result = await client.query_range(range_key)
 
-        self.assertEqual(result.state, CDXQueryState.PASS)
-        self.assertEqual(result.candidate_years, (1996, 1997, 1998))
-        self.assertEqual(result.pages_seen, 2)
+        self.assertEqual(result.state, CDXQueryState.DECOMPOSED)
+        self.assertEqual(result.candidate_years, (1996, 1997))
+        self.assertEqual(result.followup_years, (1998,))
+        self.assertEqual(result.pages_seen, 1)
         self.assertEqual(
             tuple(capsule.year for capsule in result.capsules),
-            (1996, 1997, 1998),
+            (1996, 1997),
         )
 
     async def test_incomplete_range_keeps_positive_capsule_without_negative_claim(self):
@@ -279,7 +285,7 @@ class AsyncWaybackCDXClientTests(unittest.IsolatedAsyncioTestCase):
             transport=httpx.MockTransport(lambda request: httpx.Response(200, request=request)),
             max_retries=0,
         ) as client:
-            async def partial_pages(hostname, year_from, year_to):
+            async def partial_pages(hostname, year_from, year_to, **_kwargs):
                 yield (
                     [
                         {
@@ -295,9 +301,43 @@ class AsyncWaybackCDXClientTests(unittest.IsolatedAsyncioTestCase):
             with patch.object(client, "iter_range_pages", partial_pages):
                 result = await client.query_range(range_key)
 
-        self.assertEqual(result.state, CDXQueryState.TRANSIENT_ERROR)
-        self.assertEqual(result.candidate_years, ())
+        self.assertEqual(result.state, CDXQueryState.DECOMPOSED)
+        self.assertEqual(result.candidate_years, (1997,))
+        self.assertEqual(result.followup_years, (1996, 1998))
         self.assertEqual(tuple(capsule.year for capsule in result.capsules), (1997,))
+
+
+    async def test_bounded_range_uses_exactly_one_provider_request_with_resume_key(self):
+        calls = 0
+
+        async def handler(request):
+            nonlocal calls
+            calls += 1
+            payload = [
+                ["timestamp", "original", "statuscode"],
+                ["19970102030405", "http://example.com/", "200"],
+                ["resume-token!"],
+            ]
+            return httpx.Response(
+                200,
+                content=json.dumps(payload).encode(),
+                request=request,
+            )
+
+        key = EvidenceQueryKey(
+            "example.com", TemporalScope(1996, 1998), "wayback", "cdx-v1"
+        )
+        async with AsyncWaybackCDXClient(
+            transport=httpx.MockTransport(handler),
+            max_retries=0,
+        ) as client:
+            result = await client.query_range(key)
+
+        self.assertEqual(calls, 1)
+        self.assertEqual(result.provider_requests, 1)
+        self.assertEqual(result.state, CDXQueryState.DECOMPOSED)
+        self.assertEqual(result.candidate_years, (1997,))
+        self.assertEqual(result.followup_years, (1996, 1998))
 
     async def test_rate_limiter_strictly_spaces_requests_above_one_rps(self):
         async with AsyncWaybackCDXClient(
@@ -340,14 +380,15 @@ class AsyncWaybackCDXClientTests(unittest.IsolatedAsyncioTestCase):
             transport=httpx.MockTransport(lambda request: httpx.Response(200, request=request)),
             max_retries=0,
         ) as client:
-            async def incomplete_pages(hostname, year_from, year_to):
+            async def incomplete_pages(hostname, year_from, year_to, **_kwargs):
                 yield ([], False)
 
             with patch.object(client, "iter_range_pages", incomplete_pages):
                 result = await client.query_range(range_key)
 
-        self.assertEqual(result.state, CDXQueryState.INCOMPLETE)
+        self.assertEqual(result.state, CDXQueryState.DECOMPOSED)
         self.assertEqual(result.candidate_years, ())
+        self.assertEqual(result.followup_years, (1996, 1997, 1998))
 
 
 
@@ -372,6 +413,7 @@ class AsyncWaybackCDXClientTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result.state, CDXQueryState.EMPTY_EXHAUSTIVE)
         self.assertEqual(client.http_requests, 2)
+        self.assertEqual(client.request_start_segments, 1)
         self.assertEqual(client.request_start_gaps, 1)
         self.assertGreaterEqual(client.request_start_gap_milliseconds, 0)
         self.assertEqual(

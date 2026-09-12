@@ -127,6 +127,7 @@ class RuntimeValidationTests(unittest.TestCase):
                         "wayback_rate_limit_wait_ms": 1200,
                         "wayback_cooldown_wait_ms": 300,
                         "wayback_retry_backoff_wait_ms": 100,
+                        "wayback_request_start_segments": 1,
                         "wayback_request_start_gaps": 400,
                         "wayback_request_start_gap_ms": 1_200_000,
                         "wayback_request_start_excess_gap_ms": 300_000,
@@ -206,7 +207,18 @@ class RuntimeValidationTests(unittest.TestCase):
                 float(report["provider_pacing_utilization"]),
                 (500 / 3600) / 0.5,
             )
-            self.assertEqual(report["report_version"], "runtime-validation-report-v3")
+            self.assertEqual(report["report_version"], "runtime-validation-report-v4")
+            self.assertAlmostEqual(
+                float(report["provider_active_request_starts_per_second"]),
+                400 / 1200,
+            )
+            self.assertAlmostEqual(
+                float(report["provider_active_pacing_utilization"]),
+                (400 / 1200) / 0.5,
+            )
+            self.assertEqual(report["provider_request_stream_seconds"], "1200")
+            self.assertEqual(report["provider_non_stream_seconds"], "2400.0")
+            self.assertEqual(report["provider_request_stream_segments"], 1)
             self.assertEqual(
                 report["provider_request_start_gap"],
                 {
@@ -251,6 +263,22 @@ class RuntimeValidationTests(unittest.TestCase):
                     "source-b": {
                         "novel_host_years_delta": 1,
                         "novel_eed_delta": "20",
+                    },
+                },
+            )
+            self.assertEqual(report["source_provider_request_deltas"], {})
+            self.assertEqual(
+                report["source_yield"],
+                {
+                    "source-a": {
+                        "provider_requests_delta": 0,
+                        "novel_eed_delta": "50",
+                        "novel_eed_per_1000_provider_requests": None,
+                    },
+                    "source-b": {
+                        "provider_requests_delta": 0,
+                        "novel_eed_delta": "20",
+                        "novel_eed_per_1000_provider_requests": None,
                     },
                 },
             )

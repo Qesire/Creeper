@@ -17,6 +17,7 @@ import time
 import tomllib
 
 from creeper.authority.baseline_index import BaselineIndex
+from creeper.evidence.planner import EvidencePlanner
 from creeper.runtime.source_producer import SourceProducer, SourceProducerReport
 from creeper.scheduler.admission import EvidenceBacklogAdmission
 from creeper.scheduler.credits import CreditLedger
@@ -51,6 +52,15 @@ def _positive_float(value: object, name: str) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
         raise ValueError(f"{name} must be a positive number")
     return float(value)
+
+
+def _fraction(value: object, name: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{name} must be a number between 0 and 1")
+    result = float(value)
+    if not 0.0 <= result <= 1.0:
+        raise ValueError(f"{name} must be between 0 and 1")
+    return result
 
 
 
@@ -102,6 +112,10 @@ class StaticSourceRuntime:
         )
         self.max_seconds = _positive_float(
             limits.get("lease_max_seconds"), "lease_max_seconds"
+        )
+        self.range_first_fraction = _fraction(
+            config.get("range_first_fraction", 0.10),
+            "range_first_fraction",
         )
 
         baseline_path = _path(
@@ -181,6 +195,7 @@ class StaticSourceRuntime:
             adapters={self.adapter.adapter_id: self.adapter},
             backlog_capacities={"wayback": self.backlog_capacity},
             queue_capacities=self.queue_capacities,
+            range_first_fraction=self.range_first_fraction,
             owner=self.owner,
         )
 
@@ -211,11 +226,19 @@ class StaticSourceRuntime:
             provider="wayback",
             capacity=self.backlog_capacity,
         )
-        lease_records = min(self.max_records, headroom)
+        capacity_per_record = (
+            EvidencePlanner.MAX_BACKLOG_CAPACITY_PER_OBSERVATION
+        )
+        lease_records = min(
+            self.max_records,
+            headroom // capacity_per_record,
+        )
         if lease_records < 1:
             return SourceProducerReport(
                 admission_blocked=reservoir.state is ReservoirState.READY
             ).as_dict()
+        expected_tasks = lease_records
+        reservation_tasks = lease_records * capacity_per_record
 
         template = WorkLease.create(
             reservoir_id=reservoir.reservoir_id,
@@ -224,7 +247,7 @@ class StaticSourceRuntime:
             max_requests=self.max_requests,
             max_bytes=self.max_bytes,
             max_seconds=self.max_seconds,
-            expected_evidence_tasks=lease_records,
+            expected_evidence_tasks=expected_tasks,
             expected_novel_eed=float(lease_records),
         )
         candidate = LeaseCandidate(
@@ -236,14 +259,15 @@ class StaticSourceRuntime:
                 # One discovery-only evidence task is therefore one unit of
                 # evidence-network cost, rather than assigning every lease the
                 # same constant cost regardless of how much backlog it creates.
-                evidence_network=float(lease_records),
+                evidence_network=float(expected_tasks),
                 cpu=1,
                 ssd=1,
             ),
             reservoir=reservoir,
             lease=template,
             evidence_provider="wayback",
-            expected_evidence_tasks=lease_records,
+            expected_evidence_tasks=expected_tasks,
+            reservation_evidence_tasks=reservation_tasks,
         )
         self.producer.refresh_workset(
             candidates=(candidate,),
@@ -301,6 +325,10 @@ class ActivatedSourceRuntime:
         self.max_seconds = _positive_float(
             limits.get("lease_max_seconds"), "lease_max_seconds"
         )
+        self.range_first_fraction = _fraction(
+            config.get("range_first_fraction", 0.10),
+            "range_first_fraction",
+        )
         baseline_path = _path(
             config.get("baseline_index"),
             config_path=self.config_path,
@@ -331,6 +359,7 @@ class ActivatedSourceRuntime:
             adapters={},
             backlog_capacities={"wayback": self.backlog_capacity},
             queue_capacities=self.queue_capacities,
+            range_first_fraction=self.range_first_fraction,
             owner=self.owner,
         )
 
@@ -386,13 +415,22 @@ class ActivatedSourceRuntime:
             if reservoir.evidence_mode == "direct_year":
                 lease_records = self.max_records
                 expected_tasks = 0
+                reservation_tasks = 0
             else:
-                # Every currently supported discovery-only production adapter
-                # emits at most one host observation / provider task per source
-                # record. Shrink the lease to the durable queue headroom rather
-                # than requiring the whole configured lease to fit at once.
-                lease_records = min(self.max_records, wayback_headroom)
+                # Supported production adapters emit at most one HostObservation
+                # per source record, but one observation can expand across six
+                # competition-year backlog slots after bounded-range fanout.
+                # Size the lease from the hard capacity bound, not the expected
+                # request cost, so admission remains fail-closed.
+                capacity_per_record = (
+                    EvidencePlanner.MAX_BACKLOG_CAPACITY_PER_OBSERVATION
+                )
+                lease_records = min(
+                    self.max_records,
+                    wayback_headroom // capacity_per_record,
+                )
                 expected_tasks = lease_records
+                reservation_tasks = lease_records * capacity_per_record
                 if lease_records < 1:
                     continue
             expected_eed = self._expected_lease_eed(spec.source_key)
@@ -431,6 +469,7 @@ class ActivatedSourceRuntime:
                     lease=template,
                     evidence_mode=reservoir.evidence_mode,
                     expected_evidence_tasks=expected_tasks,
+                    reservation_evidence_tasks=reservation_tasks,
                     source_key=spec.source_key,
                 )
             )
