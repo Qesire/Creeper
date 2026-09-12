@@ -199,6 +199,37 @@ class AsyncWaybackCDXClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(client.transport_errors, 2)
         self.assertEqual(sum(client.http_status_counts.values()), 0)
 
+    async def test_circuit_breaker_suppresses_retry_amplification(self):
+        calls = 0
+
+        async def handler(request):
+            nonlocal calls
+            calls += 1
+            raise httpx.ReadTimeout("timeout", request=request)
+
+        async with AsyncWaybackCDXClient(
+            transport=httpx.MockTransport(handler),
+            max_retries=3,
+            backoff=0,
+            circuit_failure_threshold=1,
+            circuit_cooldown_seconds=60,
+        ) as client:
+            first = await client.query_key(self.key("first.example"))
+            second = await client.query_key(self.key("second.example"))
+
+        self.assertEqual(first.state, CDXQueryState.TRANSIENT_ERROR)
+        self.assertEqual(second.state, CDXQueryState.TRANSIENT_ERROR)
+        # One real failing request trips the provider-wide breaker. The second
+        # task fast-fails without generating another HTTP attempt.
+        self.assertEqual(calls, 1)
+        self.assertEqual(client.http_requests, 1)
+        self.assertEqual(client.transport_errors, 1)
+        self.assertEqual(client.transport_error_counts["ReadTimeout"], 1)
+        self.assertEqual(client.circuit_open_events, 1)
+        self.assertGreaterEqual(client.circuit_fast_failures, 1)
+        self.assertEqual(first.provider_requests, 1)
+        self.assertEqual(second.provider_requests, 0)
+
     async def test_range_probe_reuses_positive_rows_as_capsules(self):
         async def handler(request):
             payload = [
