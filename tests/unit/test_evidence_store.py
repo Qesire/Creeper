@@ -165,9 +165,18 @@ class EvidenceStoreTests(unittest.TestCase):
 
             masks = store.resolve_year_masks(hostnames, chunk_size=1000)
 
-            selects = [statement for statement in statements if "WHERE hostname IN (" in statement]
+            selects = [
+                statement
+                for statement in statements
+                if "WHERE hostname IN (" in statement
+            ]
             self.assertEqual(len(selects), 3)
-            self.assertTrue(all(statement.count("'") // 2 <= 900 for statement in selects))
+            self.assertTrue(
+                all("FROM evidence_host_years" in statement for statement in selects)
+            )
+            self.assertTrue(
+                all(statement.count("'") // 2 <= 900 for statement in selects)
+            )
             self.assertEqual(len(masks), len(hostnames))
             self.assertTrue(all(mask == YEAR_BITS[1997] for mask in masks.values()))
             store.close()
