@@ -773,12 +773,30 @@ class MeasuredYieldScoutExecutor:
             payload = payload[: boundary + 1]
         return payload
 
-    async def _download_sample(self, url: str) -> SampleDownload:
+    async def _download_sample(
+        self,
+        url: str,
+        *,
+        max_download_bytes: int | None = None,
+        sample_windows: int | None = None,
+    ) -> SampleDownload:
+        budget = (
+            self.policy.max_download_bytes
+            if max_download_bytes is None
+            else int(max_download_bytes)
+        )
+        windows = (
+            self.policy.sample_windows
+            if sample_windows is None
+            else int(sample_windows)
+        )
+        if budget < 1 or windows < 1:
+            raise ValueError("sample budget and windows must be positive")
         if (
-            self.policy.sample_windows <= 1
+            windows <= 1
             or not self._windowable_line_resource(url)
         ):
-            first = await self._download_prefix(url)
+            first = await self._download_prefix(url, max_bytes=budget)
             return SampleDownload(
                 payload=first.payload,
                 content_type=first.content_type,
@@ -789,7 +807,7 @@ class MeasuredYieldScoutExecutor:
 
         per_window = max(
             1,
-            self.policy.max_download_bytes // self.policy.sample_windows,
+            budget // windows,
         )
         first = await self._download_prefix(
             url,
@@ -811,12 +829,12 @@ class MeasuredYieldScoutExecutor:
 
         max_start = max(0, first.total_size - per_window)
         starts = []
-        for index in range(self.policy.sample_windows):
-            if self.policy.sample_windows == 1:
+        for index in range(windows):
+            if windows == 1:
                 offset = 0
             else:
                 offset = round(
-                    max_start * index / (self.policy.sample_windows - 1)
+                    max_start * index / (windows - 1)
                 )
             if offset not in starts:
                 starts.append(offset)
@@ -915,11 +933,18 @@ class MeasuredYieldScoutExecutor:
             minhash_values=minhash_values,
         )
 
-    async def __call__(self, candidate: SourceCandidate) -> ScoutResult:
-        started = float(self.clock())
-        download = await self._download_sample(candidate.canonical_entrypoint)
+    def _evaluate_download(
+        self,
+        candidate: SourceCandidate,
+        download: SampleDownload,
+        *,
+        started: float,
+    ) -> ScoutResult:
         if download.content_type == "__permanent_missing__":
-            return ScoutResult(ScoutDisposition.HOLD, reason="bulk source returned HTTP 404/410")
+            return ScoutResult(
+                ScoutDisposition.HOLD,
+                reason="bulk source returned HTTP 404/410",
+            )
         try:
             parsed = _extract_hosts(
                 download.payload,
@@ -929,13 +954,11 @@ class MeasuredYieldScoutExecutor:
                 truncated=download.truncated,
             )
         except (WarcFormatError, ValueError, csv.Error) as exc:
-            detail = str(exc).strip().replace("\n", " ")[:240]
+            detail = str(exc).strip().replace("\\n", " ")[:240]
             measurement = None
-            # Preserve the historical fail-closed distinction: a payload that
-            # advertises no recognizable WARC/ARC framing is not measurable.
-            # A recognizable archive prefix may still report a zero-yield
-            # measurement for auditability without being promoted.
-            if download.payload.lstrip().startswith((b"WARC/", b"ARC/", b"\x1f\x8b")):
+            if download.payload.lstrip().startswith(
+                (b"WARC/", b"ARC/", b"\\x1f\\x8b")
+            ):
                 elapsed = max(0.0, float(self.clock()) - started)
                 measurement = self._measurement(
                     parsed=ParsedHostSample(
@@ -959,7 +982,10 @@ class MeasuredYieldScoutExecutor:
         if parsed is None:
             return ScoutResult(
                 ScoutDisposition.HOLD,
-                reason="unsupported measured source format; requires a format-specific mature parser",
+                reason=(
+                    "unsupported measured source format; requires a "
+                    "format-specific mature parser"
+                ),
             )
         parsed = _apply_source_year_hint(
             parsed,
@@ -990,10 +1016,101 @@ class MeasuredYieldScoutExecutor:
             return ScoutResult(
                 ScoutDisposition.HOLD,
                 measurement=measurement,
-                reason="measured baseline-external/EED yield below warm threshold",
+                reason=(
+                    "measured baseline-external/EED yield below warm threshold"
+                ),
             )
         return ScoutResult(
             ScoutDisposition.WARM,
             measurement=measurement,
             reason="bounded deterministic sample met warm-yield thresholds",
+        )
+
+    def _early_accept(self, result: ScoutResult) -> bool:
+        measurement = result.measurement
+        if (
+            result.disposition is not ScoutDisposition.WARM
+            or measurement is None
+        ):
+            return False
+        observed = measurement.observed_count_for_threshold
+        novel = measurement.novel_count_for_threshold
+        fraction = novel / max(1, observed)
+        multiplier = self.policy.early_accept_multiplier
+        return (
+            observed >= self.policy.min_unique_hosts
+            and novel >= self.policy.min_novel_hosts * multiplier
+            and fraction
+            >= min(1.0, self.policy.min_novel_fraction * multiplier)
+            and measurement.novel_eed_for_ranking
+            >= self.policy.min_novel_eed * multiplier
+        )
+
+    def _early_reject(self, result: ScoutResult) -> bool:
+        measurement = result.measurement
+        if (
+            result.disposition is not ScoutDisposition.HOLD
+            or measurement is None
+            or measurement.observed_count_for_threshold
+            < self.policy.min_unique_hosts
+        ):
+            return False
+        return (
+            measurement.estimated_unseen_fraction
+            <= self.policy.early_reject_unseen_fraction
+            and (
+                measurement.novel_count_for_threshold
+                < self.policy.min_novel_hosts
+                or measurement.novel_eed_for_ranking
+                < self.policy.min_novel_eed
+            )
+        )
+
+    async def __call__(self, candidate: SourceCandidate) -> ScoutResult:
+        started = float(self.clock())
+        url = candidate.canonical_entrypoint
+
+        initial_budget = min(
+            self.policy.max_download_bytes,
+            self.policy.progressive_initial_bytes,
+        )
+        progressive = (
+            self._windowable_line_resource(url)
+            and initial_budget < self.policy.max_download_bytes
+        )
+        if progressive:
+            initial = await self._download_sample(
+                url,
+                max_download_bytes=initial_budget,
+                sample_windows=1,
+            )
+            first_result = self._evaluate_download(
+                candidate,
+                initial,
+                started=started,
+            )
+            if self._early_accept(first_result):
+                return ScoutResult(
+                    ScoutDisposition.WARM,
+                    measurement=first_result.measurement,
+                    reason=(
+                        "progressive scout early-accepted a strongly positive "
+                        "low-fidelity sample"
+                    ),
+                )
+            if self._early_reject(first_result):
+                return ScoutResult(
+                    ScoutDisposition.HOLD,
+                    measurement=first_result.measurement,
+                    reason=(
+                        "progressive scout early-stopped a saturated "
+                        "low-yield sample"
+                    ),
+                )
+
+        download = await self._download_sample(url)
+        return self._evaluate_download(
+            candidate,
+            download,
+            started=started,
         )
