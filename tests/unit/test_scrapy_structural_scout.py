@@ -143,6 +143,8 @@ class ScrapyStructuralScoutExecutorTests(unittest.IsolatedAsyncioTestCase):
             level=SourceLevel.METASOURCE,
             discovered_by="curated-official-seed",
             discovery_strategy="CURATED_DIRECT_CATALOG",
+            expected_year_from=2000,
+            expected_year_to=2001,
             expected_volume=100,
             confidence=1.0,
         )
@@ -158,6 +160,13 @@ class ScrapyStructuralScoutExecutorTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(
             all(
                 child.direct_evidence_prior == 1.0
+                for child in result.discovered_candidates
+            )
+        )
+        self.assertTrue(
+            all(
+                (child.expected_year_from, child.expected_year_to)
+                == (2000, 2001)
                 for child in result.discovered_candidates
             )
         )
