@@ -481,33 +481,57 @@ class SourceReservoirManager:
                 SourceIntelligenceTask.RECOVER_STAGNATION,
             )
 
-        # Reserve one direct-evidence arm, then let observed final-EED/cost
-        # rewards choose among the remaining Codex task classes with UCB.
+        # Keep the two operationally necessary arms stable:
+        # (1) direct timestamp-bearing evidence, (2) generic reservoir refill.
+        # The remaining opportunity slots are learned from final-EED/cost UCB.
         direct = [
             spec
             for spec in specs
             if spec[1] == "DIRECT_EVIDENCE_BULK"
         ][:1]
-        remaining = [
+        refill = [
             spec
             for spec in specs
-            if spec not in direct
+            if spec[0] is SearchDirectiveKind.REFILL_RESERVOIR
+        ][:1]
+        optional = [
+            spec
+            for spec in specs
+            if spec not in direct and spec not in refill
         ]
-        remaining.sort(
+        stagnating = self._is_stagnating()
+        optional.sort(
             key=lambda spec: (
+                0
+                if (
+                    stagnating
+                    and spec[4]
+                    is SourceIntelligenceTask.RECOVER_STAGNATION
+                )
+                else 1,
                 -self._llm_task_ucb(spec[4]),
-                spec[1],
-                spec[2] or "",
             )
         )
-        ordered = direct + remaining
-        selected = ordered[
-            : min(
-                len(ordered),
-                gap,
-                self.targets.max_search_directives,
-            )
-        ]
+
+        capacity = min(gap, self.targets.max_search_directives)
+        selected: list[
+            tuple[
+                SearchDirectiveKind,
+                str,
+                str | None,
+                str,
+                SourceIntelligenceTask,
+            ]
+        ] = []
+        if direct and len(selected) < capacity:
+            selected.extend(direct)
+        optional_slots = max(
+            0,
+            capacity - len(selected) - (1 if refill else 0),
+        )
+        selected.extend(optional[:optional_slots])
+        if refill and len(selected) < capacity:
+            selected.extend(refill)
         if not selected:
             return ()
         base, remainder = divmod(gap, len(selected))
