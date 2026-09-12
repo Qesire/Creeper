@@ -136,7 +136,27 @@ class SourceIntelligenceContextBuilder:
                             measurement.observed_count_for_threshold
                         ),
                         "novel": measurement.novel_count_for_threshold,
+                        "estimated_unseen_fraction": (
+                            measurement.estimated_unseen_fraction
+                        ),
                     }
+                child_keys = self.registry.children(candidate.source_key)
+                children: list[dict[str, Any]] = []
+                for child_key in child_keys[:32]:
+                    child = self.registry.get_candidate(child_key)
+                    if child is None:
+                        continue
+                    children.append(
+                        {
+                            "entrypoint": child.canonical_entrypoint,
+                            "family": child.source_family,
+                            "level": child.level.value,
+                            "state": child.state.value,
+                            "strategy": child.discovery_strategy,
+                        }
+                    )
+                if children:
+                    payload["deterministic_children"] = children
                 result.append(payload)
         result.sort(
             key=lambda item: (
@@ -166,6 +186,7 @@ class SourceIntelligenceContextBuilder:
                 "per total resource cost"
             ),
             "inventory": inventory,
+            "llm_task_history": self.registry.llm_task_rewards(),
             "strategy_history": [
                 {
                     "strategy": item.strategy,
