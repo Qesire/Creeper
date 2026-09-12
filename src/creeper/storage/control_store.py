@@ -426,43 +426,42 @@ class ControlStore:
         return result
 
     def source_provider_request_totals(self) -> dict[str, int]:
-        """Attribute provider requests to each task's deterministic primary source."""
-        result: dict[str, int] = {}
-        unattributed = 0
+        """Attribute provider requests to each task's deterministic primary source.
+
+        The aggregation is one SQL statement so validation remains cheap at
+        million-task scale. The scalar origin lookup uses the task-origin
+        primary-key prefix and deterministic first-touch ordering.
+        """
         rows = self.connection.execute(
             """
-            SELECT m.hostname, m.year_from, m.year_to, m.provider,
-                   m.policy_version, m.provider_requests
-            FROM evidence_task_attempt_metrics m
+            SELECT source_key, SUM(provider_requests) AS provider_requests
+            FROM (
+                SELECT m.provider_requests AS provider_requests,
+                       COALESCE(
+                           (
+                               SELECT o.source_key
+                               FROM evidence_task_origins o
+                               WHERE o.hostname = m.hostname
+                                 AND o.year_from = m.year_from
+                                 AND o.year_to = m.year_to
+                                 AND o.provider = m.provider
+                                 AND o.policy_version = m.policy_version
+                               ORDER BY o.first_observed_at, o.source_key,
+                                        o.reservoir_id, o.lease_id
+                               LIMIT 1
+                           ),
+                           '__unattributed__'
+                       ) AS source_key
+                FROM evidence_task_attempt_metrics m
+            )
+            GROUP BY source_key
+            ORDER BY source_key
             """
         ).fetchall()
-        for row in rows:
-            origin = self.connection.execute(
-                """
-                SELECT source_key
-                FROM evidence_task_origins
-                WHERE hostname = ? AND year_from = ? AND year_to = ?
-                  AND provider = ? AND policy_version = ?
-                ORDER BY first_observed_at, source_key, reservoir_id, lease_id
-                LIMIT 1
-                """,
-                (
-                    row["hostname"],
-                    row["year_from"],
-                    row["year_to"],
-                    row["provider"],
-                    row["policy_version"],
-                ),
-            ).fetchone()
-            requests = int(row["provider_requests"])
-            if origin is None:
-                unattributed += requests
-            else:
-                source_key = str(origin["source_key"])
-                result[source_key] = result.get(source_key, 0) + requests
-        if unattributed:
-            result["__unattributed__"] = unattributed
-        return result
+        return {
+            str(row["source_key"]): int(row["provider_requests"] or 0)
+            for row in rows
+        }
 
     def record_evidence_task_origins(
         self,
