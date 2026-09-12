@@ -607,6 +607,24 @@ class ControlStore:
                 [(*self._values(followup), CDXQueryState.PENDING.value) for followup in exact],
             )
             created = self.connection.total_changes - before
+            # Exact-year follow-ups are a refinement of the same source work.
+            # Preserve every parent origin so later first-touch host-year
+            # attribution remains connected to the original reservoir/lease.
+            for followup in exact:
+                self.connection.execute(
+                    """
+                    INSERT OR IGNORE INTO evidence_task_origins(
+                        hostname, year_from, year_to, provider, policy_version,
+                        source_key, reservoir_id, lease_id, first_observed_at
+                    )
+                    SELECT ?, ?, ?, ?, ?,
+                           source_key, reservoir_id, lease_id, first_observed_at
+                    FROM evidence_task_origins
+                    WHERE hostname = ? AND year_from = ? AND year_to = ?
+                      AND provider = ? AND policy_version = ?
+                    """,
+                    (*self._values(followup), *self._values(key)),
+                )
             self.connection.commit()
             return created
         except BaseException:
