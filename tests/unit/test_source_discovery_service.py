@@ -68,6 +68,7 @@ follow_query = {follow_query}
 
 [admission]
 min_expected_volume = 123456
+direct_min_expected_volume = 12345
 min_enumerability_prior = 0.6
 min_confidence = 0.4
 require_year_bounds = true
@@ -98,6 +99,7 @@ max_returned_candidates = 17
         self.assertEqual(config.agent.command, ("python", "agent.py"))
         self.assertEqual(config.agent.policy.max_returned_candidates, 17)
         self.assertEqual(config.agent.admission.min_expected_volume, 123456)
+        self.assertEqual(config.agent.admission.direct_min_expected_volume, 12345)
         self.assertEqual(config.agent.admission.min_enumerability_prior, 0.6)
 
     def test_follow_query_rejects_string_truthiness(self) -> None:
@@ -217,17 +219,19 @@ Path(a.response).write_text(json.dumps(payload), encoding="utf-8")
             report = reports[0]
             self.assertEqual(report["cycle"], 1)
             self.assertGreaterEqual(report["elapsed_seconds"], 0.0)
-            self.assertEqual(report["search_episodes"], 2)
-            self.assertEqual(report["search_candidates_registered"], 2)
-            self.assertEqual(report["inventory"]["DISCOVERED"], 2)
+            self.assertEqual(report["search_episodes"], 3)
+            self.assertEqual(report["search_candidates_registered"], 3)
+            self.assertEqual(report["inventory"]["DISCOVERED"], 3)
             invocation_root = root / "runtime" / "source-discovery" / "agent-invocations"
             invocation_dirs = [path for path in invocation_root.iterdir() if path.is_dir()]
-            self.assertEqual(len(invocation_dirs), 2)
+            self.assertEqual(len(invocation_dirs), 3)
             for invocation in invocation_dirs:
                 request = __import__("json").loads(
                     (invocation / "request.json").read_text(encoding="utf-8")
                 )
                 self.assertEqual(request["admission"]["min_expected_volume"], 100000)
+                self.assertEqual(request["admission"]["direct_min_expected_volume"], 10000)
+                self.assertTrue(request["requirements"]["prefer_direct_evidence_bulk"])
                 audit = __import__("json").loads(
                     (invocation / "admission.json").read_text(encoding="utf-8")
                 )
