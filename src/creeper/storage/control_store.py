@@ -11,6 +11,7 @@ from typing import Any, Iterable
 
 from creeper.authority.baseline_index import YEAR_BITS
 from creeper.authority.normalizer import normalize_official
+from creeper.evidence.rdap_candidates import rdap_parent_candidate
 from creeper.evidence.policies import (
     CDXQueryState,
     EvidenceCapsule,
@@ -636,6 +637,154 @@ class ControlStore:
                     mask |= YEAR_BITS.get(year, 0)
                 result[str(row["hostname"])] = mask
         return result
+
+    def backfill_rdap_tasks_from_wayback(
+        self,
+        *,
+        limit: int = 64,
+        policy_version: str = "rdap-registration-v1",
+    ) -> int:
+        """Seed RDAP work from durable Wayback backlog without source replay.
+
+        This is an outage-isolation path: if Wayback backlog backpressure blocks
+        the source producer, already-discovered hostnames can still feed RDAP's
+        independent provider budget. EvidenceTask identity gives global
+        deduplication; deterministic first source origin is copied when present.
+        """
+        if limit < 1:
+            raise ValueError("limit must be positive")
+        scan_limit = max(limit * 8, limit)
+        rows = self.connection.execute(
+            """
+            SELECT e.hostname,
+                   (
+                       SELECT o.source_key
+                       FROM evidence_task_origins o
+                       WHERE o.hostname = e.hostname
+                         AND o.year_from = e.year_from
+                         AND o.year_to = e.year_to
+                         AND o.provider = e.provider
+                         AND o.policy_version = e.policy_version
+                       ORDER BY o.first_observed_at, o.source_key,
+                                o.reservoir_id, o.lease_id
+                       LIMIT 1
+                   ) AS source_key,
+                   (
+                       SELECT o.reservoir_id
+                       FROM evidence_task_origins o
+                       WHERE o.hostname = e.hostname
+                         AND o.year_from = e.year_from
+                         AND o.year_to = e.year_to
+                         AND o.provider = e.provider
+                         AND o.policy_version = e.policy_version
+                       ORDER BY o.first_observed_at, o.source_key,
+                                o.reservoir_id, o.lease_id
+                       LIMIT 1
+                   ) AS reservoir_id,
+                   (
+                       SELECT o.lease_id
+                       FROM evidence_task_origins o
+                       WHERE o.hostname = e.hostname
+                         AND o.year_from = e.year_from
+                         AND o.year_to = e.year_to
+                         AND o.provider = e.provider
+                         AND o.policy_version = e.policy_version
+                       ORDER BY o.first_observed_at, o.source_key,
+                                o.reservoir_id, o.lease_id
+                       LIMIT 1
+                   ) AS lease_id,
+                   (
+                       SELECT o.first_observed_at
+                       FROM evidence_task_origins o
+                       WHERE o.hostname = e.hostname
+                         AND o.year_from = e.year_from
+                         AND o.year_to = e.year_to
+                         AND o.provider = e.provider
+                         AND o.policy_version = e.policy_version
+                       ORDER BY o.first_observed_at, o.source_key,
+                                o.reservoir_id, o.lease_id
+                       LIMIT 1
+                   ) AS first_observed_at
+            FROM evidence_tasks e
+            WHERE e.provider = 'wayback'
+              AND e.state IN (?, ?, ?)
+            ORDER BY e.eed_weight DESC, e.year_from, e.hostname
+            LIMIT ?
+            """,
+            (
+                CDXQueryState.PENDING.value,
+                CDXQueryState.INCOMPLETE.value,
+                CDXQueryState.TRANSIENT_ERROR.value,
+                scan_limit,
+            ),
+        ).fetchall()
+
+        candidates: dict[str, tuple[object, object, object, object]] = {}
+        for row in rows:
+            parent = rdap_parent_candidate(str(row["hostname"]))
+            if parent is None or parent in candidates:
+                continue
+            candidates[parent] = (
+                row["source_key"],
+                row["reservoir_id"],
+                row["lease_id"],
+                row["first_observed_at"],
+            )
+            if len(candidates) >= limit:
+                break
+        if not candidates:
+            return 0
+
+        inserted = 0
+        now = float(self.clock())
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            for hostname, origin in candidates.items():
+                key = EvidenceQueryKey(
+                    hostname,
+                    TemporalScope(1996, 2001),
+                    "rdap",
+                    policy_version,
+                )
+                changed = self.connection.execute(
+                    """
+                    INSERT OR IGNORE INTO evidence_tasks(
+                        hostname, year_from, year_to, provider,
+                        policy_version, state
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (*self._values(key), CDXQueryState.PENDING.value),
+                ).rowcount
+                if not changed:
+                    continue
+                inserted += 1
+                source_key, reservoir_id, lease_id, observed_at = origin
+                if (
+                    source_key is not None
+                    and reservoir_id is not None
+                    and lease_id is not None
+                ):
+                    self.connection.execute(
+                        """
+                        INSERT OR IGNORE INTO evidence_task_origins(
+                            hostname, year_from, year_to, provider,
+                            policy_version, source_key, reservoir_id,
+                            lease_id, first_observed_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            *self._values(key),
+                            str(source_key),
+                            str(reservoir_id),
+                            str(lease_id),
+                            now if observed_at is None else float(observed_at),
+                        ),
+                    )
+            self.connection.commit()
+            return inserted
+        except BaseException:
+            self.connection.rollback()
+            raise
 
     def enqueue_evidence_tasks(self, keys: Iterable[EvidenceQueryKey]) -> int:
         rows = [(*self._values(key), CDXQueryState.PENDING.value) for key in keys]

@@ -261,7 +261,7 @@ class RuntimeValidationTests(unittest.TestCase):
                 float(report["provider_pacing_utilization"]),
                 (500 / 3600) / 0.5,
             )
-            self.assertEqual(report["report_version"], "runtime-validation-report-v5")
+            self.assertEqual(report["report_version"], "runtime-validation-report-v6")
             self.assertAlmostEqual(
                 float(report["provider_active_request_starts_per_second"]),
                 400 / 1200,
@@ -270,6 +270,18 @@ class RuntimeValidationTests(unittest.TestCase):
                 float(report["provider_active_pacing_utilization"]),
                 (400 / 1200) / 0.5,
             )
+            self.assertEqual(
+                report["provider_health"],
+                {
+                    "status": "healthy",
+                    "reasons": [],
+                    "circuit_open_events": 0,
+                    "circuit_fast_failures": 0,
+                },
+            )
+            self.assertTrue(report["source_progress_observed"])
+            self.assertTrue(report["integrated_capacity_baseline_eligible"])
+            self.assertEqual(report["provider_transport_error_types"], {})
             self.assertEqual(report["provider_request_stream_seconds"], "1200")
             self.assertEqual(report["provider_non_stream_seconds"], "2400.0")
             self.assertEqual(report["provider_request_stream_segments"], 1)

@@ -427,6 +427,7 @@ class SourceProducerCliTests(unittest.TestCase):
             self.assertEqual(report["leases_succeeded"], 0)
             self.assertTrue(report["admission_blocked"])
             self.assertEqual(report["source_records"], 0)
+            self.assertEqual(report["rdap_shadow_tasks_enqueued"], 2)
             control = ControlStore(runtime_root / "control.sqlite3")
             try:
                 reservoir = control.get_reservoir("webbase-full")
@@ -434,7 +435,7 @@ class SourceProducerCliTests(unittest.TestCase):
                 self.assertIsNone(reservoir.cursor)
                 self.assertEqual(
                     sum(control.evidence_task_state_counts().values()),
-                    2,
+                    4,
                 )
             finally:
                 control.close()

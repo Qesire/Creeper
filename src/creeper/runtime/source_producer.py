@@ -16,6 +16,7 @@ from dataclasses import dataclass
 
 from creeper.authority.baseline_index import BaselineIndex, YEAR_BITS
 from creeper.evidence.planner import EvidencePlanner
+from creeper.evidence.rdap_candidates import rdap_parent_candidate
 from creeper.evidence.policies import EvidenceQueryKey, TemporalScope
 from creeper.records.models import HostObservation
 from creeper.runtime.queues import BoundedQueues
@@ -28,18 +29,6 @@ from creeper.storage.control_store import ControlStore
 from creeper.storage.evidence_store import EvidenceStore
 
 
-def _rdap_parent_candidate(hostname: str) -> str | None:
-    """Conservative registrable-domain candidate without a PSL dependency."""
-    labels = hostname.split(".")
-    if len(labels) < 2:
-        return None
-    tld = labels[-1]
-    if len(tld) == 2:
-        # Avoid querying bare ccTLD public-suffix-like pairs such as co.uk.
-        if len(labels) < 3:
-            return None
-        return ".".join(labels[-3:])
-    return ".".join(labels[-2:])
 
 
 @dataclass(frozen=True)
@@ -424,7 +413,7 @@ class SourceProducer:
                         rdap_candidate
                         for hostname in hostnames
                         if (
-                            rdap_candidate := _rdap_parent_candidate(hostname)
+                            rdap_candidate := rdap_parent_candidate(hostname)
                         ) is not None
                     ))[: self.rdap_batch_size]
                     if rdap_hosts:
