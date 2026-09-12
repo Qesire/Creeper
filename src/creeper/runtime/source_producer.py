@@ -184,6 +184,7 @@ class SourceProducer:
 
         candidate, lease, reservation = granted
         provider = candidate.evidence_provider
+        origin_source_key = candidate.source_key or candidate.reservoir_id
         running = lease.start()
         self.control_store.save_lease(running)
         source_records = observations = enqueued = direct_committed = 0
@@ -214,7 +215,13 @@ class SourceProducer:
                     return
                 for key in fresh:
                     scheduled_keys[key] = None
-                enqueued += self.admission.enqueue_reserved(reservation, fresh)
+                enqueued += self.admission.enqueue_reserved(
+                    reservation,
+                    fresh,
+                    source_key=origin_source_key,
+                    reservoir_id=candidate.reservoir_id,
+                    lease_id=running.lease_id,
+                )
 
             def resolve_pending() -> None:
                 nonlocal direct_capsules
@@ -301,6 +308,15 @@ class SourceProducer:
 
             if direct_capsules:
                 direct_committed += self.evidence_store.put_many(direct_capsules)
+                self.control_store.attribute_direct_host_years(
+                    (
+                        (capsule.hostname, capsule.year, capsule.provider)
+                        for capsule in direct_capsules
+                    ),
+                    source_key=origin_source_key,
+                    reservoir_id=candidate.reservoir_id,
+                    lease_id=running.lease_id,
+                )
             assert result is not None
             self.control_store.finalize_lease(
                 running,
