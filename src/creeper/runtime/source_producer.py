@@ -166,7 +166,7 @@ class SourceProducer:
                     resource_class=template.resource_class,
                     expected_evidence_tasks=candidate.expected_evidence_tasks,
                     expected_novel_eed=candidate.expected_novel_eed,
-                    now=time.time(),
+                    now=float(self.control_store.clock()),
                     lease_ttl_seconds=ownership_ttl,
                 )
                 if lease is None:
