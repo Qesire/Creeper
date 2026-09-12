@@ -877,6 +877,25 @@ class MeasuredYieldScoutExecutor:
         for hostname, _year in novel_pairs:
             tld = hostname.rsplit(".", 1)[-1]
             novel_pair_eed += self.english_weights.get(tld, Decimal("0"))
+
+        frequencies = Counter(parsed.observation_keys)
+        singleton_observations = sum(
+            count == 1 for count in frequencies.values()
+        )
+        doubleton_observations = sum(
+            count == 2 for count in frequencies.values()
+        )
+        observation_count = sum(frequencies.values())
+        estimated_unseen_fraction = (
+            singleton_observations / observation_count
+            if observation_count
+            else 0.0
+        )
+        minhash_values = (
+            build_minhash(frequencies.keys()).values
+            if frequencies
+            else ()
+        )
         return ScoutMeasurement(
             sampled_records=parsed.sampled_records,
             unique_hosts=len(parsed.hosts),
@@ -890,6 +909,10 @@ class MeasuredYieldScoutExecutor:
             observed_host_year_pairs=len(parsed.host_year_pairs),
             novel_host_year_pairs=len(novel_pairs),
             novel_pair_eed=float(novel_pair_eed),
+            singleton_observations=singleton_observations,
+            doubleton_observations=doubleton_observations,
+            estimated_unseen_fraction=estimated_unseen_fraction,
+            minhash_values=minhash_values,
         )
 
     async def __call__(self, candidate: SourceCandidate) -> ScoutResult:
