@@ -87,11 +87,43 @@ class SourceActivationCompiler:
             raise SourceActivationError("ACTIVE candidate requires scout measurement")
         adapter_kind, enumeration_kind = _adapter_kind(candidate.canonical_entrypoint)
         source_key = candidate.source_key
+        domain_id = f"domain:{source_key.removeprefix('src:')}"
+        reservoir_id = f"reservoir:{source_key.removeprefix('src:')}"
+        adapter_id = f"{adapter_kind}:{source_key.removeprefix('src:')}"
+        year_from = candidate.expected_year_from or 1996
+        year_to = candidate.expected_year_to or 2001
 
-        # Backfill the capability-aware index space at the same authority
-        # boundary that creates a durable production reservoir. Existing
-        # activations also pass through this path, so upgrading Creeper does not
-        # require a separate migration command.
+        # Hot-path idempotence matters here: every producer worker refreshes
+        # ACTIVE sources repeatedly, and the historical-index service does the
+        # same. Once both the production reservoir and capability-aware index
+        # exist, recompilation must be read-only. In particular, never replace a
+        # real tomography synopsis with the older scout synopsis.
+        existing = self.control_store.get_reservoir(reservoir_id)
+        if existing is not None:
+            activation = self.control_store.get_activation(source_key)
+            if activation is None:
+                raise SourceActivationError(
+                    "reservoir exists without source activation lineage"
+                )
+            if self.index_registry.get_index_for_source(source_key) is not None:
+                return ProductionSourceSpec(
+                    source_key=source_key,
+                    domain_id=existing.domain_id,
+                    reservoir_id=existing.reservoir_id,
+                    adapter_id=existing.adapter_id,
+                    adapter_kind=adapter_kind,
+                    root_locator=existing.root_locator,
+                    source_family=candidate.source_family,
+                    temporal_scope=(year_from, year_to),
+                    enumeration_kind=existing.enumeration_kind,
+                    evidence_mode=existing.evidence_mode,
+                    capacity_lower=existing.capacity_lower,
+                    capacity_upper=existing.capacity_upper,
+                    cursor=existing.cursor,
+                )
+
+        # Backfill the capability-aware index exactly once for legacy
+        # activations or create it alongside a new activation.
         triage = self.registry.get_triage_observation(source_key)
         compiled_index_space = compile_candidate_index_space(
             stored,
@@ -110,28 +142,29 @@ class SourceActivationCompiler:
             ),
         )
         self.index_registry.register_index_space(compiled_index_space)
-        self.index_registry.record_synopsis(
-            RegionSynopsis(
-                region_key=compiled_index_space.root_region.region_key,
-                sampled_records=measurement.sampled_records,
-                unique_hosts=measurement.unique_hosts,
-                novel_hosts=measurement.novel_hosts,
-                observed_host_year_pairs=measurement.observed_host_year_pairs,
-                novel_host_year_pairs=measurement.novel_host_year_pairs,
-                novel_eed=measurement.novel_eed_for_ranking,
-                bytes_read=measurement.bytes_read,
-                requests=measurement.requests,
-                measurement_mode=measurement.measurement_mode,
-                minhash_values=measurement.minhash_values,
-                confidence=stored.confidence,
-                complete=False,
+        if (
+            self.index_registry.get_synopsis(
+                compiled_index_space.root_region.region_key
             )
-        )
-        domain_id = f"domain:{source_key.removeprefix('src:')}"
-        reservoir_id = f"reservoir:{source_key.removeprefix('src:')}"
-        adapter_id = f"{adapter_kind}:{source_key.removeprefix('src:')}"
-        year_from = candidate.expected_year_from or 1996
-        year_to = candidate.expected_year_to or 2001
+            is None
+        ):
+            self.index_registry.record_synopsis(
+                RegionSynopsis(
+                    region_key=compiled_index_space.root_region.region_key,
+                    sampled_records=measurement.sampled_records,
+                    unique_hosts=measurement.unique_hosts,
+                    novel_hosts=measurement.novel_hosts,
+                    observed_host_year_pairs=measurement.observed_host_year_pairs,
+                    novel_host_year_pairs=measurement.novel_host_year_pairs,
+                    novel_eed=measurement.novel_eed_for_ranking,
+                    bytes_read=measurement.bytes_read,
+                    requests=measurement.requests,
+                    measurement_mode=measurement.measurement_mode,
+                    minhash_values=measurement.minhash_values,
+                    confidence=stored.confidence,
+                    complete=False,
+                )
+            )
         capacity_lower = max(
             0,
             int(
@@ -156,13 +189,7 @@ class SourceActivationCompiler:
             ).encode("utf-8")
         ).hexdigest()
 
-        existing = self.control_store.get_reservoir(reservoir_id)
         if existing is not None:
-            activation = self.control_store.get_activation(source_key)
-            if activation is None:
-                raise SourceActivationError(
-                    "reservoir exists without source activation lineage"
-                )
             return ProductionSourceSpec(
                 source_key=source_key,
                 domain_id=existing.domain_id,
