@@ -128,6 +128,7 @@ def main(argv: list[str] | None = None) -> int:
             "--sandbox",
             "read-only",
             "--skip-git-repo-check",
+            "--ephemeral",
             "--config",
             'approval_policy="never"',
             "--config",
