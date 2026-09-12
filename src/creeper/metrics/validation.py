@@ -458,7 +458,7 @@ def build_validation_report(
         )
 
     return {
-        "report_version": "runtime-validation-report-v3",
+        "report_version": "runtime-validation-report-v4",
         "label": label,
         "code_revision": code_revision,
         "runtime_data_root": end.get("runtime_data_root"),
