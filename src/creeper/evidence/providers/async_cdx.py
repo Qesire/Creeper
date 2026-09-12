@@ -112,6 +112,7 @@ class AsyncWaybackCDXClient:
         # Request-start timeline telemetry. Unlike coroutine wait counters,
         # these values live on the provider's real request-start clock and can
         # therefore expose limiter starvation without concurrency double-counting.
+        self.request_start_segments = 0
         self.request_start_gaps = 0
         self.request_start_gap_milliseconds = 0
         self.request_start_excess_gap_milliseconds = 0
@@ -267,7 +268,9 @@ class AsyncWaybackCDXClient:
                 async def request_once() -> httpx.Response:
                     loop = asyncio.get_running_loop()
                     started = loop.time()
-                    if self._last_request_start is not None:
+                    if self._last_request_start is None:
+                        self.request_start_segments += 1
+                    else:
                         gap = max(0.0, started - self._last_request_start)
                         gap_ms = int(round(gap * 1000.0))
                         self.request_start_gaps += 1
