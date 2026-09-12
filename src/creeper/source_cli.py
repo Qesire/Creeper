@@ -120,6 +120,17 @@ class StaticSourceRuntime:
                 limits.get("queue_commits"), "queue_commits"
             ),
         }
+        self.pipeline_batch_size = _positive_int(
+            limits.get(
+                "pipeline_batch_size",
+                min(1000, self.queue_capacities["observations"]),
+            ),
+            "pipeline_batch_size",
+        )
+        self.source_extract_workers = _positive_int(
+            limits.get("source_extract_workers", 2),
+            "source_extract_workers",
+        )
         self.max_records = _positive_int(
             limits.get("lease_max_records"), "lease_max_records"
         )
@@ -218,6 +229,8 @@ class StaticSourceRuntime:
             },
             queue_capacities=self.queue_capacities,
             range_first_fraction=self.range_first_fraction,
+            pipeline_batch_size=self.pipeline_batch_size,
+            extract_workers=self.source_extract_workers,
             owner=self.owner,
         )
 
@@ -347,6 +360,17 @@ class ActivatedSourceRuntime:
                 limits.get("queue_commits"), "queue_commits"
             ),
         }
+        self.pipeline_batch_size = _positive_int(
+            limits.get(
+                "pipeline_batch_size",
+                min(1000, self.queue_capacities["observations"]),
+            ),
+            "pipeline_batch_size",
+        )
+        self.source_extract_workers = _positive_int(
+            limits.get("source_extract_workers", 2),
+            "source_extract_workers",
+        )
         self.max_records = _positive_int(
             limits.get("lease_max_records"), "lease_max_records"
         )
@@ -397,6 +421,8 @@ class ActivatedSourceRuntime:
             },
             queue_capacities=self.queue_capacities,
             range_first_fraction=self.range_first_fraction,
+            pipeline_batch_size=self.pipeline_batch_size,
+            extract_workers=self.source_extract_workers,
             owner=self.owner,
         )
 
@@ -597,6 +623,11 @@ def _empty_watch_total() -> dict[str, object]:
         "admission_blocked": False,
         "max_source_record_queue_depth": 0,
         "max_observation_queue_depth": 0,
+        "pipeline_batches": 0,
+        "source_queue_block_milliseconds": 0,
+        "observation_queue_block_milliseconds": 0,
+        "baseline_lookup_milliseconds": 0,
+        "planning_commit_milliseconds": 0,
     }
 
 
@@ -611,6 +642,11 @@ def _accumulate_watch_report(
         "evidence_tasks_enqueued",
         "direct_capsules_committed",
         "rdap_shadow_tasks_enqueued",
+        "pipeline_batches",
+        "source_queue_block_milliseconds",
+        "observation_queue_block_milliseconds",
+        "baseline_lookup_milliseconds",
+        "planning_commit_milliseconds",
     ):
         total[key] = int(total[key]) + int(report.get(key, 0))
     total["admission_blocked"] = bool(total["admission_blocked"]) or bool(
@@ -640,6 +676,21 @@ def _record_source_telemetry(
             ),
             "source_rdap_shadow_tasks_enqueued": int(
                 report.get("rdap_shadow_tasks_enqueued", 0)
+            ),
+            "source_pipeline_batches": int(
+                report.get("pipeline_batches", 0)
+            ),
+            "source_queue_block_ms": int(
+                report.get("source_queue_block_milliseconds", 0)
+            ),
+            "source_observation_queue_block_ms": int(
+                report.get("observation_queue_block_milliseconds", 0)
+            ),
+            "source_baseline_lookup_ms": int(
+                report.get("baseline_lookup_milliseconds", 0)
+            ),
+            "source_planning_commit_ms": int(
+                report.get("planning_commit_milliseconds", 0)
             ),
             "source_admission_blocked_events": int(
                 bool(report["admission_blocked"])
