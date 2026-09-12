@@ -13,6 +13,7 @@ from typing import Callable
 
 from creeper.authority.baseline_index import BaselineIndex, YEAR_BITS
 from creeper.authority.eed import load_english_weights
+from creeper.source_discovery.registry import SourceDiscoveryRegistry
 from creeper.storage.control_store import ControlStore
 from creeper.storage.evidence_store import EvidenceHostYear, EvidenceStore
 
@@ -553,8 +554,32 @@ class IncrementalReadinessRuntime:
             (row.hostname, row.year) for row in rows
         )
 
+    def _publish_source_rewards(
+        self,
+        report: IncrementalReadinessReport,
+        *,
+        reset: bool,
+    ) -> None:
+        """Feed formal readiness attribution back into discovery learning."""
+        control = self._control_store()
+        if control is None:
+            return
+        registry = SourceDiscoveryRegistry(control)
+        if reset:
+            registry.reset_final_rewards()
+        for source_key, payload in report.source_attribution.items():
+            candidate = registry.get_candidate(source_key)
+            if candidate is None:
+                # Static/non-discovery sources may legitimately appear in the
+                # readiness ledger; they have no search/Codex lineage to train.
+                continue
+            registry.record_final_reward(
+                source_key,
+                final_accepted_eed=float(payload["novel_eed"]),
+            )
+
     def sync_once(self) -> IncrementalReadinessReport:
-        self._refresh_authority()
+        authority_changed = self._refresh_authority()
         cursor = self.ledger.cursor()
         rows = self.evidence.host_years_after(
             cursor,
@@ -569,10 +594,15 @@ class IncrementalReadinessRuntime:
                 source_origins=self._source_origins(rows),
                 task_kinds=self._task_kinds(rows),
             )
-        return self.ledger.report(
+        report = self.ledger.report(
             latest_evidence_sequence=self.evidence.max_host_year_sequence(),
             baseline_eed=self.baseline_eed,
         )
+        self._publish_source_rewards(
+            report,
+            reset=authority_changed,
+        )
+        return report
 
     def sync_until_current(
         self,
