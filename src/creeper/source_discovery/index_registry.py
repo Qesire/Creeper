@@ -10,6 +10,7 @@ from creeper.source_discovery.index_space import (
     CompiledIndexSpace,
     HarvestRegion,
     RegionKind,
+    RegionState,
     RegionSynopsis,
     SourceCapabilities,
     SourceIndexSpec,
@@ -76,6 +77,7 @@ class IndexSpaceRegistry:
                 index_key TEXT NOT NULL,
                 kind TEXT NOT NULL,
                 locator TEXT NOT NULL,
+                state TEXT NOT NULL DEFAULT 'DISCOVERED',
                 parent_region_key TEXT,
                 depth INTEGER NOT NULL,
                 byte_start INTEGER,
@@ -125,6 +127,17 @@ class IndexSpaceRegistry:
         if "content_length" not in columns:
             self.connection.execute(
                 "ALTER TABLE source_indexes_v1 ADD COLUMN content_length INTEGER"
+            )
+        region_columns = {
+            str(row[1])
+            for row in self.connection.execute(
+                "PRAGMA table_info(source_regions_v1)"
+            ).fetchall()
+        }
+        if "state" not in region_columns:
+            self.connection.execute(
+                "ALTER TABLE source_regions_v1 "
+                "ADD COLUMN state TEXT NOT NULL DEFAULT 'DISCOVERED'"
             )
         self.connection.commit()
 
@@ -256,14 +269,15 @@ class IndexSpaceRegistry:
         self.connection.execute(
             """
             INSERT INTO source_regions_v1(
-                region_key, index_key, kind, locator, parent_region_key,
+                region_key, index_key, kind, locator, state, parent_region_key,
                 depth, byte_start, byte_end, key_prefix, year_from, year_to,
                 created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(region_key) DO UPDATE SET
                 index_key = excluded.index_key,
                 kind = excluded.kind,
                 locator = excluded.locator,
+                state = excluded.state,
                 parent_region_key = excluded.parent_region_key,
                 depth = excluded.depth,
                 byte_start = excluded.byte_start,
@@ -278,6 +292,7 @@ class IndexSpaceRegistry:
                 region.index_key,
                 region.kind.value,
                 region.locator,
+                region.state.value,
                 region.parent_region_key,
                 region.depth,
                 region.byte_start,
@@ -301,6 +316,24 @@ class IndexSpaceRegistry:
                 raise KeyError(f"unknown source index: {region.index_key}")
             self._put_region(region, now=now)
 
+    def mark_region_state(
+        self,
+        region_key: str,
+        state: RegionState,
+    ) -> None:
+        state = RegionState(state)
+        with self.connection:
+            changed = self.connection.execute(
+                """
+                UPDATE source_regions_v1
+                SET state = ?, updated_at = ?
+                WHERE region_key = ?
+                """,
+                (state.value, float(self.clock()), region_key),
+            ).rowcount
+        if changed != 1:
+            raise KeyError(f"unknown source region: {region_key}")
+
     def get_region(self, region_key: str) -> HarvestRegion | None:
         row = self.connection.execute(
             "SELECT * FROM source_regions_v1 WHERE region_key = ?",
@@ -313,6 +346,7 @@ class IndexSpaceRegistry:
             index_key=str(row["index_key"]),
             kind=RegionKind(str(row["kind"])),
             locator=str(row["locator"]),
+            state=RegionState(str(row["state"])),
             parent_region_key=row["parent_region_key"],
             depth=int(row["depth"]),
             byte_start=row["byte_start"],
@@ -351,6 +385,18 @@ class IndexSpaceRegistry:
             raise KeyError(f"unknown source region: {synopsis.region_key}")
         now = float(self.clock())
         with self.connection:
+            self.connection.execute(
+                """
+                UPDATE source_regions_v1
+                SET state = CASE
+                        WHEN state = 'DISCOVERED' THEN 'PROBED'
+                        ELSE state
+                    END,
+                    updated_at = ?
+                WHERE region_key = ?
+                """,
+                (now, synopsis.region_key),
+            )
             self.connection.execute(
                 """
                 INSERT INTO source_region_synopses_v1(
