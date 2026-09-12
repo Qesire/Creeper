@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import tempfile
+import threading
 import unittest
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from creeper.authority.baseline_index import BaselineIndex
@@ -52,7 +54,83 @@ class HistoricalIndexOptimizerTests(unittest.IsolatedAsyncioTestCase):
             encoding="utf-8",
         )
 
+        root = self.root
+
+        class RangeHandler(BaseHTTPRequestHandler):
+            def log_message(self, _format, *_args):
+                return
+
+            def _path(self):
+                return root / self.path.split("?", 1)[0].lstrip("/")
+
+            def _headers(self, *, status, size, start=None, end=None):
+                self.send_response(status)
+                self.send_header("Accept-Ranges", "bytes")
+                self.send_header("Content-Type", "application/octet-stream")
+                self.send_header("Content-Length", str(size))
+                if start is not None and end is not None:
+                    total = self._path().stat().st_size
+                    self.send_header(
+                        "Content-Range",
+                        f"bytes {start}-{end}/{total}",
+                    )
+                self.end_headers()
+
+            def do_HEAD(self):
+                path = self._path()
+                if not path.is_file():
+                    self.send_error(404)
+                    return
+                self._headers(status=200, size=path.stat().st_size)
+
+            def do_GET(self):
+                path = self._path()
+                if not path.is_file():
+                    self.send_error(404)
+                    return
+                data = path.read_bytes()
+                raw_range = self.headers.get("Range")
+                if not raw_range:
+                    self._headers(status=200, size=len(data))
+                    self.wfile.write(data)
+                    return
+                value = raw_range.removeprefix("bytes=")
+                left, _, right = value.partition("-")
+                start = int(left)
+                end = (
+                    len(data) - 1
+                    if not right
+                    else min(len(data) - 1, int(right))
+                )
+                if start >= len(data) or end < start:
+                    self.send_response(416)
+                    self.send_header(
+                        "Content-Range",
+                        f"bytes */{len(data)}",
+                    )
+                    self.end_headers()
+                    return
+                payload = data[start:end + 1]
+                self._headers(
+                    status=206,
+                    size=len(payload),
+                    start=start,
+                    end=end,
+                )
+                self.wfile.write(payload)
+
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), RangeHandler)
+        self.server_thread = threading.Thread(
+            target=self.server.serve_forever,
+            daemon=True,
+        )
+        self.server_thread.start()
+        self.base_url = f"http://127.0.0.1:{self.server.server_port}"
+
     def tearDown(self) -> None:
+        self.server.shutdown()
+        self.server.server_close()
+        self.server_thread.join(timeout=2)
         self.tmp.cleanup()
 
     def _config(
@@ -93,7 +171,12 @@ class HistoricalIndexOptimizerTests(unittest.IsolatedAsyncioTestCase):
             eed_model=self.model_path,
         )
 
-    def _register_active(self, locator: str) -> SourceCandidate:
+    def _register_active(
+        self,
+        locator: str,
+        *,
+        content_length: int | None = None,
+    ) -> SourceCandidate:
         control = ControlStore(self.runtime / "control.sqlite3")
         try:
             registry = SourceDiscoveryRegistry(control)
@@ -130,6 +213,14 @@ class HistoricalIndexOptimizerTests(unittest.IsolatedAsyncioTestCase):
                     minhash_values=(11, 13, 17, 19),
                 ),
             )
+            registry.record_triage_observation(
+                candidate.source_key,
+                status_code=200,
+                method="HEAD",
+                content_type="application/octet-stream",
+                content_length=content_length,
+                range_supported=True,
+            )
             return candidate
         finally:
             control.close()
@@ -153,7 +244,10 @@ class HistoricalIndexOptimizerTests(unittest.IsolatedAsyncioTestCase):
             ),
             encoding="utf-8",
         )
-        candidate = self._register_active(path.as_uri())
+        candidate = self._register_active(
+            f"{self.base_url}/{path.name}",
+            content_length=path.stat().st_size,
+        )
         config = self._config()
 
         async with HistoricalIndexOptimizerRuntime(
@@ -203,7 +297,10 @@ class HistoricalIndexOptimizerTests(unittest.IsolatedAsyncioTestCase):
                 f'{{"url":"http://{host}.com/"}}\n',
                 encoding="utf-8",
             )
-            self._register_active(path.as_uri())
+            self._register_active(
+                f"{self.base_url}/{path.name}",
+                content_length=path.stat().st_size,
+            )
         config = self._config(max_indexes=1)
 
         async with HistoricalIndexOptimizerRuntime(
@@ -227,7 +324,10 @@ class HistoricalIndexOptimizerTests(unittest.IsolatedAsyncioTestCase):
     async def test_compressed_direct_index_is_not_optimizer_eligible(self) -> None:
         path = self.root / "compressed.cdxj.gz"
         path.write_bytes(b"fixture")
-        self._register_active(path.as_uri())
+        self._register_active(
+            f"{self.base_url}/{path.name}",
+            content_length=path.stat().st_size,
+        )
         config = self._config()
 
         async with HistoricalIndexOptimizerRuntime(
