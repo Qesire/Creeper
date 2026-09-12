@@ -102,6 +102,12 @@ async def run_service(
                 retry_base_seconds=retry_base_seconds,
                 retry_max_seconds=retry_max_seconds,
             )
+            telemetry.set_gauges(
+                {
+                    "wayback_configured_requests_per_second": requests_per_second,
+                    "wayback_max_inflight": max_inflight,
+                }
+            )
             idle_delay = poll_min_seconds
             previous_http_requests = 0
             previous_throttle_responses = 0
