@@ -122,6 +122,12 @@ async def run_service(
             previous_host_lock_wait_ms = 0
             previous_inflight_wait_ms = 0
             previous_claim_wait_ms = 0
+            previous_request_start_gaps = 0
+            previous_request_start_gap_ms = 0
+            previous_request_start_excess_gap_ms = 0
+            previous_stream_refill_claims = 0
+            previous_stream_refill_tasks = 0
+            previous_stream_refill_empty_claims = 0
             previous_latency_buckets = {
                 name: 0
                 for name in (
@@ -133,8 +139,34 @@ async def run_service(
                     "gt_30s",
                 )
             }
-            while True:
-                report = await worker.run_once()
+            previous_gap_buckets = {
+                name: 0
+                for name in (
+                    "le_2_5s",
+                    "le_4s",
+                    "le_8s",
+                    "le_16s",
+                    "gt_16s",
+                )
+            }
+
+            def record_report(report: EvidenceWorkerReport) -> None:
+                nonlocal total
+                nonlocal previous_http_requests, previous_throttle_responses
+                nonlocal previous_transport_errors, previous_http_429
+                nonlocal previous_http_503, previous_http_5xx
+                nonlocal previous_http_elapsed_ms, previous_cooldown_wait_ms
+                nonlocal previous_rate_limit_wait_ms
+                nonlocal previous_retry_backoff_wait_ms
+                nonlocal previous_host_lock_wait_ms, previous_inflight_wait_ms
+                nonlocal previous_claim_wait_ms
+                nonlocal previous_request_start_gaps
+                nonlocal previous_request_start_gap_ms
+                nonlocal previous_request_start_excess_gap_ms
+                nonlocal previous_stream_refill_claims
+                nonlocal previous_stream_refill_tasks
+                nonlocal previous_stream_refill_empty_claims
+                nonlocal previous_latency_buckets, previous_gap_buckets
 
                 current_http_429 = int(provider.http_status_counts.get(429, 0))
                 current_http_503 = int(provider.http_status_counts.get(503, 0))
@@ -146,6 +178,10 @@ async def run_service(
                 current_latency_buckets = {
                     name: int(provider.http_latency_buckets.get(name, 0))
                     for name in previous_latency_buckets
+                }
+                current_gap_buckets = {
+                    name: int(provider.request_start_gap_buckets.get(name, 0))
+                    for name in previous_gap_buckets
                 }
                 telemetry.add_counters(
                     {
@@ -187,6 +223,18 @@ async def run_service(
                             provider.retry_backoff_wait_milliseconds
                             - previous_retry_backoff_wait_ms
                         ),
+                        "wayback_request_start_gaps": (
+                            provider.request_start_gaps
+                            - previous_request_start_gaps
+                        ),
+                        "wayback_request_start_gap_ms": (
+                            provider.request_start_gap_milliseconds
+                            - previous_request_start_gap_ms
+                        ),
+                        "wayback_request_start_excess_gap_ms": (
+                            provider.request_start_excess_gap_milliseconds
+                            - previous_request_start_excess_gap_ms
+                        ),
                         "evidence_host_lock_wait_ms": (
                             worker.host_lock_wait_milliseconds
                             - previous_host_lock_wait_ms
@@ -199,6 +247,18 @@ async def run_service(
                             worker.claim_wait_milliseconds
                             - previous_claim_wait_ms
                         ),
+                        "evidence_stream_refill_claims": (
+                            worker.stream_refill_claims
+                            - previous_stream_refill_claims
+                        ),
+                        "evidence_stream_refill_tasks": (
+                            worker.stream_refill_tasks
+                            - previous_stream_refill_tasks
+                        ),
+                        "evidence_stream_refill_empty_claims": (
+                            worker.stream_refill_empty_claims
+                            - previous_stream_refill_empty_claims
+                        ),
                         "evidence_batches_empty": int(report.claimed == 0),
                         **{
                             f"wayback_latency_{name}": (
@@ -206,6 +266,13 @@ async def run_service(
                                 - previous_latency_buckets[name]
                             )
                             for name in current_latency_buckets
+                        },
+                        **{
+                            f"wayback_request_gap_{name}": (
+                                current_gap_buckets[name]
+                                - previous_gap_buckets[name]
+                            )
+                            for name in current_gap_buckets
                         },
                     }
                 )
@@ -219,10 +286,23 @@ async def run_service(
                 previous_cooldown_wait_ms = provider.cooldown_wait_milliseconds
                 previous_rate_limit_wait_ms = provider.rate_limit_wait_milliseconds
                 previous_retry_backoff_wait_ms = provider.retry_backoff_wait_milliseconds
+                previous_request_start_gaps = provider.request_start_gaps
+                previous_request_start_gap_ms = (
+                    provider.request_start_gap_milliseconds
+                )
+                previous_request_start_excess_gap_ms = (
+                    provider.request_start_excess_gap_milliseconds
+                )
                 previous_host_lock_wait_ms = worker.host_lock_wait_milliseconds
                 previous_inflight_wait_ms = worker.provider_inflight_wait_milliseconds
                 previous_claim_wait_ms = worker.claim_wait_milliseconds
+                previous_stream_refill_claims = worker.stream_refill_claims
+                previous_stream_refill_tasks = worker.stream_refill_tasks
+                previous_stream_refill_empty_claims = (
+                    worker.stream_refill_empty_claims
+                )
                 previous_latency_buckets = current_latency_buckets
+                previous_gap_buckets = current_gap_buckets
                 total = EvidenceWorkerReport(
                     claimed=total.claimed + report.claimed,
                     terminal=total.terminal + report.terminal,
@@ -231,29 +311,43 @@ async def run_service(
                     unknown_provider=total.unknown_provider + report.unknown_provider,
                     pass_count=total.pass_count + report.pass_count,
                     empty_exhaustive_count=(
-                        total.empty_exhaustive_count + report.empty_exhaustive_count
+                        total.empty_exhaustive_count
+                        + report.empty_exhaustive_count
                     ),
                     invalid_count=total.invalid_count + report.invalid_count,
                     incomplete_count=total.incomplete_count + report.incomplete_count,
                     transient_error_count=(
-                        total.transient_error_count + report.transient_error_count
+                        total.transient_error_count
+                        + report.transient_error_count
                     ),
                     provider_http_requests_total=provider.http_requests,
                     provider_throttle_responses_total=provider.throttle_responses,
                 )
-                if once:
-                    return total
-                if report.claimed:
+
+            if once:
+                report = await worker.run_once()
+                record_report(report)
+                return total
+
+            while True:
+                saw_work = False
+                async for report in worker.run_streaming(stop_event=stop):
+                    saw_work = True
+                    record_report(report)
                     idle_delay = poll_min_seconds
                     payload = asdict(report)
                     payload["provider_http_requests_total"] = provider.http_requests
-                    payload["provider_throttle_responses_total"] = provider.throttle_responses
+                    payload["provider_throttle_responses_total"] = (
+                        provider.throttle_responses
+                    )
                     print(json.dumps(payload, ensure_ascii=False), flush=True)
-                    if stop.is_set():
-                        return total
-                    continue
+
                 if stop.is_set():
                     return total
+                if saw_work:
+                    continue
+
+                telemetry.add_counters({"evidence_batches_empty": 1})
                 poll_started = loop.time()
                 try:
                     await asyncio.wait_for(stop.wait(), timeout=idle_delay)
