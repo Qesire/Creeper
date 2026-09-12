@@ -350,6 +350,36 @@ class AsyncWaybackCDXClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.candidate_years, ())
 
 
+
+    async def test_request_start_gap_telemetry_tracks_real_request_timeline(self):
+        calls = 0
+
+        async def handler(request):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return httpx.Response(503, request=request)
+            return httpx.Response(200, content=b"[]", request=request)
+
+        async with AsyncWaybackCDXClient(
+            transport=httpx.MockTransport(handler),
+            max_retries=1,
+            backoff=0,
+            throttle_floor_seconds=0,
+            requests_per_second=0,
+        ) as client:
+            result = await client.query_key(self.key())
+
+        self.assertEqual(result.state, CDXQueryState.EMPTY_EXHAUSTIVE)
+        self.assertEqual(client.http_requests, 2)
+        self.assertEqual(client.request_start_gaps, 1)
+        self.assertGreaterEqual(client.request_start_gap_milliseconds, 0)
+        self.assertEqual(
+            sum(client.request_start_gap_buckets.values()),
+            client.request_start_gaps,
+        )
+        self.assertEqual(client.request_start_excess_gap_milliseconds, 0)
+
     async def test_wait_state_counters_measure_retry_and_shared_cooldown(self):
         calls = 0
 
