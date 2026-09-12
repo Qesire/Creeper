@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 
 from creeper.authority.baseline_index import BaselineIndex
-from creeper.evidence.policies import EvidenceCapsule
+from creeper.evidence.policies import EvidenceCapsule, EvidenceQueryKey, TemporalScope
 from creeper.runtime.readiness import IncrementalReadinessRuntime
 from creeper.scheduler.leases import WorkLease
 from creeper.sources.domains import SourceDomain
@@ -210,7 +210,10 @@ class IncrementalReadinessTests(unittest.TestCase):
             ) as runtime:
                 report = runtime.sync_until_current()
 
-            self.assertEqual(report.report_version if hasattr(report, "report_version") else "incremental-readiness-v2", "incremental-readiness-v2")
+            self.assertEqual(
+                report.as_dict()["report_version"],
+                "incremental-readiness-v2",
+            )
             self.assertEqual(
                 report.task_kind_attribution,
                 {
