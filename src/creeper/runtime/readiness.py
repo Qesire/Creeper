@@ -554,6 +554,21 @@ class IncrementalReadinessRuntime:
             (row.hostname, row.year) for row in rows
         )
 
+    def _publish_evidence_action_rewards(
+        self,
+        report: IncrementalReadinessReport,
+    ) -> None:
+        """Close provider action proxy yield with formal readiness reward."""
+
+        control = self._control_store()
+        if control is None:
+            return
+        control.publish_evidence_action_final_rewards(
+            report.task_kind_attribution,
+            baseline_signature=report.baseline_signature,
+            model_signature=report.model_signature,
+        )
+
     def _publish_source_rewards(
         self,
         report: IncrementalReadinessReport,
@@ -602,6 +617,7 @@ class IncrementalReadinessRuntime:
             report,
             reset=authority_changed,
         )
+        self._publish_evidence_action_rewards(report)
         return report
 
     def sync_until_current(

@@ -49,6 +49,7 @@ class SourceProducerReport:
     baseline_lookup_milliseconds: int = 0
     planning_commit_milliseconds: int = 0
     planning_observations: int = 0
+    effective_range_first_fraction: float = 0.0
 
     def as_dict(self) -> dict[str, object]:
         return self.__dict__.copy()
@@ -252,6 +253,11 @@ class SourceProducer:
         return False
 
     def run_once(self) -> SourceProducerReport:
+        effective_range_first_fraction = (
+            self.control_store.recommended_range_first_fraction(
+                self.range_first_fraction
+            )
+        )
         queues = BoundedQueues(**self.queue_capacities)
         granted = self._grant_fresh_lease()
         if granted is None:
@@ -259,7 +265,8 @@ class SourceProducer:
             # prevented execution. If no READY source remains, this is ordinary
             # idle/exhaustion instead of a reason to wait for the evidence queue.
             return SourceProducerReport(
-                admission_blocked=self._has_durable_ready_source()
+                admission_blocked=self._has_durable_ready_source(),
+                effective_range_first_fraction=effective_range_first_fraction,
             )
 
         candidate, lease, reservation = granted
@@ -423,7 +430,7 @@ class SourceProducer:
                         external_covered_mask=provider_coverage_masks.get(
                             item.hostname, 0
                         ),
-                        range_first_fraction=self.range_first_fraction,
+                        range_first_fraction=effective_range_first_fraction,
                     )
                     if plan.direct_capsules:
                         for capsule in plan.direct_capsules:
@@ -708,6 +715,7 @@ class SourceProducer:
                 observation_queue_block_milliseconds=observation_queue_block_ms,
                 baseline_lookup_milliseconds=baseline_lookup_ms,
                 planning_commit_milliseconds=planning_commit_ms,
+                effective_range_first_fraction=effective_range_first_fraction,
             )
         except BaseException:
             if not source_finalized:
@@ -773,6 +781,9 @@ class SourceProducer:
                 planning_commit_milliseconds=(
                     total.planning_commit_milliseconds
                     + report.planning_commit_milliseconds
+                ),
+                effective_range_first_fraction=(
+                    report.effective_range_first_fraction
                 ),
             )
             if report.leases_succeeded:

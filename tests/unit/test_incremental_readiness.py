@@ -233,6 +233,19 @@ class IncrementalReadinessTests(unittest.TestCase):
                     },
                 },
             )
+            check_control = ControlStore(runtime_root / "control.sqlite3")
+            action_values = check_control.evidence_action_value_summary()
+            self.assertEqual(
+                action_values["exact"].final_novel_host_years,
+                1,
+            )
+            self.assertEqual(action_values["exact"].final_novel_eed, 1.0)
+            self.assertEqual(
+                action_values["range"].final_novel_host_years,
+                2,
+            )
+            self.assertEqual(action_values["range"].final_novel_eed, 1.0)
+            check_control.close()
 
     def test_readiness_closes_search_and_codex_rewards_with_final_eed(self):
         with tempfile.TemporaryDirectory() as tmp:

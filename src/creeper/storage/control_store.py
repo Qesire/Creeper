@@ -11,6 +11,16 @@ from typing import Any, Iterable
 
 from creeper.authority.baseline_index import YEAR_BITS
 from creeper.authority.normalizer import normalize_official
+from creeper.evidence.actions import (
+    ACTION_PRIOR_STRENGTH,
+    ACTION_RETRY_PENALTY,
+    EvidenceActionKind,
+    EvidenceActionValueStats,
+    action_prior_yield,
+    adaptive_range_first_fraction,
+    classify_evidence_action,
+    posterior_host_year_yield,
+)
 from creeper.evidence.rdap_candidates import rdap_parent_candidate
 from creeper.evidence.policies import (
     CDXQueryState,
@@ -230,6 +240,29 @@ class ControlStore:
             ) WITHOUT ROWID;
             CREATE INDEX IF NOT EXISTS idx_evidence_task_attempt_metrics_kind
                 ON evidence_task_attempt_metrics(task_kind, state);
+            CREATE TABLE IF NOT EXISTS evidence_action_cost_stats (
+                task_kind TEXT PRIMARY KEY,
+                attempts INTEGER NOT NULL CHECK(attempts >= 0),
+                provider_requests INTEGER NOT NULL CHECK(provider_requests >= 0),
+                provider_elapsed_milliseconds INTEGER NOT NULL
+                    CHECK(provider_elapsed_milliseconds >= 0),
+                pages_seen INTEGER NOT NULL CHECK(pages_seen >= 0),
+                records_seen INTEGER NOT NULL CHECK(records_seen >= 0),
+                updated_at REAL NOT NULL
+            ) WITHOUT ROWID;
+            CREATE TABLE IF NOT EXISTS evidence_action_final_rewards (
+                task_kind TEXT PRIMARY KEY,
+                final_novel_host_years INTEGER NOT NULL
+                    CHECK(final_novel_host_years >= 0),
+                final_novel_eed REAL NOT NULL CHECK(final_novel_eed >= 0),
+                updated_at REAL NOT NULL
+            ) WITHOUT ROWID;
+            CREATE TABLE IF NOT EXISTS evidence_action_reward_authority (
+                singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+                baseline_signature TEXT NOT NULL,
+                model_signature TEXT NOT NULL,
+                updated_at REAL NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS evidence_host_year_origins (
                 hostname TEXT NOT NULL,
                 year INTEGER NOT NULL,
@@ -320,6 +353,25 @@ class ControlStore:
             DELETE FROM domain_fanout_state
             WHERE child_count = 0 AND query_enqueued = 0;
             """
+        )
+        self.connection.execute(
+            """
+            INSERT OR IGNORE INTO evidence_action_cost_stats(
+                task_kind, attempts, provider_requests,
+                provider_elapsed_milliseconds, pages_seen, records_seen,
+                updated_at
+            )
+            SELECT task_kind,
+                   COUNT(*),
+                   COALESCE(SUM(provider_requests), 0),
+                   COALESCE(SUM(provider_elapsed_milliseconds), 0),
+                   COALESCE(SUM(pages_seen), 0),
+                   COALESCE(SUM(records_seen), 0),
+                   ?
+            FROM evidence_task_attempt_metrics
+            GROUP BY task_kind
+            """,
+            (float(self.clock()),),
         )
         self.connection.executescript(
             """
@@ -833,19 +885,10 @@ class ControlStore:
         if any(int(value) < 0 for value in metrics):
             raise ValueError("attempt metrics must be non-negative")
         value = state.value if isinstance(state, CDXQueryState) else str(state)
-        task_kind = (
-            "rdap"
-            if key.provider == "rdap"
-            else "domain"
-            if key.policy_version.startswith("cdx-domain-")
-            else "exact"
-            if key.temporal_scope.year_from == key.temporal_scope.year_to
-            else "range"
-        )
+        task_kind = classify_evidence_action(key).value
         when = float(self.clock()) if recorded_at is None else float(recorded_at)
-        before = self.connection.total_changes
         with self.connection:
-            self.connection.execute(
+            cursor = self.connection.execute(
                 """
                 INSERT OR IGNORE INTO evidence_task_attempt_metrics(
                     hostname, year_from, year_to, provider, policy_version,
@@ -866,7 +909,235 @@ class ControlStore:
                     when,
                 ),
             )
-        return self.connection.total_changes > before
+            inserted = int(cursor.rowcount or 0) == 1
+            if inserted:
+                self.connection.execute(
+                    """
+                    INSERT INTO evidence_action_cost_stats(
+                        task_kind, attempts, provider_requests,
+                        provider_elapsed_milliseconds, pages_seen, records_seen,
+                        updated_at
+                    ) VALUES (?, 1, ?, ?, ?, ?, ?)
+                    ON CONFLICT(task_kind) DO UPDATE SET
+                        attempts = attempts + 1,
+                        provider_requests = provider_requests
+                            + excluded.provider_requests,
+                        provider_elapsed_milliseconds =
+                            provider_elapsed_milliseconds
+                            + excluded.provider_elapsed_milliseconds,
+                        pages_seen = pages_seen + excluded.pages_seen,
+                        records_seen = records_seen + excluded.records_seen,
+                        updated_at = excluded.updated_at
+                    """,
+                    (
+                        task_kind,
+                        int(provider_requests),
+                        int(provider_elapsed_milliseconds),
+                        int(pages_seen),
+                        int(records_seen),
+                        when,
+                    ),
+                )
+        return inserted
+
+    def publish_evidence_action_final_rewards(
+        self,
+        attribution: dict[str, dict[str, object]],
+        *,
+        baseline_signature: str,
+        model_signature: str,
+    ) -> bool:
+        """Publish cumulative formal readiness reward for provider action kinds.
+
+        The baseline/model signatures are part of the authority identity. A
+        changed authority atomically clears old rewards before the new
+        cumulative readiness totals are installed.
+        """
+
+        if not baseline_signature or not model_signature:
+            raise ValueError("action reward authority signatures are required")
+        normalized: dict[str, tuple[int, float]] = {}
+        for raw_kind, payload in attribution.items():
+            try:
+                kind = EvidenceActionKind(str(raw_kind))
+            except ValueError:
+                # Direct source evidence is a readiness task kind but not a
+                # provider queue action, so it is intentionally ignored here.
+                continue
+            host_years = int(payload.get("novel_host_years", 0))
+            eed = float(payload.get("novel_eed", 0.0))
+            if host_years < 0 or eed < 0:
+                raise ValueError("final evidence action rewards must be non-negative")
+            normalized[kind.value] = (host_years, eed)
+
+        now = float(self.clock())
+        changed_authority = False
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            row = self.connection.execute(
+                """
+                SELECT baseline_signature, model_signature
+                FROM evidence_action_reward_authority
+                WHERE singleton = 1
+                """
+            ).fetchone()
+            changed_authority = (
+                row is None
+                or str(row["baseline_signature"]) != baseline_signature
+                or str(row["model_signature"]) != model_signature
+            )
+            if changed_authority:
+                self.connection.execute(
+                    "DELETE FROM evidence_action_final_rewards"
+                )
+            self.connection.execute(
+                """
+                INSERT INTO evidence_action_reward_authority(
+                    singleton, baseline_signature, model_signature, updated_at
+                ) VALUES (1, ?, ?, ?)
+                ON CONFLICT(singleton) DO UPDATE SET
+                    baseline_signature = excluded.baseline_signature,
+                    model_signature = excluded.model_signature,
+                    updated_at = excluded.updated_at
+                """,
+                (baseline_signature, model_signature, now),
+            )
+            for kind, (host_years, eed) in normalized.items():
+                self.connection.execute(
+                    """
+                    INSERT INTO evidence_action_final_rewards(
+                        task_kind, final_novel_host_years,
+                        final_novel_eed, updated_at
+                    ) VALUES (?, ?, ?, ?)
+                    ON CONFLICT(task_kind) DO UPDATE SET
+                        final_novel_host_years =
+                            excluded.final_novel_host_years,
+                        final_novel_eed = excluded.final_novel_eed,
+                        updated_at = excluded.updated_at
+                    """,
+                    (kind, host_years, eed, now),
+                )
+            self.connection.commit()
+        except BaseException:
+            self.connection.rollback()
+            raise
+        return changed_authority
+
+    def recommended_range_first_fraction(
+        self,
+        base_fraction: float,
+    ) -> float:
+        """Blend configured range-first policy with formal learned action yield."""
+
+        base_fraction = float(base_fraction)
+        authority = self.connection.execute(
+            """
+            SELECT 1
+            FROM evidence_action_reward_authority
+            WHERE singleton = 1
+            """
+        ).fetchone()
+        if authority is None:
+            return base_fraction
+
+        stats = self.evidence_action_value_summary()
+        exact = stats[EvidenceActionKind.EXACT.value]
+        ranged = stats[EvidenceActionKind.RANGE.value]
+        effective_requests = (
+            max(exact.provider_requests, exact.attempts)
+            + max(ranged.provider_requests, ranged.attempts)
+        )
+        return adaptive_range_first_fraction(
+            base_fraction,
+            exact_posterior=exact.posterior_host_years_per_request,
+            range_posterior=ranged.posterior_host_years_per_request,
+            evidence_requests=effective_requests,
+            reward_authoritative=True,
+        )
+
+    def evidence_action_value_summary(
+        self,
+    ) -> dict[str, EvidenceActionValueStats]:
+        """Return formal reward/cost posterior for each provider action class."""
+
+        rows = {
+            str(row["task_kind"]): row
+            for row in self.connection.execute(
+                """
+                SELECT c.task_kind,
+                       c.attempts,
+                       c.provider_requests,
+                       c.provider_elapsed_milliseconds,
+                       COALESCE(r.final_novel_host_years, 0)
+                           AS final_novel_host_years,
+                       COALESCE(r.final_novel_eed, 0)
+                           AS final_novel_eed
+                FROM evidence_action_cost_stats c
+                LEFT JOIN evidence_action_final_rewards r
+                  ON r.task_kind = c.task_kind
+                """
+            )
+        }
+        rewards = {
+            str(row["task_kind"]): row
+            for row in self.connection.execute(
+                """
+                SELECT task_kind, final_novel_host_years, final_novel_eed
+                FROM evidence_action_final_rewards
+                """
+            )
+        }
+        result: dict[str, EvidenceActionValueStats] = {}
+        for kind in EvidenceActionKind:
+            row = rows.get(kind.value)
+            reward = rewards.get(kind.value)
+            attempts = int(row["attempts"]) if row is not None else 0
+            requests = int(row["provider_requests"]) if row is not None else 0
+            elapsed = (
+                int(row["provider_elapsed_milliseconds"])
+                if row is not None
+                else 0
+            )
+            host_years = (
+                int(
+                    row["final_novel_host_years"]
+                    if row is not None
+                    else reward["final_novel_host_years"]
+                )
+                if row is not None or reward is not None
+                else 0
+            )
+            final_eed = (
+                float(
+                    row["final_novel_eed"]
+                    if row is not None
+                    else reward["final_novel_eed"]
+                )
+                if row is not None or reward is not None
+                else 0.0
+            )
+            effective_requests = max(requests, attempts)
+            posterior = posterior_host_year_yield(
+                kind,
+                final_novel_host_years=host_years,
+                provider_requests=requests,
+                attempts=attempts,
+            )
+            result[kind.value] = EvidenceActionValueStats(
+                action_kind=kind,
+                attempts=attempts,
+                provider_requests=requests,
+                provider_elapsed_milliseconds=elapsed,
+                final_novel_host_years=host_years,
+                final_novel_eed=final_eed,
+                posterior_host_years_per_request=posterior,
+                final_eed_per_request=(
+                    final_eed / effective_requests
+                    if effective_requests > 0
+                    else 0.0
+                ),
+            )
+        return result
 
     def evidence_attempt_metric_summary(self) -> dict[str, dict[str, int]]:
         """Aggregate provider attempt cost by task kind without materializing rows."""
@@ -1335,16 +1606,39 @@ class ControlStore:
             clauses.append("(" + " OR ".join(key_clauses) + ")")
         params.append(limit)
         query = (
-            "SELECT * FROM evidence_tasks WHERE "
+            "WITH eligible AS ("
+            "SELECT e.*, CASE "
+            "WHEN e.policy_version LIKE 'cdx-domain-%' THEN 'domain' "
+            "WHEN e.provider = 'rdap' THEN 'rdap' "
+            "WHEN e.year_to > e.year_from THEN 'range' "
+            "ELSE 'exact' END AS action_kind "
+            "FROM evidence_tasks e WHERE "
             + " AND ".join(clauses)
-            + " ORDER BY "
-            + "CASE "
-            + "WHEN policy_version LIKE 'cdx-domain-%' THEN 3 "
-            + "WHEN provider = 'rdap' THEN 2 "
-            + "WHEN year_to > year_from THEN 1 ELSE 0 END DESC, "
-            + "eed_weight DESC, "
-            + "(year_to - year_from) DESC, year_from, hostname, "
-            + "year_to, provider, policy_version LIMIT ?"
+            + ") "
+            "SELECT eligible.* FROM eligible "
+            "LEFT JOIN evidence_action_cost_stats cost "
+            "ON cost.task_kind = eligible.action_kind "
+            "LEFT JOIN evidence_action_final_rewards reward "
+            "ON reward.task_kind = eligible.action_kind "
+            "ORDER BY "
+            "(eligible.eed_weight * "
+            "(COALESCE(reward.final_novel_host_years, 0) + "
+            f"{ACTION_PRIOR_STRENGTH} * CASE eligible.action_kind "
+            f"WHEN 'domain' THEN {action_prior_yield(EvidenceActionKind.DOMAIN)} "
+            f"WHEN 'rdap' THEN {action_prior_yield(EvidenceActionKind.RDAP)} "
+            f"WHEN 'range' THEN {action_prior_yield(EvidenceActionKind.RANGE)} "
+            f"ELSE {action_prior_yield(EvidenceActionKind.EXACT)} END) "
+            "/ (MAX(COALESCE(cost.provider_requests, 0), "
+            "COALESCE(cost.attempts, 0)) + "
+            f"{ACTION_PRIOR_STRENGTH}) "
+            f"/ (1.0 + {ACTION_RETRY_PENALTY} * eligible.attempt)) DESC, "
+            "CASE eligible.action_kind "
+            "WHEN 'domain' THEN 3 WHEN 'rdap' THEN 2 "
+            "WHEN 'range' THEN 1 ELSE 0 END DESC, "
+            "eligible.eed_weight DESC, "
+            "(eligible.year_to - eligible.year_from) DESC, "
+            "eligible.year_from, eligible.hostname, eligible.year_to, "
+            "eligible.provider, eligible.policy_version LIMIT ?"
         )
         lease_until = now + float(lease_seconds)
         self.connection.execute("BEGIN IMMEDIATE")
