@@ -100,6 +100,11 @@ class SourceActivationCompiler:
                 if triage is None
                 else triage.get("range_supported")
             ),
+            content_length=(
+                None
+                if triage is None
+                else triage.get("content_length")
+            ),
             direct_evidence_authority=_direct_year_capable(
                 stored.canonical_entrypoint
             ),
