@@ -115,6 +115,9 @@ def capture_runtime_snapshot(
                     "SELECT COALESCE(SUM(attempt), 0) FROM evidence_tasks"
                 ).fetchone()[0]
             )
+            evidence_origin_coverage = control.evidence_task_origin_coverage()
+            evidence_attempt_metrics = control.evidence_attempt_metric_summary()
+            source_provider_requests = control.source_provider_request_totals()
         finally:
             control.close()
     else:
@@ -122,6 +125,9 @@ def capture_runtime_snapshot(
         reservoir_states = {}
         lease_states = {}
         evidence_attempts = 0
+        evidence_origin_coverage = {}
+        evidence_attempt_metrics = {}
+        source_provider_requests = {}
 
     evidence_path = root / "evidence.sqlite3"
     if evidence_path.exists():
@@ -152,6 +158,9 @@ def capture_runtime_snapshot(
         "telemetry_gauges": gauges,
         "evidence_task_states": evidence_states,
         "evidence_task_attempts": evidence_attempts,
+        "evidence_task_origin_coverage": evidence_origin_coverage,
+        "evidence_attempt_metrics": evidence_attempt_metrics,
+        "source_provider_requests": source_provider_requests,
         "reservoir_states": reservoir_states,
         "work_lease_states": lease_states,
         "evidence_capsules": evidence_capsules,
@@ -183,6 +192,49 @@ def _counter_deltas(
             continue
         deltas[str(name)] = right - left
     return deltas, reset
+
+
+def _int_mapping_delta(
+    start: dict[str, object],
+    end: dict[str, object],
+    key: str,
+) -> dict[str, int]:
+    left = start.get(key, {})
+    right = end.get(key, {})
+    if not isinstance(left, dict) or not isinstance(right, dict):
+        return {}
+    result: dict[str, int] = {}
+    for name in sorted(set(left) | set(right)):
+        before = int(left.get(name, 0))
+        after = int(right.get(name, 0))
+        if after >= before:
+            result[str(name)] = after - before
+    return result
+
+
+def _nested_metric_delta(
+    start: dict[str, object],
+    end: dict[str, object],
+    key: str,
+) -> dict[str, dict[str, int]]:
+    left = start.get(key, {})
+    right = end.get(key, {})
+    if not isinstance(left, dict) or not isinstance(right, dict):
+        return {}
+    result: dict[str, dict[str, int]] = {}
+    for group in sorted(set(left) | set(right)):
+        before = left.get(group, {})
+        after = right.get(group, {})
+        if not isinstance(before, dict) or not isinstance(after, dict):
+            continue
+        delta: dict[str, int] = {}
+        for metric in sorted(set(before) | set(after)):
+            b = int(before.get(metric, 0))
+            a = int(after.get(metric, 0))
+            if a >= b:
+                delta[str(metric)] = a - b
+        result[str(group)] = delta
+    return result
 
 
 def _readiness_is_current(snapshot: dict[str, object]) -> tuple[bool, str | None]:
@@ -298,12 +350,19 @@ def build_validation_report(
     http_5xx = deltas.get("wayback_http_5xx", 0)
     transport_errors = deltas.get("wayback_transport_errors", 0)
     http_elapsed_ms = deltas.get("wayback_http_elapsed_ms", 0)
+    request_start_segments = deltas.get("wayback_request_start_segments", 0)
     request_start_gaps = deltas.get("wayback_request_start_gaps", 0)
     request_start_gap_ms = deltas.get("wayback_request_start_gap_ms", 0)
     request_start_excess_gap_ms = deltas.get(
         "wayback_request_start_excess_gap_ms", 0
     )
     source_attribution = _source_attribution_delta(start, end)
+    source_request_deltas = _int_mapping_delta(
+        start, end, "source_provider_requests"
+    )
+    attempt_metric_deltas = _nested_metric_delta(
+        start, end, "evidence_attempt_metrics"
+    )
     attributed_eed_delta = sum(
         (
             Decimal(str(item["novel_eed_delta"]))
@@ -312,6 +371,16 @@ def build_validation_report(
         Decimal("0"),
     )
     observed_rps = Decimal(http_requests) / Decimal(str(elapsed))
+    request_stream_seconds = Decimal(request_start_gap_ms) / Decimal("1000")
+    active_request_rps = (
+        None
+        if request_start_gaps <= 0 or request_stream_seconds <= 0
+        else Decimal(request_start_gaps) / request_stream_seconds
+    )
+    non_stream_seconds = max(
+        Decimal("0"),
+        Decimal(str(elapsed)) - request_stream_seconds,
+    )
     end_gauges = end.get("telemetry_gauges", {})
     configured_rps = Decimal("0")
     if isinstance(end_gauges, dict):
@@ -340,6 +409,24 @@ def build_validation_report(
         if denominator <= 0:
             return None
         return format(Decimal(numerator) / Decimal(denominator), "f")
+
+    source_yield: dict[str, dict[str, object]] = {}
+    for source_key in sorted(
+        (set(source_request_deltas) | set(source_attribution))
+        - {"__unattributed__"}
+    ):
+        requests = int(source_request_deltas.get(source_key, 0))
+        attribution = source_attribution.get(source_key, {})
+        eed = _decimal(attribution.get("novel_eed_delta", "0")) or Decimal("0")
+        source_yield[source_key] = {
+            "provider_requests_delta": requests,
+            "novel_eed_delta": format(eed, "f"),
+            "novel_eed_per_1000_provider_requests": (
+                None
+                if requests <= 0
+                else format(eed * Decimal("1000") / Decimal(requests), "f")
+            ),
+        }
 
     storage_start = int(start.get("runtime_tree_bytes", 0))
     storage_end = int(end.get("runtime_tree_bytes", 0))
@@ -414,6 +501,12 @@ def build_validation_report(
             else format(eed_per_1000_requests, "f")
         ),
         "provider_request_starts_per_second": format(observed_rps, "f"),
+        "provider_active_request_starts_per_second": (
+            None if active_request_rps is None else format(active_request_rps, "f")
+        ),
+        "provider_request_stream_seconds": format(request_stream_seconds, "f"),
+        "provider_non_stream_seconds": format(non_stream_seconds, "f"),
+        "provider_request_stream_segments": request_start_segments,
         "configured_provider_request_starts_per_second": (
             None if configured_rps <= 0 else format(configured_rps, "f")
         ),
@@ -468,6 +561,18 @@ def build_validation_report(
             "cumulative coroutine/service wait; categories may overlap in wall time"
         ),
         "source_attribution": source_attribution,
+        "source_provider_request_deltas": source_request_deltas,
+        "source_yield": source_yield,
+        "unattributed_provider_requests_delta": int(
+            source_request_deltas.get("__unattributed__", 0)
+        ),
+        "evidence_attempt_metric_deltas": attempt_metric_deltas,
+        "evidence_task_origin_coverage_start": start.get(
+            "evidence_task_origin_coverage", {}
+        ),
+        "evidence_task_origin_coverage_end": end.get(
+            "evidence_task_origin_coverage", {}
+        ),
         "attributed_novel_eed_delta": (
             None if not valid else format(attributed_eed_delta, "f")
         ),
