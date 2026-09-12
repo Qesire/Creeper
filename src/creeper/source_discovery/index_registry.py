@@ -94,11 +94,13 @@ class IndexSpaceRegistry:
                 region_key TEXT PRIMARY KEY,
                 sampled_records INTEGER NOT NULL,
                 unique_hosts INTEGER NOT NULL,
+                novel_hosts INTEGER NOT NULL,
                 observed_host_year_pairs INTEGER NOT NULL,
                 novel_host_year_pairs INTEGER NOT NULL,
                 novel_eed REAL NOT NULL,
                 bytes_read INTEGER NOT NULL,
                 requests INTEGER NOT NULL,
+                measurement_mode TEXT NOT NULL,
                 observed_year_histogram_json TEXT NOT NULL,
                 novel_year_histogram_json TEXT NOT NULL,
                 tld_host_year_histogram_json TEXT NOT NULL,
@@ -296,22 +298,24 @@ class IndexSpaceRegistry:
             self.connection.execute(
                 """
                 INSERT INTO source_region_synopses_v1(
-                    region_key, sampled_records, unique_hosts,
+                    region_key, sampled_records, unique_hosts, novel_hosts,
                     observed_host_year_pairs, novel_host_year_pairs,
-                    novel_eed, bytes_read, requests,
+                    novel_eed, bytes_read, requests, measurement_mode,
                     observed_year_histogram_json,
                     novel_year_histogram_json,
                     tld_host_year_histogram_json,
                     minhash_json, confidence, complete, observed_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(region_key) DO UPDATE SET
                     sampled_records = excluded.sampled_records,
                     unique_hosts = excluded.unique_hosts,
+                    novel_hosts = excluded.novel_hosts,
                     observed_host_year_pairs = excluded.observed_host_year_pairs,
                     novel_host_year_pairs = excluded.novel_host_year_pairs,
                     novel_eed = excluded.novel_eed,
                     bytes_read = excluded.bytes_read,
                     requests = excluded.requests,
+                    measurement_mode = excluded.measurement_mode,
                     observed_year_histogram_json =
                         excluded.observed_year_histogram_json,
                     novel_year_histogram_json =
@@ -327,11 +331,13 @@ class IndexSpaceRegistry:
                     synopsis.region_key,
                     synopsis.sampled_records,
                     synopsis.unique_hosts,
+                    synopsis.novel_hosts,
                     synopsis.observed_host_year_pairs,
                     synopsis.novel_host_year_pairs,
                     synopsis.novel_eed,
                     synopsis.bytes_read,
                     synopsis.requests,
+                    synopsis.measurement_mode.value,
                     self._encode_histogram(synopsis.observed_year_histogram),
                     self._encode_histogram(synopsis.novel_year_histogram),
                     self._encode_histogram(synopsis.tld_host_year_histogram),
@@ -363,11 +369,13 @@ class IndexSpaceRegistry:
             region_key=str(row["region_key"]),
             sampled_records=int(row["sampled_records"]),
             unique_hosts=int(row["unique_hosts"]),
+            novel_hosts=int(row["novel_hosts"]),
             observed_host_year_pairs=int(row["observed_host_year_pairs"]),
             novel_host_year_pairs=int(row["novel_host_year_pairs"]),
             novel_eed=float(row["novel_eed"]),
             bytes_read=int(row["bytes_read"]),
             requests=int(row["requests"]),
+            measurement_mode=str(row["measurement_mode"]),
             observed_year_histogram=hist(
                 "observed_year_histogram_json",
                 integer_key=True,
