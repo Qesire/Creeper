@@ -38,7 +38,6 @@ class SourceProducerReport:
     leases_succeeded: int = 0
     source_records: int = 0
     observations: int = 0
-    planning_observations: int = 0
     evidence_tasks_enqueued: int = 0
     direct_capsules_committed: int = 0
     admission_blocked: bool = False
@@ -49,6 +48,7 @@ class SourceProducerReport:
     observation_queue_block_milliseconds: int = 0
     baseline_lookup_milliseconds: int = 0
     planning_commit_milliseconds: int = 0
+    planning_observations: int = 0
 
     def as_dict(self) -> dict[str, object]:
         return self.__dict__.copy()
