@@ -140,8 +140,15 @@ class InterpretableSourceValueModel:
         measurement = self.registry.get_scout_measurement(
             candidate.source_key
         )
-        conversion, family_n = self._family_conversion(
-            candidate.source_family
+        (
+            success_probability,
+            positive_conversion,
+            family_n,
+        ) = self._family_hurdle(candidate.source_family)
+        expected_conversion = (
+            success_probability * positive_conversion
+            if family_n > 0
+            else 1.0
         )
 
         if measurement is None:
