@@ -158,6 +158,34 @@ class SourceReservoirManager:
             return None
         return max(scored, key=lambda item: (item[1], item[0]))
 
+    def _best_measured_direct_origin(
+        self,
+        candidates: list[SourceCandidate],
+    ) -> tuple[str, float] | None:
+        totals: dict[str, tuple[float, float]] = {}
+        for candidate in candidates:
+            if (
+                candidate.state not in {SourceState.WARM, SourceState.ACTIVE}
+                or candidate.direct_evidence_prior < 0.5
+            ):
+                continue
+            measurement = self.registry.get_scout_measurement(candidate.source_key)
+            if measurement is None or measurement.elapsed_seconds <= 0:
+                continue
+            eed, elapsed = totals.get(candidate.origin, (0.0, 0.0))
+            totals[candidate.origin] = (
+                eed + measurement.novel_eed_for_ranking,
+                elapsed + measurement.elapsed_seconds,
+            )
+        scored = [
+            (origin, eed / elapsed)
+            for origin, (eed, elapsed) in totals.items()
+            if elapsed > 0 and eed > 0
+        ]
+        if not scored:
+            return None
+        return max(scored, key=lambda item: (item[1], item[0]))
+
     def _best_observed_search_strategy(self) -> str:
         rewards = [
             reward
@@ -230,9 +258,22 @@ class SourceReservoirManager:
         add_spec(
             SearchDirectiveKind.DIRECT_EVIDENCE,
             "DIRECT_EVIDENCE_BULK",
-            "cdx/cdxj archive indexes",
+            "cdx/cdxj archive indexes and manifests",
             "prioritize timestamp-bearing bulk indexes that can directly produce host-year evidence",
         )
+
+        best_direct_origin = self._best_measured_direct_origin(candidates)
+        if best_direct_origin is not None:
+            origin, value = best_direct_origin
+            add_spec(
+                SearchDirectiveKind.DIRECT_EVIDENCE,
+                "EXPLOIT_DIRECT_ORIGIN",
+                origin,
+                (
+                    "search the same archive origin for sibling CDX/CDXJ "
+                    f"resources; measured direct yield={value:.6g} novel EED/s"
+                ),
+            )
 
         best_family = self._best_measured_family(candidates)
         if projected_warm < self.targets.warm_min and best_family is not None:
