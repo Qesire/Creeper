@@ -281,7 +281,7 @@ class ExactRegionHarvestTests(unittest.TestCase):
                     "Content-Length": str(len(body)),
                     "Accept-Ranges": "bytes",
                 },
-                content=body,
+                stream=httpx.ByteStream(body),
                 request=request,
             )
 
