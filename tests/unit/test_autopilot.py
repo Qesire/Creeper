@@ -12,11 +12,12 @@ from creeper.autopilot import (
     ReadinessServicePolicy,
     ResourceGovernorPolicy,
     SupervisorPolicy,
+    _desired_children,
     build_child_specs,
     load_autopilot_config,
     run_autopilot,
 )
-from creeper.runtime.resource_governor import ResourceSample
+from creeper.runtime.resource_governor import GovernorState, ResourceSample
 
 
 class _FakeProcess:
@@ -104,6 +105,44 @@ class AutopilotTests(unittest.TestCase):
             owners,
             ["source-producer-1", "source-producer-2", "source-producer-3"],
         )
+
+    def test_historical_index_adds_supervised_service_and_throttles_first(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            model = root / "eed-model.json"
+            config = AutopilotConfig(
+                source_discovery_config=root / "discovery.toml",
+                source_producer_config=root / "producer.toml",
+                runtime_data_root=root / "runtime",
+                supervisor=SupervisorPolicy(),
+                evidence=EvidenceServicePolicy(),
+                historical_index_enabled=True,
+                historical_index_eed_model=model,
+            )
+
+            specs = build_child_specs(config)
+
+        self.assertEqual(
+            [spec.name for spec in specs],
+            [
+                "source-discovery",
+                "historical-index",
+                "source-producer",
+                "evidence-worker",
+            ],
+        )
+        optimizer = specs[1].argv
+        self.assertIn("creeper.historical_index_service", optimizer)
+        self.assertIn("--eed-model", optimizer)
+        self.assertIn(str(model), optimizer)
+        desired = _desired_children(
+            GovernorState.THROTTLED,
+            {spec.name for spec in specs},
+        )
+        self.assertNotIn("source-discovery", desired)
+        self.assertNotIn("historical-index", desired)
+        self.assertIn("source-producer", desired)
+        self.assertIn("evidence-worker", desired)
 
     def test_readiness_adds_fourth_isolated_service_process(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -444,6 +483,76 @@ class AutopilotTests(unittest.TestCase):
             self.assertIsNone(disabled.readiness)
             self.assertEqual(disabled.source_producer_workers, 4)
             self.assertEqual(len(build_child_specs(disabled)), 6)
+
+    def test_config_enables_historical_index_from_producer_and_discovery_model(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            scrapy = root / "scrapy"
+            scrapy.mkdir()
+            runtime = root / "runtime"
+            baseline = root / "baseline.sqlite3"
+            baseline.write_bytes(b"fixture")
+            model = root / "eed-model.json"
+            model.write_text(
+                '{"tld":["com"],"lang":["eng"],"perc_of_tld":["100"]}',
+                encoding="utf-8",
+            )
+            discovery = root / "discovery.toml"
+            discovery.write_text(
+                "\n".join(
+                    [
+                        f'runtime_data_root = "{runtime}"',
+                        f'scrapy_project_dir = "{scrapy}"',
+                        "",
+                        "[agent]",
+                        'command = ["python", "agent.py"]',
+                        'backend = "fixture"',
+                        'actor = "agent:test"',
+                        "",
+                        "[measurement]",
+                        f'baseline_index = "{baseline}"',
+                        f'eed_model = "{model}"',
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            producer = root / "producer.toml"
+            producer.write_text(
+                "\n".join(
+                    [
+                        'source_mode = "activated"',
+                        f'runtime_data_root = "{runtime}"',
+                        f'baseline_index = "{baseline}"',
+                        "",
+                        "[historical_index]",
+                        "enabled = true",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            config = root / "autopilot.toml"
+            config.write_text(
+                "\n".join(
+                    [
+                        f'source_discovery_config = "{discovery}"',
+                        f'source_producer_config = "{producer}"',
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            loaded = load_autopilot_config(config)
+            specs = build_child_specs(loaded)
+
+        self.assertTrue(loaded.historical_index_enabled)
+        self.assertEqual(
+            loaded.historical_index_eed_model,
+            model.resolve(),
+        )
+        self.assertIn(
+            "historical-index",
+            [spec.name for spec in specs],
+        )
 
     def test_config_parses_optional_resource_governor(self):
         with tempfile.TemporaryDirectory() as tmp:

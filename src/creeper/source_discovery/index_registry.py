@@ -280,6 +280,37 @@ class IndexSpaceRegistry:
             return None
         return self.get_index(str(row["index_key"]))
 
+    def list_indexes(
+        self,
+        *,
+        direct_evidence_authority: bool | None = None,
+    ) -> tuple[SourceIndexSpec, ...]:
+        """List compiled indexes, optionally filtering direct-evidence authority."""
+
+        if direct_evidence_authority is None:
+            rows = self.connection.execute(
+                """
+                SELECT index_key
+                FROM source_indexes_v1
+                ORDER BY index_key
+                """
+            ).fetchall()
+        else:
+            rows = self.connection.execute(
+                """
+                SELECT index_key
+                FROM source_indexes_v1
+                WHERE direct_evidence_authority = ?
+                ORDER BY index_key
+                """,
+                (int(direct_evidence_authority),),
+            ).fetchall()
+        return tuple(
+            index
+            for row in rows
+            if (index := self.get_index(str(row["index_key"]))) is not None
+        )
+
     def _put_region(self, region: HarvestRegion, *, now: float) -> None:
         self.connection.execute(
             """
@@ -616,6 +647,32 @@ class IndexSpaceRegistry:
             FROM source_regions_v1
             WHERE index_key = ?
             ORDER BY depth, region_key
+            """,
+            (index_key,),
+        ).fetchall()
+        return tuple(
+            region
+            for row in rows
+            if (region := self.get_region(str(row["region_key"]))) is not None
+        )
+
+    def list_leaf_regions(
+        self,
+        index_key: str,
+    ) -> tuple[HarvestRegion, ...]:
+        """Return only regions with no durable child in this index."""
+
+        rows = self.connection.execute(
+            """
+            SELECT parent.region_key
+            FROM source_regions_v1 AS parent
+            WHERE parent.index_key = ?
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM source_regions_v1 AS child
+                  WHERE child.parent_region_key = parent.region_key
+              )
+            ORDER BY parent.depth, parent.region_key
             """,
             (index_key,),
         ).fetchall()

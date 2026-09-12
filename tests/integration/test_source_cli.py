@@ -272,6 +272,117 @@ class SourceProducerCliTests(unittest.TestCase):
                 self.assertEqual(candidate_runtime.costs.evidence_network, 2.0)
                 self.assertEqual(candidate_runtime.reservation_evidence_tasks, 14)
 
+    def test_activated_runtime_delegates_only_optimizer_eligible_direct_indexes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task_root = root / "task"
+            baseline_root = task_root / "merged260909-3"
+            baseline_root.mkdir(parents=True)
+            for year in range(1996, 2002):
+                (baseline_root / f"{year}.txt").write_text(
+                    "",
+                    encoding="utf-8",
+                )
+            (baseline_root / "candidate_pool.txt").write_text(
+                "",
+                encoding="utf-8",
+            )
+            baseline_path = root / "baseline.sqlite3"
+            BaselineIndex.build(task_root, baseline_path).close()
+            runtime_root = root / "runtime"
+            runtime_root.mkdir()
+
+            plain = root / "plain.cdxj"
+            plain.write_text(
+                'com,plain)/ 19980101000000 '
+                '{"url":"http://plain.com/"}\n',
+                encoding="utf-8",
+            )
+            compressed = root / "compressed.cdxj.gz"
+            compressed.write_bytes(b"fixture")
+
+            control = ControlStore(runtime_root / "control.sqlite3")
+            try:
+                registry = SourceDiscoveryRegistry(control)
+                candidates = []
+                for path in (plain, compressed):
+                    candidate = SourceCandidate(
+                        canonical_entrypoint=(
+                            f"https://archive.example/{path.name}"
+                        ),
+                        source_family="BULK_ARTIFACT",
+                        level=SourceLevel.SOURCE,
+                        discovered_by="test",
+                        discovery_strategy="fixture",
+                        expected_year_from=1996,
+                        expected_year_to=2001,
+                        expected_volume=100,
+                        enumerability_prior=1.0,
+                        confidence=1.0,
+                        state=SourceState.ACTIVE,
+                    )
+                    registry.register_proposal(candidate)
+                    registry.record_scout_measurement(
+                        candidate.source_key,
+                        ScoutMeasurement(
+                            sampled_records=10,
+                            unique_hosts=10,
+                            novel_hosts=10,
+                            direct_host_years=10,
+                            requests=1,
+                            bytes_read=1024,
+                            elapsed_seconds=1.0,
+                            novel_eed=10.0,
+                        ),
+                    )
+                    registry.record_triage_observation(
+                        candidate.source_key,
+                        status_code=200,
+                        method="HEAD",
+                        content_type="application/octet-stream",
+                        content_length=path.stat().st_size,
+                        range_supported=True,
+                    )
+                    candidates.append(candidate)
+            finally:
+                control.close()
+
+            config = {
+                "source_mode": "activated",
+                "baseline_index": str(baseline_path),
+                "runtime_data_root": str(runtime_root),
+                "historical_index": {"enabled": True},
+            }
+            limits = {
+                "queue_source_records": 10,
+                "queue_observations": 10,
+                "queue_evidence_tasks": 10,
+                "queue_commits": 10,
+                "lease_max_records": 4,
+                "lease_max_requests": 4,
+                "lease_max_bytes": 4096,
+                "lease_max_seconds": 30,
+                "evidence_backlog_capacity": 16,
+            }
+            with ActivatedSourceRuntime(
+                root / "activated.toml",
+                config=config,
+                limits=limits,
+                owner="delegation-test",
+            ) as runtime:
+                count = runtime.refresh_workset()
+
+                self.assertEqual(count, 1)
+                self.assertEqual(
+                    runtime.historical_index_delegated_sources,
+                    1,
+                )
+                self.assertEqual(len(runtime.producer.candidates), 1)
+                self.assertEqual(
+                    runtime.producer.candidates[0].source_key,
+                    candidates[1].source_key,
+                )
+
     def test_static_runtime_shrinks_lease_to_backlog_headroom(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

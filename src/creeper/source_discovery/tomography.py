@@ -220,8 +220,17 @@ class RegionTomographyPlanner:
         actions: list[TomographyAction] = []
         for region in self._leaf_regions(index_key):
             synopsis = self.registry.get_synopsis(region.region_key)
-            if region.state is RegionState.DISCOVERED or synopsis is None:
-                priority, expected = self._priority(region, None)
+            # A scout synopsis is useful as a value prior but cannot establish
+            # exact byte boundaries. Force one real bounded probe whenever the
+            # durable region still lacks a finite range; the probe may learn
+            # object size with HEAD/Range or local stat before harvest.
+            if (
+                region.byte_start is None
+                or region.byte_end is None
+                or region.state is RegionState.DISCOVERED
+                or synopsis is None
+            ):
+                priority, expected = self._priority(region, synopsis)
                 actions.append(
                     TomographyAction(
                         kind=TomographyActionKind.PROBE,

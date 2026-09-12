@@ -5,6 +5,8 @@ import unittest
 from dataclasses import replace
 from pathlib import Path
 
+import httpx
+
 from creeper.authority.baseline_index import BaselineIndex
 from creeper.evidence.policies import EvidenceCapsule
 from creeper.source_discovery.harvest import (
@@ -209,6 +211,96 @@ class ExactRegionHarvestTests(unittest.TestCase):
             report.bytes_read,
             (end_exclusive - start) + 1,
         )
+        self.assertEqual(self.evidence.for_hostname("alpha.com"), [])
+        beta = self.evidence.for_hostname("beta.com")
+        self.assertEqual(len(beta), 1)
+        self.assertEqual(beta[0].year, 1998)
+        self.assertEqual(self.evidence.for_hostname("gamma.com"), [])
+
+    def test_remote_range_harvest_discards_partial_boundary_rows(self) -> None:
+        lines = [
+            self._line("alpha", 1998, "0101000000"),
+            self._line("beta", 1998, "0101000000"),
+            self._line("gamma", 1998, "0101000000"),
+        ]
+        payload = "".join(lines).encode("utf-8")
+        self.counter += 1
+        candidate = SourceCandidate(
+            canonical_entrypoint=(
+                f"https://archive{self.counter}.example/remote.cdxj"
+            ),
+            source_family="BULK_ARTIFACT",
+            level=SourceLevel.SOURCE,
+            discovered_by="test",
+            discovery_strategy="DIRECT_EVIDENCE_BULK",
+            expected_year_from=1996,
+            expected_year_to=2001,
+            expected_volume=10_000,
+            direct_evidence_prior=1.0,
+            enumerability_prior=1.0,
+            confidence=1.0,
+        )
+        compiled = compile_candidate_index_space(
+            candidate,
+            range_supported=True,
+            content_length=len(payload),
+            direct_evidence_authority=True,
+        )
+        self.registry.register_index_space(compiled)
+
+        first_end = len(lines[0].encode("utf-8"))
+        second_end = first_end + len(lines[1].encode("utf-8"))
+        start = 7
+        end_exclusive = second_end + 7
+        region = child_region(
+            compiled.root_region,
+            kind=RegionKind.BYTE_RANGE,
+            byte_start=start,
+            byte_end=end_exclusive - 1,
+        )
+        self.registry.put_region(region)
+        self.registry.mark_region_state(
+            region.region_key,
+            RegionState.HARVEST_READY,
+        )
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            raw = request.headers.get("range", "")
+            self.assertTrue(raw.startswith("bytes="))
+            bounds = raw.removeprefix("bytes=")
+            left, right = bounds.split("-", 1)
+            request_start = int(left)
+            request_end = int(right)
+            body = payload[request_start:request_end + 1]
+            return httpx.Response(
+                206,
+                headers={
+                    "Content-Range": (
+                        f"bytes {request_start}-{request_end}/{len(payload)}"
+                    ),
+                    "Content-Length": str(len(body)),
+                    "Accept-Ranges": "bytes",
+                },
+                stream=httpx.ByteStream(body),
+                request=request,
+            )
+
+        client = httpx.Client(transport=httpx.MockTransport(handler))
+        try:
+            executor = RegionHarvestExecutor(
+                registry=self.registry,
+                baseline=self.baseline,
+                evidence_store=self.evidence,
+                http_client=client,
+            )
+
+            report = executor.harvest(region.region_key)
+        finally:
+            client.close()
+
+        self.assertIsNotNone(report)
+        assert report is not None
+        self.assertTrue(report.completed)
         self.assertEqual(self.evidence.for_hostname("alpha.com"), [])
         beta = self.evidence.for_hostname("beta.com")
         self.assertEqual(len(beta), 1)

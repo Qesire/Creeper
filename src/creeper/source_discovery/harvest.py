@@ -9,16 +9,23 @@ per-year witness reduction, and bounded resume semantics.
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 from dataclasses import dataclass
+import time
 from urllib.parse import urlsplit
+
+import httpx
 
 from creeper.authority.baseline_index import YEAR_BITS, BaselineIndex
 from creeper.evidence.planner import EvidencePlanner
 from creeper.records.candidates import CandidateSourceScope
 from creeper.records.models import HostObservation, SourceRecord
-from creeper.scheduler.leases import WorkLease
+from creeper.runtime.http import configured_http_proxy
+from creeper.scheduler.leases import LeaseResult, WorkLease
 from creeper.source_discovery.index_registry import IndexSpaceRegistry
 from creeper.source_discovery.index_space import HarvestRegion, RegionState
+from creeper.sources.archive.cdx import parse_cdx_line
+from creeper.sources.archive.cdxj import parse_cdxj_line
 from creeper.sources.archive.host_year import (
     ContiguousHostYearWitnessReducer,
     HostYearWitnessGroup,
@@ -93,6 +100,7 @@ class RegionHarvestExecutor:
         evidence_store: EvidenceStore,
         owner: str = "region-harvester",
         policy: RegionHarvestPolicy | None = None,
+        http_client: httpx.Client | None = None,
     ) -> None:
         if not owner.strip():
             raise ValueError("harvest owner is required")
@@ -101,6 +109,7 @@ class RegionHarvestExecutor:
         self.evidence_store = evidence_store
         self.owner = owner
         self.policy = policy or RegionHarvestPolicy()
+        self.http_client = http_client
         self.planner = EvidencePlanner()
 
     @staticmethod
@@ -186,6 +195,185 @@ class RegionHarvestExecutor:
             counters["inserted"] += self.evidence_store.put_many(capsules)
         groups.clear()
 
+    def _execute_http_region(
+        self,
+        *,
+        index,
+        lease: WorkLease,
+        emit_record,
+    ) -> LeaseResult:
+        """Stream one finite HTTP byte region without fsspec HTTP extras.
+
+        The request starts one byte before a nonzero cursor so a resumed or
+        subdivided region can prove whether its first byte is a line boundary.
+        Progress is persisted only after complete newline-terminated records.
+        Bytes fetched beyond the last committed line in the final network chunk
+        may be re-fetched on resume; they are never skipped.
+        """
+
+        start = _cursor_value(lease.cursor_start)
+        end_exclusive = _cursor_value(lease.cursor_end)
+        if start is None or end_exclusive is None:
+            raise RegionHarvestError("HTTP region harvest requires byte cursors")
+        if end_exclusive <= start:
+            return LeaseResult(lease.lease_id, next_cursor=None)
+
+        request_start = start - 1 if start > 0 else start
+        request_end = end_exclusive - 1
+        headers = {
+            "Range": f"bytes={request_start}-{request_end}",
+            "Accept-Encoding": "identity",
+        }
+        timeout = httpx.Timeout(self.policy.max_seconds)
+        own_client = self.http_client is None
+        context = (
+            httpx.Client(
+                follow_redirects=True,
+                timeout=timeout,
+                proxy=configured_http_proxy(),
+                trust_env=False,
+                headers={"User-Agent": "Creeper-historical-index/2.2"},
+            )
+            if own_client
+            else nullcontext(self.http_client)
+        )
+
+        emitted = 0
+        bytes_read = 0
+        downstream_wait = 0.0
+        started = time.monotonic()
+        cursor = start
+        buffer = b""
+        boundary_ready = start == 0
+        prefix_checked = start == 0
+        stopped = False
+
+        with context as client:
+            assert client is not None
+            with client.stream(
+                "GET",
+                index.locator,
+                headers=headers,
+                timeout=timeout,
+            ) as response:
+                if response.status_code != 206:
+                    raise RegionHarvestError(
+                        "remote exact harvest requires HTTP 206 Range response"
+                    )
+                content_range = response.headers.get("content-range", "")
+                if not content_range.lower().startswith("bytes ") or "/" not in content_range:
+                    raise RegionHarvestError(
+                        "remote Range response omitted Content-Range"
+                    )
+                try:
+                    returned = content_range.split(" ", 1)[1].split("/", 1)[0]
+                    returned_start_text, returned_end_text = returned.split("-", 1)
+                    returned_start = int(returned_start_text)
+                    returned_end = int(returned_end_text)
+                except (ValueError, IndexError) as exc:
+                    raise RegionHarvestError(
+                        "remote Range response has invalid Content-Range"
+                    ) from exc
+                if (
+                    returned_start != request_start
+                    or returned_end != request_end
+                ):
+                    raise RegionHarvestError(
+                        "remote Range response does not match requested byte interval"
+                    )
+
+                for chunk in response.iter_raw(chunk_size=64 * 1024):
+                    if not chunk:
+                        continue
+                    bytes_read += len(chunk)
+                    buffer += chunk
+
+                    if not boundary_ready:
+                        if not prefix_checked:
+                            if not buffer:
+                                continue
+                            previous = buffer[:1]
+                            buffer = buffer[1:]
+                            prefix_checked = True
+                            if previous == b"\n":
+                                boundary_ready = True
+                                cursor = start
+                        if not boundary_ready:
+                            boundary = buffer.find(b"\n")
+                            if boundary < 0:
+                                if (
+                                    time.monotonic() - started - downstream_wait
+                                    >= self.policy.max_seconds
+                                ):
+                                    stopped = True
+                                    break
+                                continue
+                            buffer = buffer[boundary + 1 :]
+                            cursor += boundary + 1
+                            boundary_ready = True
+
+                    while boundary_ready:
+                        boundary = buffer.find(b"\n")
+                        if boundary < 0:
+                            break
+                        raw = buffer[: boundary + 1]
+                        buffer = buffer[boundary + 1 :]
+                        line_start = cursor
+                        cursor += len(raw)
+                        line = raw.decode(
+                            "utf-8",
+                            errors="replace",
+                        ).rstrip("\r\n")
+                        locator = f"{index.locator}:byte:{line_start}"
+                        record = (
+                            parse_cdxj_line(
+                                line,
+                                source_id=index.source_key,
+                                locator=locator,
+                            )
+                            if index.capabilities.format == "CDXJ"
+                            else parse_cdx_line(
+                                line,
+                                source_id=index.source_key,
+                                locator=locator,
+                            )
+                        )
+                        if record is not None:
+                            emit_started = time.monotonic()
+                            emit_record(record)
+                            downstream_wait += (
+                                time.monotonic() - emit_started
+                            )
+                            emitted += 1
+                        if emitted >= lease.max_records:
+                            stopped = cursor < end_exclusive
+                            break
+                        if (
+                            time.monotonic() - started - downstream_wait
+                            >= self.policy.max_seconds
+                        ):
+                            stopped = cursor < end_exclusive
+                            break
+                    if stopped:
+                        break
+
+        next_cursor = (
+            f"byte:{cursor}"
+            if stopped and cursor < end_exclusive
+            else None
+        )
+        return LeaseResult(
+            lease_id=lease.lease_id,
+            records=emitted,
+            requests=1,
+            bytes_read=bytes_read,
+            elapsed_seconds=max(
+                0.0,
+                time.monotonic() - started - downstream_wait,
+            ),
+            next_cursor=next_cursor,
+        )
+
     def harvest(self, region_key: str) -> RegionHarvestReport | None:
         """Claim and advance one region; return None when another owner won."""
 
@@ -246,21 +434,11 @@ class RegionHarvestExecutor:
                 resume_cursor=None,
             )
 
-        reservoir = Reservoir(
-            reservoir_id=index.source_key,
-            domain_id=index.factory_key,
-            adapter_id=f"structured:region:{index.capabilities.format.lower()}",
-            root_locator=index.locator,
-            enumeration_kind="byte_region",
-            capacity_lower=0,
-            evidence_mode="direct_year",
-        )
-        adapter = StructuredProductionAdapter(reservoir)
         # One preceding-byte boundary check is permitted for nonzero starts.
         logical_bytes = end_exclusive - start
         max_bytes = logical_bytes + (1 if start > 0 else 0)
         lease = WorkLease.create(
-            reservoir_id=reservoir.reservoir_id,
+            reservoir_id=index.source_key,
             cursor_start=f"byte:{start}",
             cursor_end=f"byte:{end_exclusive}",
             max_records=min(
@@ -290,8 +468,30 @@ class RegionHarvestExecutor:
                 if len(pending) >= self.policy.baseline_batch_size:
                     self._flush_groups(pending, counters=counters)
 
+        adapter: StructuredProductionAdapter | None = None
         try:
-            result = adapter.execute_stream(lease, emit)
+            scheme = urlsplit(index.locator).scheme.lower()
+            if scheme in {"http", "https"}:
+                result = self._execute_http_region(
+                    index=index,
+                    lease=lease,
+                    emit_record=emit,
+                )
+            else:
+                reservoir = Reservoir(
+                    reservoir_id=index.source_key,
+                    domain_id=index.factory_key,
+                    adapter_id=(
+                        f"structured:region:"
+                        f"{index.capabilities.format.lower()}"
+                    ),
+                    root_locator=index.locator,
+                    enumeration_kind="byte_region",
+                    capacity_lower=0,
+                    evidence_mode="direct_year",
+                )
+                adapter = StructuredProductionAdapter(reservoir)
+                result = adapter.execute_stream(lease, emit)
             final_group = reducer.finish()
             if final_group is not None:
                 pending.append(final_group)
@@ -334,7 +534,8 @@ class RegionHarvestExecutor:
                 resume_cursor=resume_cursor,
             )
         except BaseException:
-            adapter.close()
+            if adapter is not None:
+                adapter.close()
             # Keep any pre-existing resume cursor. Evidence writes are
             # idempotent, so replay after a hard failure is safe.
             try:
@@ -349,4 +550,5 @@ class RegionHarvestExecutor:
                 pass
             raise
         finally:
-            adapter.close()
+            if adapter is not None:
+                adapter.close()

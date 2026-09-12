@@ -90,6 +90,8 @@ class AutopilotConfig:
     supervisor: SupervisorPolicy
     evidence: EvidenceServicePolicy
     source_producer_workers: int = 1
+    historical_index_enabled: bool = False
+    historical_index_eed_model: Path | None = None
     baseline_index: Path | None = None
     readiness: ReadinessServicePolicy | None = None
     resource_governor: ResourceGovernorPolicy | None = None
@@ -169,7 +171,9 @@ def _nonnegative_int(value: object, *, name: str) -> int:
     return value
 
 
-def _producer_runtime_config(config_path: Path) -> tuple[Path, Path, int]:
+def _producer_runtime_config(
+    config_path: Path,
+) -> tuple[Path, Path, int, bool]:
     with config_path.open("rb") as stream:
         root = tomllib.load(stream)
     source_mode = root.get("source_mode", "static")
@@ -197,7 +201,18 @@ def _producer_runtime_config(config_path: Path) -> tuple[Path, Path, int]:
         ),
         name="source producer limits.source_workers",
     )
-    return runtime_root, baseline_index, workers
+    historical_raw = root.get("historical_index", {})
+    if not isinstance(historical_raw, dict):
+        raise ValueError("source producer [historical_index] must be a TOML table")
+    historical_enabled = _strict_bool(
+        historical_raw.get("enabled", False),
+        name="source producer historical_index.enabled",
+    )
+    if historical_enabled and source_mode != "activated":
+        raise ValueError(
+            "historical index optimizer requires source_mode='activated'"
+        )
+    return runtime_root, baseline_index, workers, historical_enabled
 
 
 def load_autopilot_config(config_path: Path) -> AutopilotConfig:
@@ -215,13 +230,25 @@ def load_autopilot_config(config_path: Path) -> AutopilotConfig:
         name="source_producer_config",
     )
     discovery = load_source_discovery_config(discovery_path)
-    producer_root, baseline_index, source_producer_workers = (
-        _producer_runtime_config(producer_path)
-    )
+    (
+        producer_root,
+        baseline_index,
+        source_producer_workers,
+        historical_index_enabled,
+    ) = _producer_runtime_config(producer_path)
     if discovery.runtime_data_root.resolve() != producer_root.resolve():
         raise ValueError(
             "source discovery and source producer must share one runtime_data_root"
         )
+
+    historical_index_eed_model: Path | None = None
+    if historical_index_enabled:
+        if discovery.measurement is None:
+            raise ValueError(
+                "historical index optimizer requires source discovery [measurement] "
+                "so it can share the formal EED model"
+            )
+        historical_index_eed_model = discovery.measurement.eed_model
 
     sup_raw = _table(root, "supervisor")
     sup_default = SupervisorPolicy()
@@ -444,6 +471,8 @@ def load_autopilot_config(config_path: Path) -> AutopilotConfig:
         supervisor=supervisor,
         evidence=evidence,
         source_producer_workers=source_producer_workers,
+        historical_index_enabled=historical_index_enabled,
+        historical_index_eed_model=historical_index_eed_model,
         baseline_index=baseline_index,
         readiness=readiness,
         resource_governor=resource_governor,
@@ -465,6 +494,27 @@ def build_child_specs(config: AutopilotConfig) -> tuple[ChildSpec, ...]:
             ),
         ),
     ]
+    if config.historical_index_enabled:
+        if config.historical_index_eed_model is None:
+            raise ValueError(
+                "historical index optimizer requires an EED model"
+            )
+        specs.append(
+            ChildSpec(
+                "historical-index",
+                (
+                    py,
+                    "-m",
+                    "creeper.historical_index_service",
+                    str(config.source_producer_config),
+                    "--eed-model",
+                    str(config.historical_index_eed_model),
+                    "--owner",
+                    "historical-index",
+                    "--watch",
+                ),
+            )
+        )
     for index in range(config.source_producer_workers):
         worker_name = (
             "source-producer"
@@ -592,7 +642,7 @@ def _desired_children(
     if state is GovernorState.NORMAL:
         return set(available)
     if state is GovernorState.THROTTLED:
-        return set(available) - {"source-discovery"}
+        return set(available) - {"source-discovery", "historical-index"}
     if state is GovernorState.DRAIN_ONLY:
         return set(available) & {"readiness-worker"}
     return set()

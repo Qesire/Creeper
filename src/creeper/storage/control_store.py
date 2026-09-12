@@ -2103,6 +2103,32 @@ class ControlStore:
             state=ReservoirState(row["state"]),
         )
 
+    def exhaust_ready_reservoir(self, reservoir_id: str) -> bool:
+        """Mark an unleased READY reservoir exhausted without fabricating a lease.
+
+        Historical region optimization owns work below the reservoir cursor
+        layer, so once every leaf region is terminal there is no sequential
+        cursor to finalize. The READY guard prevents the optimizer from
+        clobbering a reservoir concurrently owned by a legacy/source worker.
+        """
+
+        from creeper.sources.reservoirs import ReservoirState
+
+        with self.connection:
+            changed = self.connection.execute(
+                """
+                UPDATE reservoirs
+                SET state = ?, cursor = NULL
+                WHERE reservoir_id = ? AND state = ?
+                """,
+                (
+                    ReservoirState.EXHAUSTED.value,
+                    reservoir_id,
+                    ReservoirState.READY.value,
+                ),
+            ).rowcount
+        return changed == 1
+
     def save_lease(self, lease: Any) -> None:
         from creeper.scheduler.leases import LeaseState
 

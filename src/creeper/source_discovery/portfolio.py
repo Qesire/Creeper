@@ -172,7 +172,7 @@ class RegionPortfolioPlanner:
     def _reference_states(
         self,
     ) -> tuple[dict[int, _CoverageState], int, bool]:
-        """Build one virtual union per MinHash width from HARVESTED regions."""
+        """Build the global virtual union of all already HARVESTED coverage."""
 
         states: dict[int, _CoverageState] = {}
         harvested = self.registry.list_regions_by_state(RegionState.HARVESTED)
@@ -307,6 +307,7 @@ class RegionPortfolioPlanner:
         *,
         max_regions: int = 8,
         byte_budget: int | None = None,
+        index_keys: set[str] | frozenset[str] | tuple[str, ...] | None = None,
     ) -> RegionPortfolioPlan:
         """Select a virtual harvest portfolio without mutating region state."""
 
@@ -314,11 +315,26 @@ class RegionPortfolioPlanner:
             raise ValueError("max_regions must be positive")
         if byte_budget is not None and byte_budget < 1:
             raise ValueError("byte_budget must be positive when supplied")
+        allowed = (
+            None
+            if index_keys is None
+            else frozenset(str(item) for item in index_keys)
+        )
+        if allowed is not None and not allowed:
+            return RegionPortfolioPlan(
+                selections=(),
+                total_harvest_bytes=0,
+                total_marginal_eed=0.0,
+                candidate_regions_considered=0,
+                harvested_reference_regions=0,
+            )
 
         candidates: list[tuple[HarvestRegion, RegionSynopsis]] = []
         for region in self.registry.list_regions_by_state(
             RegionState.HARVEST_READY
         ):
+            if allowed is not None and region.index_key not in allowed:
+                continue
             synopsis = self.registry.get_synopsis(region.region_key)
             if synopsis is None or synopsis.novel_count_for_value <= 0:
                 continue
