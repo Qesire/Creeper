@@ -491,8 +491,8 @@ def build_validation_report(
     )
     historical_probe_bytes = deltas.get("historical_index_probe_bytes", 0)
     historical_harvest_bytes = deltas.get("historical_index_harvest_bytes", 0)
-    historical_bytes = deltas.get(
-        "historical_index_network_bytes",
+    historical_io_bytes = deltas.get(
+        "historical_index_io_bytes",
         historical_probe_bytes + historical_harvest_bytes,
     )
     measured_network_requests = (
@@ -910,7 +910,7 @@ def build_validation_report(
                 "historical_index_harvest_failures", 0
             ),
             "network_requests": historical_requests,
-            "network_bytes": historical_bytes,
+            "io_bytes": historical_io_bytes,
             "direct_capsules_inserted": deltas.get(
                 "historical_index_direct_capsules_inserted", 0
             ),
