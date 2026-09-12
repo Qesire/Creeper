@@ -119,6 +119,81 @@ class EvidenceBacklogAdmissionTests(unittest.TestCase):
         self.assertTrue(all(self.control.get_evidence_task(key) is None for key in keys))
         self.assertEqual(self.admission.reserved("wayback"), 1)
 
+
+    def test_range_parent_retains_capacity_for_exact_fanout(self):
+        parent = EvidenceQueryKey(
+            "range.example",
+            TemporalScope(1996, 1998),
+            "wayback",
+            "cdx-v1",
+        )
+        reservation = self.admission.try_reserve(
+            provider="wayback",
+            amount=3,
+            capacity=3,
+            ttl_seconds=30,
+        )
+        assert reservation is not None
+
+        inserted = self.admission.enqueue_reserved(reservation, [parent])
+
+        self.assertEqual(inserted, 1)
+        # Parent occupies one nonterminal slot; two additional slots remain
+        # persistently reserved for worst-case exact fanout.
+        self.assertEqual(self.admission.reserved("wayback"), 2)
+        self.assertEqual(
+            self.admission.available_capacity(provider="wayback", capacity=3),
+            0,
+        )
+
+        self.control.claim_evidence_tasks(owner="worker", limit=1)
+        children = [
+            EvidenceQueryKey(
+                "range.example",
+                TemporalScope(year, year),
+                "wayback",
+                "cdx-v1",
+            )
+            for year in (1996, 1997, 1998)
+        ]
+        self.control.finish_range_task(
+            parent,
+            "decomposed",
+            followup_keys=children,
+            owner="worker",
+        )
+
+        self.assertEqual(self.admission.reserved("wayback"), 0)
+        self.assertEqual(
+            self.admission.available_capacity(provider="wayback", capacity=3),
+            0,
+        )
+        self.assertEqual(
+            sum(
+                1
+                for task in self.control.list_evidence_tasks()
+                if task.state == "pending"
+            ),
+            3,
+        )
+
+    def test_live_reservation_can_renew_but_expired_one_cannot(self):
+        reservation = self.admission.try_reserve(
+            provider="wayback",
+            amount=1,
+            capacity=1,
+            ttl_seconds=10,
+        )
+        assert reservation is not None
+        self.now = 1_005.0
+
+        renewed = self.admission.renew(reservation, ttl_seconds=20)
+
+        self.assertGreaterEqual(renewed.expires_at, 1_025.0)
+        self.now = 1_026.0
+        with self.assertRaisesRegex(RuntimeError, "expired before renewal"):
+            self.admission.renew(renewed, ttl_seconds=20)
+
     def test_expired_crash_reservation_is_reaped_on_next_admission(self):
         reservation = self.admission.try_reserve(
             provider="wayback", amount=2, capacity=2, ttl_seconds=10
