@@ -63,6 +63,8 @@ def ensure_curated_direct_catalogs(
     """Idempotently add audited catalog entrypoints to the cold pool."""
     inserted = 0
     for candidate in curated_direct_catalogs():
+        if registry.get_candidate(candidate.source_key) is not None:
+            continue
         _, created = registry.register_proposal(candidate)
         inserted += int(created)
     return inserted
