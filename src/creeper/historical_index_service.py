@@ -58,6 +58,7 @@ from creeper.source_discovery.tomography_service import RegionTomographyService
 from creeper.sources.reservoirs import ReservoirState
 from creeper.storage.control_store import ControlStore
 from creeper.storage.evidence_store import EvidenceStore
+from creeper.storage.telemetry_store import RuntimeTelemetryStore
 
 
 @dataclass(frozen=True)
@@ -410,6 +411,13 @@ def load_historical_index_optimizer_config(
                 ),
                 name="historical_index.claim_grace_seconds",
             ),
+            boundary_record_max_bytes=_positive_int(
+                raw.get(
+                    "boundary_record_max_bytes",
+                    harvest_default.boundary_record_max_bytes,
+                ),
+                name="historical_index.boundary_record_max_bytes",
+            ),
         ),
     )
 
@@ -432,6 +440,9 @@ class HistoricalIndexOptimizerRuntime:
         self.owner = owner
         self.control = ControlStore(config.runtime_data_root / "control.sqlite3")
         self.evidence = EvidenceStore(config.runtime_data_root / "evidence.sqlite3")
+        self.telemetry = RuntimeTelemetryStore(
+            config.runtime_data_root / "telemetry.sqlite3"
+        )
         self.baseline = BaselineIndex(config.baseline_index)
         self.discovery = SourceDiscoveryRegistry(self.control)
         self.compiler = SourceActivationCompiler(
@@ -487,6 +498,7 @@ class HistoricalIndexOptimizerRuntime:
     async def close(self) -> None:
         if self._owns_client:
             await self.client.aclose()
+        self.telemetry.close()
         self.evidence.close()
         self.baseline.close()
         self.control.close()
@@ -580,6 +592,7 @@ class HistoricalIndexOptimizerRuntime:
         return exhausted
 
     async def run_once(self) -> HistoricalIndexCycleReport:
+        cycle_started = time.perf_counter()
         compiled, compile_errors = self._compile_active_sources()
         errors = list(compile_errors)
         eligible = self._eligible_ready_indexes()
@@ -620,7 +633,7 @@ class HistoricalIndexOptimizerRuntime:
             self._eligible_ready_indexes()
         )
 
-        return HistoricalIndexCycleReport(
+        cycle = HistoricalIndexCycleReport(
             compiled_active_sources=compiled,
             compile_failures=len(compile_errors),
             eligible_ready_indexes=len(eligible),
@@ -643,6 +656,44 @@ class HistoricalIndexOptimizerRuntime:
             recovered_expired_claims=harvest.recovered_expired_claims,
             errors=tuple(errors),
         )
+        elapsed_ms = max(
+            0,
+            int(round((time.perf_counter() - cycle_started) * 1000.0)),
+        )
+        network_requests = cycle.probe_requests + cycle.harvest_requests
+        network_bytes = cycle.probe_bytes_read + cycle.harvest_bytes_read
+        self.telemetry.add_counters(
+            {
+                "historical_index_cycles": 1,
+                "historical_index_probe_attempts": cycle.probe_attempts,
+                "historical_index_probe_requests": cycle.probe_requests,
+                "historical_index_probe_bytes": cycle.probe_bytes_read,
+                "historical_index_probe_failures": cycle.probes_failed,
+                "historical_index_harvest_requests": cycle.harvest_requests,
+                "historical_index_harvest_bytes": cycle.harvest_bytes_read,
+                "historical_index_harvest_failures": len(
+                    cycle.harvest_failed_regions
+                ),
+                "historical_index_network_requests": network_requests,
+                "historical_index_network_bytes": network_bytes,
+                "historical_index_direct_capsules_inserted": (
+                    cycle.direct_capsules_inserted
+                ),
+                "historical_index_exhausted_reservoirs": (
+                    cycle.exhausted_reservoirs
+                ),
+                "historical_index_compile_failures": cycle.compile_failures,
+                "historical_index_wall_milliseconds": elapsed_ms,
+            }
+        )
+        self.telemetry.set_gauges(
+            {
+                "historical_index_eligible_ready_indexes": (
+                    cycle.eligible_ready_indexes
+                ),
+            }
+        )
+        return cycle
 
 
 class _OptimizerLock:
