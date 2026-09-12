@@ -602,7 +602,7 @@ def _accumulate_watch_report(
         "direct_capsules_committed",
         "rdap_shadow_tasks_enqueued",
     ):
-        total[key] = int(total[key]) + int(report[key])
+        total[key] = int(total[key]) + int(report.get(key, 0))
     total["admission_blocked"] = bool(total["admission_blocked"]) or bool(
         report["admission_blocked"]
     )
