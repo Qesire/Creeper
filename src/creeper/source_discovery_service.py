@@ -110,6 +110,29 @@ def _optional_path(value: Any, *, config_path: Path, name: str) -> Path | None:
     return _resolve_path(value, config_path=config_path, name=name)
 
 
+def _resolve_agent_command(
+    values: list[str],
+    *,
+    config_path: Path,
+) -> tuple[str, ...]:
+    """Resolve path-like command arguments relative to the config file.
+
+    Executable names such as python or codex remain PATH-resolved. Relative
+    script/config paths containing a path separator are made absolute against
+    the TOML directory, so daemon startup does not depend on shell cwd.
+    """
+    resolved: list[str] = []
+    for value in values:
+        path = Path(value)
+        if (
+            not path.is_absolute()
+            and ("/" in value or "\\\\" in value)
+        ):
+            value = str((config_path.parent / path).resolve())
+        resolved.append(value)
+    return tuple(resolved)
+
+
 def _nonnegative_int(value: Any, *, name: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         raise ValueError(f"{name} must be a non-negative integer")
@@ -249,7 +272,10 @@ def load_source_discovery_config(config_path: Path) -> SourceDiscoveryServiceCon
         require_year_bounds=_strict_bool(admission_raw.get("require_year_bounds", True), name="admission.require_year_bounds"),
     )
     agent = AgentConfig(
-        command=tuple(raw_command),
+        command=_resolve_agent_command(
+            raw_command,
+            config_path=config_path,
+        ),
         backend=backend,
         actor=actor,
         cwd=_optional_path(agent_raw.get("cwd"), config_path=config_path, name="agent.cwd"),
