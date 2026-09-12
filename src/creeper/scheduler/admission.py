@@ -407,13 +407,6 @@ class EvidenceBacklogAdmission:
             )
 
     def reserved(self, provider: str, *, now: float | None = None) -> int:
+        """Return all live capacity held outside durable backlog rows."""
         current = self._now() if now is None else float(now)
-        row = self.connection.execute(
-            """
-            SELECT COALESCE(SUM(amount), 0)
-            FROM evidence_capacity_reservations
-            WHERE provider = ? AND expires_at > ?
-            """,
-            (provider, current),
-        ).fetchone()
-        return int(row[0] or 0)
+        return self._reserved_locked(provider, current)
