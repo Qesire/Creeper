@@ -236,7 +236,7 @@ class StaticSourceRuntime:
         self.close()
 
     def run_once(self) -> dict[str, object]:
-        rdap_shadow = _backfill_rdap_shadow(self)
+        rdap_shadow = 0
         reservoir = self.control.get_reservoir(self.reservoir_id)
         if reservoir is None:
             raise RuntimeError(
@@ -259,6 +259,7 @@ class StaticSourceRuntime:
             headroom // capacity_per_record,
         )
         if lease_records < 1:
+            rdap_shadow = _backfill_rdap_shadow(self)
             report = SourceProducerReport(
                 admission_blocked=reservoir.state is ReservoirState.READY
             ).as_dict()
@@ -528,7 +529,16 @@ class ActivatedSourceRuntime:
         return len(candidates)
 
     def run_once(self) -> dict[str, object]:
-        rdap_shadow = _backfill_rdap_shadow(self)
+        wayback_headroom = self.producer.admission.available_capacity(
+            provider="wayback",
+            capacity=self.backlog_capacity,
+        )
+        rdap_shadow = (
+            _backfill_rdap_shadow(self)
+            if wayback_headroom
+            < EvidencePlanner.MAX_BACKLOG_CAPACITY_PER_OBSERVATION
+            else 0
+        )
         self.refresh_workset()
         report = self.producer.run_once().as_dict()
         report["rdap_shadow_tasks_enqueued"] = rdap_shadow
