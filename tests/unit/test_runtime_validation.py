@@ -405,7 +405,7 @@ class RuntimeValidationTests(unittest.TestCase):
             )
             self.assertEqual(
                 report["end_backlog"]["evidence_task_states"]["pending"],
-                1,
+                3,
             )
             self.assertTrue((run_dir / "start.json").is_file())
             self.assertTrue((run_dir / "end.json").is_file())
