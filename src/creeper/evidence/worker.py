@@ -118,6 +118,7 @@ class AsyncEvidenceWorker:
         if unknown_limits:
             raise KeyError(f"inflight configured for unknown providers: {sorted(unknown_limits)}")
         self._semaphores: dict[str, asyncio.Semaphore] = {}
+        self._provider_inflight_limits: dict[str, int] = {}
         # Bounded striped locks prevent overlapping queries for the same host
         # without retaining one Lock per hostname across a multi-million task run.
         self._host_lock_stripes = tuple(asyncio.Lock() for _ in range(4096))
@@ -126,6 +127,81 @@ class AsyncEvidenceWorker:
             if not isinstance(limit, int) or limit < 1:
                 raise ValueError("provider inflight limits must be positive integers")
             self._semaphores[provider] = asyncio.Semaphore(limit)
+            self._provider_inflight_limits[provider] = limit
+
+    def _claim_balanced(self, limit: int) -> list[EvidenceTask]:
+        """Claim one bounded window while reserving capacity per provider.
+
+        Independent providers own independent network budgets. A single global
+        ORDER BY must not let a deep Wayback/domain backlog consume every
+        claimed execution slot while RDAP (or a future independent provider)
+        sits idle. Reserve up to each provider's configured inflight capacity,
+        then fill the remaining window using the normal competition-value order.
+        """
+        if limit < 1:
+            return []
+
+        providers = tuple(self.providers)
+        if len(providers) == 1:
+            return self.queue.claim(
+                owner=self.owner,
+                limit=limit,
+                providers=providers,
+                lease_seconds=self.lease_seconds,
+            )
+
+        quotas = {provider: 0 for provider in providers}
+        reserve_budget = min(
+            limit,
+            sum(self._provider_inflight_limits.values()),
+        )
+
+        # First guarantee one claim opportunity per provider when the window
+        # can hold it, then round-robin toward each provider's inflight limit.
+        remaining = reserve_budget
+        for provider in providers:
+            if remaining <= 0:
+                break
+            quotas[provider] = 1
+            remaining -= 1
+        while remaining > 0:
+            progressed = False
+            for provider in providers:
+                if remaining <= 0:
+                    break
+                if quotas[provider] >= self._provider_inflight_limits[provider]:
+                    continue
+                quotas[provider] += 1
+                remaining -= 1
+                progressed = True
+            if not progressed:
+                break
+
+        claimed: list[EvidenceTask] = []
+        for provider in providers:
+            quota = quotas[provider]
+            if quota <= 0:
+                continue
+            claimed.extend(
+                self.queue.claim(
+                    owner=self.owner,
+                    limit=quota,
+                    providers=(provider,),
+                    lease_seconds=self.lease_seconds,
+                )
+            )
+
+        remaining_window = limit - len(claimed)
+        if remaining_window > 0:
+            claimed.extend(
+                self.queue.claim(
+                    owner=self.owner,
+                    limit=remaining_window,
+                    providers=providers,
+                    lease_seconds=self.lease_seconds,
+                )
+            )
+        return claimed
 
     def _retry_at(self, attempt: int) -> float:
         exponent = max(0, int(attempt) - 1)
@@ -261,12 +337,7 @@ class AsyncEvidenceWorker:
         """
         loop = asyncio.get_running_loop()
         claim_started = loop.time()
-        tasks = self.queue.claim(
-            owner=self.owner,
-            limit=self.claim_batch_size,
-            providers=self.providers,
-            lease_seconds=self.lease_seconds,
-        )
+        tasks = self._claim_balanced(self.claim_batch_size)
         self.claim_wait_milliseconds += max(
             0,
             int(round((loop.time() - claim_started) * 1000.0)),
@@ -490,12 +561,7 @@ class AsyncEvidenceWorker:
             if limit < 1:
                 return []
             started = loop.time()
-            tasks = self.queue.claim(
-                owner=self.owner,
-                limit=limit,
-                providers=self.providers,
-                lease_seconds=self.lease_seconds,
-            )
+            tasks = self._claim_balanced(limit)
             self.claim_wait_milliseconds += max(
                 0,
                 int(round((loop.time() - started) * 1000.0)),
