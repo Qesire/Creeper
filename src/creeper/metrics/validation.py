@@ -400,6 +400,10 @@ def build_validation_report(
     http_5xx = deltas.get("wayback_http_5xx", 0)
     transport_errors = deltas.get("wayback_transport_errors", 0)
     http_elapsed_ms = deltas.get("wayback_http_elapsed_ms", 0)
+    rdap_requests = deltas.get("rdap_http_requests", 0)
+    rdap_429 = deltas.get("rdap_http_429", 0)
+    rdap_5xx = deltas.get("rdap_http_5xx", 0)
+    rdap_transport_errors = deltas.get("rdap_transport_errors", 0)
     request_start_segments = deltas.get("wayback_request_start_segments", 0)
     request_start_gaps = deltas.get("wayback_request_start_gaps", 0)
     request_start_gap_ms = deltas.get("wayback_request_start_gap_ms", 0)
@@ -434,9 +438,17 @@ def build_validation_report(
     )
     end_gauges = end.get("telemetry_gauges", {})
     configured_rps = Decimal("0")
+    rdap_configured_rps = Decimal("0")
+    rdap_effective_rps = Decimal("0")
     if isinstance(end_gauges, dict):
         configured_rps = _decimal(
             end_gauges.get("wayback_configured_requests_per_second")
+        ) or Decimal("0")
+        rdap_configured_rps = _decimal(
+            end_gauges.get("rdap_configured_requests_per_second")
+        ) or Decimal("0")
+        rdap_effective_rps = _decimal(
+            end_gauges.get("rdap_effective_requests_per_second")
         ) or Decimal("0")
 
     valid = (
@@ -729,6 +741,41 @@ def build_validation_report(
             "circuit_open_events": deltas.get("wayback_circuit_open_events", 0),
             "circuit_fast_failures": deltas.get(
                 "wayback_circuit_fast_failures", 0
+            ),
+        },
+        "rdap_provider": {
+            "requests": rdap_requests,
+            "configured_requests_per_second": (
+                None
+                if rdap_configured_rps <= 0
+                else format(rdap_configured_rps, "f")
+            ),
+            "effective_requests_per_second_end": (
+                None
+                if rdap_effective_rps <= 0
+                else format(rdap_effective_rps, "f")
+            ),
+            "http_429": rdap_429,
+            "http_429_fraction": ratio(rdap_429, rdap_requests),
+            "http_5xx": rdap_5xx,
+            "http_5xx_fraction": ratio(rdap_5xx, rdap_requests),
+            "transport_errors": rdap_transport_errors,
+            "transport_error_fraction": ratio(
+                rdap_transport_errors,
+                rdap_requests,
+            ),
+            "throttle_events": deltas.get("rdap_throttle_events", 0),
+            "cooldown_wait_milliseconds": deltas.get(
+                "rdap_cooldown_wait_ms", 0
+            ),
+            "rate_limit_wait_milliseconds": deltas.get(
+                "rdap_rate_limit_wait_ms", 0
+            ),
+            "adaptive_rate_decreases": deltas.get(
+                "rdap_adaptive_rate_decreases", 0
+            ),
+            "adaptive_rate_increases": deltas.get(
+                "rdap_adaptive_rate_increases", 0
             ),
         },
         "source_progress_observed": source_progress_observed,
