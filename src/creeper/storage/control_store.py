@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import sqlite3
 import time
 from dataclasses import dataclass
@@ -262,6 +263,7 @@ class ControlStore:
                 parent_hostname TEXT PRIMARY KEY,
                 observed_self INTEGER NOT NULL DEFAULT 0 CHECK(observed_self IN (0,1)),
                 child_count INTEGER NOT NULL DEFAULT 0 CHECK(child_count >= 0),
+                child_sketch INTEGER NOT NULL DEFAULT 0 CHECK(child_sketch >= 0),
                 query_enqueued INTEGER NOT NULL DEFAULT 0 CHECK(query_enqueued IN (0,1)),
                 rdap_enqueued INTEGER NOT NULL DEFAULT 0 CHECK(rdap_enqueued IN (0,1)),
                 first_source_key TEXT,
@@ -300,6 +302,12 @@ class ControlStore:
                 "ALTER TABLE domain_fanout_state ADD COLUMN "
                 "rdap_enqueued INTEGER NOT NULL DEFAULT 0 "
                 "CHECK(rdap_enqueued IN (0,1))"
+            )
+        if "child_sketch" not in fanout_columns:
+            self.connection.execute(
+                "ALTER TABLE domain_fanout_state ADD COLUMN "
+                "child_sketch INTEGER NOT NULL DEFAULT 0 "
+                "CHECK(child_sketch >= 0)"
             )
         self.connection.executescript(
             """
@@ -365,83 +373,83 @@ class ControlStore:
         *,
         source_key: str | None = None,
     ) -> int:
-        """Accumulate one-level parent/child fanout from normalized observations.
+        """Accumulate bounded distinct-child fanout sketches per parent.
 
-        A parent is eligible for domain amplification only if it was also
-        observed as an exact hostname, preventing accidental broad queries for
-        bare public-suffix-like labels.
+        Storage is O(parent domains), not O(observed hostnames): each parent
+        owns one 63-bit sketch. Hash collisions can only under-count fanout,
+        which is a safe false-negative for the amplification threshold.
         """
-        values = []
-        for raw in hostnames:
-            hostname = normalize_official(str(raw))
-            if hostname is not None:
-                values.append(hostname)
-        values = list(dict.fromkeys(values))
+        values = list(dict.fromkeys(
+            hostname
+            for raw in hostnames
+            if (hostname := normalize_official(str(raw))) is not None
+        ))
         if not values:
             return 0
+
+        batch_bits: dict[str, int] = {}
+        for hostname in values:
+            labels = hostname.split(".")
+            if len(labels) < 3:
+                continue
+            parent_labels = labels[1:]
+            # Do not manufacture broad ccTLD suffixes such as co.uk. A
+            # three-label parent such as example.co.uk remains eligible.
+            if len(parent_labels[-1]) == 2 and len(parent_labels) < 3:
+                continue
+            parent = ".".join(parent_labels)
+            digest = hashlib.blake2s(
+                hostname.encode("utf-8"),
+                digest_size=8,
+            ).digest()
+            bit = 1 << (int.from_bytes(digest, "big") % 63)
+            batch_bits[parent] = batch_bits.get(parent, 0) | bit
+
+        if not batch_bits:
+            return 0
+
         now = float(self.clock())
-        parents: set[str] = set()
         before = self.connection.total_changes
         with self.connection:
-            for hostname in values:
-                self.connection.execute(
+            for parent, bits in batch_bits.items():
+                row = self.connection.execute(
                     """
-                    INSERT INTO domain_fanout_state(
-                        parent_hostname, observed_self, child_count,
-                        query_enqueued, first_source_key, updated_at
-                    ) VALUES (?, 1, 0, 0, ?, ?)
-                    ON CONFLICT(parent_hostname) DO UPDATE SET
-                        observed_self = 1,
-                        first_source_key = COALESCE(
-                            domain_fanout_state.first_source_key,
-                            excluded.first_source_key
-                        ),
-                        updated_at = excluded.updated_at
-                    """,
-                    (hostname, source_key, now),
-                )
-                labels = hostname.split(".")
-                if len(labels) < 3:
-                    continue
-                parent = ".".join(labels[1:])
-                parents.add(parent)
-                self.connection.execute(
-                    """
-                    INSERT INTO domain_fanout_state(
-                        parent_hostname, observed_self, child_count,
-                        query_enqueued, first_source_key, updated_at
-                    ) VALUES (?, 0, 0, 0, ?, ?)
-                    ON CONFLICT(parent_hostname) DO UPDATE SET
-                        first_source_key = COALESCE(
-                            domain_fanout_state.first_source_key,
-                            excluded.first_source_key
-                        ),
-                        updated_at = excluded.updated_at
-                    """,
-                    (parent, source_key, now),
-                )
-                self.connection.execute(
-                    """
-                    INSERT OR IGNORE INTO domain_fanout_members(
-                        parent_hostname, child_hostname
-                    ) VALUES (?, ?)
-                    """,
-                    (parent, hostname),
-                )
-            for parent in parents:
-                self.connection.execute(
-                    """
-                    UPDATE domain_fanout_state
-                    SET child_count = (
-                        SELECT COUNT(*)
-                        FROM domain_fanout_members m
-                        WHERE m.parent_hostname = domain_fanout_state.parent_hostname
-                    ),
-                    updated_at = ?
+                    SELECT child_count, child_sketch, first_source_key
+                    FROM domain_fanout_state
                     WHERE parent_hostname = ?
                     """,
-                    (now, parent),
-                )
+                    (parent,),
+                ).fetchone()
+                if row is None:
+                    combined = bits
+                    count = combined.bit_count()
+                    self.connection.execute(
+                        """
+                        INSERT INTO domain_fanout_state(
+                            parent_hostname, observed_self, child_count,
+                            child_sketch, query_enqueued, rdap_enqueued,
+                            first_source_key, updated_at
+                        ) VALUES (?, 0, ?, ?, 0, 0, ?, ?)
+                        """,
+                        (parent, count, combined, source_key, now),
+                    )
+                else:
+                    combined = int(row["child_sketch"] or 0) | bits
+                    count = max(
+                        int(row["child_count"] or 0),
+                        combined.bit_count(),
+                    )
+                    self.connection.execute(
+                        """
+                        UPDATE domain_fanout_state
+                        SET child_count = ?,
+                            child_sketch = ?,
+                            first_source_key = COALESCE(first_source_key, ?),
+                            updated_at = ?
+                        WHERE parent_hostname = ?
+                        """,
+                        (count, combined, source_key, now, parent),
+                    )
         return self.connection.total_changes - before
 
     def ready_domain_fanout_candidates(
@@ -456,8 +464,7 @@ class ControlStore:
             """
             SELECT parent_hostname
             FROM domain_fanout_state
-            WHERE observed_self = 1
-              AND query_enqueued = 0
+            WHERE query_enqueued = 0
               AND child_count >= ?
             ORDER BY child_count DESC, parent_hostname
             LIMIT ?
