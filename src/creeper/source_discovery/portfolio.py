@@ -225,13 +225,20 @@ class RegionPortfolioPlanner:
         sketch = _valid_sketch(synopsis)
         jaccard: float | None = None
         if sketch is None:
-            containment = self.policy.unknown_overlap_penalty
+            containment = (
+                self.policy.unknown_overlap_penalty
+                if states or unknown_reference
+                else 0.0
+            )
         else:
             state = states.get(len(sketch.values))
             if state is None or state.estimated_cardinality <= 0:
+                # Existing coverage with an incompatible sketch width cannot be
+                # compared safely. Treat it like unsketched coverage rather
+                # than pretending the candidate is disjoint.
                 containment = (
                     self.policy.unknown_overlap_penalty
-                    if unknown_reference
+                    if states or unknown_reference
                     else 0.0
                 )
             elif cardinality <= 0:
@@ -359,7 +366,13 @@ class RegionPortfolioPlanner:
             )
             selections.append(estimate)
             spent += estimate.estimated_harvest_bytes
+            sketch = _valid_sketch(synopsis)
             self._add_to_state(states, estimate, synopsis)
+            if (
+                sketch is None
+                and estimate.estimated_total_novel_items > 0
+            ):
+                unknown_reference = True
             remaining = [
                 (candidate, candidate_synopsis)
                 for candidate, candidate_synopsis in remaining
