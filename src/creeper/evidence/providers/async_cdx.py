@@ -100,6 +100,11 @@ class AsyncWaybackCDXClient:
         self.throttle_responses = 0
         self.transport_errors = 0
         self.http_elapsed_milliseconds = 0
+        # Operational wait-state telemetry only. These counters never
+        # participate in evidence or submission authority.
+        self.cooldown_wait_milliseconds = 0
+        self.rate_limit_wait_milliseconds = 0
+        self.retry_backoff_wait_milliseconds = 0
         self.http_latency_buckets: Counter[str] = Counter()
         self.http_status_counts: Counter[int] = Counter()
         self._cooldown_until = 0.0
@@ -201,7 +206,22 @@ class AsyncWaybackCDXClient:
                 remaining = self._cooldown_until - loop.time()
             if remaining <= 0:
                 return
+            started = loop.time()
             await asyncio.sleep(remaining)
+            self.cooldown_wait_milliseconds += max(
+                0,
+                int(round((loop.time() - started) * 1000.0)),
+            )
+
+    async def _sleep_retry_backoff(self, seconds: float) -> None:
+        """Measure Tenacity retry sleep without changing retry semantics."""
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        await asyncio.sleep(float(seconds))
+        self.retry_backoff_wait_milliseconds += max(
+            0,
+            int(round((loop.time() - started) * 1000.0)),
+        )
 
     async def _register_throttle(self, response: httpx.Response) -> None:
         self.throttle_responses += 1
@@ -212,6 +232,7 @@ class AsyncWaybackCDXClient:
 
     async def _get(self, params: dict[str, str]) -> httpx.Response:
         retrying = AsyncRetrying(
+            sleep=self._sleep_retry_backoff,
             stop=stop_after_attempt(self.max_retries + 1),
             wait=self._wait_policy(),
             retry=retry_if_exception(_retryable_http_error),
@@ -256,11 +277,17 @@ class AsyncWaybackCDXClient:
                 if self._limiter is None:
                     response = await request_once()
                 else:
-                    async with self._limiter:
-                        # Cooldown may have been extended while this coroutine
-                        # was waiting for a rate token.
-                        await self._wait_for_cooldown()
-                        response = await request_once()
+                    loop = asyncio.get_running_loop()
+                    limiter_started = loop.time()
+                    await self._limiter.acquire()
+                    self.rate_limit_wait_milliseconds += max(
+                        0,
+                        int(round((loop.time() - limiter_started) * 1000.0)),
+                    )
+                    # Cooldown may have been extended while this coroutine
+                    # was waiting for a rate token.
+                    await self._wait_for_cooldown()
+                    response = await request_once()
                 self.http_status_counts[int(response.status_code)] += 1
                 if response.status_code == 429 or response.status_code == 503:
                     await self._register_throttle(response)
