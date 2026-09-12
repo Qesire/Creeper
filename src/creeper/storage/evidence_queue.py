@@ -107,15 +107,24 @@ class DurableEvidenceQueue:
               AND (lease_until IS NULL OR lease_until <= ?)
               AND (retry_at IS NULL OR retry_at <= ?)
               AND provider IN ({placeholders})
-            -- Prefer wider temporal probes because one provider request can
-            -- yield multiple host-years, then interleave exact-year work by
-            -- year before hostname so one claim window is not packed with
-            -- serial same-host tasks.
-            ORDER BY provider,
+            -- Competition-value order:
+            -- 1) domain amplification can return many host-years/request;
+            -- 2) RDAP runs on an independent provider budget;
+            -- 3) wider probes can return multiple years;
+            -- 4) official EED weight breaks ties toward higher score value.
+            ORDER BY
+                     CASE
+                         WHEN policy_version LIKE 'cdx-domain-%' THEN 3
+                         WHEN provider = 'rdap' THEN 2
+                         WHEN year_to > year_from THEN 1
+                         ELSE 0
+                     END DESC,
+                     eed_weight DESC,
                      (year_to - year_from) DESC,
                      year_from,
                      hostname,
                      year_to,
+                     provider,
                      policy_version
             LIMIT ?
         """
