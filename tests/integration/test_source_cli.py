@@ -159,7 +159,7 @@ class SourceProducerCliTests(unittest.TestCase):
                         "lease_max_requests = 4",
                         "lease_max_bytes = 4096",
                         "lease_max_seconds = 30",
-                        "evidence_backlog_capacity = 4",
+                        "evidence_backlog_capacity = 9",
                     ]
                 ),
                 encoding="utf-8",
@@ -252,7 +252,7 @@ class SourceProducerCliTests(unittest.TestCase):
                 "lease_max_requests": 4,
                 "lease_max_bytes": 4096,
                 "lease_max_seconds": 30,
-                "evidence_backlog_capacity": 4,
+                "evidence_backlog_capacity": 14,
             }
             with ActivatedSourceRuntime(
                 root / "activated.toml",
@@ -270,6 +270,7 @@ class SourceProducerCliTests(unittest.TestCase):
                 candidate_runtime = runtime.producer.candidates[0]
                 self.assertAlmostEqual(candidate_runtime.expected_novel_eed, 1.0)
                 self.assertEqual(candidate_runtime.costs.evidence_network, 2.0)
+                self.assertEqual(candidate_runtime.reservation_evidence_tasks, 12)
 
     def test_static_runtime_shrinks_lease_to_backlog_headroom(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -474,7 +475,7 @@ class SourceProducerCliTests(unittest.TestCase):
                         "lease_max_requests = 1",
                         "lease_max_bytes = 1024",
                         "lease_max_seconds = 30",
-                        "evidence_backlog_capacity = 4",
+                        "evidence_backlog_capacity = 6",
                     ]
                 ),
                 encoding="utf-8",
