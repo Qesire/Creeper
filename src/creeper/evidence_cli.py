@@ -122,6 +122,7 @@ async def run_service(
             previous_host_lock_wait_ms = 0
             previous_inflight_wait_ms = 0
             previous_claim_wait_ms = 0
+            previous_request_start_segments = 0
             previous_request_start_gaps = 0
             previous_request_start_gap_ms = 0
             previous_request_start_excess_gap_ms = 0
@@ -160,6 +161,7 @@ async def run_service(
                 nonlocal previous_retry_backoff_wait_ms
                 nonlocal previous_host_lock_wait_ms, previous_inflight_wait_ms
                 nonlocal previous_claim_wait_ms
+                nonlocal previous_request_start_segments
                 nonlocal previous_request_start_gaps
                 nonlocal previous_request_start_gap_ms
                 nonlocal previous_request_start_excess_gap_ms
@@ -192,6 +194,7 @@ async def run_service(
                         "evidence_inserted_capsules": report.inserted_capsules,
                         "evidence_pass_results": report.pass_count,
                         "evidence_empty_exhaustive_results": report.empty_exhaustive_count,
+                        "evidence_decomposed_results": report.decomposed_count,
                         "evidence_invalid_results": report.invalid_count,
                         "evidence_incomplete_results": report.incomplete_count,
                         "evidence_transient_error_results": report.transient_error_count,
@@ -222,6 +225,10 @@ async def run_service(
                         "wayback_retry_backoff_wait_ms": (
                             provider.retry_backoff_wait_milliseconds
                             - previous_retry_backoff_wait_ms
+                        ),
+                        "wayback_request_start_segments": (
+                            provider.request_start_segments
+                            - previous_request_start_segments
                         ),
                         "wayback_request_start_gaps": (
                             provider.request_start_gaps
@@ -286,6 +293,7 @@ async def run_service(
                 previous_cooldown_wait_ms = provider.cooldown_wait_milliseconds
                 previous_rate_limit_wait_ms = provider.rate_limit_wait_milliseconds
                 previous_retry_backoff_wait_ms = provider.retry_backoff_wait_milliseconds
+                previous_request_start_segments = provider.request_start_segments
                 previous_request_start_gaps = provider.request_start_gaps
                 previous_request_start_gap_ms = (
                     provider.request_start_gap_milliseconds
@@ -313,6 +321,9 @@ async def run_service(
                     empty_exhaustive_count=(
                         total.empty_exhaustive_count
                         + report.empty_exhaustive_count
+                    ),
+                    decomposed_count=(
+                        total.decomposed_count + report.decomposed_count
                     ),
                     invalid_count=total.invalid_count + report.invalid_count,
                     incomplete_count=total.incomplete_count + report.incomplete_count,
