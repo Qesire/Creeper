@@ -954,10 +954,10 @@ class MeasuredYieldScoutExecutor:
                 truncated=download.truncated,
             )
         except (WarcFormatError, ValueError, csv.Error) as exc:
-            detail = str(exc).strip().replace("\\n", " ")[:240]
+            detail = str(exc).strip().replace("\n", " ")[:240]
             measurement = None
             if download.payload.lstrip().startswith(
-                (b"WARC/", b"ARC/", b"\\x1f\\x8b")
+                (b"WARC/", b"ARC/", b"\x1f\x8b")
             ):
                 elapsed = max(0.0, float(self.clock()) - started)
                 measurement = self._measurement(
