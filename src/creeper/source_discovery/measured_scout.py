@@ -17,7 +17,7 @@ import json
 import math
 import time
 import zlib
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from decimal import Decimal
 from pathlib import PurePosixPath
 from urllib.parse import urlsplit
@@ -1066,6 +1066,28 @@ class MeasuredYieldScoutExecutor:
             )
         )
 
+    @staticmethod
+    def _with_cumulative_cost(
+        result: ScoutResult,
+        *,
+        requests: int,
+        bytes_read: int,
+    ) -> ScoutResult:
+        measurement = result.measurement
+        if measurement is None:
+            return result
+        return ScoutResult(
+            result.disposition,
+            measurement=replace(
+                measurement,
+                requests=requests,
+                bytes_read=bytes_read,
+            ),
+            reason=result.reason,
+            discovered_candidates=result.discovered_candidates,
+            edge_relation=result.edge_relation,
+        )
+
     async def __call__(self, candidate: SourceCandidate) -> ScoutResult:
         started = float(self.clock())
         url = candidate.canonical_entrypoint
@@ -1078,48 +1100,74 @@ class MeasuredYieldScoutExecutor:
             self._windowable_line_resource(url)
             and initial_budget < self.policy.max_download_bytes
         )
-        if progressive:
-            initial = await self._download_sample(
-                url,
-                max_download_bytes=initial_budget,
-                sample_windows=1,
-            )
-            first_result = self._evaluate_download(
+        if not progressive:
+            download = await self._download_sample(url)
+            return self._evaluate_download(
                 candidate,
-                initial,
+                download,
                 started=started,
             )
-            if self._early_accept(first_result):
+
+        # Four cumulative fidelity targets approximate
+        # 64 KiB -> 512 KiB -> 2 MiB -> full configured budget. Each stage
+        # spends only the *incremental* bytes required to reach its target, so
+        # the complete scout remains within max_download_bytes.
+        targets = {
+            initial_budget,
+            min(self.policy.max_download_bytes, max(initial_budget, 512 * 1024)),
+            min(self.policy.max_download_bytes, max(initial_budget, 2 * 1024 * 1024)),
+            self.policy.max_download_bytes,
+        }
+        stage_targets = sorted(targets)
+        spent_bytes = 0
+        spent_requests = 0
+        last_result: ScoutResult | None = None
+
+        for index, target in enumerate(stage_targets):
+            incremental_budget = target - spent_bytes
+            if incremental_budget <= 0:
+                continue
+            windows = min(
+                self.policy.sample_windows,
+                max(1, index + 1),
+            )
+            download = await self._download_sample(
+                url,
+                max_download_bytes=incremental_budget,
+                sample_windows=windows,
+            )
+            spent_bytes += download.bytes_read
+            spent_requests += download.requests
+            result = self._evaluate_download(
+                candidate,
+                download,
+                started=started,
+            )
+            result = self._with_cumulative_cost(
+                result,
+                requests=spent_requests,
+                bytes_read=spent_bytes,
+            )
+            last_result = result
+
+            if self._early_accept(result):
                 return ScoutResult(
                     ScoutDisposition.WARM,
-                    measurement=first_result.measurement,
+                    measurement=result.measurement,
                     reason=(
                         "progressive scout early-accepted a strongly positive "
-                        "low-fidelity sample"
+                        f"fidelity stage {index + 1}/{len(stage_targets)}"
                     ),
                 )
-            if self._early_reject(first_result):
+            if self._early_reject(result):
                 return ScoutResult(
                     ScoutDisposition.HOLD,
-                    measurement=first_result.measurement,
+                    measurement=result.measurement,
                     reason=(
-                        "progressive scout early-stopped a saturated "
-                        "low-yield sample"
+                        "progressive scout early-stopped a saturated low-yield "
+                        f"fidelity stage {index + 1}/{len(stage_targets)}"
                     ),
                 )
 
-        remaining_budget = self.policy.max_download_bytes
-        if progressive:
-            remaining_budget = max(
-                1,
-                self.policy.max_download_bytes - initial.bytes_read,
-            )
-        download = await self._download_sample(
-            url,
-            max_download_bytes=remaining_budget,
-        )
-        return self._evaluate_download(
-            candidate,
-            download,
-            started=started,
-        )
+        assert last_result is not None
+        return last_result
