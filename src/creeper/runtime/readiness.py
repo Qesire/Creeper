@@ -161,45 +161,6 @@ class IncrementalReadinessLedger:
                 """,
                 (baseline_signature, model_signature),
             )
-            for task_kind in sorted(task_kind_counts):
-                current_kind = self.connection.execute(
-                    """
-                    SELECT novel_host_years, novel_eed
-                    FROM readiness_task_kind WHERE task_kind = ?
-                    """,
-                    (task_kind,),
-                ).fetchone()
-                if current_kind is None:
-                    self.connection.execute(
-                        """
-                        INSERT INTO readiness_task_kind(
-                            task_kind, novel_host_years, novel_eed
-                        ) VALUES (?, ?, ?)
-                        """,
-                        (
-                            task_kind,
-                            task_kind_counts[task_kind],
-                            format(task_kind_eed[task_kind], "f"),
-                        ),
-                    )
-                else:
-                    self.connection.execute(
-                        """
-                        UPDATE readiness_task_kind
-                        SET novel_host_years = ?, novel_eed = ?
-                        WHERE task_kind = ?
-                        """,
-                        (
-                            int(current_kind["novel_host_years"])
-                            + task_kind_counts[task_kind],
-                            format(
-                                Decimal(str(current_kind["novel_eed"]))
-                                + task_kind_eed[task_kind],
-                                "f",
-                            ),
-                            task_kind,
-                        ),
-                    )
             for year in YEAR_BITS:
                 self.connection.execute(
                     """
@@ -351,6 +312,45 @@ class IncrementalReadinessLedger:
                                 "f",
                             ),
                             source_key,
+                        ),
+                    )
+            for task_kind in sorted(task_kind_counts):
+                current_kind = self.connection.execute(
+                    """
+                    SELECT novel_host_years, novel_eed
+                    FROM readiness_task_kind WHERE task_kind = ?
+                    """,
+                    (task_kind,),
+                ).fetchone()
+                if current_kind is None:
+                    self.connection.execute(
+                        """
+                        INSERT INTO readiness_task_kind(
+                            task_kind, novel_host_years, novel_eed
+                        ) VALUES (?, ?, ?)
+                        """,
+                        (
+                            task_kind,
+                            task_kind_counts[task_kind],
+                            format(task_kind_eed[task_kind], "f"),
+                        ),
+                    )
+                else:
+                    self.connection.execute(
+                        """
+                        UPDATE readiness_task_kind
+                        SET novel_host_years = ?, novel_eed = ?
+                        WHERE task_kind = ?
+                        """,
+                        (
+                            int(current_kind["novel_host_years"])
+                            + task_kind_counts[task_kind],
+                            format(
+                                Decimal(str(current_kind["novel_eed"]))
+                                + task_kind_eed[task_kind],
+                                "f",
+                            ),
+                            task_kind,
                         ),
                     )
             for year in YEAR_BITS:
