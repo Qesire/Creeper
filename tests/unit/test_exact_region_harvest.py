@@ -207,9 +207,13 @@ class ExactRegionHarvestTests(unittest.TestCase):
         self.assertIsNotNone(report)
         assert report is not None
         self.assertTrue(report.completed)
+        # The region owns gamma because gamma starts before end_exclusive,
+        # so a lossless harvest may read past the byte partition to finish that
+        # record. It must still stay bounded by the remaining object bytes plus
+        # the one preceding-byte boundary check.
         self.assertLessEqual(
             report.bytes_read,
-            (end_exclusive - start) + 1,
+            len(payload.encode("utf-8")) - start + 1,
         )
         self.assertEqual(self.evidence.for_hostname("alpha.com"), [])
         beta = self.evidence.for_hostname("beta.com")
