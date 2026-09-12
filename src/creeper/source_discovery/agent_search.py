@@ -140,6 +140,14 @@ class CommandAgentSearchExecutor:
             "target_year_to": 2001,
             "requirements": {
                 "prefer_metasources": True,
+                "prefer_direct_evidence_bulk": True,
+                "direct_evidence_suffixes": [
+                    ".cdx", ".cdx.gz", ".cdxj", ".cdxj.gz"
+                ],
+                "direct_evidence_semantics": (
+                    "capture timestamp + original URL rows for 1996-2001"
+                ),
+                "prefer_catalogs_that_enumerate_direct_evidence_bulk": True,
                 "source_identity": "exact resource URL",
                 "evidence_claims_are_not_authorized": True,
             },
@@ -148,6 +156,7 @@ class CommandAgentSearchExecutor:
             admission = self.admission_policy
             payload["admission"] = {
                 "min_expected_volume": admission.min_expected_volume,
+                "direct_min_expected_volume": admission.direct_min_expected_volume,
                 "min_enumerability_prior": admission.min_enumerability_prior,
                 "min_confidence": admission.min_confidence,
                 "require_year_bounds": admission.require_year_bounds,

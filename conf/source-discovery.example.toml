@@ -65,6 +65,10 @@ timeout_seconds = 30.0
 target_year_from = 1996
 target_year_to = 2001
 min_expected_volume = 100000
+# CDX/CDXJ rows are already timestamp-bearing annual evidence, so even
+# substantially smaller direct-evidence reservoirs can dominate per-host
+# Wayback verification on accepted Novel EED / wall-clock.
+direct_min_expected_volume = 10000
 min_enumerability_prior = 0.50
 min_confidence = 0.35
 require_year_bounds = true

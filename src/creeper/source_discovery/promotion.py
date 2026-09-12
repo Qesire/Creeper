@@ -12,7 +12,11 @@ from dataclasses import dataclass
 import re
 from urllib.parse import urlsplit
 
-from creeper.source_discovery.models import SourceCandidate, SourceLevel
+from creeper.source_discovery.models import (
+    SourceCandidate,
+    SourceLevel,
+    is_direct_evidence_entrypoint,
+)
 from creeper.source_discovery.scrapy_sidecar import ScrapyLinkDiscovery
 
 
@@ -231,7 +235,8 @@ class LinkPromotionAccumulator:
                 family = "BULK_ARTIFACT"
                 level = SourceLevel.SOURCE
                 enumerability = 0.95
-                temporal = 0.45
+                direct = is_direct_evidence_entrypoint(url)
+                temporal = 1.0 if direct else 0.45
             elif aggregate.meta_hits >= 2:
                 family = "RESOURCE_CATALOG"
                 level = SourceLevel.METASOURCE
@@ -263,7 +268,9 @@ class LinkPromotionAccumulator:
                 expected_year_to=inferred_year,
                 temporal_semantics_prior=temporal,
                 enumerability_prior=enumerability,
-                direct_evidence_prior=0.0,
+                direct_evidence_prior=(
+                    1.0 if is_direct_evidence_entrypoint(url) else 0.0
+                ),
                 baseline_overlap_prior=0.5,
                 access_cost_prior=0.5 if aggregate.bulk_artifact else 1.0,
                 adapter_cost_prior=0.75 if aggregate.bulk_artifact else 1.0,

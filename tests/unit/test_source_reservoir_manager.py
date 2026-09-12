@@ -147,15 +147,15 @@ class SourceReservoirManagerTests(unittest.TestCase):
         self.assertEqual(
             [directive.kind for directive in plan.search_directives],
             [
+                SearchDirectiveKind.DIRECT_EVIDENCE,
                 SearchDirectiveKind.EXPLOIT_SOURCE_FAMILY,
                 SearchDirectiveKind.REFILL_RESERVOIR,
-                SearchDirectiveKind.DISCOVER_NEW_FAMILY,
             ],
         )
-        self.assertEqual(plan.search_directives[0].subject, "HIGH_YIELD_FAMILY")
-        self.assertEqual(plan.search_directives[0].strategy, "EXPLOIT_SUCCESS")
-        self.assertEqual(plan.search_directives[1].strategy, "META_SOURCE_SEARCH")
-        self.assertEqual(plan.search_directives[2].strategy, "EXPLORE_NEW_FAMILY")
+        self.assertEqual(plan.search_directives[0].strategy, "DIRECT_EVIDENCE_BULK")
+        self.assertEqual(plan.search_directives[1].subject, "HIGH_YIELD_FAMILY")
+        self.assertEqual(plan.search_directives[1].strategy, "EXPLOIT_SUCCESS")
+        self.assertEqual(plan.search_directives[2].strategy, "META_SOURCE_SEARCH")
         self.assertEqual(len({item.dedup_key for item in plan.search_directives}), 3)
 
     def test_refill_uses_best_observed_search_strategy(self) -> None:
