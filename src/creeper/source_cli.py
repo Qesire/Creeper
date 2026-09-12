@@ -232,7 +232,11 @@ class StaticSourceRuntime:
             expected_novel_eed=float(lease_records),
             costs=ResourceCost(
                 general_network=0,
-                evidence_network=1,
+                # Wayback request capacity is the dominant scarce resource.
+                # One discovery-only evidence task is therefore one unit of
+                # evidence-network cost, rather than assigning every lease the
+                # same constant cost regardless of how much backlog it creates.
+                evidence_network=float(lease_records),
                 cpu=1,
                 ssd=1,
             ),
@@ -410,8 +414,15 @@ class ActivatedSourceRuntime:
                     expected_novel_eed=expected_eed,
                     costs=ResourceCost(
                         general_network=1,
+                        # Score discovery sources against the actual scarce
+                        # downstream work they create. Because expected_eed and
+                        # expected_tasks scale with lease size, this makes the
+                        # scheduler prefer expected Novel EED per Wayback task.
+                        # Direct-year sources bypass Wayback and pay zero here.
                         evidence_network=(
-                            0 if reservoir.evidence_mode == "direct_year" else 1
+                            0
+                            if reservoir.evidence_mode == "direct_year"
+                            else float(expected_tasks)
                         ),
                         cpu=1,
                         ssd=1,
