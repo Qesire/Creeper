@@ -384,6 +384,7 @@ def build_validation_report(
     http_requests = deltas.get("wayback_http_requests", 0)
     source_records = deltas.get("source_records", 0)
     claimed = deltas.get("evidence_claimed_tasks", 0)
+    terminal = deltas.get("evidence_terminal_tasks", 0)
     pass_results = deltas.get("evidence_pass_results", 0)
     empty_results = deltas.get("evidence_empty_exhaustive_results", 0)
     retryable = deltas.get("evidence_retryable_tasks", 0)
@@ -452,6 +453,46 @@ def build_validation_report(
         if denominator <= 0:
             return None
         return format(Decimal(numerator) / Decimal(denominator), "f")
+
+    transport_fraction = (
+        None
+        if http_requests <= 0
+        else Decimal(transport_errors) / Decimal(http_requests)
+    )
+    five_xx_fraction = (
+        None
+        if http_requests <= 0
+        else Decimal(http_5xx) / Decimal(http_requests)
+    )
+    provider_health_reasons: list[str] = []
+    if http_requests >= 20:
+        if transport_fraction is not None and transport_fraction > Decimal("0.05"):
+            provider_health_reasons.append(
+                "Wayback transport-error fraction exceeds 5%"
+            )
+        if five_xx_fraction is not None and five_xx_fraction > Decimal("0.05"):
+            provider_health_reasons.append(
+                "Wayback 5xx fraction exceeds 5%"
+            )
+        if claimed >= 20 and terminal == 0 and retryable > 0:
+            provider_health_reasons.append(
+                "evidence work made no terminal progress"
+            )
+        provider_health_status = (
+            "healthy" if not provider_health_reasons else "unhealthy"
+        )
+    else:
+        provider_health_status = "insufficient_sample"
+
+    source_progress_observed = (
+        source_records > 0
+        or deltas.get("source_direct_capsules_committed", 0) > 0
+    )
+    integrated_capacity_baseline_eligible = (
+        valid
+        and provider_health_status == "healthy"
+        and source_progress_observed
+    )
 
     source_yield: dict[str, dict[str, object]] = {}
     for source_key in sorted(
@@ -529,7 +570,7 @@ def build_validation_report(
         )
 
     return {
-        "report_version": "runtime-validation-report-v5",
+        "report_version": "runtime-validation-report-v6",
         "label": label,
         "code_revision": code_revision,
         "runtime_data_root": end.get("runtime_data_root"),
@@ -670,6 +711,23 @@ def build_validation_report(
         "provider_429_fraction": ratio(http_429, http_requests),
         "provider_5xx_fraction": ratio(http_5xx, http_requests),
         "provider_transport_error_fraction": ratio(transport_errors, http_requests),
+        "provider_transport_error_types": {
+            name.removeprefix("wayback_transport_error_"): value
+            for name, value in deltas.items()
+            if name.startswith("wayback_transport_error_")
+        },
+        "provider_health": {
+            "status": provider_health_status,
+            "reasons": provider_health_reasons,
+            "circuit_open_events": deltas.get("wayback_circuit_open_events", 0),
+            "circuit_fast_failures": deltas.get(
+                "wayback_circuit_fast_failures", 0
+            ),
+        },
+        "source_progress_observed": source_progress_observed,
+        "integrated_capacity_baseline_eligible": (
+            integrated_capacity_baseline_eligible
+        ),
         "mean_provider_request_latency_seconds": (
             None
             if http_requests <= 0
