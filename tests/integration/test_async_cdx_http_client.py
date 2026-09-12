@@ -237,7 +237,7 @@ class AsyncWaybackCDXClientTests(unittest.IsolatedAsyncioTestCase):
             ),
             max_retries=0,
         ) as client:
-            async def dense_pages(hostname, year_from, year_to):
+            async def dense_pages(hostname, year_from, year_to, **_kwargs):
                 yield (
                     [
                         {
@@ -285,7 +285,7 @@ class AsyncWaybackCDXClientTests(unittest.IsolatedAsyncioTestCase):
             transport=httpx.MockTransport(lambda request: httpx.Response(200, request=request)),
             max_retries=0,
         ) as client:
-            async def partial_pages(hostname, year_from, year_to):
+            async def partial_pages(hostname, year_from, year_to, **_kwargs):
                 yield (
                     [
                         {
@@ -380,7 +380,7 @@ class AsyncWaybackCDXClientTests(unittest.IsolatedAsyncioTestCase):
             transport=httpx.MockTransport(lambda request: httpx.Response(200, request=request)),
             max_retries=0,
         ) as client:
-            async def incomplete_pages(hostname, year_from, year_to):
+            async def incomplete_pages(hostname, year_from, year_to, **_kwargs):
                 yield ([], False)
 
             with patch.object(client, "iter_range_pages", incomplete_pages):
