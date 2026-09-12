@@ -109,6 +109,21 @@ class StreamingRefillProvider(FakeProvider):
         return await super().query_key(key)
 
 
+class EmptyRangeProvider(FakeProvider):
+    def __init__(self):
+        super().__init__(state=CDXQueryState.EMPTY_EXHAUSTIVE)
+        self.range_keys = []
+
+    async def query_range(self, key):
+        self.range_keys.append(key)
+        return RangeEvidenceQueryResult(
+            hostname=key.hostname,
+            key=key,
+            state=CDXQueryState.EMPTY_EXHAUSTIVE,
+            provider_requests=1,
+        )
+
+
 class FakeRangeProvider(FakeProvider):
     def __init__(self):
         super().__init__(state=CDXQueryState.PASS)
@@ -313,6 +328,48 @@ class AsyncEvidenceWorkerTests(unittest.IsolatedAsyncioTestCase):
                 ("other.example", 1997, 1997),
                 ("same.example", 1997, 1997),
             ],
+        )
+
+    async def test_claim_window_reserves_slots_for_independent_provider(self):
+        wayback_keys = [
+            EvidenceQueryKey(
+                f"domain-{index}.example",
+                TemporalScope(1996, 2001),
+                "wayback",
+                "cdx-domain-v1",
+            )
+            for index in range(6)
+        ]
+        rdap_key = EvidenceQueryKey(
+            "registration.example",
+            TemporalScope(1996, 2001),
+            "rdap",
+            "rdap-registration-v1",
+        )
+        self.control.enqueue_evidence_tasks([*wayback_keys, rdap_key])
+        wayback = FakeDomainProvider()
+        rdap = EmptyRangeProvider()
+        worker = AsyncEvidenceWorker(
+            control_store=self.control,
+            evidence_store=self.evidence,
+            providers={"wayback": wayback, "rdap": rdap},
+            owner="worker-provider-balanced",
+            claim_batch_size=4,
+            provider_inflight={"wayback": 3, "rdap": 1},
+        )
+
+        report = await worker.run_once()
+
+        self.assertEqual(report.claimed, 4)
+        self.assertEqual(rdap.range_keys, [rdap_key])
+        self.assertEqual(
+            sum(
+                1
+                for task in self.control.list_evidence_tasks()
+                if task.key.provider == "wayback" and task.lease_owner is None
+                and task.state == CDXQueryState.PENDING.value
+            ),
+            3,
         )
 
     async def test_worker_drains_preexisting_durable_backlog_with_bounded_inflight(self):
