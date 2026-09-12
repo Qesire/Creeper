@@ -17,6 +17,7 @@ from creeper.source_discovery.coordinator import (
     TriageResult,
 )
 from creeper.source_discovery.expander import ExpansionResult, expand_scrapy_spool
+from creeper.source_discovery.index_registry import IndexSpaceRegistry
 from creeper.source_discovery.index_space import (
     CompiledIndexSpace,
     HarvestRegion,
@@ -92,6 +93,7 @@ __all__ = [
     "LinkPromotionAccumulator",
     "CompiledIndexSpace",
     "HarvestRegion",
+    "IndexSpaceRegistry",
     "QueryCapabilityHints",
     "RegionKind",
     "RegionSynopsis",
