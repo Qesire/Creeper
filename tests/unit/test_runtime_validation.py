@@ -127,6 +127,16 @@ class RuntimeValidationTests(unittest.TestCase):
                         "wayback_rate_limit_wait_ms": 1200,
                         "wayback_cooldown_wait_ms": 300,
                         "wayback_retry_backoff_wait_ms": 100,
+                        "wayback_request_start_gaps": 400,
+                        "wayback_request_start_gap_ms": 1_200_000,
+                        "wayback_request_start_excess_gap_ms": 300_000,
+                        "wayback_request_gap_le_2_5s": 100,
+                        "wayback_request_gap_le_4s": 200,
+                        "wayback_request_gap_le_8s": 80,
+                        "wayback_request_gap_gt_16s": 20,
+                        "evidence_stream_refill_claims": 25,
+                        "evidence_stream_refill_tasks": 400,
+                        "evidence_stream_refill_empty_claims": 2,
                         "evidence_host_lock_wait_ms": 40,
                         "evidence_provider_inflight_wait_ms": 50,
                         "evidence_claim_wait_ms": 60,
@@ -195,6 +205,29 @@ class RuntimeValidationTests(unittest.TestCase):
             self.assertAlmostEqual(
                 float(report["provider_pacing_utilization"]),
                 (500 / 3600) / 0.5,
+            )
+            self.assertEqual(report["report_version"], "runtime-validation-report-v3")
+            self.assertEqual(
+                report["provider_request_start_gap"],
+                {
+                    "count": 400,
+                    "mean_seconds": "3",
+                    "excess_seconds": "300",
+                    "buckets": {
+                        "gt_16s": 20,
+                        "le_2_5s": 100,
+                        "le_4s": 200,
+                        "le_8s": 80,
+                    },
+                },
+            )
+            self.assertEqual(
+                report["streaming_pump"],
+                {
+                    "refill_claims": 25,
+                    "refill_tasks": 400,
+                    "empty_refill_claims": 2,
+                },
             )
             self.assertEqual(
                 report["wait_state_milliseconds"],
