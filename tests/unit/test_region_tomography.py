@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from dataclasses import replace
 from decimal import Decimal
 from pathlib import Path
 
@@ -52,7 +53,7 @@ class RegionTomographyTests(unittest.IsolatedAsyncioTestCase):
     @staticmethod
     def _candidate(path: Path, *, volume: int = 10_000) -> SourceCandidate:
         return SourceCandidate(
-            canonical_entrypoint=str(path),
+            canonical_entrypoint=f"https://archive.example/{path.name}",
             source_family="BULK_ARTIFACT",
             level=SourceLevel.SOURCE,
             discovered_by="test",
@@ -64,6 +65,20 @@ class RegionTomographyTests(unittest.IsolatedAsyncioTestCase):
             enumerability_prior=1.0,
             confidence=0.9,
         )
+
+    def _compiled_local(self, path: Path, *, content_length: int | None = None):
+        compiled = compile_candidate_index_space(
+            self._candidate(path),
+            content_length=(
+                path.stat().st_size
+                if content_length is None
+                else content_length
+            ),
+            direct_evidence_authority=True,
+        )
+        index = replace(compiled.index, locator=str(path))
+        root_region = replace(compiled.root_region, locator=str(path))
+        return replace(compiled, index=index, root_region=root_region)
 
     async def test_local_cdxj_probe_builds_complete_baseline_aware_synopsis(self) -> None:
         path = self.root / "tiny.cdxj"
@@ -79,11 +94,7 @@ class RegionTomographyTests(unittest.IsolatedAsyncioTestCase):
             + "\n",
             encoding="utf-8",
         )
-        compiled = compile_candidate_index_space(
-            self._candidate(path),
-            content_length=path.stat().st_size,
-            direct_evidence_authority=True,
-        )
+        compiled = self._compiled_local(path)
         self.registry.register_index_space(compiled)
         executor = RegionProbeExecutor(
             self.baseline,
@@ -148,10 +159,7 @@ class RegionTomographyTests(unittest.IsolatedAsyncioTestCase):
     async def test_compressed_cdx_fails_closed_for_byte_tomography(self) -> None:
         path = self.root / "index.cdxj.gz"
         path.write_bytes(b"not-a-real-gzip")
-        compiled = compile_candidate_index_space(
-            self._candidate(path),
-            content_length=path.stat().st_size,
-        )
+        compiled = self._compiled_local(path)
         executor = RegionProbeExecutor(
             self.baseline,
             {"com": Decimal("1")},
@@ -163,10 +171,7 @@ class RegionTomographyTests(unittest.IsolatedAsyncioTestCase):
     def test_planner_refines_positive_region_then_promotes_terminal_child(self) -> None:
         path = self.root / "planned.cdxj"
         path.write_text("x\n" * 100, encoding="utf-8")
-        compiled = compile_candidate_index_space(
-            self._candidate(path),
-            content_length=160,
-        )
+        compiled = self._compiled_local(path, content_length=160)
         self.registry.register_index_space(compiled)
         planner = RegionTomographyPlanner(
             self.registry,
