@@ -183,8 +183,13 @@ class CommandAgentSearchExecutor:
             },
             "context_hash": context_hash,
             "context": context,
-            "target_year_from": 1996,
-            "target_year_to": 2001,
+            # Transitional top-level aliases keep existing bounded search
+            # helpers operational while v2 consumers use the typed task object.
+            "kind": directive.kind.value,
+            "strategy": directive.strategy,
+            "desired_candidates": directive.desired_candidates,
+            "subject": directive.subject,
+            "reason": directive.reason,
             "target_year_from": 1996,
             "target_year_to": 2001,
             "requirements": {
