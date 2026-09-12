@@ -17,8 +17,10 @@ from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass
 from typing import Protocol
 
+from creeper.evidence.domain_amplification import is_domain_amplification_key
 from creeper.evidence.policies import (
     CDXQueryState,
+    DomainEvidenceQueryResult,
     EvidenceQueryKey,
     EvidenceQueryResult,
     RangeEvidenceQueryResult,
@@ -37,6 +39,9 @@ class AsyncEvidenceProvider(Protocol):
     async def query_range(self, key: EvidenceQueryKey) -> RangeEvidenceQueryResult:
         """Probe a multi-year scope without committing annual evidence."""
 
+    async def query_domain(self, key: EvidenceQueryKey) -> DomainEvidenceQueryResult:
+        """Probe one bounded domain page yielding concrete host-year positives."""
+
 
 @dataclass(frozen=True)
 class EvidenceWorkerReport:
@@ -51,6 +56,7 @@ class EvidenceWorkerReport:
     invalid_count: int = 0
     incomplete_count: int = 0
     transient_error_count: int = 0
+    domain_amplification_count: int = 0
     provider_http_requests_total: int = 0
     provider_throttle_responses_total: int = 0
 
@@ -135,8 +141,14 @@ class AsyncEvidenceWorker:
     @staticmethod
     def _transient_for(
         task: EvidenceTask, error: str
-    ) -> EvidenceQueryResult | RangeEvidenceQueryResult:
+    ) -> EvidenceQueryResult | RangeEvidenceQueryResult | DomainEvidenceQueryResult:
         scope = task.key.temporal_scope
+        if is_domain_amplification_key(task.key):
+            return DomainEvidenceQueryResult(
+                key=task.key,
+                state=CDXQueryState.TRANSIENT_ERROR,
+                error=error,
+            )
         if scope.year_from != scope.year_to:
             return RangeEvidenceQueryResult(
                 hostname=task.key.hostname,
@@ -155,7 +167,7 @@ class AsyncEvidenceWorker:
     def _record_attempt_metric(
         self,
         task: EvidenceTask,
-        result: EvidenceQueryResult | RangeEvidenceQueryResult,
+        result: EvidenceQueryResult | RangeEvidenceQueryResult | DomainEvidenceQueryResult,
     ) -> None:
         self.control_store.record_evidence_task_attempt_metric(
             result.key or task.key,
@@ -197,6 +209,13 @@ class AsyncEvidenceWorker:
             )
             try:
                 scope = task.key.temporal_scope
+                if is_domain_amplification_key(task.key):
+                    query_domain = getattr(provider, "query_domain", None)
+                    if query_domain is None:
+                        raise ValueError(
+                            f"provider {task.key.provider!r} does not support domain probes"
+                        )
+                    return await query_domain(task.key)
                 if scope.year_from != scope.year_to:
                     query_range = getattr(provider, "query_range", None)
                     if query_range is None:
@@ -213,6 +232,48 @@ class AsyncEvidenceWorker:
                 semaphore.release()
         finally:
             host_lock.release()
+
+    def _commit_domain_result(
+        self,
+        task: EvidenceTask,
+        result: DomainEvidenceQueryResult,
+    ) -> tuple[int, int, int]:
+        """Persist one bounded multi-host result without negative host coverage."""
+        inserted = 0
+        if result.capsules:
+            self.control_store.attribute_domain_host_years(
+                result.key,
+                (
+                    (capsule.hostname, capsule.year)
+                    for capsule in result.capsules
+                ),
+            )
+            inserted = self.evidence_store.put_many(result.capsules)
+
+        if result.state in {
+            CDXQueryState.PASS,
+            CDXQueryState.EMPTY_EXHAUSTIVE,
+            CDXQueryState.DECOMPOSED,
+            CDXQueryState.INVALID,
+        }:
+            self.control_store.finish_evidence_task(
+                result.key,
+                result.state,
+                owner=self.owner,
+            )
+            return 1, 0, inserted
+        if result.state in {
+            CDXQueryState.INCOMPLETE,
+            CDXQueryState.TRANSIENT_ERROR,
+        }:
+            self.control_store.finish_evidence_task(
+                result.key,
+                result.state,
+                owner=self.owner,
+                retry_at=self._retry_at(task.attempt),
+            )
+            return 0, 1, inserted
+        raise ValueError(f"unsupported provider state: {result.state}")
 
     async def _heartbeat(
         self,
@@ -288,6 +349,7 @@ class AsyncEvidenceWorker:
             flush_count=1,
         )
         terminal = retryable = range_inserted_capsules = 0
+        domain_completed = 0
         state_counts = {
             CDXQueryState.PASS: 0,
             CDXQueryState.EMPTY_EXHAUSTIVE: 0,
@@ -308,7 +370,15 @@ class AsyncEvidenceWorker:
                 task = task_by_key[result.key]
                 self._record_attempt_metric(task, result)
 
-                if isinstance(result, RangeEvidenceQueryResult):
+                if isinstance(result, DomainEvidenceQueryResult):
+                    add_terminal, add_retryable, add_inserted = (
+                        self._commit_domain_result(task, result)
+                    )
+                    terminal += add_terminal
+                    retryable += add_retryable
+                    range_inserted_capsules += add_inserted
+                    domain_completed += 1
+                elif isinstance(result, RangeEvidenceQueryResult):
                     if result.capsules:
                         self.control_store.attribute_task_host_years(
                             result.key,
@@ -421,6 +491,7 @@ class AsyncEvidenceWorker:
             transient_error_count=state_counts[
                 CDXQueryState.TRANSIENT_ERROR
             ],
+            domain_amplification_count=domain_completed,
         )
 
 
@@ -488,6 +559,7 @@ class AsyncEvidenceWorker:
         launch(initial)
         claimed = len(initial)
         terminal = retryable = inserted_capsules = 0
+        domain_completed = 0
         state_counts = {
             CDXQueryState.PASS: 0,
             CDXQueryState.EMPTY_EXHAUSTIVE: 0,
@@ -510,6 +582,7 @@ class AsyncEvidenceWorker:
 
         def snapshot_and_reset() -> EvidenceWorkerReport:
             nonlocal claimed, terminal, retryable, inserted_capsules
+            nonlocal domain_completed
             nonlocal completed_since_yield, state_counts
             report = EvidenceWorkerReport(
                 claimed=claimed,
@@ -527,8 +600,10 @@ class AsyncEvidenceWorker:
                 transient_error_count=state_counts[
                     CDXQueryState.TRANSIENT_ERROR
                 ],
+                domain_amplification_count=domain_completed,
             )
             claimed = terminal = retryable = inserted_capsules = 0
+            domain_completed = 0
             completed_since_yield = 0
             state_counts = {
                 CDXQueryState.PASS: 0,
@@ -556,7 +631,15 @@ class AsyncEvidenceWorker:
                     state_counts[result.state] += 1
                     self._record_attempt_metric(task, result)
 
-                    if isinstance(result, RangeEvidenceQueryResult):
+                    if isinstance(result, DomainEvidenceQueryResult):
+                        add_terminal, add_retryable, add_inserted = (
+                            self._commit_domain_result(task, result)
+                        )
+                        terminal += add_terminal
+                        retryable += add_retryable
+                        inserted_capsules += add_inserted
+                        domain_completed += 1
+                    elif isinstance(result, RangeEvidenceQueryResult):
                         if result.capsules:
                             self.control_store.attribute_task_host_years(
                                 result.key,
