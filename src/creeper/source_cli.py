@@ -53,6 +53,15 @@ def _positive_float(value: object, name: str) -> float:
     return float(value)
 
 
+def _fraction(value: object, name: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{name} must be a number between 0 and 1")
+    result = float(value)
+    if not 0.0 <= result <= 1.0:
+        raise ValueError(f"{name} must be between 0 and 1")
+    return result
+
+
 
 class StaticSourceRuntime:
     """Persistent runtime for one configured static discovery reservoir.
@@ -102,6 +111,10 @@ class StaticSourceRuntime:
         )
         self.max_seconds = _positive_float(
             limits.get("lease_max_seconds"), "lease_max_seconds"
+        )
+        self.range_first_fraction = _fraction(
+            config.get("range_first_fraction", 0.10),
+            "range_first_fraction",
         )
 
         baseline_path = _path(
@@ -181,6 +194,7 @@ class StaticSourceRuntime:
             adapters={self.adapter.adapter_id: self.adapter},
             backlog_capacities={"wayback": self.backlog_capacity},
             queue_capacities=self.queue_capacities,
+            range_first_fraction=self.range_first_fraction,
             owner=self.owner,
         )
 
@@ -301,6 +315,10 @@ class ActivatedSourceRuntime:
         self.max_seconds = _positive_float(
             limits.get("lease_max_seconds"), "lease_max_seconds"
         )
+        self.range_first_fraction = _fraction(
+            config.get("range_first_fraction", 0.10),
+            "range_first_fraction",
+        )
         baseline_path = _path(
             config.get("baseline_index"),
             config_path=self.config_path,
@@ -331,6 +349,7 @@ class ActivatedSourceRuntime:
             adapters={},
             backlog_capacities={"wayback": self.backlog_capacity},
             queue_capacities=self.queue_capacities,
+            range_first_fraction=self.range_first_fraction,
             owner=self.owner,
         )
 
