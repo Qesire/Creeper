@@ -238,6 +238,50 @@ class ControlStoreTests(unittest.TestCase):
             store.close()
 
 
+
+    def test_task_kind_attribution_does_not_require_source_origin(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ControlStore(Path(tmp) / "control.sqlite3")
+            exact = EvidenceQueryKey(
+                "exact.example",
+                TemporalScope(1997, 1997),
+                "wayback",
+                "v1",
+            )
+            ranged = EvidenceQueryKey(
+                "range.example",
+                TemporalScope(1996, 1998),
+                "wayback",
+                "v1",
+            )
+            store.enqueue_evidence_tasks([exact, ranged])
+
+            self.assertEqual(
+                store.attribute_task_host_years(exact, [1997]),
+                0,
+            )
+            self.assertEqual(
+                store.attribute_task_host_years(ranged, [1996, 1998]),
+                0,
+            )
+
+            resolved = store.resolve_host_year_task_kinds(
+                [
+                    ("exact.example", 1997),
+                    ("range.example", 1996),
+                    ("range.example", 1998),
+                ]
+            )
+            self.assertEqual(
+                resolved,
+                {
+                    ("exact.example", 1997): "exact",
+                    ("range.example", 1996): "range",
+                    ("range.example", 1998): "range",
+                },
+            )
+            store.close()
+
     def test_attempt_metrics_and_origin_coverage_are_operational_only(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = ControlStore(Path(tmp) / "control.sqlite3", clock=lambda: 123.0)
