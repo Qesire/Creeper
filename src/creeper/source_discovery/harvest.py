@@ -245,6 +245,7 @@ class RegionHarvestExecutor:
         cursor = start
         buffer = b""
         boundary_ready = start == 0
+        prefix_checked = start == 0
         stopped = False
 
         with context as client:
@@ -288,14 +289,16 @@ class RegionHarvestExecutor:
                     buffer += chunk
 
                     if not boundary_ready:
-                        if not buffer:
-                            continue
-                        previous = buffer[:1]
-                        buffer = buffer[1:]
-                        if previous == b"\n":
-                            boundary_ready = True
-                            cursor = start
-                        else:
+                        if not prefix_checked:
+                            if not buffer:
+                                continue
+                            previous = buffer[:1]
+                            buffer = buffer[1:]
+                            prefix_checked = True
+                            if previous == b"\n":
+                                boundary_ready = True
+                                cursor = start
+                        if not boundary_ready:
                             boundary = buffer.find(b"\n")
                             if boundary < 0:
                                 if (
@@ -306,7 +309,7 @@ class RegionHarvestExecutor:
                                     break
                                 continue
                             buffer = buffer[boundary + 1 :]
-                            cursor = start + boundary + 1
+                            cursor += boundary + 1
                             boundary_ready = True
 
                     while boundary_ready:
