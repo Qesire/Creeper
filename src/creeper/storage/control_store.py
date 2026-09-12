@@ -81,6 +81,20 @@ class ControlStore:
                 ON evidence_tasks(state, retry_at, lease_until);
             CREATE INDEX IF NOT EXISTS idx_evidence_tasks_provider_claim
                 ON evidence_tasks(provider, state, retry_at, lease_until);
+            CREATE TABLE IF NOT EXISTS evidence_task_fanout_reservations (
+                hostname TEXT NOT NULL,
+                year_from INTEGER NOT NULL,
+                year_to INTEGER NOT NULL,
+                provider TEXT NOT NULL,
+                policy_version TEXT NOT NULL,
+                amount INTEGER NOT NULL CHECK(amount > 0),
+                PRIMARY KEY(hostname, year_from, year_to, provider, policy_version),
+                FOREIGN KEY(
+                    hostname, year_from, year_to, provider, policy_version
+                ) REFERENCES evidence_tasks(
+                    hostname, year_from, year_to, provider, policy_version
+                )
+            ) WITHOUT ROWID;
             CREATE TABLE IF NOT EXISTS runtime_checkpoints (
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
@@ -787,6 +801,18 @@ class ControlStore:
                 [(*self._values(followup), CDXQueryState.PENDING.value) for followup in exact],
             )
             created = self.connection.total_changes - before
+            # Range tasks reserve their worst-case net fanout capacity at
+            # initial admission. The parent is becoming terminal in this same
+            # transaction, so deleting the token after child insertion converts
+            # reserved capacity into durable exact-year rows atomically.
+            self.connection.execute(
+                """
+                DELETE FROM evidence_task_fanout_reservations
+                WHERE hostname = ? AND year_from = ? AND year_to = ?
+                  AND provider = ? AND policy_version = ?
+                """,
+                self._values(key),
+            )
             # Exact-year follow-ups are a refinement of the same source work.
             # Preserve every parent origin so later first-touch host-year
             # attribution remains connected to the original reservoir/lease.
@@ -1192,6 +1218,7 @@ class ControlStore:
         expected_evidence_tasks: int,
         expected_novel_eed: float,
         now: float,
+        lease_ttl_seconds: float | None = None,
     ) -> Any | None:
         """Atomically claim a READY reservoir with a new cursor-backed lease."""
         from creeper.scheduler.leases import LeaseState, WorkLease
@@ -1218,6 +1245,11 @@ class ControlStore:
                 expected_evidence_tasks=expected_evidence_tasks,
                 expected_novel_eed=expected_novel_eed,
                 now=float(now),
+                expires_at=(
+                    None
+                    if lease_ttl_seconds is None
+                    else float(now) + float(lease_ttl_seconds)
+                ),
             ).grant(owner=owner)
             self.connection.execute(
                 """
@@ -1260,6 +1292,65 @@ class ControlStore:
                 raise RuntimeError("reservoir changed while granting lease")
             self.connection.commit()
             return lease
+        except BaseException:
+            self.connection.rollback()
+            raise
+
+    def renew_lease(
+        self,
+        lease: Any,
+        *,
+        ttl_seconds: float,
+        now: float | None = None,
+    ) -> float:
+        """Extend one still-live owned source lease without reviving expiry.
+
+        max_seconds remains the adapter work budget. expires_at is an
+        ownership/visibility deadline and may be renewed while the producer is
+        alive. An already-expired deadline fails closed because another
+        producer may legally recover the reservoir.
+        """
+        from creeper.scheduler.leases import LeaseState
+
+        if ttl_seconds <= 0:
+            raise ValueError("ttl_seconds must be positive")
+        lease_id = self._field(lease, "lease_id")
+        owner = self._field(lease, "owner")
+        if not lease_id or not owner:
+            raise ValueError("an owned lease is required")
+        current = float(self.clock()) if now is None else float(now)
+        new_expiry = current + float(ttl_seconds)
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            row = self.connection.execute(
+                """
+                SELECT state, owner, expires_at
+                FROM work_leases
+                WHERE lease_id = ?
+                """,
+                (lease_id,),
+            ).fetchone()
+            if (
+                row is None
+                or row["owner"] != owner
+                or row["state"] not in {
+                    LeaseState.GRANTED.value,
+                    LeaseState.RUNNING.value,
+                }
+            ):
+                raise ValueError("lease is not live or is not owned by caller")
+            if row["expires_at"] is not None and float(row["expires_at"]) <= current:
+                raise RuntimeError("source lease expired before renewal")
+            effective_expiry = max(
+                new_expiry,
+                float(row["expires_at"] or 0.0),
+            )
+            self.connection.execute(
+                "UPDATE work_leases SET expires_at = ? WHERE lease_id = ?",
+                (effective_expiry, lease_id),
+            )
+            self.connection.commit()
+            return effective_expiry
         except BaseException:
             self.connection.rollback()
             raise
