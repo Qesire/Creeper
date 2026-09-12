@@ -99,6 +99,56 @@ class EvidenceQueryResult:
 
 
 @dataclass(frozen=True)
+class DomainEvidenceQueryResult:
+    """One bounded domain-scope CDX probe yielding many exact host-year capsules.
+
+    This is amplification-only work. Even an exhaustive page is not converted
+    into negative coverage for the parent hostname; the result is terminal
+    DECOMPOSED so every positive row may be reused while absence remains
+    non-authoritative.
+    """
+
+    domain: str
+    key: EvidenceQueryKey
+    state: CDXQueryState
+    capsules: tuple[EvidenceCapsule, ...] = ()
+    pages_seen: int = 0
+    records_seen: int = 0
+    provider_requests: int = 0
+    provider_elapsed_milliseconds: int = 0
+    error: str | None = None
+
+    def __post_init__(self) -> None:
+        normalized = normalize_official(self.domain)
+        if normalized is None or normalized != self.key.hostname:
+            raise ValueError("domain result must match normalized query hostname")
+        if self.key.temporal_scope.year_from == self.key.temporal_scope.year_to:
+            raise ValueError("domain amplification requires a multi-year scope")
+        if self.state not in {
+            CDXQueryState.DECOMPOSED,
+            CDXQueryState.TRANSIENT_ERROR,
+            CDXQueryState.INVALID,
+        }:
+            raise ValueError("domain amplification uses decomposed/retry/error states only")
+        seen: set[tuple[str, int]] = set()
+        for capsule in self.capsules:
+            if capsule.provider != self.key.provider:
+                raise ValueError("domain capsule provider must match query provider")
+            if capsule.policy_version != self.key.policy_version:
+                raise ValueError("domain capsule policy must match query policy")
+            if not (
+                self.key.temporal_scope.year_from
+                <= capsule.year
+                <= self.key.temporal_scope.year_to
+            ):
+                raise ValueError("domain capsule year must be inside query scope")
+            identity = (capsule.hostname, capsule.year)
+            if identity in seen:
+                raise ValueError("domain result keeps at most one capsule per host-year")
+            seen.add(identity)
+
+
+@dataclass(frozen=True)
 class RangeEvidenceQueryResult:
     """A multi-year probe with reusable positive evidence.
 
