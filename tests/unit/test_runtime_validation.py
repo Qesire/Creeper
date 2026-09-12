@@ -22,6 +22,7 @@ class RuntimeValidationTests(unittest.TestCase):
         cursor: int = 0,
         latest: int = 0,
         sources: dict[str, dict[str, object]] | None = None,
+        task_kinds: dict[str, dict[str, object]] | None = None,
     ) -> None:
         path = root / "readiness" / "readiness.json"
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -35,6 +36,7 @@ class RuntimeValidationTests(unittest.TestCase):
                     "evidence_cursor": cursor,
                     "latest_evidence_sequence": latest,
                     "source_attribution": sources or {},
+                    "task_kind_attribution": task_kinds or {},
                 }
             ),
             encoding="utf-8",
@@ -98,6 +100,12 @@ class RuntimeValidationTests(unittest.TestCase):
                         "novel_eed": "10",
                     }
                 },
+                task_kinds={
+                    "exact": {
+                        "novel_host_years": 1,
+                        "novel_eed": "5",
+                    }
+                },
             )
             start_validation_run(
                 runtime_data_root=root,
@@ -107,6 +115,42 @@ class RuntimeValidationTests(unittest.TestCase):
                 code_revision="abc123",
                 clock=lambda: 100.0,
             )
+
+            control = ControlStore(root / "control.sqlite3")
+            try:
+                exact_key = EvidenceQueryKey(
+                    "exact-window.example",
+                    TemporalScope(1997, 1997),
+                    "wayback",
+                    "cdx-v1",
+                )
+                range_key = EvidenceQueryKey(
+                    "range-window.example",
+                    TemporalScope(1996, 1998),
+                    "wayback",
+                    "cdx-v1",
+                )
+                control.enqueue_evidence_tasks([exact_key, range_key])
+                control.record_evidence_task_attempt_metric(
+                    exact_key,
+                    attempt=1,
+                    state="pass",
+                    provider_requests=4,
+                    provider_elapsed_milliseconds=400,
+                    pages_seen=1,
+                    records_seen=2,
+                )
+                control.record_evidence_task_attempt_metric(
+                    range_key,
+                    attempt=1,
+                    state="pass",
+                    provider_requests=2,
+                    provider_elapsed_milliseconds=200,
+                    pages_seen=1,
+                    records_seen=20,
+                )
+            finally:
+                control.close()
 
             telemetry = RuntimeTelemetryStore(root / "telemetry.sqlite3")
             evidence = EvidenceStore(root / "evidence.sqlite3")
@@ -183,6 +227,16 @@ class RuntimeValidationTests(unittest.TestCase):
                         "novel_eed": "20",
                     },
                 },
+                task_kinds={
+                    "exact": {
+                        "novel_host_years": 2,
+                        "novel_eed": "25",
+                    },
+                    "range": {
+                        "novel_host_years": 2,
+                        "novel_eed": "30",
+                    },
+                },
             )
             (root / "spool.bin").write_bytes(b"x" * 1024)
 
@@ -207,7 +261,7 @@ class RuntimeValidationTests(unittest.TestCase):
                 float(report["provider_pacing_utilization"]),
                 (500 / 3600) / 0.5,
             )
-            self.assertEqual(report["report_version"], "runtime-validation-report-v4")
+            self.assertEqual(report["report_version"], "runtime-validation-report-v5")
             self.assertAlmostEqual(
                 float(report["provider_active_request_starts_per_second"]),
                 400 / 1200,
@@ -279,6 +333,38 @@ class RuntimeValidationTests(unittest.TestCase):
                         "provider_requests_delta": 0,
                         "novel_eed_delta": "20",
                         "novel_eed_per_1000_provider_requests": None,
+                    },
+                },
+            )
+            self.assertEqual(
+                report["task_kind_attribution"],
+                {
+                    "exact": {
+                        "novel_host_years_delta": 1,
+                        "novel_eed_delta": "20",
+                    },
+                    "range": {
+                        "novel_host_years_delta": 2,
+                        "novel_eed_delta": "30",
+                    },
+                },
+            )
+            self.assertEqual(
+                report["task_kind_yield"],
+                {
+                    "exact": {
+                        "provider_requests_delta": 4,
+                        "novel_host_years_delta": 1,
+                        "novel_eed_delta": "20",
+                        "novel_host_years_per_1000_provider_requests": "250",
+                        "novel_eed_per_1000_provider_requests": "5000",
+                    },
+                    "range": {
+                        "provider_requests_delta": 2,
+                        "novel_host_years_delta": 2,
+                        "novel_eed_delta": "30",
+                        "novel_host_years_per_1000_provider_requests": "1000",
+                        "novel_eed_per_1000_provider_requests": "15000",
                     },
                 },
             )
