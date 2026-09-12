@@ -29,6 +29,9 @@ from creeper.sources.local.static_dataset import StaticDatasetAdapter
 from creeper.sources.production import ProductionAdapterFactory
 from creeper.sources.reservoirs import Reservoir, ReservoirState
 from creeper.source_discovery.activation import SourceActivationCompiler
+from creeper.source_discovery.index_optimization import (
+    index_region_optimizer_eligible,
+)
 from creeper.source_discovery.registry import SourceDiscoveryRegistry
 from creeper.storage.control_store import ControlStore
 from creeper.storage.evidence_store import EvidenceStore
@@ -61,6 +64,12 @@ def _fraction(value: object, name: str) -> float:
     if not 0.0 <= result <= 1.0:
         raise ValueError(f"{name} must be between 0 and 1")
     return result
+
+
+def _strict_bool(value: object, name: str) -> bool:
+    if not isinstance(value, bool):
+        raise ValueError(f"{name} must be a boolean")
+    return value
 
 
 
@@ -387,6 +396,14 @@ class ActivatedSourceRuntime:
             config.get("range_first_fraction", 0.10),
             "range_first_fraction",
         )
+        historical_raw = config.get("historical_index", {})
+        if not isinstance(historical_raw, dict):
+            raise ValueError("historical_index must be a TOML table")
+        self.historical_index_enabled = _strict_bool(
+            historical_raw.get("enabled", False),
+            "historical_index.enabled",
+        )
+        self.historical_index_delegated_sources = 0
         baseline_path = _path(
             config.get("baseline_index"),
             config_path=self.config_path,
@@ -455,6 +472,7 @@ class ActivatedSourceRuntime:
     def refresh_workset(self) -> int:
         candidates: list[LeaseCandidate] = []
         adapters: dict[str, object] = {}
+        self.historical_index_delegated_sources = 0
         wayback_headroom = self.producer.admission.available_capacity(
             provider="wayback",
             capacity=self.backlog_capacity,
@@ -466,6 +484,16 @@ class ActivatedSourceRuntime:
                     f"activated reservoir disappeared: {spec.reservoir_id}"
                 )
             if reservoir.state is ReservoirState.EXHAUSTED:
+                continue
+            index = self.compiler.index_registry.get_index_for_source(
+                spec.source_key
+            )
+            if (
+                self.historical_index_enabled
+                and index is not None
+                and index_region_optimizer_eligible(index)
+            ):
+                self.historical_index_delegated_sources += 1
                 continue
             adapter = self.adapter_cache.get(reservoir.adapter_id)
             if adapter is None:
@@ -568,6 +596,9 @@ class ActivatedSourceRuntime:
         self.refresh_workset()
         report = self.producer.run_once().as_dict()
         report["rdap_shadow_tasks_enqueued"] = rdap_shadow
+        report["historical_index_delegated_sources"] = (
+            self.historical_index_delegated_sources
+        )
         return report
 
 
@@ -620,6 +651,7 @@ def _empty_watch_total() -> dict[str, object]:
         "evidence_tasks_enqueued": 0,
         "direct_capsules_committed": 0,
         "rdap_shadow_tasks_enqueued": 0,
+        "historical_index_delegated_sources": 0,
         "admission_blocked": False,
         "max_source_record_queue_depth": 0,
         "max_observation_queue_depth": 0,
@@ -642,6 +674,7 @@ def _accumulate_watch_report(
         "evidence_tasks_enqueued",
         "direct_capsules_committed",
         "rdap_shadow_tasks_enqueued",
+        "historical_index_delegated_sources",
         "pipeline_batches",
         "source_queue_block_milliseconds",
         "observation_queue_block_milliseconds",
@@ -676,6 +709,9 @@ def _record_source_telemetry(
             ),
             "source_rdap_shadow_tasks_enqueued": int(
                 report.get("rdap_shadow_tasks_enqueued", 0)
+            ),
+            "source_historical_index_delegated_sources": int(
+                report.get("historical_index_delegated_sources", 0)
             ),
             "source_pipeline_batches": int(
                 report.get("pipeline_batches", 0)
