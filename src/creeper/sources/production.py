@@ -102,6 +102,7 @@ class WarcProductionAdapter:
                 artifact_ref=record.artifact_ref,
                 direct_year_mask=record.direct_year_mask,
                 year_hint_mask=record.year_hint_mask,
+                original_url=record.payload,
             ),
         )
 
@@ -310,11 +311,24 @@ class StructuredProductionAdapter:
     ) -> LeaseResult:
         """Read and emit one bounded structured lease incrementally.
 
-        This is the production fast path for large CDX/CDXJ resources: source
-        I/O overlaps hostname extraction, baseline lookup, planning and durable
-        authority commits through SourceProducer's bounded queues.
+        cursor_end is an optional exclusive byte boundary. Normal source
+        production leaves it unset. Region harvest uses it to reuse this mature
+        reader without allowing a selected region to bleed into adjacent bytes.
+        When a bounded region starts in the middle of a line, that fragment is
+        discarded; when it ends in the middle of a line, the trailing fragment
+        is discarded. Every emitted row is therefore a complete source record
+        wholly represented by the selected byte interval.
         """
+
         start = self._cursor_value(lease.cursor_start)
+        end = (
+            self._cursor_value(lease.cursor_end)
+            if lease.cursor_end is not None
+            else None
+        )
+        if end is not None and end < start:
+            raise ValueError("structured cursor_end must not precede cursor_start")
+
         emitted = 0
         started = time.monotonic()
         downstream_wait_seconds = 0.0
@@ -322,10 +336,33 @@ class StructuredProductionAdapter:
         next_cursor: str | None = f"byte:{start}"
         if lease.max_requests <= 0 or lease.max_seconds <= 0:
             return LeaseResult(lease.lease_id, next_cursor=next_cursor)
+        if end is not None and end == start:
+            return LeaseResult(lease.lease_id, next_cursor=None)
 
         source, opened = self._ensure_stream(start)
         try:
-            while emitted < lease.max_records and bytes_read < lease.max_bytes:
+            if end is not None and start > 0 and self._pending_line is None:
+                source.seek(start - 1)
+                previous = source.read(1)
+                bytes_read += len(previous)
+                source.seek(start)
+                if previous != b"\n":
+                    remaining = end - start
+                    fragment = source.readline(remaining)
+                    bytes_read += len(fragment)
+                    next_cursor = f"byte:{source.tell()}"
+                    if (
+                        not fragment.endswith((b"\n", b"\r"))
+                        and source.tell() >= end
+                    ):
+                        next_cursor = None
+                        self.close()
+
+            while (
+                self._stream is not None
+                and emitted < lease.max_records
+                and bytes_read < lease.max_bytes
+            ):
                 if (
                     time.monotonic() - started - downstream_wait_seconds
                     >= lease.max_seconds
@@ -337,7 +374,15 @@ class StructuredProductionAdapter:
                     self._pending_line = None
                 else:
                     offset = source.tell()
-                    raw = source.readline()
+                    if end is not None:
+                        remaining = end - offset
+                        if remaining <= 0:
+                            next_cursor = None
+                            self.close()
+                            break
+                        raw = source.readline(remaining)
+                    else:
+                        raw = source.readline()
 
                 if not raw:
                     next_cursor = None
@@ -352,6 +397,17 @@ class StructuredProductionAdapter:
                         )
                     self._pending_line = (offset, raw)
                     next_cursor = f"byte:{offset}"
+                    break
+
+                bytes_read += len(raw)
+
+                if (
+                    end is not None
+                    and source.tell() >= end
+                    and not raw.endswith((b"\n", b"\r"))
+                ):
+                    next_cursor = None
+                    self.close()
                     break
 
                 line = raw.decode("utf-8", errors="replace").rstrip("\r\n")
@@ -385,11 +441,12 @@ class StructuredProductionAdapter:
                     emit_record(record)
                     downstream_wait_seconds += time.monotonic() - emit_started
                     emitted += 1
-                bytes_read += len(raw)
                 next_cursor = f"byte:{source.tell()}"
+                if end is not None and source.tell() >= end:
+                    next_cursor = None
+                    self.close()
+                    break
         except BaseException:
-            # Keep a buffered over-budget line alive, but reset the stream for
-            # all other failures so the next durable retry starts from cursor.
             if self._pending_line is None:
                 self.close()
             raise
@@ -429,6 +486,7 @@ class StructuredProductionAdapter:
                 artifact_ref=record.artifact_ref,
                 direct_year_mask=record.direct_year_mask,
                 year_hint_mask=record.year_hint_mask,
+                original_url=record.payload,
             ),
         )
 

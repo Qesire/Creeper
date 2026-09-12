@@ -159,7 +159,7 @@ class EvidencePlanner:
             policy_version=policy_version,
             evidence_type="dated_archive_index",
             source_id=observation.source_id,
-            original_url=observation.locator,
+            original_url=observation.original_url or observation.locator,
             record_locator=observation.locator,
             extraction_method=observation.record_type or "source_record",
         )

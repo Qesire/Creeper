@@ -34,6 +34,7 @@ class HostObservation:
     artifact_ref: str = ""
     direct_year_mask: int = 0
     year_hint_mask: int = 0
+    original_url: str = ""
 
 
 @dataclass(frozen=True)
