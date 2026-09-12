@@ -225,7 +225,7 @@ class HistoricalIndexOptimizerTests(unittest.IsolatedAsyncioTestCase):
         finally:
             control.close()
 
-    async def test_full_cycle_closes_active_local_index_to_evidence_and_exhaustion(
+    async def test_full_cycle_probes_harvests_and_exhausts_http_index(
         self,
     ) -> None:
         path = self.root / "index.cdxj"
@@ -246,7 +246,7 @@ class HistoricalIndexOptimizerTests(unittest.IsolatedAsyncioTestCase):
         )
         candidate = self._register_active(
             f"{self.base_url}/{path.name}",
-            content_length=path.stat().st_size,
+            content_length=None,
         )
         config = self._config()
 
