@@ -196,17 +196,35 @@ class SourceCandidate:
             SourceLevel.COLLECTION: 1.25,
             SourceLevel.METASOURCE: 1.6,
         }[self.level]
-        volume = math.log1p(max(1, self.expected_volume or 1))
+        # Exact timestamp-bearing bulk resources are unusually valuable:
+        # they combine discovery and evidence and bypass per-host Wayback. Link
+        # expansion often cannot know their record count in advance, so give a
+        # conservative volume proxy instead of treating unknown direct files as
+        # one-record sources.
+        direct = float(self.direct_evidence_prior)
+        volume_hint = self.expected_volume
+        if volume_hint is None and direct >= 0.5:
+            volume_hint = 100_000
+        volume = math.log1p(max(1, volume_hint or 1))
         novelty = max(0.01, 1.0 - self.baseline_overlap_prior)
         quality = (
             1.0
             + self.temporal_semantics_prior
             + self.enumerability_prior
-            + self.direct_evidence_prior
+            + direct
         ) / 4.0
+        direct_multiplier = 1.0 + 4.0 * direct
         cost = max(0.1, 1.0 + self.access_cost_prior + self.adapter_cost_prior)
         confidence = max(0.05, self.confidence)
-        return level_multiplier * volume * novelty * quality * confidence / cost
+        return (
+            level_multiplier
+            * volume
+            * novelty
+            * quality
+            * direct_multiplier
+            * confidence
+            / cost
+        )
 
 
 @dataclass(frozen=True)
