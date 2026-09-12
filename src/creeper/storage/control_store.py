@@ -17,6 +17,7 @@ from creeper.evidence.actions import (
     EvidenceActionKind,
     EvidenceActionValueStats,
     action_prior_yield,
+    adaptive_range_first_fraction,
     classify_evidence_action,
     posterior_host_year_yield,
 )
@@ -1021,6 +1022,38 @@ class ControlStore:
             self.connection.rollback()
             raise
         return changed_authority
+
+    def recommended_range_first_fraction(
+        self,
+        base_fraction: float,
+    ) -> float:
+        """Blend configured range-first policy with formal learned action yield."""
+
+        base_fraction = float(base_fraction)
+        authority = self.connection.execute(
+            """
+            SELECT 1
+            FROM evidence_action_reward_authority
+            WHERE singleton = 1
+            """
+        ).fetchone()
+        if authority is None:
+            return base_fraction
+
+        stats = self.evidence_action_value_summary()
+        exact = stats[EvidenceActionKind.EXACT.value]
+        ranged = stats[EvidenceActionKind.RANGE.value]
+        effective_requests = (
+            max(exact.provider_requests, exact.attempts)
+            + max(ranged.provider_requests, ranged.attempts)
+        )
+        return adaptive_range_first_fraction(
+            base_fraction,
+            exact_posterior=exact.posterior_host_years_per_request,
+            range_posterior=ranged.posterior_host_years_per_request,
+            evidence_requests=effective_requests,
+            reward_authoritative=True,
+        )
 
     def evidence_action_value_summary(
         self,
