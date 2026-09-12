@@ -82,9 +82,6 @@ class SourceActivationCompiler:
             raise SourceActivationError("candidate is not registered in discovery registry")
         if stored.state is not SourceState.ACTIVE:
             raise SourceActivationError("only ACTIVE candidates can be activated")
-        measurement = self.registry.get_scout_measurement(candidate.source_key)
-        if measurement is None:
-            raise SourceActivationError("ACTIVE candidate requires scout measurement")
         adapter_kind, enumeration_kind = _adapter_kind(candidate.canonical_entrypoint)
         source_key = candidate.source_key
         domain_id = f"domain:{source_key.removeprefix('src:')}"
@@ -121,6 +118,10 @@ class SourceActivationCompiler:
                     capacity_upper=existing.capacity_upper,
                     cursor=existing.cursor,
                 )
+
+        measurement = self.registry.get_scout_measurement(source_key)
+        if measurement is None:
+            raise SourceActivationError("ACTIVE candidate requires scout measurement")
 
         # Backfill the capability-aware index exactly once for legacy
         # activations or create it alongside a new activation.
