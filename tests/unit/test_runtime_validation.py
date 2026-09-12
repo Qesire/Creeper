@@ -21,6 +21,7 @@ class RuntimeValidationTests(unittest.TestCase):
         baseline: str = "base-a",
         cursor: int = 0,
         latest: int = 0,
+        sources: dict[str, dict[str, object]] | None = None,
     ) -> None:
         path = root / "readiness" / "readiness.json"
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -33,6 +34,7 @@ class RuntimeValidationTests(unittest.TestCase):
                     "confirmed_fraction_of_five_percent": "0.1",
                     "evidence_cursor": cursor,
                     "latest_evidence_sequence": latest,
+                    "source_attribution": sources or {},
                 }
             ),
             encoding="utf-8",
@@ -85,7 +87,18 @@ class RuntimeValidationTests(unittest.TestCase):
                 evidence.close()
                 control.close()
 
-            self._readiness(root, eed="10", cursor=1, latest=1)
+            self._readiness(
+                root,
+                eed="10",
+                cursor=1,
+                latest=1,
+                sources={
+                    "source-a": {
+                        "novel_host_years": 1,
+                        "novel_eed": "10",
+                    }
+                },
+            )
             start_validation_run(
                 runtime_data_root=root,
                 run_dir=run_dir,
@@ -111,11 +124,21 @@ class RuntimeValidationTests(unittest.TestCase):
                         "wayback_http_429": 5,
                         "wayback_http_5xx": 8,
                         "wayback_transport_errors": 2,
+                        "wayback_rate_limit_wait_ms": 1200,
+                        "wayback_cooldown_wait_ms": 300,
+                        "wayback_retry_backoff_wait_ms": 100,
+                        "evidence_host_lock_wait_ms": 40,
+                        "evidence_provider_inflight_wait_ms": 50,
+                        "evidence_claim_wait_ms": 60,
+                        "evidence_poll_idle_ms": 70,
                         "evidence_claimed_tasks": 100,
                         "evidence_pass_results": 50,
                         "evidence_empty_exhaustive_results": 40,
                         "evidence_retryable_tasks": 10,
                     }
+                )
+                telemetry.set_gauges(
+                    {"wayback_configured_requests_per_second": 0.5}
                 )
                 telemetry.append_resource_sample(
                     rss_bytes=200,
@@ -134,7 +157,22 @@ class RuntimeValidationTests(unittest.TestCase):
                 evidence.close()
                 telemetry.close()
 
-            self._readiness(root, eed="110", cursor=2, latest=2)
+            self._readiness(
+                root,
+                eed="110",
+                cursor=2,
+                latest=2,
+                sources={
+                    "source-a": {
+                        "novel_host_years": 2,
+                        "novel_eed": "60",
+                    },
+                    "source-b": {
+                        "novel_host_years": 1,
+                        "novel_eed": "20",
+                    },
+                },
+            )
             (root / "spool.bin").write_bytes(b"x" * 1024)
 
             report = finish_validation_run(
@@ -150,6 +188,41 @@ class RuntimeValidationTests(unittest.TestCase):
                 report["novel_eed_per_1000_provider_requests"],
                 "200",
             )
+            self.assertAlmostEqual(
+                float(report["provider_request_starts_per_second"]),
+                500 / 3600,
+            )
+            self.assertAlmostEqual(
+                float(report["provider_pacing_utilization"]),
+                (500 / 3600) / 0.5,
+            )
+            self.assertEqual(
+                report["wait_state_milliseconds"],
+                {
+                    "wayback_rate_limit": 1200,
+                    "wayback_cooldown": 300,
+                    "wayback_retry_backoff": 100,
+                    "host_lock": 40,
+                    "provider_inflight": 50,
+                    "claim": 60,
+                    "poll_idle": 70,
+                },
+            )
+            self.assertEqual(
+                report["source_attribution"],
+                {
+                    "source-a": {
+                        "novel_host_years_delta": 1,
+                        "novel_eed_delta": "50",
+                    },
+                    "source-b": {
+                        "novel_host_years_delta": 1,
+                        "novel_eed_delta": "20",
+                    },
+                },
+            )
+            self.assertEqual(report["attributed_novel_eed_delta"], "70")
+            self.assertEqual(report["unattributed_novel_eed_delta"], "30")
             self.assertEqual(report["target_source_records_progress"], "1")
             self.assertTrue(report["target_source_records_reached"])
             self.assertEqual(report["provider_429_fraction"], "0.01")
