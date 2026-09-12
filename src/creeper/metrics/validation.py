@@ -387,6 +387,13 @@ def build_validation_report(
     terminal = deltas.get("evidence_terminal_tasks", 0)
     pass_results = deltas.get("evidence_pass_results", 0)
     empty_results = deltas.get("evidence_empty_exhaustive_results", 0)
+    terminal_observed = max(
+        terminal,
+        pass_results
+        + empty_results
+        + deltas.get("evidence_decomposed_results", 0)
+        + deltas.get("evidence_invalid_results", 0),
+    )
     retryable = deltas.get("evidence_retryable_tasks", 0)
     throttles = deltas.get("wayback_throttle_responses", 0)
     http_429 = deltas.get("wayback_http_429", 0)
@@ -474,7 +481,7 @@ def build_validation_report(
             provider_health_reasons.append(
                 "Wayback 5xx fraction exceeds 5%"
             )
-        if claimed >= 20 and terminal == 0 and retryable > 0:
+        if claimed >= 20 and terminal_observed == 0 and retryable > 0:
             provider_health_reasons.append(
                 "evidence work made no terminal progress"
             )
