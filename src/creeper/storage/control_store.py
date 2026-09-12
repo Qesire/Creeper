@@ -116,6 +116,7 @@ class ControlStore:
             FROM evidence_tasks
             WHERE year_to > year_from
               AND policy_version NOT LIKE 'cdx-domain-%'
+              AND provider <> 'rdap'
               AND state IN ('pending', 'incomplete', 'transient_error');
             CREATE TABLE IF NOT EXISTS runtime_checkpoints (
                 key TEXT PRIMARY KEY,
@@ -1161,7 +1162,13 @@ class ControlStore:
         query = (
             "SELECT * FROM evidence_tasks WHERE "
             + " AND ".join(clauses)
-            + " ORDER BY (year_to - year_from) DESC, year_from, hostname, "
+            + " ORDER BY "
+            + "CASE "
+            + "WHEN policy_version LIKE 'cdx-domain-%' THEN 3 "
+            + "WHEN provider = 'rdap' THEN 2 "
+            + "WHEN year_to > year_from THEN 1 ELSE 0 END DESC, "
+            + "eed_weight DESC, "
+            + "(year_to - year_from) DESC, year_from, hostname, "
             + "year_to, provider, policy_version LIMIT ?"
         )
         lease_until = now + float(lease_seconds)
