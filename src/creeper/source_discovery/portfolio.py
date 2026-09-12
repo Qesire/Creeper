@@ -213,8 +213,10 @@ class RegionPortfolioPlanner:
         states: dict[int, _CoverageState],
         *,
         unknown_reference: bool,
+        per_region_overhead_bytes: int = 0,
     ) -> RegionPortfolioEstimate:
         harvest_bytes, cardinality = _estimated_cardinality(region, synopsis)
+        cost_bytes = harvest_bytes + int(per_region_overhead_bytes)
         _, scale = _estimated_scale(region, synopsis)
         total_eed = max(0.0, synopsis.novel_eed * scale)
         reliability = self.policy.confidence_floor + (
@@ -260,10 +262,10 @@ class RegionPortfolioPlanner:
 
         marginal_fraction = max(0.0, 1.0 - containment)
         marginal_eed = risk_adjusted * marginal_fraction
-        per_mib = marginal_eed / harvest_bytes * (1024 * 1024)
+        per_mib = marginal_eed / cost_bytes * (1024 * 1024)
         return RegionPortfolioEstimate(
             region=region,
-            estimated_harvest_bytes=harvest_bytes,
+            estimated_harvest_bytes=cost_bytes,
             estimated_total_novel_items=cardinality,
             estimated_total_novel_eed=total_eed,
             risk_adjusted_total_eed=risk_adjusted,
@@ -308,6 +310,7 @@ class RegionPortfolioPlanner:
         max_regions: int = 8,
         byte_budget: int | None = None,
         index_keys: set[str] | frozenset[str] | tuple[str, ...] | None = None,
+        per_region_overhead_bytes: int = 0,
     ) -> RegionPortfolioPlan:
         """Select a virtual harvest portfolio without mutating region state."""
 
@@ -315,6 +318,14 @@ class RegionPortfolioPlanner:
             raise ValueError("max_regions must be positive")
         if byte_budget is not None and byte_budget < 1:
             raise ValueError("byte_budget must be positive when supplied")
+        if (
+            isinstance(per_region_overhead_bytes, bool)
+            or not isinstance(per_region_overhead_bytes, int)
+            or per_region_overhead_bytes < 0
+        ):
+            raise ValueError(
+                "per_region_overhead_bytes must be a non-negative integer"
+            )
         allowed = (
             None
             if index_keys is None
@@ -355,6 +366,7 @@ class RegionPortfolioPlanner:
                     synopsis,
                     states,
                     unknown_reference=unknown_reference,
+                    per_region_overhead_bytes=per_region_overhead_bytes,
                 )
                 if (
                     byte_budget is not None
