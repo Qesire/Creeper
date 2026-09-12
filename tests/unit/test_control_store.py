@@ -38,6 +38,57 @@ class ControlStoreTests(unittest.TestCase):
             self.assertEqual({task.attempt for task in claimed}, {1})
             store.close()
 
+
+    def test_claim_order_prefers_wide_scope_then_interleaves_hosts_by_year(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ControlStore(Path(tmp) / "control.sqlite3")
+            keys = [
+                EvidenceQueryKey(
+                    "same.example",
+                    TemporalScope(1997, 1997),
+                    "wayback",
+                    "v1",
+                ),
+                EvidenceQueryKey(
+                    "same.example",
+                    TemporalScope(1998, 1998),
+                    "wayback",
+                    "v1",
+                ),
+                EvidenceQueryKey(
+                    "other.example",
+                    TemporalScope(1997, 1997),
+                    "wayback",
+                    "v1",
+                ),
+                EvidenceQueryKey(
+                    "wide.example",
+                    TemporalScope(1996, 2001),
+                    "wayback",
+                    "v1",
+                ),
+            ]
+            store.enqueue_evidence_tasks(keys)
+
+            claimed = store.claim_evidence_tasks(owner="worker-priority", limit=3)
+
+            self.assertEqual(
+                [
+                    (
+                        task.key.hostname,
+                        task.key.temporal_scope.year_from,
+                        task.key.temporal_scope.year_to,
+                    )
+                    for task in claimed
+                ],
+                [
+                    ("wide.example", 1996, 2001),
+                    ("other.example", 1997, 1997),
+                    ("same.example", 1997, 1997),
+                ],
+            )
+            store.close()
+
     def test_terminal_tasks_are_not_claimed_but_retryable_tasks_are(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = ControlStore(Path(tmp) / "control.sqlite3")
