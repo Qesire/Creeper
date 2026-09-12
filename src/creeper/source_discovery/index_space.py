@@ -21,6 +21,7 @@ from urllib.parse import urlsplit
 
 from creeper.source_discovery.coordinator import TriageResult
 from creeper.source_discovery.models import (
+    MeasurementMode,
     SourceCandidate,
     SourceLevel,
     source_origin,
@@ -196,11 +197,13 @@ class RegionSynopsis:
     region_key: str
     sampled_records: int
     unique_hosts: int
+    novel_hosts: int
     observed_host_year_pairs: int
     novel_host_year_pairs: int
     novel_eed: float
     bytes_read: int
     requests: int
+    measurement_mode: MeasurementMode = MeasurementMode.HOST_YEAR
     observed_year_histogram: tuple[tuple[int, int], ...] = ()
     novel_year_histogram: tuple[tuple[int, int], ...] = ()
     tld_host_year_histogram: tuple[tuple[str, int], ...] = ()
@@ -211,9 +214,15 @@ class RegionSynopsis:
     def __post_init__(self) -> None:
         if not self.region_key:
             raise ValueError("region_key is required")
+        object.__setattr__(
+            self,
+            "measurement_mode",
+            MeasurementMode(self.measurement_mode),
+        )
         for name in (
             "sampled_records",
             "unique_hosts",
+            "novel_hosts",
             "observed_host_year_pairs",
             "novel_host_year_pairs",
             "bytes_read",
@@ -222,6 +231,8 @@ class RegionSynopsis:
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                 raise ValueError(f"{name} must be a non-negative integer")
+        if self.novel_hosts > self.unique_hosts:
+            raise ValueError("novel_hosts cannot exceed unique_hosts")
         if self.novel_host_year_pairs > self.observed_host_year_pairs:
             raise ValueError("novel host-year pairs cannot exceed observed pairs")
         if not math.isfinite(self.novel_eed) or self.novel_eed < 0:
@@ -243,10 +254,23 @@ class RegionSynopsis:
             raise ValueError("minhash values must be non-negative integers")
 
     @property
+    def observed_count_for_value(self) -> int:
+        if self.measurement_mode is MeasurementMode.HOST_YEAR:
+            return self.observed_host_year_pairs
+        return self.unique_hosts
+
+    @property
+    def novel_count_for_value(self) -> int:
+        if self.measurement_mode is MeasurementMode.HOST_YEAR:
+            return self.novel_host_year_pairs
+        return self.novel_hosts
+
+    @property
     def novel_fraction(self) -> float:
-        if self.observed_host_year_pairs <= 0:
+        observed = self.observed_count_for_value
+        if observed <= 0:
             return 0.0
-        return self.novel_host_year_pairs / self.observed_host_year_pairs
+        return self.novel_count_for_value / observed
 
     @property
     def novel_eed_per_byte(self) -> float:
