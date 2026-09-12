@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 
 from creeper.source_discovery.activation import (
@@ -135,6 +136,51 @@ class SourceActivationCompilerTests(unittest.TestCase):
                 self.assertEqual(synopsis_row["novel_eed"], 100.0)
                 self.assertEqual(synopsis_row["sampled_records"], 256)
                 self.assertEqual(synopsis_row["complete"], 0)
+            finally:
+                control.close()
+
+    def test_recompile_preserves_real_tomography_synopsis_and_is_read_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            control = ControlStore(Path(tmp) / "control.sqlite3")
+            try:
+                candidate = _candidate("https://archive.example/observed.cdxj")
+                registry = self._registry(control, candidate)
+                compiler = SourceActivationCompiler(
+                    control,
+                    registry=registry,
+                )
+                first = compiler.compile(candidate)
+                index = compiler.index_registry.get_index_for_source(
+                    candidate.source_key
+                )
+                self.assertIsNotNone(index)
+                assert index is not None
+                regions = compiler.index_registry.list_regions(index.index_key)
+                root = next(region for region in regions if region.depth == 0)
+                scout = compiler.index_registry.get_synopsis(root.region_key)
+                self.assertIsNotNone(scout)
+                assert scout is not None
+
+                measured = replace(
+                    scout,
+                    sampled_records=scout.sampled_records + 17,
+                    novel_hosts=scout.novel_hosts + 3,
+                    novel_eed=scout.novel_eed + 321.5,
+                    bytes_read=scout.bytes_read + 4096,
+                    confidence=1.0,
+                    complete=True,
+                )
+                compiler.index_registry.record_synopsis(measured)
+                before = control.connection.total_changes
+
+                second = compiler.compile(candidate)
+
+                self.assertEqual(second.reservoir_id, first.reservoir_id)
+                self.assertEqual(control.connection.total_changes, before)
+                self.assertEqual(
+                    compiler.index_registry.get_synopsis(root.region_key),
+                    measured,
+                )
             finally:
                 control.close()
 
