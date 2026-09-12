@@ -170,17 +170,17 @@ class AsyncRDAPClientTests(unittest.IsolatedAsyncioTestCase):
 
         async with AsyncRDAPClient(
             transport=httpx.MockTransport(handler),
-            requests_per_second=1.0,
-            min_requests_per_second=0.1,
+            requests_per_second=10.0,
+            min_requests_per_second=1.0,
             recovery_successes=2,
             recovery_step_fraction=0.2,
         ) as client:
-            client.effective_requests_per_second = 0.5
+            client.effective_requests_per_second = 5.0
             await client.query_range(self.key())
             await client.query_range(self.key())
 
         self.assertEqual(client.adaptive_rate_increases, 1)
-        self.assertAlmostEqual(client.effective_requests_per_second, 0.7)
+        self.assertAlmostEqual(client.effective_requests_per_second, 7.0)
 
     async def test_server_error_is_retryable(self):
         async def handler(request):
