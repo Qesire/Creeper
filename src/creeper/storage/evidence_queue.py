@@ -107,7 +107,16 @@ class DurableEvidenceQueue:
               AND (lease_until IS NULL OR lease_until <= ?)
               AND (retry_at IS NULL OR retry_at <= ?)
               AND provider IN ({placeholders})
-            ORDER BY provider, hostname, year_from, year_to, policy_version
+            -- Prefer wider temporal probes because one provider request can
+            -- yield multiple host-years, then interleave exact-year work by
+            -- year before hostname so one claim window is not packed with
+            -- serial same-host tasks.
+            ORDER BY provider,
+                     (year_to - year_from) DESC,
+                     year_from,
+                     hostname,
+                     year_to,
+                     policy_version
             LIMIT ?
         """
 
