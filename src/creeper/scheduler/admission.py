@@ -324,7 +324,9 @@ class EvidenceBacklogAdmission:
                     inserted_keys.append(key)
 
             fanout_capacity = sum(
-                max(
+                0
+                if key.policy_version.startswith("cdx-domain-")
+                else max(
                     0,
                     key.temporal_scope.year_to - key.temporal_scope.year_from,
                 )
@@ -337,9 +339,13 @@ class EvidenceBacklogAdmission:
                 )
 
             for key in inserted_keys:
-                extra = max(
-                    0,
-                    key.temporal_scope.year_to - key.temporal_scope.year_from,
+                extra = (
+                    0
+                    if key.policy_version.startswith("cdx-domain-")
+                    else max(
+                        0,
+                        key.temporal_scope.year_to - key.temporal_scope.year_from,
+                    )
                 )
                 if extra:
                     self.connection.execute(
