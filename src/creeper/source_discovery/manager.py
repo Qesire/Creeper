@@ -4,9 +4,16 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import StrEnum
+import math
 
-from creeper.source_discovery.models import SourceCandidate, SourceState
+from creeper.source_discovery.models import (
+    SourceCandidate,
+    SourceLevel,
+    SourceState,
+)
+from creeper.source_discovery.overlap import MinHashSketch
 from creeper.source_discovery.registry import SourceDiscoveryRegistry
+from creeper.source_discovery.value import InterpretableSourceValueModel
 
 
 class SearchDirectiveKind(StrEnum):
@@ -14,6 +21,17 @@ class SearchDirectiveKind(StrEnum):
     REFILL_RESERVOIR = "REFILL_RESERVOIR"
     EXPLOIT_SOURCE_FAMILY = "EXPLOIT_SOURCE_FAMILY"
     DISCOVER_NEW_FAMILY = "DISCOVER_NEW_FAMILY"
+    INTERPRET_STRUCTURE = "INTERPRET_STRUCTURE"
+    RECOVER_STAGNATION = "RECOVER_STAGNATION"
+
+
+class SourceIntelligenceTask(StrEnum):
+    """Finite Codex subagent roles requested by the deterministic parent."""
+
+    DISCOVER_NEW_SOURCE = "DISCOVER_NEW_SOURCE"
+    EXPLOIT_SUCCESS_PATTERN = "EXPLOIT_SUCCESS_PATTERN"
+    INTERPRET_STRUCTURE = "INTERPRET_STRUCTURE"
+    RECOVER_STAGNATION = "RECOVER_STAGNATION"
 
 
 @dataclass(frozen=True)
@@ -61,6 +79,7 @@ class SearchDirective:
     desired_candidates: int
     subject: str | None
     reason: str
+    task_type: SourceIntelligenceTask = SourceIntelligenceTask.DISCOVER_NEW_SOURCE
 
     @property
     def dedup_key(self) -> str:
@@ -106,12 +125,21 @@ class SourceReservoirManager:
         *,
         targets: SourcePoolTargets | None = None,
         search_cooldown_seconds: float = 0.0,
+        search_ucb_exploration: float = 0.35,
+        stagnation_window: int = 6,
     ) -> None:
         if search_cooldown_seconds < 0:
             raise ValueError("search_cooldown_seconds must be non-negative")
+        if search_ucb_exploration < 0:
+            raise ValueError("search_ucb_exploration must be non-negative")
+        if stagnation_window < 2:
+            raise ValueError("stagnation_window must be at least two")
         self.registry = registry
         self.targets = targets or SourcePoolTargets()
         self.search_cooldown_seconds = float(search_cooldown_seconds)
+        self.search_ucb_exploration = float(search_ucb_exploration)
+        self.stagnation_window = int(stagnation_window)
+        self.value_model = InterpretableSourceValueModel(registry)
 
     def _usable(self, candidates: list[SourceCandidate]) -> list[SourceCandidate]:
         return [
@@ -120,18 +148,57 @@ class SourceReservoirManager:
             if self.registry.suppression_reason(candidate) is None
         ]
 
-    def _rank_warm(self, candidates: list[SourceCandidate]) -> list[SourceCandidate]:
-        def key(candidate: SourceCandidate) -> tuple[float, int, str]:
-            measurement = self.registry.get_scout_measurement(candidate.source_key)
-            if measurement is None:
-                return (0.0, 0, candidate.source_key)
-            return (
-                measurement.novel_eed_per_second,
-                measurement.direct_host_years,
-                candidate.source_key,
+    def _overlap_penalty(
+        self,
+        candidate: SourceCandidate,
+        active: list[SourceCandidate],
+    ) -> float:
+        raw = self.registry.get_overlap_sketch(candidate.source_key)
+        if raw is None:
+            return 0.0
+        sketch = MinHashSketch(raw)
+        similarities: list[float] = []
+        for other in active:
+            other_raw = self.registry.get_overlap_sketch(other.source_key)
+            if other_raw is None or len(other_raw) != len(raw):
+                continue
+            similarities.append(
+                sketch.similarity(MinHashSketch(other_raw))
             )
+        return max(similarities, default=0.0)
 
-        return sorted(candidates, key=key, reverse=True)
+    def _candidate_value(
+        self,
+        candidate: SourceCandidate,
+        *,
+        active: list[SourceCandidate],
+    ) -> float:
+        estimate = self.value_model.estimate(
+            candidate,
+            overlap_penalty=self._overlap_penalty(candidate, active),
+        )
+        measurement = self.registry.get_scout_measurement(candidate.source_key)
+        residual_bonus = (
+            0.0
+            if measurement is None
+            else 0.01 * measurement.residual_opportunity
+        )
+        return estimate.score + residual_bonus
+
+    def _rank_warm(
+        self,
+        candidates: list[SourceCandidate],
+        *,
+        active: list[SourceCandidate],
+    ) -> list[SourceCandidate]:
+        return sorted(
+            candidates,
+            key=lambda candidate: (
+                self._candidate_value(candidate, active=active),
+                candidate.source_key,
+            ),
+            reverse=True,
+        )
 
     def _best_measured_family(
         self,
@@ -187,19 +254,84 @@ class SourceReservoirManager:
         return max(scored, key=lambda item: (item[1], item[0]))
 
     def _best_observed_search_strategy(self) -> str:
+        """Choose an observed strategy by UCB rather than greedy lock-in."""
         rewards = [
             reward
             for reward in self.registry.strategy_rewards()
-            if reward.episodes > 0
-            and reward.search_cost_seconds > 0
-            and reward.reward_per_cost > 0
+            if reward.episodes > 0 and reward.search_cost_seconds > 0
         ]
         if not rewards:
             return "META_SOURCE_SEARCH"
-        return max(
-            rewards,
-            key=lambda reward: (reward.reward_per_cost, reward.strategy),
-        ).strategy
+        total_episodes = sum(item.episodes for item in rewards)
+        scale = max(
+            1.0,
+            max((item.reward_per_cost for item in rewards), default=0.0),
+        )
+
+        def ucb(reward) -> tuple[float, str]:
+            bonus = (
+                self.search_ucb_exploration
+                * scale
+                * (math.log(total_episodes + 1.0) / reward.episodes) ** 0.5
+            )
+            return reward.reward_per_cost + bonus, reward.strategy
+
+        return max(rewards, key=ucb).strategy
+
+    def _is_stagnating(self) -> bool:
+        rows = self.registry.connection.execute(
+            """
+            SELECT accepted_novel_eed
+            FROM source_search_episodes
+            WHERE finished_at IS NOT NULL
+            ORDER BY finished_at DESC
+            LIMIT ?
+            """,
+            (self.stagnation_window,),
+        ).fetchall()
+        if len(rows) < self.stagnation_window:
+            return False
+        return sum(float(row["accepted_novel_eed"]) for row in rows) <= 0.0
+
+    def _llm_task_ucb(
+        self,
+        task_type: SourceIntelligenceTask,
+    ) -> float:
+        """Estimate value of spending one more Codex call on this task."""
+        rewards = {
+            str(item["task_type"]): item
+            for item in self.registry.llm_task_rewards()
+        }
+        item = rewards.get(task_type.value)
+        if item is None or int(item["episodes"]) < 1:
+            # Every task class gets at least one exploration opportunity.
+            return float("inf")
+        episodes = int(item["episodes"])
+        cost = float(item["cost_seconds"])
+        credited = float(item["credited_eed"])
+        mean = credited / cost if cost > 0 else 0.0
+        total_episodes = sum(
+            max(0, int(row["episodes"]))
+            for row in rewards.values()
+        )
+        scale = max(
+            1.0,
+            max(
+                (
+                    float(row["credited_eed"])
+                    / float(row["cost_seconds"])
+                    if float(row["cost_seconds"]) > 0
+                    else 0.0
+                )
+                for row in rewards.values()
+            ),
+        )
+        bonus = (
+            self.search_ucb_exploration
+            * scale
+            * (math.log(total_episodes + 1.0) / episodes) ** 0.5
+        )
+        return mean + bonus
 
     def _strategy_available(self, strategy: str) -> bool:
         """Rate-limit completed search strategies without adding another broker."""
@@ -235,7 +367,15 @@ class SourceReservoirManager:
         if gap <= 0:
             return ()
 
-        specs: list[tuple[SearchDirectiveKind, str, str | None, str]] = []
+        specs: list[
+            tuple[
+                SearchDirectiveKind,
+                str,
+                str | None,
+                str,
+                SourceIntelligenceTask,
+            ]
+        ] = []
         seen: set[str] = set()
 
         def add_spec(
@@ -243,14 +383,13 @@ class SourceReservoirManager:
             strategy: str,
             subject: str | None,
             reason: str,
+            task_type: SourceIntelligenceTask,
         ) -> None:
-            if len(specs) >= self.targets.max_search_directives:
-                return
             dedup_key = f"{strategy}:{subject or '*'}"
             if dedup_key in seen or not self._strategy_available(strategy):
                 return
             seen.add(dedup_key)
-            specs.append((kind, strategy, subject, reason))
+            specs.append((kind, strategy, subject, reason, task_type))
 
         # Direct timestamp-bearing bulk indexes bypass the scarce per-host
         # Wayback evidence lane entirely, so always reserve the first refill arm
@@ -260,7 +399,37 @@ class SourceReservoirManager:
             "DIRECT_EVIDENCE_BULK",
             "cdx/cdxj archive indexes and manifests",
             "prioritize timestamp-bearing bulk indexes that can directly produce host-year evidence",
+            SourceIntelligenceTask.DISCOVER_NEW_SOURCE,
         )
+
+        structural_holds = [
+            candidate
+            for candidate in self.registry.list_candidates(
+                state=SourceState.HOLD
+            )
+            if (
+                candidate.source_family
+                in {"RESOURCE_CATALOG", "RESOURCE_DIRECTORY"}
+                or candidate.level
+                in {SourceLevel.COLLECTION, SourceLevel.METASOURCE}
+            )
+            and self.registry.suppression_reason(candidate) is None
+        ]
+        if structural_holds:
+            structural_holds.sort(
+                key=lambda item: (-item.scout_priority, item.source_key)
+            )
+            subject_candidate = structural_holds[0]
+            add_spec(
+                SearchDirectiveKind.INTERPRET_STRUCTURE,
+                "INTERPRET_STRUCTURE",
+                subject_candidate.canonical_entrypoint,
+                (
+                    "deterministic structural scouting left a catalog/metasource "
+                    "in HOLD; ask Codex for bounded resource/template hypotheses"
+                ),
+                SourceIntelligenceTask.INTERPRET_STRUCTURE,
+            )
 
         best_direct_origin = self._best_measured_direct_origin(candidates)
         if best_direct_origin is not None:
@@ -273,6 +442,7 @@ class SourceReservoirManager:
                     "search the same archive origin for sibling CDX/CDXJ "
                     f"resources; measured direct yield={value:.6g} novel EED/s"
                 ),
+                SourceIntelligenceTask.EXPLOIT_SUCCESS_PATTERN,
             )
 
         best_family = self._best_measured_family(candidates)
@@ -283,6 +453,7 @@ class SourceReservoirManager:
                 "EXPLOIT_SUCCESS",
                 family,
                 f"warm reserve low; measured family yield={value:.6g} novel EED/s",
+                SourceIntelligenceTask.EXPLOIT_SUCCESS_PATTERN,
             )
 
         best_strategy = self._best_observed_search_strategy()
@@ -291,17 +462,76 @@ class SourceReservoirManager:
             best_strategy,
             None,
             f"usable cold reserve {cold_count} below minimum {self.targets.cold_min}",
+            SourceIntelligenceTask.DISCOVER_NEW_SOURCE,
         )
         add_spec(
             SearchDirectiveKind.DISCOVER_NEW_FAMILY,
             "EXPLORE_NEW_FAMILY",
             None,
             "retain explicit exploration while refilling the candidate reserve",
+            SourceIntelligenceTask.DISCOVER_NEW_SOURCE,
         )
 
-        # If the remaining gap is smaller than the strategy set, fewer searches
-        # are launched rather than assigning a fake minimum of one to every arm.
-        selected = specs[: min(len(specs), gap)]
+        if self._is_stagnating():
+            add_spec(
+                SearchDirectiveKind.RECOVER_STAGNATION,
+                "RECOVER_STAGNATION",
+                None,
+                "recent completed source-search episodes produced no credited EED",
+                SourceIntelligenceTask.RECOVER_STAGNATION,
+            )
+
+        # Keep the two operationally necessary arms stable:
+        # (1) direct timestamp-bearing evidence, (2) generic reservoir refill.
+        # The remaining opportunity slots are learned from final-EED/cost UCB.
+        direct = [
+            spec
+            for spec in specs
+            if spec[1] == "DIRECT_EVIDENCE_BULK"
+        ][:1]
+        refill = [
+            spec
+            for spec in specs
+            if spec[0] is SearchDirectiveKind.REFILL_RESERVOIR
+        ][:1]
+        optional = [
+            spec
+            for spec in specs
+            if spec not in direct and spec not in refill
+        ]
+        stagnating = self._is_stagnating()
+        optional.sort(
+            key=lambda spec: (
+                0
+                if (
+                    stagnating
+                    and spec[4]
+                    is SourceIntelligenceTask.RECOVER_STAGNATION
+                )
+                else 1,
+                -self._llm_task_ucb(spec[4]),
+            )
+        )
+
+        capacity = min(gap, self.targets.max_search_directives)
+        selected: list[
+            tuple[
+                SearchDirectiveKind,
+                str,
+                str | None,
+                str,
+                SourceIntelligenceTask,
+            ]
+        ] = []
+        if direct and len(selected) < capacity:
+            selected.extend(direct)
+        optional_slots = max(
+            0,
+            capacity - len(selected) - (1 if refill else 0),
+        )
+        selected.extend(optional[:optional_slots])
+        if refill and len(selected) < capacity:
+            selected.extend(refill)
         if not selected:
             return ()
         base, remainder = divmod(gap, len(selected))
@@ -312,8 +542,9 @@ class SourceReservoirManager:
                 desired_candidates=base + (1 if index < remainder else 0),
                 subject=subject,
                 reason=reason,
+                task_type=task_type,
             )
-            for index, (kind, strategy, subject, reason) in enumerate(selected)
+            for index, (kind, strategy, subject, reason, task_type) in enumerate(selected)
         ]
         assert sum(item.desired_candidates for item in directives) == gap
         return tuple(directives)
@@ -342,20 +573,32 @@ class SourceReservoirManager:
         warm = by_state[SourceState.WARM]
         cold_count = sum(len(by_state[state]) for state in self._COLD_STATES)
 
-        warm_ranked = self._rank_warm(warm)
+        warm_ranked = self._rank_warm(warm, active=active)
         activation_slots = max(0, self.targets.active_target - len(active))
         activate = warm_ranked[:activation_slots]
         projected_warm = len(warm) - len(activate)
 
         discovered = sorted(
             by_state[SourceState.DISCOVERED],
-            key=lambda item: (-item.scout_priority, item.source_key),
+            key=lambda item: (
+                -self._candidate_value(item, active=active),
+                item.source_key,
+            ),
         )
         triage = discovered[: self.targets.triage_batch]
 
         scouting_now = len(by_state[SourceState.SCOUTING])
         scout_slots = max(0, self.targets.scout_parallelism - scouting_now)
-        scout = self.registry.rank_scout_candidates(limit=scout_slots)
+        scout_candidates = self._usable(
+            by_state[SourceState.SCOUT_READY]
+        )
+        scout_candidates.sort(
+            key=lambda item: (
+                -self._candidate_value(item, active=active),
+                item.source_key,
+            )
+        )
+        scout = scout_candidates[:scout_slots]
 
         directives = self._search_directives(
             cold_count=cold_count,

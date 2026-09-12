@@ -10,13 +10,14 @@ remain HOLD rather than being guessed.
 from __future__ import annotations
 
 import csv
+from collections import Counter
 import gzip
 import io
 import json
 import math
 import time
 import zlib
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from decimal import Decimal
 from pathlib import PurePosixPath
 from urllib.parse import urlsplit
@@ -25,6 +26,7 @@ import httpx
 from creeper.authority.baseline_index import BaselineIndex, YEAR_BITS
 from creeper.authority.normalizer import normalize_official
 from creeper.source_discovery.coordinator import ScoutDisposition, ScoutResult
+from creeper.source_discovery.overlap import build_minhash
 from creeper.source_discovery.models import (
     MeasurementMode,
     ScoutMeasurement,
@@ -49,6 +51,9 @@ class MeasuredYieldScoutPolicy:
     min_novel_fraction: float = 0.01
     min_novel_eed: float = 1.0
     timeout_seconds: float = 30.0
+    progressive_initial_bytes: int = 64 * 1024
+    early_accept_multiplier: float = 4.0
+    early_reject_unseen_fraction: float = 0.01
 
     def __post_init__(self) -> None:
         for name in (
@@ -59,6 +64,7 @@ class MeasuredYieldScoutPolicy:
             "sample_windows",
             "min_unique_hosts",
             "min_novel_hosts",
+            "progressive_initial_bytes",
         ):
             value = getattr(self, name)
             if not isinstance(value, int) or isinstance(value, bool) or value < 1:
@@ -77,6 +83,18 @@ class MeasuredYieldScoutPolicy:
             raise ValueError("min_novel_eed must be finite and non-negative")
         if not math.isfinite(self.timeout_seconds) or self.timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be positive")
+        if (
+            not math.isfinite(self.early_accept_multiplier)
+            or self.early_accept_multiplier < 1.0
+        ):
+            raise ValueError("early_accept_multiplier must be at least one")
+        if (
+            not math.isfinite(self.early_reject_unseen_fraction)
+            or not 0.0 <= self.early_reject_unseen_fraction <= 1.0
+        ):
+            raise ValueError(
+                "early_reject_unseen_fraction must be within [0, 1]"
+            )
 
 
 @dataclass(frozen=True)
@@ -116,6 +134,7 @@ class ParsedHostSample:
     hosts: set[str]
     host_year_pairs: set[tuple[str, int]]
     measurement_mode: MeasurementMode
+    observation_keys: tuple[str, ...] = ()
 
     def __iter__(self):
         yield self.sampled_records
@@ -366,6 +385,7 @@ def _extract_warc_hosts(
     sampled = 0
     hosts: set[str] = set()
     host_year_pairs: set[tuple[str, int]] = set()
+    observations: list[str] = []
     stream = io.BytesIO(payload)
     try:
         for record in iter_warc_target_records(stream):
@@ -382,6 +402,9 @@ def _extract_warc_hosts(
                 hosts.add(hostname)
                 assert record.source_year is not None
                 host_year_pairs.add((hostname, record.source_year))
+                observations.append(
+                    f"{hostname}\t{record.source_year}"
+                )
     except WarcFormatError:
         # A Range probe may end in the middle of the final canonical gzip
         # member. Complete records before that boundary are still a valid
@@ -394,6 +417,7 @@ def _extract_warc_hosts(
         hosts=hosts,
         host_year_pairs=host_year_pairs,
         measurement_mode=MeasurementMode.HOST_YEAR,
+        observation_keys=tuple(observations),
     )
 
 
@@ -425,6 +449,7 @@ def _extract_hosts(
     lines = _iter_text_lines(payload, max_line_bytes=policy.max_line_bytes)
     hosts: set[str] = set()
     host_year_pairs: set[tuple[str, int]] = set()
+    observations: list[str] = []
     saw_undated_host = False
     sampled = 0
 
@@ -448,11 +473,15 @@ def _extract_hosts(
             if hostname is not None:
                 hosts.add(hostname)
                 host_year_pairs.add((hostname, record.source_year))
+                observations.append(
+                    f"{hostname}\t{record.source_year}"
+                )
         return ParsedHostSample(
             sampled_records=sampled,
             hosts=hosts,
             host_year_pairs=host_year_pairs,
             measurement_mode=MeasurementMode.HOST_YEAR,
+            observation_keys=tuple(observations),
         )
 
     if suffix in {".jsonl", ".ndjson"} or "ndjson" in lower_type:
@@ -471,8 +500,10 @@ def _extract_hosts(
                 hosts.add(hostname)
                 if year is None:
                     saw_undated_host = True
+                    observations.append(hostname)
                 else:
                     host_year_pairs.add((hostname, year))
+                    observations.append(f"{hostname}\t{year}")
         return ParsedHostSample(
             sampled_records=sampled,
             hosts=hosts,
@@ -481,6 +512,7 @@ def _extract_hosts(
                 host_year_pairs=host_year_pairs,
                 saw_undated_host=saw_undated_host,
             ),
+            observation_keys=tuple(observations),
         )
 
     if suffix in {".csv", ".tsv"} or "text/csv" in lower_type or "tab-separated-values" in lower_type:
@@ -495,6 +527,7 @@ def _extract_hosts(
                 hosts=hosts,
                 host_year_pairs=host_year_pairs,
                 measurement_mode=MeasurementMode.HOST_ONLY,
+                observation_keys=(),
             )
 
         known_fields = {
@@ -515,6 +548,7 @@ def _extract_hosts(
                 hostname = _hostname_from_scalar(cell)
                 if hostname is not None:
                     hosts.add(hostname)
+                    observations.append(hostname)
                     saw_undated_host = True
                     return
 
@@ -533,8 +567,10 @@ def _extract_hosts(
                     hosts.add(hostname)
                     if year is None:
                         saw_undated_host = True
+                        observations.append(hostname)
                     else:
                         host_year_pairs.add((hostname, year))
+                        observations.append(f"{hostname}\t{year}")
         else:
             if sampled < policy.max_records:
                 sampled += 1
@@ -552,6 +588,7 @@ def _extract_hosts(
                 host_year_pairs=host_year_pairs,
                 saw_undated_host=saw_undated_host,
             ),
+            observation_keys=tuple(observations),
         )
 
     if suffix in {"", ".txt", ".list", ".urls"} or lower_type.startswith("text/plain"):
@@ -564,11 +601,13 @@ def _extract_hosts(
             hostname = _hostname_from_scalar(line)
             if hostname is not None:
                 hosts.add(hostname)
+                observations.append(hostname)
         return ParsedHostSample(
             sampled_records=sampled,
             hosts=hosts,
             host_year_pairs=set(),
             measurement_mode=MeasurementMode.HOST_ONLY,
+            observation_keys=tuple(observations),
         )
 
     return None
@@ -605,6 +644,10 @@ def _apply_source_year_hint(
         hosts=set(parsed.hosts),
         host_year_pairs={(hostname, year_from) for hostname in parsed.hosts},
         measurement_mode=MeasurementMode.HOST_YEAR,
+        observation_keys=tuple(
+            f"{key.split(chr(9), 1)[0]}\t{year_from}"
+            for key in parsed.observation_keys
+        ),
     )
 
 
@@ -730,12 +773,30 @@ class MeasuredYieldScoutExecutor:
             payload = payload[: boundary + 1]
         return payload
 
-    async def _download_sample(self, url: str) -> SampleDownload:
+    async def _download_sample(
+        self,
+        url: str,
+        *,
+        max_download_bytes: int | None = None,
+        sample_windows: int | None = None,
+    ) -> SampleDownload:
+        budget = (
+            self.policy.max_download_bytes
+            if max_download_bytes is None
+            else int(max_download_bytes)
+        )
+        windows = (
+            self.policy.sample_windows
+            if sample_windows is None
+            else int(sample_windows)
+        )
+        if budget < 1 or windows < 1:
+            raise ValueError("sample budget and windows must be positive")
         if (
-            self.policy.sample_windows <= 1
+            windows <= 1
             or not self._windowable_line_resource(url)
         ):
-            first = await self._download_prefix(url)
+            first = await self._download_prefix(url, max_bytes=budget)
             return SampleDownload(
                 payload=first.payload,
                 content_type=first.content_type,
@@ -746,7 +807,7 @@ class MeasuredYieldScoutExecutor:
 
         per_window = max(
             1,
-            self.policy.max_download_bytes // self.policy.sample_windows,
+            budget // windows,
         )
         first = await self._download_prefix(
             url,
@@ -768,12 +829,12 @@ class MeasuredYieldScoutExecutor:
 
         max_start = max(0, first.total_size - per_window)
         starts = []
-        for index in range(self.policy.sample_windows):
-            if self.policy.sample_windows == 1:
+        for index in range(windows):
+            if windows == 1:
                 offset = 0
             else:
                 offset = round(
-                    max_start * index / (self.policy.sample_windows - 1)
+                    max_start * index / (windows - 1)
                 )
             if offset not in starts:
                 starts.append(offset)
@@ -834,6 +895,25 @@ class MeasuredYieldScoutExecutor:
         for hostname, _year in novel_pairs:
             tld = hostname.rsplit(".", 1)[-1]
             novel_pair_eed += self.english_weights.get(tld, Decimal("0"))
+
+        frequencies = Counter(parsed.observation_keys)
+        singleton_observations = sum(
+            count == 1 for count in frequencies.values()
+        )
+        doubleton_observations = sum(
+            count == 2 for count in frequencies.values()
+        )
+        observation_count = sum(frequencies.values())
+        estimated_unseen_fraction = (
+            singleton_observations / observation_count
+            if observation_count
+            else 0.0
+        )
+        minhash_values = (
+            build_minhash(frequencies.keys()).values
+            if frequencies
+            else ()
+        )
         return ScoutMeasurement(
             sampled_records=parsed.sampled_records,
             unique_hosts=len(parsed.hosts),
@@ -847,13 +927,24 @@ class MeasuredYieldScoutExecutor:
             observed_host_year_pairs=len(parsed.host_year_pairs),
             novel_host_year_pairs=len(novel_pairs),
             novel_pair_eed=float(novel_pair_eed),
+            singleton_observations=singleton_observations,
+            doubleton_observations=doubleton_observations,
+            estimated_unseen_fraction=estimated_unseen_fraction,
+            minhash_values=minhash_values,
         )
 
-    async def __call__(self, candidate: SourceCandidate) -> ScoutResult:
-        started = float(self.clock())
-        download = await self._download_sample(candidate.canonical_entrypoint)
+    def _evaluate_download(
+        self,
+        candidate: SourceCandidate,
+        download: SampleDownload,
+        *,
+        started: float,
+    ) -> ScoutResult:
         if download.content_type == "__permanent_missing__":
-            return ScoutResult(ScoutDisposition.HOLD, reason="bulk source returned HTTP 404/410")
+            return ScoutResult(
+                ScoutDisposition.HOLD,
+                reason="bulk source returned HTTP 404/410",
+            )
         try:
             parsed = _extract_hosts(
                 download.payload,
@@ -865,11 +956,9 @@ class MeasuredYieldScoutExecutor:
         except (WarcFormatError, ValueError, csv.Error) as exc:
             detail = str(exc).strip().replace("\n", " ")[:240]
             measurement = None
-            # Preserve the historical fail-closed distinction: a payload that
-            # advertises no recognizable WARC/ARC framing is not measurable.
-            # A recognizable archive prefix may still report a zero-yield
-            # measurement for auditability without being promoted.
-            if download.payload.lstrip().startswith((b"WARC/", b"ARC/", b"\x1f\x8b")):
+            if download.payload.lstrip().startswith(
+                (b"WARC/", b"ARC/", b"\x1f\x8b")
+            ):
                 elapsed = max(0.0, float(self.clock()) - started)
                 measurement = self._measurement(
                     parsed=ParsedHostSample(
@@ -893,7 +982,10 @@ class MeasuredYieldScoutExecutor:
         if parsed is None:
             return ScoutResult(
                 ScoutDisposition.HOLD,
-                reason="unsupported measured source format; requires a format-specific mature parser",
+                reason=(
+                    "unsupported measured source format; requires a "
+                    "format-specific mature parser"
+                ),
             )
         parsed = _apply_source_year_hint(
             parsed,
@@ -924,10 +1016,158 @@ class MeasuredYieldScoutExecutor:
             return ScoutResult(
                 ScoutDisposition.HOLD,
                 measurement=measurement,
-                reason="measured baseline-external/EED yield below warm threshold",
+                reason=(
+                    "measured baseline-external/EED yield below warm threshold"
+                ),
             )
         return ScoutResult(
             ScoutDisposition.WARM,
             measurement=measurement,
             reason="bounded deterministic sample met warm-yield thresholds",
         )
+
+    def _early_accept(self, result: ScoutResult) -> bool:
+        measurement = result.measurement
+        if (
+            result.disposition is not ScoutDisposition.WARM
+            or measurement is None
+        ):
+            return False
+        observed = measurement.observed_count_for_threshold
+        novel = measurement.novel_count_for_threshold
+        fraction = novel / max(1, observed)
+        multiplier = self.policy.early_accept_multiplier
+        return (
+            observed >= self.policy.min_unique_hosts
+            and novel >= self.policy.min_novel_hosts * multiplier
+            and fraction
+            >= min(1.0, self.policy.min_novel_fraction * multiplier)
+            and measurement.novel_eed_for_ranking
+            >= self.policy.min_novel_eed * multiplier
+        )
+
+    def _early_reject(self, result: ScoutResult) -> bool:
+        measurement = result.measurement
+        if (
+            result.disposition is not ScoutDisposition.HOLD
+            or measurement is None
+            or measurement.observed_count_for_threshold
+            < self.policy.min_unique_hosts
+        ):
+            return False
+        return (
+            measurement.estimated_unseen_fraction
+            <= self.policy.early_reject_unseen_fraction
+            and (
+                measurement.novel_count_for_threshold
+                < self.policy.min_novel_hosts
+                or measurement.novel_eed_for_ranking
+                < self.policy.min_novel_eed
+            )
+        )
+
+    @staticmethod
+    def _with_cumulative_cost(
+        result: ScoutResult,
+        *,
+        requests: int,
+        bytes_read: int,
+    ) -> ScoutResult:
+        measurement = result.measurement
+        if measurement is None:
+            return result
+        return ScoutResult(
+            result.disposition,
+            measurement=replace(
+                measurement,
+                requests=requests,
+                bytes_read=bytes_read,
+            ),
+            reason=result.reason,
+            discovered_candidates=result.discovered_candidates,
+            edge_relation=result.edge_relation,
+        )
+
+    async def __call__(self, candidate: SourceCandidate) -> ScoutResult:
+        started = float(self.clock())
+        url = candidate.canonical_entrypoint
+
+        initial_budget = min(
+            self.policy.max_download_bytes,
+            self.policy.progressive_initial_bytes,
+        )
+        progressive = (
+            self._windowable_line_resource(url)
+            and initial_budget < self.policy.max_download_bytes
+        )
+        if not progressive:
+            download = await self._download_sample(url)
+            return self._evaluate_download(
+                candidate,
+                download,
+                started=started,
+            )
+
+        # Four cumulative fidelity targets approximate
+        # 64 KiB -> 512 KiB -> 2 MiB -> full configured budget. Each stage
+        # spends only the *incremental* bytes required to reach its target, so
+        # the complete scout remains within max_download_bytes.
+        targets = {
+            initial_budget,
+            min(self.policy.max_download_bytes, max(initial_budget, 512 * 1024)),
+            min(self.policy.max_download_bytes, max(initial_budget, 2 * 1024 * 1024)),
+            self.policy.max_download_bytes,
+        }
+        stage_targets = sorted(targets)
+        spent_bytes = 0
+        spent_requests = 0
+        last_result: ScoutResult | None = None
+
+        for index, target in enumerate(stage_targets):
+            incremental_budget = target - spent_bytes
+            if incremental_budget <= 0:
+                continue
+            windows = min(
+                self.policy.sample_windows,
+                max(1, index + 1),
+            )
+            download = await self._download_sample(
+                url,
+                max_download_bytes=incremental_budget,
+                sample_windows=windows,
+            )
+            spent_bytes += download.bytes_read
+            spent_requests += download.requests
+            result = self._evaluate_download(
+                candidate,
+                download,
+                started=started,
+            )
+            result = self._with_cumulative_cost(
+                result,
+                requests=spent_requests,
+                bytes_read=spent_bytes,
+            )
+            last_result = result
+
+            if self._early_accept(result):
+                return ScoutResult(
+                    ScoutDisposition.WARM,
+                    measurement=result.measurement,
+                    reason=(
+                        "progressive scout early-accepted a strongly positive "
+                        f"fidelity stage {index + 1}/{len(stage_targets)}"
+                    ),
+                )
+            if self._early_reject(result):
+                return ScoutResult(
+                    ScoutDisposition.HOLD,
+                    measurement=result.measurement,
+                    reason=(
+                        "progressive scout early-stopped a saturated low-yield "
+                        f"fidelity stage {index + 1}/{len(stage_targets)}"
+                    ),
+                )
+
+        assert last_result is not None
+        return last_result

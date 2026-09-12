@@ -14,6 +14,7 @@ from creeper.source_discovery import (
 )
 from creeper.source_discovery.manager import (
     SearchDirectiveKind,
+    SourceIntelligenceTask,
     SourcePoolTargets,
     SourceReservoirManager,
 )
@@ -287,6 +288,90 @@ class SourceReservoirManagerTests(unittest.TestCase):
             if item.kind is SearchDirectiveKind.REFILL_RESERVOIR
         )
         self.assertEqual(refill.strategy, "RECOVERY")
+
+    def test_hold_metasource_allocates_interpret_structure_opportunity(self) -> None:
+        catalog = SourceCandidate(
+            canonical_entrypoint="https://archive.example/catalog/",
+            source_family="RESOURCE_CATALOG",
+            level=SourceLevel.METASOURCE,
+            discovered_by="scrapy_sidecar",
+            discovery_strategy="DETERMINISTIC_LINK_EXPANSION",
+            expected_year_from=1996,
+            expected_year_to=2001,
+            expected_volume=100000,
+            enumerability_prior=0.9,
+            confidence=0.8,
+        )
+        self.registry.register_proposal(catalog)
+        self.registry.transition(catalog.source_key, SourceState.HOLD)
+        manager = SourceReservoirManager(
+            self.registry,
+            targets=SourcePoolTargets(
+                active_min=0,
+                active_target=0,
+                warm_min=0,
+                warm_target=0,
+                cold_min=3,
+                cold_target=6,
+                max_search_directives=3,
+            ),
+        )
+
+        plan = manager.plan()
+
+        interpret = next(
+            item
+            for item in plan.search_directives
+            if item.task_type is SourceIntelligenceTask.INTERPRET_STRUCTURE
+        )
+        self.assertEqual(
+            interpret.kind,
+            SearchDirectiveKind.INTERPRET_STRUCTURE,
+        )
+        self.assertEqual(
+            interpret.subject,
+            catalog.canonical_entrypoint,
+        )
+
+    def test_zero_credit_tail_prioritizes_recovery_codex_task(self) -> None:
+        for index in range(6):
+            episode = self.registry.begin_search_episode(
+                strategy=f"ZERO_{index}",
+                backend="test",
+                query=f"zero-{index}",
+                actor="test",
+                episode_id=f"search:zero:{index}",
+            )
+            self.registry.finish_search_episode(
+                episode.episode_id,
+                search_cost_seconds=1.0,
+            )
+        manager = SourceReservoirManager(
+            self.registry,
+            targets=SourcePoolTargets(
+                active_min=0,
+                active_target=0,
+                warm_min=0,
+                warm_target=0,
+                cold_min=3,
+                cold_target=6,
+                max_search_directives=3,
+            ),
+            stagnation_window=6,
+        )
+
+        plan = manager.plan()
+
+        recovery = next(
+            item
+            for item in plan.search_directives
+            if item.task_type is SourceIntelligenceTask.RECOVER_STAGNATION
+        )
+        self.assertEqual(
+            recovery.kind,
+            SearchDirectiveKind.RECOVER_STAGNATION,
+        )
+        self.assertEqual(recovery.strategy, "RECOVER_STAGNATION")
 
     def test_suppressed_candidates_do_not_satisfy_reserve_or_receive_work(self) -> None:
         candidate = self.candidate("suppressed", family="SATURATED")

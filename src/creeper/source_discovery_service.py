@@ -30,6 +30,7 @@ from creeper.source_discovery.coordinator import (
     SourceDiscoveryCoordinator,
 )
 from creeper.source_discovery.curated_seeds import ensure_curated_direct_catalogs
+from creeper.source_discovery.intelligence import SourceIntelligenceContextBuilder
 from creeper.source_discovery.manager import SourcePoolTargets, SourceReservoirManager
 from creeper.source_discovery.measured_scout import (
     MeasuredYieldScoutExecutor,
@@ -54,6 +55,8 @@ class CoordinatorConfig:
     search_parallelism: int = 3
     failure_retry_seconds: float = 30.0
     search_cooldown_seconds: float = 30.0
+    search_ucb_exploration: float = 0.35
+    stagnation_window: int = 6
 
 
 @dataclass(frozen=True)
@@ -105,6 +108,29 @@ def _optional_path(value: Any, *, config_path: Path, name: str) -> Path | None:
     if value is None:
         return None
     return _resolve_path(value, config_path=config_path, name=name)
+
+
+def _resolve_agent_command(
+    values: list[str],
+    *,
+    config_path: Path,
+) -> tuple[str, ...]:
+    """Resolve path-like command arguments relative to the config file.
+
+    Executable names such as python or codex remain PATH-resolved. Relative
+    script/config paths containing a path separator are made absolute against
+    the TOML directory, so daemon startup does not depend on shell cwd.
+    """
+    resolved: list[str] = []
+    for value in values:
+        path = Path(value)
+        if (
+            not path.is_absolute()
+            and ("/" in value or "\\" in value)
+        ):
+            value = str((config_path.parent / path).resolve())
+        resolved.append(value)
+    return tuple(resolved)
 
 
 def _nonnegative_int(value: Any, *, name: str) -> int:
@@ -190,6 +216,14 @@ def load_source_discovery_config(config_path: Path) -> SourceDiscoveryServiceCon
         search_cooldown_seconds=_nonnegative_float(
             coordinator_raw.get("search_cooldown_seconds", 30.0), name="coordinator.search_cooldown_seconds"
         ),
+        search_ucb_exploration=_nonnegative_float(
+            coordinator_raw.get("search_ucb_exploration", 0.35),
+            name="coordinator.search_ucb_exploration",
+        ),
+        stagnation_window=_positive_int(
+            coordinator_raw.get("stagnation_window", 6),
+            name="coordinator.stagnation_window",
+        ),
     )
 
     triage_raw = _table(root, "triage")
@@ -238,7 +272,10 @@ def load_source_discovery_config(config_path: Path) -> SourceDiscoveryServiceCon
         require_year_bounds=_strict_bool(admission_raw.get("require_year_bounds", True), name="admission.require_year_bounds"),
     )
     agent = AgentConfig(
-        command=tuple(raw_command),
+        command=_resolve_agent_command(
+            raw_command,
+            config_path=config_path,
+        ),
         backend=backend,
         actor=actor,
         cwd=_optional_path(agent_raw.get("cwd"), config_path=config_path, name="agent.cwd"),
@@ -252,6 +289,14 @@ def load_source_discovery_config(config_path: Path) -> SourceDiscoveryServiceCon
             ),
             max_returned_candidates=_positive_int(
                 agent_raw.get("max_returned_candidates", 2_000), name="agent.max_returned_candidates"
+            ),
+            max_returned_hypotheses=_positive_int(
+                agent_raw.get("max_returned_hypotheses", 128),
+                name="agent.max_returned_hypotheses",
+            ),
+            max_motif_expansions=_positive_int(
+                agent_raw.get("max_motif_expansions", 256),
+                name="agent.max_motif_expansions",
             ),
         ),
         admission=admission,
@@ -300,6 +345,27 @@ def load_source_discovery_config(config_path: Path) -> SourceDiscoveryServiceCon
                 ),
                 timeout_seconds=_positive_float(
                     measurement_raw.get("timeout_seconds", defaults.timeout_seconds), name="measurement.timeout_seconds"
+                ),
+                progressive_initial_bytes=_positive_int(
+                    measurement_raw.get(
+                        "progressive_initial_bytes",
+                        defaults.progressive_initial_bytes,
+                    ),
+                    name="measurement.progressive_initial_bytes",
+                ),
+                early_accept_multiplier=_positive_float(
+                    measurement_raw.get(
+                        "early_accept_multiplier",
+                        defaults.early_accept_multiplier,
+                    ),
+                    name="measurement.early_accept_multiplier",
+                ),
+                early_reject_unseen_fraction=_unit_float(
+                    measurement_raw.get(
+                        "early_reject_unseen_fraction",
+                        defaults.early_reject_unseen_fraction,
+                    ),
+                    name="measurement.early_reject_unseen_fraction",
                 ),
             ),
         )
@@ -360,6 +426,8 @@ async def _open_runtime(config: SourceDiscoveryServiceConfig):
                 registry,
                 targets=config.pool,
                 search_cooldown_seconds=config.coordinator.search_cooldown_seconds,
+                search_ucb_exploration=config.coordinator.search_ucb_exploration,
+                stagnation_window=config.coordinator.stagnation_window,
             )
             max_io = max(config.coordinator.triage_parallelism, config.coordinator.scout_parallelism)
             limits = httpx.Limits(
@@ -392,6 +460,7 @@ async def _open_runtime(config: SourceDiscoveryServiceConfig):
                     structural_executor=structural,
                     measured_executor=measured,
                 )
+                intelligence_context = SourceIntelligenceContextBuilder(registry)
                 search = CommandAgentSearchExecutor(
                     config.agent.command,
                     discovery_root / "agent-invocations",
@@ -400,6 +469,7 @@ async def _open_runtime(config: SourceDiscoveryServiceConfig):
                     cwd=config.agent.cwd,
                     policy=config.agent.policy,
                     admission_policy=config.agent.admission,
+                    context_builder=intelligence_context,
                 )
                 coordinator = SourceDiscoveryCoordinator(
                     registry,

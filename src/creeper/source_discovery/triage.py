@@ -53,15 +53,36 @@ class HttpSourceTriageExecutor:
         self.policy = policy or HttpTriagePolicy()
 
     @staticmethod
-    def _result_for_status(status: int, *, method: str) -> TriageResult:
-        if 200 <= status < 400:
-            return TriageResult(
-                TriageDisposition.SCOUT,
-                reason=f"{method} entrypoint probe returned HTTP {status}",
-            )
+    def _result_for_response(
+        response: httpx.Response,
+        *,
+        method: str,
+    ) -> TriageResult:
+        status = int(response.status_code)
+        raw_length = response.headers.get("content-length")
+        content_length = (
+            int(raw_length)
+            if raw_length is not None and raw_length.isdigit()
+            else None
+        )
+        range_supported = (
+            response.status_code == 206
+            or response.headers.get("accept-ranges", "").lower() == "bytes"
+            or response.headers.get("content-range") is not None
+        )
+        disposition = (
+            TriageDisposition.SCOUT
+            if 200 <= status < 400
+            else TriageDisposition.HOLD
+        )
         return TriageResult(
-            TriageDisposition.HOLD,
+            disposition,
             reason=f"{method} entrypoint probe returned HTTP {status}",
+            status_code=status,
+            method=method,
+            content_type=response.headers.get("content-type"),
+            content_length=content_length,
+            range_supported=range_supported,
         )
 
     def _raise_if_transient(self, status: int, *, method: str) -> None:
@@ -70,7 +91,7 @@ class HttpSourceTriageExecutor:
                 f"{method} entrypoint probe returned transient HTTP {status}"
             )
 
-    async def _range_get_status(self, url: str) -> int:
+    async def _range_get_result(self, url: str) -> TriageResult:
         async with self.client.stream(
             "GET",
             url,
@@ -80,7 +101,9 @@ class HttpSourceTriageExecutor:
         ) as response:
             # Deliberately do not consume response content. Closing the stream
             # bounds local memory even when the origin ignores the Range header.
-            return int(response.status_code)
+            status = int(response.status_code)
+            self._raise_if_transient(status, method="GET")
+            return self._result_for_response(response, method="GET")
 
     async def __call__(self, candidate: SourceCandidate) -> TriageResult:
         url = candidate.canonical_entrypoint
@@ -92,11 +115,9 @@ class HttpSourceTriageExecutor:
             )
             status = int(response.status_code)
             if status in self.policy.fallback_get_statuses:
-                status = await self._range_get_status(url)
-                self._raise_if_transient(status, method="GET")
-                return self._result_for_status(status, method="GET")
+                return await self._range_get_result(url)
             self._raise_if_transient(status, method="HEAD")
-            return self._result_for_status(status, method="HEAD")
+            return self._result_for_response(response, method="HEAD")
         except TriageTransientError:
             raise
         except (httpx.TimeoutException, httpx.NetworkError, httpx.RemoteProtocolError) as exc:

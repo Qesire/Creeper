@@ -208,6 +208,135 @@ class SourceDiscoveryRegistryTests(unittest.TestCase):
         self.assertEqual(rewarded.accepted_novel_eed, 12.0)
         self.assertEqual(self.registry.strategy_rewards()[0].reward_per_cost, 6.0)
 
+    def test_final_reward_supersedes_scout_proxy_and_credits_llm_hypothesis(self) -> None:
+        episode_id = "llm:test-final"
+        self.registry.begin_search_episode(
+            strategy="EXPLOIT_SUCCESS",
+            backend="codex-cli-subagent",
+            query="expand a proven source",
+            actor="codex:source-intelligence",
+            episode_id=episode_id,
+        )
+        self.registry.begin_llm_episode(
+            episode_id=episode_id,
+            task_type="EXPLOIT_SUCCESS_PATTERN",
+            backend="codex-cli-subagent",
+            actor="codex:source-intelligence",
+            context_hash="abc123",
+            prompt_version="source-intelligence-v2",
+        )
+        hypothesis = {
+            "hypothesis_id": f"{episode_id}:h1",
+            "action": "PROBE_URL",
+            "confidence": 0.8,
+        }
+        self.registry.register_llm_hypothesis(episode_id, hypothesis)
+        candidate = self.candidate(
+            "final-reward/",
+            strategy="EXPLOIT_SUCCESS",
+        )
+        self.registry.register_proposal(
+            candidate,
+            episode_id=episode_id,
+        )
+        self.registry.link_llm_source(
+            candidate.source_key,
+            hypothesis_id=hypothesis["hypothesis_id"],
+        )
+        self.registry.finish_search_episode(
+            episode_id,
+            search_cost_seconds=2.0,
+        )
+        self.registry.finish_llm_episode(
+            episode_id,
+            cost_seconds=2.0,
+        )
+
+        self.registry.record_scout_measurement(
+            candidate.source_key,
+            ScoutMeasurement(
+                sampled_records=100,
+                unique_hosts=80,
+                novel_hosts=20,
+                direct_host_years=0,
+                requests=1,
+                bytes_read=1024,
+                elapsed_seconds=1.0,
+                novel_eed=8.0,
+            ),
+        )
+        self.assertEqual(
+            self.registry.get_search_episode(episode_id).accepted_novel_eed,
+            8.0,
+        )
+
+        self.registry.record_final_reward(
+            candidate.source_key,
+            final_accepted_eed=3.5,
+        )
+
+        self.assertEqual(
+            self.registry.get_search_episode(episode_id).accepted_novel_eed,
+            3.5,
+        )
+        task_rewards = self.registry.llm_task_rewards()
+        self.assertEqual(len(task_rewards), 1)
+        self.assertEqual(
+            task_rewards[0]["task_type"],
+            "EXPLOIT_SUCCESS_PATTERN",
+        )
+        self.assertEqual(task_rewards[0]["credited_eed"], 3.5)
+
+        # Later proxy remeasurement cannot overwrite formal final authority.
+        self.registry.record_scout_measurement(
+            candidate.source_key,
+            ScoutMeasurement(
+                sampled_records=100,
+                unique_hosts=90,
+                novel_hosts=50,
+                direct_host_years=0,
+                requests=2,
+                bytes_read=2048,
+                elapsed_seconds=1.0,
+                novel_eed=25.0,
+            ),
+        )
+        self.assertEqual(
+            self.registry.get_search_episode(episode_id).accepted_novel_eed,
+            3.5,
+        )
+
+    def test_residual_and_overlap_scout_signals_round_trip(self) -> None:
+        candidate = self._to_scout_ready(self.candidate("residual/"))
+        self.registry.transition(candidate.source_key, SourceState.SCOUTING)
+        measurement = ScoutMeasurement(
+            sampled_records=10,
+            unique_hosts=5,
+            novel_hosts=2,
+            direct_host_years=0,
+            requests=1,
+            bytes_read=512,
+            elapsed_seconds=0.5,
+            novel_eed=2.0,
+            singleton_observations=3,
+            doubleton_observations=1,
+            estimated_unseen_fraction=0.3,
+            minhash_values=(1, 2, 3, 4),
+        )
+        self.registry.record_scout_measurement(
+            candidate.source_key,
+            measurement,
+        )
+
+        restored = self.registry.get_scout_measurement(candidate.source_key)
+        self.assertIsNotNone(restored)
+        assert restored is not None
+        self.assertEqual(restored.singleton_observations, 3)
+        self.assertEqual(restored.doubleton_observations, 1)
+        self.assertAlmostEqual(restored.estimated_unseen_fraction, 0.3)
+        self.assertEqual(restored.minhash_values, (1, 2, 3, 4))
+        self.assertAlmostEqual(restored.residual_opportunity, 1.5)
+
     def test_agent_prior_cannot_promote_source_without_measured_scout(self) -> None:
         candidate = self.candidate("measured/")
         self.registry.register_proposal(candidate)

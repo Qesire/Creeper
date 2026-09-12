@@ -34,6 +34,38 @@ elif args.mode == "fail":
     raise SystemExit(7)
 elif args.mode == "oversize":
     open(args.response, "w", encoding="utf-8").write("x" * 4096)
+elif args.mode == "hypothesis":
+    payload = {
+        "query": "expand successful annual source",
+        "hypotheses": [{
+            "hypothesis_id": "annual-cdx",
+            "action": "ENUMERATE_TEMPLATE",
+            "template": "https://archives.example/{YEAR}/index.cdxj",
+            "variables": {"YEAR": [1999, 2000, 2001]},
+            "candidate_defaults": {
+                "source_family": "BULK_ARTIFACT",
+                "level": "SOURCE",
+                "expected_year_from": 1996,
+                "expected_year_to": 2001,
+                "expected_volume": 100000,
+                "temporal_semantics_prior": 1.0,
+                "enumerability_prior": 0.95,
+                "direct_evidence_prior": 1.0,
+                "baseline_overlap_prior": 0.5,
+                "access_cost_prior": 0.5,
+                "adapter_cost_prior": 0.5,
+                "confidence": 0.9
+            },
+            "expected_mechanism": "annual CDXJ siblings",
+            "confidence": 0.9,
+            "validation": {
+                "method": "HEAD_OR_RANGE",
+                "max_requests": 3,
+                "max_bytes": 65536
+            }
+        }]
+    }
+    open(args.response, "w", encoding="utf-8").write(json.dumps(payload))
 elif args.mode == "success":
     payload = {
         "query": "historical web archive catalog 1996 2001",
@@ -104,11 +136,42 @@ class CommandAgentSearchExecutorTests(unittest.IsolatedAsyncioTestCase):
         invocation_dirs = list((self.root / "invocations-success").iterdir())
         self.assertEqual(len(invocation_dirs), 1)
         request = json.loads((invocation_dirs[0] / "request.json").read_text(encoding="utf-8"))
-        self.assertEqual(request["contract"], "creeper.search-agent.v1")
+        self.assertEqual(
+            request["contract"],
+            "creeper.llm-source-intelligence.v2",
+        )
+        self.assertEqual(request["execution"]["mode"], "SUBAGENT")
+        self.assertEqual(request["execution"]["authority"], "proposal_only")
+        self.assertEqual(
+            request["task"]["task_type"],
+            "DISCOVER_NEW_SOURCE",
+        )
+        self.assertEqual(request["task"]["desired_candidates"], 5)
+        # Transitional aliases keep existing finite search helpers compatible.
         self.assertEqual(request["desired_candidates"], 5)
         self.assertEqual(request["target_year_from"], 1996)
         self.assertEqual(request["target_year_to"], 2001)
         self.assertTrue(request["requirements"]["prefer_metasources"])
+
+    async def test_hypothesis_template_is_expanded_and_attributed(self) -> None:
+        executor = self.executor("hypothesis")
+
+        batch = await executor(self.directive())
+
+        self.assertEqual(len(batch.candidates), 3)
+        self.assertEqual(len(batch.hypotheses), 1)
+        self.assertIsNotNone(batch.llm_episode_id)
+        hypothesis_id = batch.hypotheses[0]["hypothesis_id"]
+        self.assertTrue(str(hypothesis_id).startswith("llm:"))
+        attribution = dict(batch.hypothesis_attribution)
+        self.assertEqual(len(attribution), 3)
+        self.assertEqual(set(attribution.values()), {hypothesis_id})
+        self.assertTrue(
+            all(
+                candidate.direct_evidence_prior == 1.0
+                for candidate in batch.candidates
+            )
+        )
 
     async def test_oversized_response_fails_closed(self) -> None:
         executor = self.executor("oversize", max_response_bytes=128)

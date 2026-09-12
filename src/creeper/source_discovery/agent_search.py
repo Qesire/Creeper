@@ -19,6 +19,12 @@ from pathlib import Path
 from typing import Any
 
 from creeper.source_discovery.admission import SearchAdmissionPolicy
+from creeper.source_discovery.intelligence import SourceIntelligenceContextBuilder
+from creeper.source_discovery.motifs import (
+    MotifExpansionPolicy,
+    MotifProtocolError,
+    candidate_payloads_from_hypothesis,
+)
 from creeper.source_discovery.coordinator import SearchBatch
 from creeper.source_discovery.manager import SearchDirective
 from creeper.source_discovery.models import SourceCandidate, SourceLevel, SourceState
@@ -34,11 +40,18 @@ class CommandAgentSearchPolicy:
     termination_grace_seconds: float = 2.0
     max_response_bytes: int = 2 * 1024 * 1024
     max_returned_candidates: int = 2_000
+    max_returned_hypotheses: int = 128
+    max_motif_expansions: int = 256
 
     def __post_init__(self) -> None:
         if self.timeout_seconds <= 0 or self.termination_grace_seconds <= 0:
             raise ValueError("agent search timeouts must be positive")
-        if self.max_response_bytes < 1 or self.max_returned_candidates < 1:
+        if (
+            self.max_response_bytes < 1
+            or self.max_returned_candidates < 1
+            or self.max_returned_hypotheses < 1
+            or self.max_motif_expansions < 1
+        ):
             raise ValueError("agent search response limits must be positive")
 
 
@@ -112,6 +125,7 @@ class CommandAgentSearchExecutor:
         cwd: Path | None = None,
         policy: CommandAgentSearchPolicy | None = None,
         admission_policy: SearchAdmissionPolicy | None = None,
+        context_builder: SourceIntelligenceContextBuilder | None = None,
         clock=time.monotonic,
     ) -> None:
         command = tuple(command)
@@ -126,11 +140,51 @@ class CommandAgentSearchExecutor:
         self.cwd = None if cwd is None else Path(cwd).resolve()
         self.policy = policy or CommandAgentSearchPolicy()
         self.admission_policy = admission_policy
+        self.context_builder = context_builder
         self.clock = clock
 
-    def _request_payload(self, directive: SearchDirective) -> dict[str, object]:
+    def _request_payload(
+        self,
+        directive: SearchDirective,
+        *,
+        episode_id: str,
+    ) -> dict[str, object]:
+        context = (
+            {}
+            if self.context_builder is None
+            else self.context_builder.build(directive)
+        )
+        context_hash = (
+            ""
+            if self.context_builder is None
+            else self.context_builder.digest(context)
+        )
         payload: dict[str, object] = {
-            "contract": "creeper.search-agent.v1",
+            "contract": "creeper.llm-source-intelligence.v2",
+            "prompt_version": "source-intelligence-v2",
+            "episode_id": episode_id,
+            "execution": {
+                "parent_process": "creeper-source-discovery",
+                "mode": "SUBAGENT",
+                "authority": "proposal_only",
+                "must_return_structured_output": True,
+            },
+            "task": {
+                "task_type": directive.task_type.value,
+                "kind": directive.kind.value,
+                "strategy": directive.strategy,
+                "desired_candidates": directive.desired_candidates,
+                "subject": directive.subject,
+                "reason": directive.reason,
+                "objective": (
+                    "maximize marginal FINAL Accepted Novel EED "
+                    "per total resource cost"
+                ),
+            },
+            "context_hash": context_hash,
+            "context": context,
+            # Transitional top-level aliases keep existing bounded search
+            # helpers operational while v2 consumers use the typed task object.
             "kind": directive.kind.value,
             "strategy": directive.strategy,
             "desired_candidates": directive.desired_candidates,
@@ -173,6 +227,23 @@ class CommandAgentSearchExecutor:
                 ),
                 "source_identity": "exact resource URL",
                 "evidence_claims_are_not_authorized": True,
+                "prefer_templates_over_long_url_lists": True,
+                "hypothesis_actions": [
+                    "PROBE_URL",
+                    "SEARCH_WEB_RESULT",
+                    "EXPAND_CATALOG",
+                    "ENUMERATE_TEMPLATE",
+                ],
+            },
+            "requested_output": {
+                "query": "non-empty concise description of the search/reasoning performed",
+                "hypotheses": (
+                    "bounded testable hypotheses; templates must use explicit "
+                    "finite variable lists"
+                ),
+                "candidates": (
+                    "legacy direct candidate list; prefer hypotheses in v2"
+                ),
             },
         }
         if self.admission_policy is not None:
@@ -214,11 +285,14 @@ class CommandAgentSearchExecutor:
         path: Path,
         *,
         strategy: str,
+        episode_id: str,
     ) -> tuple[
         str,
         tuple[SourceCandidate, ...],
         tuple[dict[str, str], ...],
         int,
+        tuple[dict[str, object], ...],
+        tuple[tuple[str, str], ...],
     ]:
         try:
             size = path.stat().st_size
@@ -234,25 +308,64 @@ class CommandAgentSearchExecutor:
             raise SearchAgentProtocolError(f"invalid agent response JSON: {exc}") from exc
         if not isinstance(payload, dict):
             raise SearchAgentProtocolError("agent response must be a JSON object")
-        unknown = set(payload) - {"query", "candidates"}
+        unknown = set(payload) - {"query", "candidates", "hypotheses"}
         if unknown:
             raise SearchAgentProtocolError(
                 f"unknown agent response fields: {sorted(unknown)}"
             )
         query = payload.get("query")
-        candidates = payload.get("candidates")
+        candidates = payload.get("candidates", [])
+        hypotheses = payload.get("hypotheses", [])
         if not isinstance(query, str) or not query.strip():
             raise SearchAgentProtocolError("agent response query must be non-empty")
         if not isinstance(candidates, list):
             raise SearchAgentProtocolError("agent response candidates must be a list")
-        if len(candidates) > self.policy.max_returned_candidates:
+        if not isinstance(hypotheses, list):
+            raise SearchAgentProtocolError("agent response hypotheses must be a list")
+        if len(hypotheses) > self.policy.max_returned_hypotheses:
             raise SearchAgentProtocolError(
-                "agent returned more candidates than max_returned_candidates"
+                "agent returned more hypotheses than max_returned_hypotheses"
+            )
+
+        normalized_hypotheses: list[dict[str, object]] = []
+        expanded_items: list[tuple[str | None, Any]] = [
+            (None, item) for item in candidates
+        ]
+        motif_policy = MotifExpansionPolicy(
+            max_expansions=self.policy.max_motif_expansions
+        )
+        for raw in hypotheses:
+            if not isinstance(raw, dict):
+                raise SearchAgentProtocolError(
+                    "agent hypothesis must be a JSON object"
+                )
+            raw_id = raw.get("hypothesis_id")
+            if not isinstance(raw_id, str) or not raw_id.strip():
+                raise SearchAgentProtocolError("hypothesis_id is required")
+            normalized = dict(raw)
+            hypothesis_id = f"{episode_id}:{raw_id}"
+            normalized["hypothesis_id"] = hypothesis_id
+            try:
+                generated = candidate_payloads_from_hypothesis(
+                    normalized,
+                    policy=motif_policy,
+                )
+            except MotifProtocolError as exc:
+                raise SearchAgentProtocolError(
+                    f"invalid agent hypothesis: {exc}"
+                ) from exc
+            normalized_hypotheses.append(normalized)
+            expanded_items.extend(generated)
+
+        if len(expanded_items) > self.policy.max_returned_candidates:
+            raise SearchAgentProtocolError(
+                "agent hypotheses expanded beyond max_returned_candidates"
             )
 
         accepted: list[SourceCandidate] = []
         rejected: list[dict[str, str]] = []
-        for item in candidates:
+        attribution: list[tuple[str, str]] = []
+        for hypothesis_id, item in expanded_items:
             candidate = _candidate_from_payload(
                 item,
                 strategy=strategy,
@@ -265,6 +378,10 @@ class CommandAgentSearchExecutor:
             )
             if reason is None:
                 accepted.append(candidate)
+                if hypothesis_id is not None:
+                    attribution.append(
+                        (candidate.source_key, hypothesis_id)
+                    )
             else:
                 rejected.append(
                     {
@@ -273,7 +390,14 @@ class CommandAgentSearchExecutor:
                         "reason": reason,
                     }
                 )
-        return query, tuple(accepted), tuple(rejected), len(candidates)
+        return (
+            query,
+            tuple(accepted),
+            tuple(rejected),
+            len(expanded_items),
+            tuple(normalized_hypotheses),
+            tuple(attribution),
+        )
 
     @staticmethod
     def _write_admission_audit(
@@ -300,6 +424,7 @@ class CommandAgentSearchExecutor:
 
     async def __call__(self, directive: SearchDirective) -> SearchBatch:
         invocation_id = uuid.uuid4().hex
+        episode_id = f"llm:{invocation_id}"
         invocation_dir = self.invocation_root / invocation_id
         invocation_dir.mkdir(parents=True, exist_ok=False)
         request_path = invocation_dir / "request.json"
@@ -307,7 +432,7 @@ class CommandAgentSearchExecutor:
         admission_path = invocation_dir / "admission.json"
         request_path.write_text(
             json.dumps(
-                self._request_payload(directive),
+                self._request_payload(directive, episode_id=episode_id),
                 ensure_ascii=False,
                 sort_keys=True,
                 indent=2,
@@ -346,9 +471,17 @@ class CommandAgentSearchExecutor:
         if returncode != 0:
             raise RuntimeError(f"source search agent failed rc={returncode}")
 
-        query, candidates, rejected, raw_candidate_count = self._read_response(
+        (
+            query,
+            candidates,
+            rejected,
+            raw_candidate_count,
+            hypotheses,
+            hypothesis_attribution,
+        ) = self._read_response(
             response_path,
             strategy=directive.strategy,
+            episode_id=episode_id,
         )
         self._write_admission_audit(
             admission_path,
@@ -357,10 +490,20 @@ class CommandAgentSearchExecutor:
             rejected=rejected,
         )
         elapsed = max(0.0, float(self.clock()) - started)
+        request_payload = self._request_payload(
+            directive,
+            episode_id=episode_id,
+        )
         return SearchBatch(
             backend=self.backend,
             query=query,
             actor=self.actor,
             candidates=candidates,
             search_cost_seconds=elapsed,
+            llm_episode_id=episode_id,
+            llm_task_type=directive.task_type.value,
+            context_hash=str(request_payload["context_hash"]),
+            prompt_version=str(request_payload["prompt_version"]),
+            hypotheses=hypotheses,
+            hypothesis_attribution=hypothesis_attribution,
         )

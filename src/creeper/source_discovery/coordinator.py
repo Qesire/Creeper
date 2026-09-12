@@ -20,11 +20,13 @@ from pathlib import Path
 from typing import Generic, TypeVar
 
 from creeper.source_discovery.manager import SearchDirective, SourceReservoirManager
+from creeper.source_discovery.motifs import infer_year_sibling_candidates
 from creeper.source_discovery.models import (
     ScoutMeasurement,
     SourceCandidate,
     SourceState,
     is_common_crawl_provenance,
+    source_key,
 )
 from creeper.source_discovery.registry import SourceDiscoveryRegistry
 
@@ -49,9 +51,18 @@ class ScoutDisposition(StrEnum):
 class TriageResult:
     disposition: TriageDisposition
     reason: str = ""
+    status_code: int | None = None
+    method: str | None = None
+    content_type: str | None = None
+    content_length: int | None = None
+    range_supported: bool | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "disposition", TriageDisposition(self.disposition))
+        if self.status_code is not None and not 100 <= self.status_code <= 599:
+            raise ValueError("triage status_code must be a valid HTTP status")
+        if self.content_length is not None and self.content_length < 0:
+            raise ValueError("triage content_length must be non-negative")
 
 
 @dataclass(frozen=True)
@@ -90,12 +101,22 @@ class SearchBatch:
     actor: str
     candidates: tuple[SourceCandidate, ...] = ()
     search_cost_seconds: float | None = None
+    llm_episode_id: str | None = None
+    llm_task_type: str | None = None
+    context_hash: str | None = None
+    prompt_version: str | None = None
+    hypotheses: tuple[dict[str, object], ...] = ()
+    hypothesis_attribution: tuple[tuple[str, str], ...] = ()
 
     def __post_init__(self) -> None:
         if not self.backend.strip() or not self.query.strip() or not self.actor.strip():
             raise ValueError("search batch attribution fields are required")
         if self.search_cost_seconds is not None and self.search_cost_seconds < 0:
             raise ValueError("search_cost_seconds must be non-negative")
+        if self.llm_episode_id is not None and not self.llm_episode_id.strip():
+            raise ValueError("llm_episode_id must be non-empty when provided")
+        if self.llm_episode_id is not None and not self.llm_task_type:
+            raise ValueError("llm_task_type is required for LLM batches")
 
 
 @dataclass(frozen=True)
@@ -294,6 +315,14 @@ class SourceDiscoveryCoordinator:
                 continue
             result = outcome.value
             assert result is not None
+            self.registry.record_triage_observation(
+                candidate.source_key,
+                status_code=result.status_code,
+                method=result.method,
+                content_type=result.content_type,
+                content_length=result.content_length,
+                range_supported=result.range_supported,
+            )
             self.registry.transition(candidate.source_key, SourceState.TRIAGED)
             if result.disposition is TriageDisposition.SCOUT:
                 self.registry.transition(candidate.source_key, SourceState.SCOUT_READY)
@@ -349,6 +378,38 @@ class SourceDiscoveryCoordinator:
                 continue
             counts["scout_edges_added"] += int(added)
 
+    def _commit_year_motif_siblings(
+        self,
+        parent: SourceCandidate,
+        counts: dict[str, int],
+    ) -> None:
+        """Exploit an exact annual URL pattern without another LLM call."""
+        for proposed in infer_year_sibling_candidates(parent):
+            existing = self.registry.get_candidate(proposed.source_key)
+            effective = existing or proposed
+            if self.registry.suppression_reason(effective) is not None:
+                counts["scout_children_dropped"] += 1
+                continue
+            inserted = False
+            if existing is None:
+                effective, inserted = self.registry.register_proposal(proposed)
+                counts["scout_children_registered"] += int(inserted)
+            try:
+                added = self.registry.add_edge(
+                    parent.source_key,
+                    effective.source_key,
+                    relation="year_sibling_of",
+                )
+            except ValueError:
+                counts["scout_children_dropped"] += 1
+                if inserted:
+                    self.registry.transition(
+                        effective.source_key,
+                        SourceState.REJECTED,
+                    )
+                continue
+            counts["scout_edges_added"] += int(added)
+
     def _commit_scouts(
         self,
         candidates: list[SourceCandidate],
@@ -370,6 +431,7 @@ class SourceDiscoveryCoordinator:
             self._commit_scout_children(current, result, counts)
             if result.disposition is ScoutDisposition.WARM:
                 self.registry.transition(candidate.source_key, SourceState.WARM)
+                self._commit_year_motif_siblings(current, counts)
                 counts["scouted_warm"] += 1
             elif result.disposition is ScoutDisposition.HOLD:
                 self.registry.transition(candidate.source_key, SourceState.HOLD)
@@ -408,7 +470,22 @@ class SourceDiscoveryCoordinator:
                 backend=batch.backend,
                 query=batch.query,
                 actor=batch.actor,
+                episode_id=batch.llm_episode_id,
             )
+            if batch.llm_episode_id is not None:
+                self.registry.begin_llm_episode(
+                    episode_id=batch.llm_episode_id,
+                    task_type=batch.llm_task_type or directive.task_type.value,
+                    backend=batch.backend,
+                    actor=batch.actor,
+                    context_hash=batch.context_hash or "",
+                    prompt_version=batch.prompt_version or "unknown",
+                )
+                for hypothesis in batch.hypotheses:
+                    self.registry.register_llm_hypothesis(
+                        batch.llm_episode_id,
+                        hypothesis,
+                    )
             seen: set[str] = set()
             accepted: list[SourceCandidate] = []
             dropped = 0
@@ -437,11 +514,43 @@ class SourceDiscoveryCoordinator:
                 ):
                     dropped += 1
                     continue
-                self.registry.register_proposal(candidate, episode_id=episode.episode_id)
+                self.registry.register_proposal(
+                    candidate,
+                    episode_id=episode.episode_id,
+                )
+                if (
+                    directive.task_type.value == "INTERPRET_STRUCTURE"
+                    and directive.subject
+                ):
+                    try:
+                        parent_key = source_key(directive.subject)
+                        if self.registry.get_candidate(parent_key) is not None:
+                            self.registry.add_edge(
+                                parent_key,
+                                candidate.source_key,
+                                relation="llm_interprets_to",
+                            )
+                    except ValueError:
+                        # Search admission still owns candidate acceptance; an
+                        # invalid/non-source subject simply cannot add lineage.
+                        pass
+                if batch.llm_episode_id is not None:
+                    attribution = dict(batch.hypothesis_attribution)
+                    hypothesis_id = attribution.get(candidate.source_key)
+                    if hypothesis_id is not None:
+                        self.registry.link_llm_source(
+                            candidate.source_key,
+                            hypothesis_id=hypothesis_id,
+                        )
             self.registry.finish_search_episode(
                 episode.episode_id,
                 search_cost_seconds=cost,
             )
+            if batch.llm_episode_id is not None:
+                self.registry.finish_llm_episode(
+                    batch.llm_episode_id,
+                    cost_seconds=cost,
+                )
             counts["search_episodes"] += 1
             counts["search_candidates_registered"] += len(accepted)
             counts["search_candidates_dropped"] += dropped
