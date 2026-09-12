@@ -32,6 +32,12 @@ from creeper.source_discovery.index_space import (
     child_region,
     compile_candidate_index_space,
 )
+from creeper.source_discovery.portfolio import (
+    RegionPortfolioEstimate,
+    RegionPortfolioPlan,
+    RegionPortfolioPlanner,
+    RegionPortfolioPolicy,
+)
 from creeper.source_discovery.region_probe import (
     RegionProbeError,
     RegionProbeExecutor,
@@ -115,6 +121,10 @@ __all__ = [
     "HarvestRegion",
     "IndexSpaceRegistry",
     "QueryCapabilityHints",
+    "RegionPortfolioEstimate",
+    "RegionPortfolioPlan",
+    "RegionPortfolioPlanner",
+    "RegionPortfolioPolicy",
     "RegionKind",
     "RegionState",
     "RegionProbeError",
