@@ -6,7 +6,11 @@ from dataclasses import dataclass
 from enum import StrEnum
 import math
 
-from creeper.source_discovery.models import SourceCandidate, SourceState
+from creeper.source_discovery.models import (
+    SourceCandidate,
+    SourceLevel,
+    SourceState,
+)
 from creeper.source_discovery.overlap import MinHashSketch
 from creeper.source_discovery.registry import SourceDiscoveryRegistry
 from creeper.source_discovery.value import InterpretableSourceValueModel
@@ -17,6 +21,7 @@ class SearchDirectiveKind(StrEnum):
     REFILL_RESERVOIR = "REFILL_RESERVOIR"
     EXPLOIT_SOURCE_FAMILY = "EXPLOIT_SOURCE_FAMILY"
     DISCOVER_NEW_FAMILY = "DISCOVER_NEW_FAMILY"
+    INTERPRET_STRUCTURE = "INTERPRET_STRUCTURE"
     RECOVER_STAGNATION = "RECOVER_STAGNATION"
 
 
@@ -358,6 +363,35 @@ class SourceReservoirManager:
             "prioritize timestamp-bearing bulk indexes that can directly produce host-year evidence",
             SourceIntelligenceTask.DISCOVER_NEW_SOURCE,
         )
+
+        structural_holds = [
+            candidate
+            for candidate in self.registry.list_candidates(
+                state=SourceState.HOLD
+            )
+            if (
+                candidate.source_family
+                in {"RESOURCE_CATALOG", "RESOURCE_DIRECTORY"}
+                or candidate.level
+                in {SourceLevel.COLLECTION, SourceLevel.METASOURCE}
+            )
+            and self.registry.suppression_reason(candidate) is None
+        ]
+        if structural_holds:
+            structural_holds.sort(
+                key=lambda item: (-item.scout_priority, item.source_key)
+            )
+            subject_candidate = structural_holds[0]
+            add_spec(
+                SearchDirectiveKind.INTERPRET_STRUCTURE,
+                "INTERPRET_STRUCTURE",
+                subject_candidate.canonical_entrypoint,
+                (
+                    "deterministic structural scouting left a catalog/metasource "
+                    "in HOLD; ask Codex for bounded resource/template hypotheses"
+                ),
+                SourceIntelligenceTask.INTERPRET_STRUCTURE,
+            )
 
         best_direct_origin = self._best_measured_direct_origin(candidates)
         if best_direct_origin is not None:
