@@ -171,23 +171,23 @@ class FakeDomainProvider(FakeProvider):
     async def query_range(self, key):
         capsules = (
             EvidenceCapsule(
-                hostname="example.com",
+                hostname=key.hostname,
                 year=1997,
                 provider=key.provider,
                 temporal_semantics="capture_timestamp_year",
                 evidence_timestamp="19970102030405",
-                source_locator="http://example.com/",
+                source_locator=f"http://{key.hostname}/",
                 payload_hash="e" * 64,
                 policy_version=key.policy_version,
                 evidence_type="domain_scope_cdx_capture",
             ),
             EvidenceCapsule(
-                hostname="a.example.com",
+                hostname=f"a.{key.hostname}",
                 year=1998,
                 provider=key.provider,
                 temporal_semantics="capture_timestamp_year",
                 evidence_timestamp="19980102030405",
-                source_locator="http://a.example.com/",
+                source_locator=f"http://a.{key.hostname}/",
                 payload_hash="f" * 64,
                 policy_version=key.policy_version,
                 evidence_type="domain_scope_cdx_capture",
