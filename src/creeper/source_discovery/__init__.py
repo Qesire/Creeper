@@ -23,6 +23,7 @@ from creeper.source_discovery.index_space import (
     HarvestRegion,
     QueryCapabilityHints,
     RegionKind,
+    RegionState,
     RegionSynopsis,
     SourceAccessMode,
     SourceCapabilities,
@@ -30,6 +31,25 @@ from creeper.source_discovery.index_space import (
     SourceIndexSpec,
     child_region,
     compile_candidate_index_space,
+)
+from creeper.source_discovery.region_probe import (
+    RegionProbeError,
+    RegionProbeExecutor,
+    RegionProbePolicy,
+    RegionProbeResult,
+    SampledByteRange,
+)
+from creeper.source_discovery.tomography_service import (
+    RegionTomographyReport,
+    RegionTomographyService,
+)
+from creeper.source_discovery.tomography import (
+    RegionTomographyPlanner,
+    RegionTomographyPolicy,
+    TomographyAction,
+    TomographyActionKind,
+    region_size_bytes,
+    split_byte_region,
 )
 from creeper.source_discovery.manager import (
     ReservoirPlan,
@@ -96,8 +116,20 @@ __all__ = [
     "IndexSpaceRegistry",
     "QueryCapabilityHints",
     "RegionKind",
+    "RegionState",
+    "RegionProbeError",
+    "RegionProbeExecutor",
+    "RegionProbePolicy",
+    "RegionProbeResult",
+    "RegionTomographyPlanner",
+    "RegionTomographyPolicy",
+    "RegionTomographyReport",
+    "RegionTomographyService",
     "RegionSynopsis",
+    "SampledByteRange",
     "SourceAccessMode",
+    "TomographyAction",
+    "TomographyActionKind",
     "SourceCapabilities",
     "SourceFactorySpec",
     "SourceIndexSpec",
@@ -140,6 +172,8 @@ __all__ = [
     "canonicalize_source_entrypoint",
     "child_region",
     "compile_candidate_index_space",
+    "region_size_bytes",
+    "split_byte_region",
     "expand_scrapy_spool",
     "iter_scrapy_link_discoveries",
     "prepare_append_spool",

@@ -47,6 +47,16 @@ class RegionKind(StrEnum):
     SHARD = "SHARD"
 
 
+class RegionState(StrEnum):
+    """Durable lifecycle of one finite index region."""
+
+    DISCOVERED = "DISCOVERED"
+    PROBED = "PROBED"
+    HARVEST_READY = "HARVEST_READY"
+    HARVESTED = "HARVESTED"
+    DROPPED = "DROPPED"
+
+
 @dataclass(frozen=True)
 class QueryCapabilityHints:
     """Explicitly verified query features.
@@ -131,6 +141,7 @@ class SourceIndexSpec:
     expected_year_from: int | None = None
     expected_year_to: int | None = None
     expected_volume: int | None = None
+    content_length: int | None = None
 
     def __post_init__(self) -> None:
         if not self.index_key or not self.factory_key or not self.source_key:
@@ -147,6 +158,8 @@ class SourceIndexSpec:
             raise ValueError("index year range is reversed")
         if self.expected_volume is not None and self.expected_volume < 0:
             raise ValueError("expected_volume must be non-negative")
+        if self.content_length is not None and self.content_length < 0:
+            raise ValueError("content_length must be non-negative")
 
 
 @dataclass(frozen=True)
@@ -157,6 +170,7 @@ class HarvestRegion:
     index_key: str
     kind: RegionKind
     locator: str
+    state: RegionState = RegionState.DISCOVERED
     parent_region_key: str | None = None
     depth: int = 0
     byte_start: int | None = None
@@ -167,6 +181,7 @@ class HarvestRegion:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "kind", RegionKind(self.kind))
+        object.__setattr__(self, "state", RegionState(self.state))
         if not self.region_key or not self.index_key or not self.locator.strip():
             raise ValueError("region identity and locator are required")
         if self.depth < 0:
@@ -321,6 +336,7 @@ def compile_candidate_index_space(
     *,
     triage: TriageResult | None = None,
     range_supported: bool | None = None,
+    content_length: int | None = None,
     query_hints: QueryCapabilityHints | None = None,
     direct_evidence_authority: bool | None = None,
 ) -> CompiledIndexSpace:
@@ -345,6 +361,13 @@ def compile_candidate_index_space(
         else (triage.range_supported if triage is not None else None)
     )
     range_supported = bool(observed_range)
+    observed_length = (
+        content_length
+        if content_length is not None
+        else (triage.content_length if triage is not None else None)
+    )
+    if observed_length is not None and observed_length < 0:
+        raise ValueError("content_length must be non-negative")
     hierarchical = (
         candidate.level in {SourceLevel.COLLECTION, SourceLevel.METASOURCE}
         or candidate.source_family in {"RESOURCE_CATALOG", "RESOURCE_DIRECTORY"}
@@ -394,12 +417,15 @@ def compile_candidate_index_space(
         expected_year_from=candidate.expected_year_from,
         expected_year_to=candidate.expected_year_to,
         expected_volume=candidate.expected_volume,
+        content_length=observed_length,
     )
     root_region = HarvestRegion(
         region_key=_stable_key("region", index.index_key, RegionKind.FULL.value),
         index_key=index.index_key,
         kind=RegionKind.FULL,
         locator=index.locator,
+        byte_start=(0 if observed_length else None),
+        byte_end=(observed_length - 1 if observed_length else None),
     )
     return CompiledIndexSpace(
         factory=factory,

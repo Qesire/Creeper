@@ -10,7 +10,10 @@ from creeper.source_discovery.index_space import (
     CompiledIndexSpace,
     HarvestRegion,
     RegionKind,
+    RegionState,
     RegionSynopsis,
+    SourceCapabilities,
+    SourceIndexSpec,
 )
 from creeper.storage.control_store import ControlStore
 
@@ -60,6 +63,7 @@ class IndexSpaceRegistry:
                 expected_year_from INTEGER,
                 expected_year_to INTEGER,
                 expected_volume INTEGER,
+                content_length INTEGER,
                 created_at REAL NOT NULL,
                 updated_at REAL NOT NULL,
                 FOREIGN KEY(factory_key)
@@ -73,6 +77,7 @@ class IndexSpaceRegistry:
                 index_key TEXT NOT NULL,
                 kind TEXT NOT NULL,
                 locator TEXT NOT NULL,
+                state TEXT NOT NULL DEFAULT 'DISCOVERED',
                 parent_region_key TEXT,
                 depth INTEGER NOT NULL,
                 byte_start INTEGER,
@@ -113,6 +118,27 @@ class IndexSpaceRegistry:
             ) WITHOUT ROWID;
             """
         )
+        columns = {
+            str(row[1])
+            for row in self.connection.execute(
+                "PRAGMA table_info(source_indexes_v1)"
+            ).fetchall()
+        }
+        if "content_length" not in columns:
+            self.connection.execute(
+                "ALTER TABLE source_indexes_v1 ADD COLUMN content_length INTEGER"
+            )
+        region_columns = {
+            str(row[1])
+            for row in self.connection.execute(
+                "PRAGMA table_info(source_regions_v1)"
+            ).fetchall()
+        }
+        if "state" not in region_columns:
+            self.connection.execute(
+                "ALTER TABLE source_regions_v1 "
+                "ADD COLUMN state TEXT NOT NULL DEFAULT 'DISCOVERED'"
+            )
         self.connection.commit()
 
     def register_index_space(self, compiled: CompiledIndexSpace) -> None:
@@ -149,8 +175,8 @@ class IndexSpaceRegistry:
                     sorted_keyspace, supports_query, supports_prefix,
                     supports_domain, supports_date_filter,
                     expected_year_from, expected_year_to, expected_volume,
-                    created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    content_length, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(index_key) DO UPDATE SET
                     factory_key = excluded.factory_key,
                     source_key = excluded.source_key,
@@ -169,6 +195,7 @@ class IndexSpaceRegistry:
                     expected_year_from = excluded.expected_year_from,
                     expected_year_to = excluded.expected_year_to,
                     expected_volume = excluded.expected_volume,
+                    content_length = excluded.content_length,
                     updated_at = excluded.updated_at
                 """,
                 (
@@ -190,24 +217,71 @@ class IndexSpaceRegistry:
                     index.expected_year_from,
                     index.expected_year_to,
                     index.expected_volume,
+                    index.content_length,
                     now,
                     now,
                 ),
             )
             self._put_region(compiled.root_region, now=now)
 
+    def get_index(self, index_key: str) -> SourceIndexSpec | None:
+        row = self.connection.execute(
+            "SELECT * FROM source_indexes_v1 WHERE index_key = ?",
+            (index_key,),
+        ).fetchone()
+        if row is None:
+            return None
+        capabilities = SourceCapabilities(
+            access_mode=str(row["access_mode"]),
+            format=str(row["source_format"]),
+            hierarchical=bool(row["hierarchical"]),
+            range_supported=bool(row["range_supported"]),
+            timestamp_bearing=bool(row["timestamp_bearing"]),
+            direct_evidence_authority=bool(row["direct_evidence_authority"]),
+            sorted_keyspace=row["sorted_keyspace"],
+            supports_query=bool(row["supports_query"]),
+            supports_prefix=bool(row["supports_prefix"]),
+            supports_domain=bool(row["supports_domain"]),
+            supports_date_filter=bool(row["supports_date_filter"]),
+        )
+        return SourceIndexSpec(
+            index_key=str(row["index_key"]),
+            factory_key=str(row["factory_key"]),
+            source_key=str(row["source_key"]),
+            locator=str(row["locator"]),
+            capabilities=capabilities,
+            expected_year_from=row["expected_year_from"],
+            expected_year_to=row["expected_year_to"],
+            expected_volume=row["expected_volume"],
+            content_length=row["content_length"],
+        )
+
+    def get_index_for_source(self, source_key: str) -> SourceIndexSpec | None:
+        row = self.connection.execute(
+            "SELECT index_key FROM source_indexes_v1 WHERE source_key = ?",
+            (source_key,),
+        ).fetchone()
+        if row is None:
+            return None
+        return self.get_index(str(row["index_key"]))
+
     def _put_region(self, region: HarvestRegion, *, now: float) -> None:
         self.connection.execute(
             """
             INSERT INTO source_regions_v1(
-                region_key, index_key, kind, locator, parent_region_key,
+                region_key, index_key, kind, locator, state, parent_region_key,
                 depth, byte_start, byte_end, key_prefix, year_from, year_to,
                 created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(region_key) DO UPDATE SET
                 index_key = excluded.index_key,
                 kind = excluded.kind,
                 locator = excluded.locator,
+                state = CASE
+                    WHEN source_regions_v1.state = 'DISCOVERED'
+                        THEN excluded.state
+                    ELSE source_regions_v1.state
+                END,
                 parent_region_key = excluded.parent_region_key,
                 depth = excluded.depth,
                 byte_start = excluded.byte_start,
@@ -222,6 +296,7 @@ class IndexSpaceRegistry:
                 region.index_key,
                 region.kind.value,
                 region.locator,
+                region.state.value,
                 region.parent_region_key,
                 region.depth,
                 region.byte_start,
@@ -245,6 +320,24 @@ class IndexSpaceRegistry:
                 raise KeyError(f"unknown source index: {region.index_key}")
             self._put_region(region, now=now)
 
+    def mark_region_state(
+        self,
+        region_key: str,
+        state: RegionState,
+    ) -> None:
+        state = RegionState(state)
+        with self.connection:
+            changed = self.connection.execute(
+                """
+                UPDATE source_regions_v1
+                SET state = ?, updated_at = ?
+                WHERE region_key = ?
+                """,
+                (state.value, float(self.clock()), region_key),
+            ).rowcount
+        if changed != 1:
+            raise KeyError(f"unknown source region: {region_key}")
+
     def get_region(self, region_key: str) -> HarvestRegion | None:
         row = self.connection.execute(
             "SELECT * FROM source_regions_v1 WHERE region_key = ?",
@@ -257,6 +350,7 @@ class IndexSpaceRegistry:
             index_key=str(row["index_key"]),
             kind=RegionKind(str(row["kind"])),
             locator=str(row["locator"]),
+            state=RegionState(str(row["state"])),
             parent_region_key=row["parent_region_key"],
             depth=int(row["depth"]),
             byte_start=row["byte_start"],
@@ -295,6 +389,18 @@ class IndexSpaceRegistry:
             raise KeyError(f"unknown source region: {synopsis.region_key}")
         now = float(self.clock())
         with self.connection:
+            self.connection.execute(
+                """
+                UPDATE source_regions_v1
+                SET state = CASE
+                        WHEN state = 'DISCOVERED' THEN 'PROBED'
+                        ELSE state
+                    END,
+                    updated_at = ?
+                WHERE region_key = ?
+                """,
+                (now, synopsis.region_key),
+            )
             self.connection.execute(
                 """
                 INSERT INTO source_region_synopses_v1(
