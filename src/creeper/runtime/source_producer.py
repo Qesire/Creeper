@@ -15,6 +15,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 
 from creeper.authority.baseline_index import BaselineIndex, YEAR_BITS
+from creeper.evidence.domain_amplification import plan_domain_amplification
 from creeper.evidence.planner import EvidencePlanner
 from creeper.evidence.policies import EvidenceQueryKey
 from creeper.records.models import HostObservation
@@ -35,6 +36,7 @@ class SourceProducerReport:
     observations: int = 0
     evidence_tasks_enqueued: int = 0
     direct_capsules_committed: int = 0
+    domain_amplification_tasks: int = 0
     admission_blocked: bool = False
     max_source_record_queue_depth: int = 0
     max_observation_queue_depth: int = 0
@@ -59,6 +61,7 @@ class SourceProducer:
         queue_capacities: Mapping[str, int],
         evidence_policy_version: str = "cdx-v1",
         range_first_fraction: float = 0.0,
+        domain_amplification_min_hosts: int = 4,
         owner: str = "source-producer",
         baseline_batch_size: int = 50_000,
         reservation_grace_seconds: float = 30.0,
@@ -69,6 +72,12 @@ class SourceProducer:
             raise ValueError("reservation_grace_seconds must be non-negative")
         if not 0.0 <= float(range_first_fraction) <= 1.0:
             raise ValueError("range_first_fraction must be between 0 and 1")
+        if (
+            not isinstance(domain_amplification_min_hosts, int)
+            or isinstance(domain_amplification_min_hosts, bool)
+            or domain_amplification_min_hosts < 2
+        ):
+            raise ValueError("domain_amplification_min_hosts must be at least two")
         capacities = dict(backlog_capacities)
         if any(
             not provider or not isinstance(value, int) or value < 0
@@ -88,6 +97,7 @@ class SourceProducer:
         self.queue_capacities = dict(queue_capacities)
         self.evidence_policy_version = evidence_policy_version
         self.range_first_fraction = float(range_first_fraction)
+        self.domain_amplification_min_hosts = domain_amplification_min_hosts
         self.owner = owner
         self.baseline_batch_size = baseline_batch_size
         self.reservation_grace_seconds = reservation_grace_seconds
@@ -204,6 +214,7 @@ class SourceProducer:
         running = lease.start()
         self.control_store.save_lease(running)
         source_records = observations = enqueued = direct_committed = 0
+        domain_enqueued = 0
         max_source = max_observations = 0
         direct_capsules = []
         scheduled_keys: dict[EvidenceQueryKey, None] = {}
@@ -251,23 +262,25 @@ class SourceProducer:
 
             pending: list[HostObservation] = []
 
-            def enqueue_external_keys(keys: Iterable[EvidenceQueryKey]) -> None:
+            def enqueue_external_keys(keys: Iterable[EvidenceQueryKey]) -> int:
                 nonlocal enqueued
                 fresh = [key for key in keys if key not in scheduled_keys]
                 if not fresh:
-                    return
+                    return 0
                 for key in fresh:
                     scheduled_keys[key] = None
-                enqueued += self.admission.enqueue_reserved(
+                inserted = self.admission.enqueue_reserved(
                     reservation,
                     fresh,
                     source_key=origin_source_key,
                     reservoir_id=candidate.reservoir_id,
                     lease_id=running.lease_id,
                 )
+                enqueued += inserted
+                return inserted
 
             def resolve_pending() -> None:
-                nonlocal direct_capsules
+                nonlocal direct_capsules, domain_enqueued
                 if not pending:
                     return
                 keep_ownership_live()
@@ -297,6 +310,7 @@ class SourceProducer:
                     candidate.reservoir is not None
                     and candidate.reservoir.evidence_mode == "direct_year"
                 )
+                amplification_eligible: set[str] = set()
                 for item in pending:
                     annual_mask, _candidate = resolved.get(item.hostname, (0, False))
                     plan = self.evidence_planner.plan(
@@ -322,6 +336,8 @@ class SourceProducer:
                             )
                     if plan.external_keys:
                         enqueue_external_keys(plan.external_keys)
+                        if not allow_direct:
+                            amplification_eligible.add(item.hostname)
                         scheduled_mask = provider_coverage_masks.get(
                             item.hostname, 0
                         )
@@ -332,6 +348,14 @@ class SourceProducer:
                             ):
                                 scheduled_mask |= YEAR_BITS.get(year, 0)
                         provider_coverage_masks[item.hostname] = scheduled_mask
+                if amplification_eligible and not allow_direct:
+                    domain_keys = plan_domain_amplification(
+                        hostnames,
+                        provider=provider,
+                        min_distinct_hosts=self.domain_amplification_min_hosts,
+                        eligible_hostnames=amplification_eligible,
+                    )
+                    domain_enqueued += enqueue_external_keys(domain_keys)
                 pending.clear()
 
             for record in records:
@@ -378,6 +402,7 @@ class SourceProducer:
                 observations=observations,
                 evidence_tasks_enqueued=enqueued,
                 direct_capsules_committed=direct_committed,
+                domain_amplification_tasks=domain_enqueued,
                 max_source_record_queue_depth=max_source,
                 max_observation_queue_depth=max_observations,
             )
@@ -416,6 +441,10 @@ class SourceProducer:
                 ),
                 direct_capsules_committed=(
                     total.direct_capsules_committed + report.direct_capsules_committed
+                ),
+                domain_amplification_tasks=(
+                    total.domain_amplification_tasks
+                    + report.domain_amplification_tasks
                 ),
                 admission_blocked=total.admission_blocked or report.admission_blocked,
                 max_source_record_queue_depth=max(
