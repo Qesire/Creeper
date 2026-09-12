@@ -11,8 +11,9 @@ from __future__ import annotations
 
 from contextlib import nullcontext
 from dataclasses import dataclass
+from pathlib import Path
 import time
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 
 import httpx
 
@@ -30,8 +31,6 @@ from creeper.sources.archive.host_year import (
     ContiguousHostYearWitnessReducer,
     HostYearWitnessGroup,
 )
-from creeper.sources.production import StructuredProductionAdapter
-from creeper.sources.reservoirs import Reservoir
 from creeper.storage.evidence_store import EvidenceStore
 
 
@@ -46,6 +45,7 @@ class RegionHarvestPolicy:
     max_records_per_lease: int = 100_000
     policy_version: str = "historical-region-v1"
     claim_grace_seconds: float = 60.0
+    boundary_record_max_bytes: int = 4 * 1024 * 1024
 
     def __post_init__(self) -> None:
         if self.max_seconds <= 0:
@@ -58,6 +58,8 @@ class RegionHarvestPolicy:
             raise ValueError("policy_version is required")
         if self.claim_grace_seconds < 0:
             raise ValueError("claim_grace_seconds must be non-negative")
+        if self.boundary_record_max_bytes < 1:
+            raise ValueError("boundary_record_max_bytes must be positive")
 
 
 @dataclass(frozen=True)
