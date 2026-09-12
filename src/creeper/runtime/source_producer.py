@@ -497,6 +497,13 @@ class SourceProducer:
                         enqueue_auxiliary_keys("rdap", rdap_keys)
 
                 if batch_direct_capsules:
+                    # Commit evidence proof first. Incremental readiness can
+                    # recover direct source identity from persisted capsules if
+                    # this process dies before ControlStore attribution commits.
+                    # This avoids orphan first-touch credit with no evidence.
+                    direct_committed += self.evidence_store.put_many(
+                        batch_direct_capsules
+                    )
                     self.control_store.attribute_direct_host_years(
                         (
                             (capsule.hostname, capsule.year, capsule.provider)
@@ -505,9 +512,6 @@ class SourceProducer:
                         source_key=origin_source_key,
                         reservoir_id=candidate.reservoir_id,
                         lease_id=running.lease_id,
-                    )
-                    direct_committed += self.evidence_store.put_many(
-                        batch_direct_capsules
                     )
                 planning_commit_ms += max(
                     0,
