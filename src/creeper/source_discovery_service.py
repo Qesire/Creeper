@@ -222,7 +222,14 @@ def load_source_discovery_config(config_path: Path) -> SourceDiscoveryServiceCon
     admission = SearchAdmissionPolicy(
         target_year_from=_nonnegative_int(admission_raw.get("target_year_from", 1996), name="admission.target_year_from"),
         target_year_to=_nonnegative_int(admission_raw.get("target_year_to", 2001), name="admission.target_year_to"),
-        min_expected_volume=_positive_int(admission_raw.get("min_expected_volume", 100_000), name="admission.min_expected_volume"),
+        min_expected_volume=_positive_int(
+            admission_raw.get("min_expected_volume", 100_000),
+            name="admission.min_expected_volume",
+        ),
+        direct_min_expected_volume=_positive_int(
+            admission_raw.get("direct_min_expected_volume", 10_000),
+            name="admission.direct_min_expected_volume",
+        ),
         min_enumerability_prior=_unit_float(
             admission_raw.get("min_enumerability_prior", 0.5), name="admission.min_enumerability_prior"
         ),
