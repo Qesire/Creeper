@@ -206,7 +206,15 @@ class RegionHarvestExecutor:
             )
             raise RegionHarvestError("claimed region has no source index")
 
-        self._validate_region(claimed, index)
+        try:
+            self._validate_region(claimed, index)
+        except BaseException:
+            self.registry.release_region_harvest(
+                region_key,
+                owner=self.owner,
+            )
+            raise
+
         start = self.registry.get_region_harvest_cursor(region_key)
         if start is None:
             assert claimed.byte_start is not None
