@@ -123,6 +123,34 @@ class FakeRangeProvider(FakeProvider):
         )
 
 
+class FakeDecomposedRangeProvider(FakeProvider):
+    async def query_range(self, key):
+        capsule = EvidenceCapsule(
+            hostname=key.hostname,
+            year=1997,
+            provider=key.provider,
+            temporal_semantics="capture_timestamp_year",
+            evidence_timestamp="19970102030405",
+            source_locator=f"http://{key.hostname}/",
+            payload_hash="d" * 64,
+            policy_version=key.policy_version,
+            evidence_type="exact_host_cdx_capture",
+            extraction_method="cdx_query_range_bounded",
+        )
+        return RangeEvidenceQueryResult(
+            hostname=key.hostname,
+            key=key,
+            state=CDXQueryState.DECOMPOSED,
+            candidate_years=(1997,),
+            followup_years=(1996, 1998),
+            capsules=(capsule,),
+            pages_seen=1,
+            records_seen=3,
+            provider_requests=1,
+            provider_elapsed_milliseconds=12,
+        )
+
+
 class FakeRangeCapsuleProvider(FakeProvider):
     def __init__(self, *, state=CDXQueryState.PASS):
         super().__init__(state=state)
@@ -516,6 +544,53 @@ class AsyncEvidenceWorkerTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreater(visible.lease_until, time.time())
         report = await task
         self.assertEqual(report.terminal, 1)
+
+
+    async def test_decomposed_range_commits_positive_and_fans_out_missing_years(self):
+        key = EvidenceQueryKey(
+            "bounded-range.example",
+            TemporalScope(1996, 1998),
+            "wayback",
+            "cdx-v1",
+        )
+        self.control.enqueue_evidence_tasks([key])
+        worker = AsyncEvidenceWorker(
+            control_store=self.control,
+            evidence_store=self.evidence,
+            providers={"wayback": FakeDecomposedRangeProvider()},
+            owner="worker-bounded-range",
+        )
+
+        report = await worker.run_once()
+
+        self.assertEqual(report.claimed, 1)
+        self.assertEqual(report.terminal, 1)
+        self.assertEqual(report.decomposed_count, 1)
+        self.assertEqual(report.inserted_capsules, 1)
+        self.assertEqual(
+            tuple(c.year for c in self.evidence.for_hostname(key.hostname)),
+            (1997,),
+        )
+        tasks = self.control.list_evidence_tasks()
+        self.assertEqual(
+            [
+                (
+                    item.key.temporal_scope.year_from,
+                    item.key.temporal_scope.year_to,
+                    item.state,
+                )
+                for item in tasks
+            ],
+            [
+                (1996, 1996, CDXQueryState.PENDING.value),
+                (1996, 1998, CDXQueryState.DECOMPOSED.value),
+                (1998, 1998, CDXQueryState.PENDING.value),
+            ],
+        )
+        metrics = self.control.evidence_attempt_metric_summary()
+        self.assertEqual(metrics["range"]["attempts"], 1)
+        self.assertEqual(metrics["range"]["provider_requests"], 1)
+        self.assertEqual(metrics["range"]["pages_seen"], 1)
 
     async def test_range_positive_capsules_avoid_exact_year_requery(self):
         key = EvidenceQueryKey(
