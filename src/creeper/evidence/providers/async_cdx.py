@@ -47,7 +47,13 @@ class _RequestAccounting:
     elapsed_milliseconds: int = 0
 
 
+class _ProviderCircuitOpen(httpx.TransportError):
+    """Internal fail-fast signal when the provider outage breaker is open."""
+
+
 def _retryable_http_error(exc: BaseException) -> bool:
+    if isinstance(exc, _ProviderCircuitOpen):
+        return False
     if isinstance(exc, (httpx.TimeoutException, httpx.TransportError)):
         return True
     if isinstance(exc, httpx.HTTPStatusError):
@@ -80,6 +86,8 @@ class AsyncWaybackCDXClient:
         max_keepalive_connections: int = 8,
         keepalive_expiry_seconds: float = 30.0,
         throttle_floor_seconds: float = 2.0,
+        circuit_failure_threshold: int = 3,
+        circuit_cooldown_seconds: float = 60.0,
         user_agent: str = "Creeper/2.2 (research; https://github.com/Qesire/Creeper)",
         client: httpx.AsyncClient | None = None,
         transport: httpx.AsyncBaseTransport | None = None,
@@ -96,6 +104,10 @@ class AsyncWaybackCDXClient:
             or max_keepalive_connections > max_connections
             or keepalive_expiry_seconds <= 0
             or throttle_floor_seconds < 0
+            or not isinstance(circuit_failure_threshold, int)
+            or isinstance(circuit_failure_threshold, bool)
+            or circuit_failure_threshold < 1
+            or circuit_cooldown_seconds <= 0
         ):
             raise ValueError("invalid async CDX client limits")
         if client is not None and transport is not None:
@@ -107,9 +119,14 @@ class AsyncWaybackCDXClient:
         self.backoff = backoff
         self.max_backoff = max_backoff
         self.throttle_floor_seconds = float(throttle_floor_seconds)
+        self.circuit_failure_threshold = int(circuit_failure_threshold)
+        self.circuit_cooldown_seconds = float(circuit_cooldown_seconds)
         self.http_requests = 0
         self.throttle_responses = 0
         self.transport_errors = 0
+        self.transport_error_counts: Counter[str] = Counter()
+        self.circuit_open_events = 0
+        self.circuit_fast_failures = 0
         self.http_elapsed_milliseconds = 0
         self.requests_per_second = float(requests_per_second)
         # Request-start timeline telemetry. Unlike coroutine wait counters,
@@ -130,6 +147,9 @@ class AsyncWaybackCDXClient:
         self.http_status_counts: Counter[int] = Counter()
         self._cooldown_until = 0.0
         self._cooldown_lock = asyncio.Lock()
+        self._health_lock = asyncio.Lock()
+        self._provider_failure_streak = 0
+        self._circuit_open_until = 0.0
         if requests_per_second > 0:
             # Use one token per interval for strict pacing. A token bucket with
             # max_rate=N permits an N-request burst at the start of each
@@ -172,6 +192,42 @@ class AsyncWaybackCDXClient:
     async def aclose(self) -> None:
         if self._owns_client:
             await self.client.aclose()
+
+    async def _raise_if_circuit_open(self) -> None:
+        loop = asyncio.get_running_loop()
+        async with self._health_lock:
+            remaining = self._circuit_open_until - loop.time()
+        if remaining > 0:
+            self.circuit_fast_failures += 1
+            raise _ProviderCircuitOpen(
+                f"Wayback provider circuit open for {remaining:.3f}s"
+            )
+
+    async def _register_provider_failure(self) -> bool:
+        """Return True when this failure should terminate the current task.
+
+        Once the shared failure threshold is reached, all concurrent tasks stop
+        their internal retry loops. Durable EvidenceTask retry scheduling then
+        owns recovery, avoiding N x (max_retries+1) request amplification during
+        a provider outage.
+        """
+        loop = asyncio.get_running_loop()
+        now = loop.time()
+        async with self._health_lock:
+            if self._circuit_open_until > now:
+                return True
+            self._provider_failure_streak += 1
+            if self._provider_failure_streak < self.circuit_failure_threshold:
+                return False
+            self._provider_failure_streak = 0
+            self._circuit_open_until = now + self.circuit_cooldown_seconds
+            self.circuit_open_events += 1
+            return True
+
+    async def _register_provider_success(self) -> None:
+        async with self._health_lock:
+            self._provider_failure_streak = 0
+            self._circuit_open_until = 0.0
 
     def _wait_policy(self):
         if self.backoff == 0 or self.max_backoff == 0:
@@ -266,7 +322,9 @@ class AsyncWaybackCDXClient:
         )
         async for attempt in retrying:
             with attempt:
+                await self._raise_if_circuit_open()
                 await self._wait_for_cooldown()
+                await self._raise_if_circuit_open()
 
                 async def request_once() -> httpx.Response:
                     loop = asyncio.get_running_loop()
@@ -304,8 +362,14 @@ class AsyncWaybackCDXClient:
                             self.endpoint,
                             params=params,
                         )
-                    except (httpx.TimeoutException, httpx.TransportError):
+                    except (httpx.TimeoutException, httpx.TransportError) as exc:
                         self.transport_errors += 1
+                        self.transport_error_counts[type(exc).__name__] += 1
+                        if await self._register_provider_failure():
+                            raise _ProviderCircuitOpen(
+                                "Wayback provider circuit opened after repeated "
+                                f"{type(exc).__name__} failures"
+                            ) from exc
                         raise
                     finally:
                         elapsed_ms = max(
@@ -342,16 +406,28 @@ class AsyncWaybackCDXClient:
                     # Cooldown may have been extended while this coroutine
                     # was waiting for a rate token.
                     await self._wait_for_cooldown()
+                    await self._raise_if_circuit_open()
                     response = await request_once()
                 self.http_status_counts[int(response.status_code)] += 1
-                if response.status_code == 429 or response.status_code == 503:
+                status = int(response.status_code)
+                if status == 429:
+                    # Reachability succeeded; this is throttling rather than a
+                    # transport/provider outage.
+                    await self._register_provider_success()
                     await self._register_throttle(response)
                     response.raise_for_status()
-                if response.status_code >= 500:
+                if status >= 500:
+                    if status == 503:
+                        await self._register_throttle(response)
+                    if await self._register_provider_failure():
+                        raise _ProviderCircuitOpen(
+                            f"Wayback provider circuit opened after HTTP {status}"
+                        )
                     response.raise_for_status()
-                if response.status_code >= 400:
+                await self._register_provider_success()
+                if status >= 400:
                     raise ValueError(
-                        f"CDX rejected request with HTTP {response.status_code}"
+                        f"CDX rejected request with HTTP {status}"
                     )
                 return response
         raise AssertionError("unreachable")
