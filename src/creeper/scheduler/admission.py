@@ -92,7 +92,16 @@ class EvidenceBacklogAdmission:
             """,
             (provider, now),
         ).fetchone()
-        return int(row[0] or 0)
+        lease_reserved = int(row[0] or 0)
+        fanout_row = self.connection.execute(
+            """
+            SELECT COALESCE(SUM(amount), 0)
+            FROM evidence_task_fanout_reservations
+            WHERE provider = ?
+            """,
+            (provider,),
+        ).fetchone()
+        return lease_reserved + int(fanout_row[0] or 0)
 
     def available_capacity(
         self,
@@ -256,11 +265,13 @@ class EvidenceBacklogAdmission:
     ) -> int:
         """Atomically transfer reserved capacity into durable task rows.
 
-        Optional source lineage is operational metadata only. It is inserted in
-        the same transaction but never changes reservation consumption or the
-        returned count of newly created EvidenceTask rows.
+        Range tasks also retain their worst-case *net* exact-fanout capacity
+        after insertion. A span of N years consumes one durable parent slot
+        plus N-1 persistent fanout tokens, so later DECOMPOSED fanout can
+        replace the parent with up to N exact children without crossing the
+        configured backlog high-water mark.
         """
-        rows = list(keys)
+        rows = list(dict.fromkeys(keys))
         if not rows:
             return 0
         if reservation.reservation_id is None:
@@ -291,14 +302,15 @@ class EvidenceBacklogAdmission:
             if row is None or float(row["expires_at"]) <= now:
                 raise RuntimeError("capacity reservation expired before task enqueue")
             remaining = int(row["amount"])
-            before = self.connection.total_changes
-            self.connection.executemany(
-                """
-                INSERT OR IGNORE INTO evidence_tasks(
-                    hostname, year_from, year_to, provider, policy_version, state
-                ) VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                [
+
+            inserted_keys: list[EvidenceQueryKey] = []
+            for key in rows:
+                changed = self.connection.execute(
+                    """
+                    INSERT OR IGNORE INTO evidence_tasks(
+                        hostname, year_from, year_to, provider, policy_version, state
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    """,
                     (
                         key.hostname,
                         key.temporal_scope.year_from,
@@ -306,11 +318,39 @@ class EvidenceBacklogAdmission:
                         key.provider,
                         key.policy_version,
                         CDXQueryState.PENDING.value,
-                    )
-                    for key in rows
-                ],
+                    ),
+                ).rowcount
+                if changed:
+                    inserted_keys.append(key)
+
+            fanout_capacity = sum(
+                max(
+                    0,
+                    key.temporal_scope.year_to - key.temporal_scope.year_from,
+                )
+                for key in inserted_keys
             )
-            inserted = self.connection.total_changes - before
+            required_capacity = len(inserted_keys) + fanout_capacity
+            if required_capacity > remaining:
+                raise RuntimeError(
+                    "actual evidence work exceeded the SourceLease capacity reservation"
+                )
+
+            for key in inserted_keys:
+                extra = max(
+                    0,
+                    key.temporal_scope.year_to - key.temporal_scope.year_from,
+                )
+                if extra:
+                    self.connection.execute(
+                        """
+                        INSERT INTO evidence_task_fanout_reservations(
+                            hostname, year_from, year_to, provider, policy_version, amount
+                        ) VALUES (?, ?, ?, ?, ?, ?)
+                        """,
+                        (*self.control_store._values(key), extra),
+                    )
+
             if source_key is not None:
                 assert reservoir_id is not None and lease_id is not None
                 self.connection.executemany(
@@ -335,11 +375,8 @@ class EvidenceBacklogAdmission:
                         for key in rows
                     ],
                 )
-            if inserted > remaining:
-                raise RuntimeError(
-                    "actual evidence work exceeded the SourceLease capacity reservation"
-                )
-            remaining -= inserted
+
+            remaining -= required_capacity
             if remaining:
                 self.connection.execute(
                     """
@@ -355,7 +392,7 @@ class EvidenceBacklogAdmission:
                     (reservation.reservation_id,),
                 )
             self.connection.commit()
-            return inserted
+            return len(inserted_keys)
         except BaseException:
             self.connection.rollback()
             raise
