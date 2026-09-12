@@ -385,6 +385,7 @@ def _extract_warc_hosts(
     sampled = 0
     hosts: set[str] = set()
     host_year_pairs: set[tuple[str, int]] = set()
+    observations: list[str] = []
     stream = io.BytesIO(payload)
     try:
         for record in iter_warc_target_records(stream):
@@ -401,6 +402,9 @@ def _extract_warc_hosts(
                 hosts.add(hostname)
                 assert record.source_year is not None
                 host_year_pairs.add((hostname, record.source_year))
+                observations.append(
+                    f"{hostname}\t{record.source_year}"
+                )
     except WarcFormatError:
         # A Range probe may end in the middle of the final canonical gzip
         # member. Complete records before that boundary are still a valid
@@ -413,6 +417,7 @@ def _extract_warc_hosts(
         hosts=hosts,
         host_year_pairs=host_year_pairs,
         measurement_mode=MeasurementMode.HOST_YEAR,
+        observation_keys=tuple(observations),
     )
 
 
@@ -444,6 +449,7 @@ def _extract_hosts(
     lines = _iter_text_lines(payload, max_line_bytes=policy.max_line_bytes)
     hosts: set[str] = set()
     host_year_pairs: set[tuple[str, int]] = set()
+    observations: list[str] = []
     saw_undated_host = False
     sampled = 0
 
@@ -467,11 +473,15 @@ def _extract_hosts(
             if hostname is not None:
                 hosts.add(hostname)
                 host_year_pairs.add((hostname, record.source_year))
+                observations.append(
+                    f"{hostname}\t{record.source_year}"
+                )
         return ParsedHostSample(
             sampled_records=sampled,
             hosts=hosts,
             host_year_pairs=host_year_pairs,
             measurement_mode=MeasurementMode.HOST_YEAR,
+            observation_keys=tuple(observations),
         )
 
     if suffix in {".jsonl", ".ndjson"} or "ndjson" in lower_type:
@@ -490,8 +500,10 @@ def _extract_hosts(
                 hosts.add(hostname)
                 if year is None:
                     saw_undated_host = True
+                    observations.append(hostname)
                 else:
                     host_year_pairs.add((hostname, year))
+                    observations.append(f"{hostname}\t{year}")
         return ParsedHostSample(
             sampled_records=sampled,
             hosts=hosts,
@@ -500,6 +512,7 @@ def _extract_hosts(
                 host_year_pairs=host_year_pairs,
                 saw_undated_host=saw_undated_host,
             ),
+            observation_keys=tuple(observations),
         )
 
     if suffix in {".csv", ".tsv"} or "text/csv" in lower_type or "tab-separated-values" in lower_type:
@@ -514,6 +527,7 @@ def _extract_hosts(
                 hosts=hosts,
                 host_year_pairs=host_year_pairs,
                 measurement_mode=MeasurementMode.HOST_ONLY,
+                observation_keys=(),
             )
 
         known_fields = {
@@ -534,6 +548,7 @@ def _extract_hosts(
                 hostname = _hostname_from_scalar(cell)
                 if hostname is not None:
                     hosts.add(hostname)
+                    observations.append(hostname)
                     saw_undated_host = True
                     return
 
@@ -552,8 +567,10 @@ def _extract_hosts(
                     hosts.add(hostname)
                     if year is None:
                         saw_undated_host = True
+                        observations.append(hostname)
                     else:
                         host_year_pairs.add((hostname, year))
+                        observations.append(f"{hostname}\t{year}")
         else:
             if sampled < policy.max_records:
                 sampled += 1
@@ -571,6 +588,7 @@ def _extract_hosts(
                 host_year_pairs=host_year_pairs,
                 saw_undated_host=saw_undated_host,
             ),
+            observation_keys=tuple(observations),
         )
 
     if suffix in {"", ".txt", ".list", ".urls"} or lower_type.startswith("text/plain"):
@@ -583,11 +601,13 @@ def _extract_hosts(
             hostname = _hostname_from_scalar(line)
             if hostname is not None:
                 hosts.add(hostname)
+                observations.append(hostname)
         return ParsedHostSample(
             sampled_records=sampled,
             hosts=hosts,
             host_year_pairs=set(),
             measurement_mode=MeasurementMode.HOST_ONLY,
+            observation_keys=tuple(observations),
         )
 
     return None
@@ -624,6 +644,10 @@ def _apply_source_year_hint(
         hosts=set(parsed.hosts),
         host_year_pairs={(hostname, year_from) for hostname in parsed.hosts},
         measurement_mode=MeasurementMode.HOST_YEAR,
+        observation_keys=tuple(
+            f"{key.split(chr(9), 1)[0]}\t{year_from}"
+            for key in parsed.observation_keys
+        ),
     )
 
 
