@@ -33,6 +33,54 @@ ACTION_PRIOR_YIELD: dict[EvidenceActionKind, float] = {
 }
 ACTION_PRIOR_STRENGTH = 4.0
 ACTION_RETRY_PENALTY = 0.25
+RANGE_ADAPTATION_FULL_REQUESTS = 50
+RANGE_EXPLORATION_FLOOR = 0.05
+RANGE_EXPLORATION_CEILING = 0.95
+
+
+def adaptive_range_first_fraction(
+    base_fraction: float,
+    *,
+    exact_posterior: float,
+    range_posterior: float,
+    evidence_requests: int,
+    reward_authoritative: bool,
+) -> float:
+    """Blend configured cold-start policy into learned exact/range allocation.
+
+    No formal readiness reward means no behavior change. Once final reward is
+    authoritative, at most 50 effective requests are required for the learned
+    target to fully replace the configured bootstrap fraction. A small
+    exploration floor/ceiling prevents permanent action starvation.
+    """
+
+    values = (base_fraction, exact_posterior, range_posterior)
+    if any(not math.isfinite(float(value)) or value < 0 for value in values):
+        raise ValueError("adaptive range inputs must be finite and non-negative")
+    if base_fraction > 1:
+        raise ValueError("base_fraction must be within [0, 1]")
+    if evidence_requests < 0:
+        raise ValueError("evidence_requests must be non-negative")
+    if base_fraction == 0 or not reward_authoritative:
+        return float(base_fraction)
+
+    total = exact_posterior + range_posterior
+    if total <= 0:
+        target = float(base_fraction)
+    else:
+        target = range_posterior / total
+    target = min(
+        RANGE_EXPLORATION_CEILING,
+        max(RANGE_EXPLORATION_FLOOR, target),
+    )
+    confidence = min(
+        1.0,
+        evidence_requests / float(RANGE_ADAPTATION_FULL_REQUESTS),
+    )
+    return (
+        (1.0 - confidence) * float(base_fraction)
+        + confidence * target
+    )
 
 
 def classify_evidence_action_fields(
