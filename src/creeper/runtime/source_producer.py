@@ -298,7 +298,6 @@ class SourceProducer:
                     and candidate.reservoir.evidence_mode == "direct_year"
                 )
                 for item in pending:
-                    keep_ownership_live()
                     annual_mask, _candidate = resolved.get(item.hostname, (0, False))
                     plan = self.evidence_planner.plan(
                         item,
@@ -365,7 +364,6 @@ class SourceProducer:
                 )
                 direct_committed += self.evidence_store.put_many(direct_capsules)
             assert result is not None
-            keep_ownership_live()
             self.control_store.finalize_lease(
                 running,
                 next_cursor=result.next_cursor,
