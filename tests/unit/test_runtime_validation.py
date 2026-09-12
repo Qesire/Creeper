@@ -217,7 +217,7 @@ class RuntimeValidationTests(unittest.TestCase):
                 (400 / 1200) / 0.5,
             )
             self.assertEqual(report["provider_request_stream_seconds"], "1200")
-            self.assertEqual(report["provider_non_stream_seconds"], "2400")
+            self.assertEqual(report["provider_non_stream_seconds"], "2400.0")
             self.assertEqual(report["provider_request_stream_segments"], 1)
             self.assertEqual(
                 report["provider_request_start_gap"],
