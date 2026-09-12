@@ -9,6 +9,10 @@ from pathlib import Path
 from creeper.authority.baseline_index import BaselineIndex
 from creeper.evidence.policies import EvidenceCapsule
 from creeper.runtime.readiness import IncrementalReadinessRuntime
+from creeper.scheduler.leases import WorkLease
+from creeper.sources.domains import SourceDomain
+from creeper.sources.reservoirs import Reservoir
+from creeper.storage.control_store import ControlStore
 from creeper.storage.evidence_store import EvidenceStore
 
 
@@ -186,6 +190,73 @@ class IncrementalReadinessTests(unittest.TestCase):
             self.assertEqual(report.confirmed_fraction_of_five_percent, "1")
             self.assertTrue(report.prewarm_reached)
             self.assertTrue(report.formal_gate_reached)
+
+
+    def test_readiness_uses_same_authority_for_source_eed_attribution(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            runtime_root = root / "runtime"
+            runtime_root.mkdir()
+            baseline = self._build_baseline(root)
+            model = self._model(root)
+
+            control = ControlStore(runtime_root / "control.sqlite3")
+            domain = SourceDomain(
+                domain_id="source-domain",
+                family="FIXTURE",
+                discovery_mechanism="test",
+                temporal_scope=(1996, 2001),
+            )
+            reservoir = Reservoir(
+                reservoir_id="source-reservoir",
+                domain_id=domain.domain_id,
+                adapter_id="fixture",
+                root_locator="fixture://source",
+                enumeration_kind="finite_list",
+                capacity_lower=1,
+                capacity_upper=1,
+                evidence_mode="direct_year",
+            )
+            control.save_domain(domain)
+            control.save_reservoir(reservoir)
+            lease = WorkLease.create(
+                reservoir_id=reservoir.reservoir_id,
+                max_records=1,
+                max_requests=1,
+                max_bytes=1024,
+                max_seconds=30,
+            )
+            control.save_lease(lease)
+            control.attribute_direct_host_years(
+                [("new.org", 1997, "arquivo")],
+                source_key="source-a",
+                reservoir_id=reservoir.reservoir_id,
+                lease_id=lease.lease_id,
+            )
+            control.close()
+
+            evidence = EvidenceStore(runtime_root / "evidence.sqlite3")
+            evidence.put(self._capsule("new.org", 1997, provider="arquivo"))
+            evidence.close()
+
+            with IncrementalReadinessRuntime(
+                runtime_root,
+                baseline_index=baseline,
+                eed_model=model,
+                baseline_eed="20",
+            ) as runtime:
+                report = runtime.sync_until_current()
+
+            self.assertEqual(report.novel_eed, "1")
+            self.assertEqual(
+                report.source_attribution,
+                {
+                    "source-a": {
+                        "novel_host_years": 1,
+                        "novel_eed": "1",
+                    }
+                },
+            )
 
 
 if __name__ == "__main__":
