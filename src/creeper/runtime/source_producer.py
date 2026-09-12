@@ -421,9 +421,11 @@ class SourceProducer:
                         )
 
                     rdap_hosts = list(dict.fromkeys(
-                        candidate
+                        rdap_candidate
                         for hostname in hostnames
-                        if (candidate := _rdap_parent_candidate(hostname)) is not None
+                        if (
+                            rdap_candidate := _rdap_parent_candidate(hostname)
+                        ) is not None
                     ))[: self.rdap_batch_size]
                     if rdap_hosts:
                         rdap_keys = tuple(
