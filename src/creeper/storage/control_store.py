@@ -9,6 +9,9 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from creeper.authority.baseline_index import YEAR_BITS
+from creeper.evidence.domain_amplification import (
+    DOMAIN_AMPLIFICATION_POLICY_VERSION,
+)
 from creeper.evidence.policies import (
     CDXQueryState,
     EvidenceQueryKey,
@@ -376,7 +379,9 @@ class ControlStore:
             raise ValueError("attempt metrics must be non-negative")
         value = state.value if isinstance(state, CDXQueryState) else str(state)
         task_kind = (
-            "exact"
+            "domain"
+            if key.policy_version == DOMAIN_AMPLIFICATION_POLICY_VERSION
+            else "exact"
             if key.temporal_scope.year_from == key.temporal_scope.year_to
             else "range"
         )
@@ -621,6 +626,95 @@ class ControlStore:
                         when,
                     )
                     for year in year_list
+                ],
+            )
+        return self.connection.total_changes - before
+
+    def attribute_domain_host_years(
+        self,
+        key: EvidenceQueryKey,
+        host_years: Iterable[tuple[str, int]],
+        *,
+        attributed_at: float | None = None,
+    ) -> int:
+        """Assign first-touch credit for positives from one domain-scope task."""
+        values = list(dict.fromkeys(
+            (str(hostname), int(year)) for hostname, year in host_years
+        ))
+        if not values:
+            return 0
+        scope = key.temporal_scope
+        if any(year < scope.year_from or year > scope.year_to for _, year in values):
+            raise ValueError("attributed year falls outside domain task scope")
+        suffix = "." + key.hostname
+        if any(
+            hostname != key.hostname and not hostname.endswith(suffix)
+            for hostname, _ in values
+        ):
+            raise ValueError("attributed hostname falls outside domain task scope")
+        when = float(self.clock()) if attributed_at is None else float(attributed_at)
+
+        with self.connection:
+            self.connection.executemany(
+                """
+                INSERT OR IGNORE INTO evidence_host_year_task_kinds(
+                    hostname, year, task_kind, evidence_provider,
+                    task_year_from, task_year_to, task_policy_version,
+                    attributed_at
+                ) VALUES (?, ?, 'domain', ?, ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        hostname,
+                        year,
+                        key.provider,
+                        scope.year_from,
+                        scope.year_to,
+                        key.policy_version,
+                        when,
+                    )
+                    for hostname, year in values
+                ],
+            )
+
+        origin = self.connection.execute(
+            """
+            SELECT source_key, reservoir_id, lease_id
+            FROM evidence_task_origins
+            WHERE hostname = ? AND year_from = ? AND year_to = ?
+              AND provider = ? AND policy_version = ?
+            ORDER BY first_observed_at, source_key, reservoir_id, lease_id
+            LIMIT 1
+            """,
+            self._values(key),
+        ).fetchone()
+        if origin is None:
+            return 0
+
+        before = self.connection.total_changes
+        with self.connection:
+            self.connection.executemany(
+                """
+                INSERT OR IGNORE INTO evidence_host_year_origins(
+                    hostname, year, source_key, reservoir_id, lease_id,
+                    evidence_provider, task_year_from, task_year_to,
+                    task_policy_version, attributed_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        hostname,
+                        year,
+                        str(origin["source_key"]),
+                        str(origin["reservoir_id"]),
+                        str(origin["lease_id"]),
+                        key.provider,
+                        scope.year_from,
+                        scope.year_to,
+                        key.policy_version,
+                        when,
+                    )
+                    for hostname, year in values
                 ],
             )
         return self.connection.total_changes - before
