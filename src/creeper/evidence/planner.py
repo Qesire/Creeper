@@ -41,10 +41,13 @@ class EvidencePlanner:
         policy_version: str,
         allow_direct: bool = False,
         external_covered_mask: int = 0,
+        range_first_fraction: float = 0.0,
     ) -> EvidencePlan:
         hostname = normalize_official(observation.hostname)
         if hostname is None:
             raise ValueError("invalid hostname")
+        if not 0.0 <= float(range_first_fraction) <= 1.0:
+            raise ValueError("range_first_fraction must be between 0 and 1")
 
         suppressed_mask = official_mask | local_mask
         claimed_direct_mask = observation.direct_year_mask & ~suppressed_mask
@@ -64,10 +67,17 @@ class EvidencePlanner:
             or observation.source_year in YEAR_BITS
         )
         if not has_temporal_claim:
-            # An undated hostname is still a valid discovery candidate. Ask
-            # the evidence provider for the complete competition period; the
-            # range probe will identify years with captures and fan out only
-            # those years to exact queries.
+            # An undated hostname is still a valid discovery candidate.
+            hint_mask = ALL_YEAR_MASK
+        elif (
+            (not allow_direct or restricted_source)
+            and self._range_first_selected(hostname, range_first_fraction)
+        ):
+            # Deterministic exploration bucket: discover every unresolved
+            # competition year for a small fraction of externally verified
+            # hostnames. The provider executes this as a one-page bounded range
+            # probe, so exploration cannot silently turn into unbounded archive
+            # pagination.
             hint_mask = ALL_YEAR_MASK
         hint_mask &= ~suppressed_mask
         hint_mask &= ~direct_mask
@@ -95,6 +105,19 @@ class EvidencePlanner:
             for year_from, year_to in ranges
         )
         return EvidencePlan(direct_capsules, external_keys)
+
+    @staticmethod
+    def _range_first_selected(hostname: str, fraction: float) -> bool:
+        value = float(fraction)
+        if value <= 0:
+            return False
+        if value >= 1:
+            return True
+        bucket = int.from_bytes(
+            hashlib.sha256(hostname.encode("utf-8")).digest()[:8],
+            "big",
+        )
+        return bucket < int(value * (1 << 64))
 
     @staticmethod
     def _direct_capsule(
