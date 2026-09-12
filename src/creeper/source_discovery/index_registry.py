@@ -78,6 +78,8 @@ class IndexSpaceRegistry:
                 kind TEXT NOT NULL,
                 locator TEXT NOT NULL,
                 state TEXT NOT NULL DEFAULT 'DISCOVERED',
+                harvest_owner TEXT,
+                harvest_expires_at REAL,
                 parent_region_key TEXT,
                 depth INTEGER NOT NULL,
                 byte_start INTEGER,
@@ -138,6 +140,14 @@ class IndexSpaceRegistry:
             self.connection.execute(
                 "ALTER TABLE source_regions_v1 "
                 "ADD COLUMN state TEXT NOT NULL DEFAULT 'DISCOVERED'"
+            )
+        if "harvest_owner" not in region_columns:
+            self.connection.execute(
+                "ALTER TABLE source_regions_v1 ADD COLUMN harvest_owner TEXT"
+            )
+        if "harvest_expires_at" not in region_columns:
+            self.connection.execute(
+                "ALTER TABLE source_regions_v1 ADD COLUMN harvest_expires_at REAL"
             )
         self.connection.commit()
 
@@ -320,17 +330,173 @@ class IndexSpaceRegistry:
                 raise KeyError(f"unknown source index: {region.index_key}")
             self._put_region(region, now=now)
 
+    def recover_expired_harvest_claims(
+        self,
+        *,
+        now: float | None = None,
+    ) -> int:
+        if now is None:
+            now = float(self.clock())
+        with self.connection:
+            changed = self.connection.execute(
+                """
+                UPDATE source_regions_v1
+                SET state = ?,
+                    harvest_owner = NULL,
+                    harvest_expires_at = NULL,
+                    updated_at = ?
+                WHERE state = ?
+                  AND harvest_expires_at IS NOT NULL
+                  AND harvest_expires_at <= ?
+                """,
+                (
+                    RegionState.HARVEST_READY.value,
+                    float(now),
+                    RegionState.HARVESTING.value,
+                    float(now),
+                ),
+            ).rowcount
+        return int(changed)
+
+    def claim_region_for_harvest(
+        self,
+        region_key: str,
+        *,
+        owner: str,
+        ttl_seconds: float,
+    ) -> HarvestRegion | None:
+        if not owner.strip():
+            raise ValueError("harvest owner is required")
+        if ttl_seconds <= 0:
+            raise ValueError("harvest ttl_seconds must be positive")
+        now = float(self.clock())
+        expires_at = now + float(ttl_seconds)
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            self.connection.execute(
+                """
+                UPDATE source_regions_v1
+                SET state = ?,
+                    harvest_owner = NULL,
+                    harvest_expires_at = NULL,
+                    updated_at = ?
+                WHERE state = ?
+                  AND harvest_expires_at IS NOT NULL
+                  AND harvest_expires_at <= ?
+                """,
+                (
+                    RegionState.HARVEST_READY.value,
+                    now,
+                    RegionState.HARVESTING.value,
+                    now,
+                ),
+            )
+            changed = self.connection.execute(
+                """
+                UPDATE source_regions_v1
+                SET state = ?,
+                    harvest_owner = ?,
+                    harvest_expires_at = ?,
+                    updated_at = ?
+                WHERE region_key = ? AND state = ?
+                """,
+                (
+                    RegionState.HARVESTING.value,
+                    owner,
+                    expires_at,
+                    now,
+                    region_key,
+                    RegionState.HARVEST_READY.value,
+                ),
+            ).rowcount
+            self.connection.commit()
+        except BaseException:
+            self.connection.rollback()
+            raise
+        if changed != 1:
+            return None
+        return self.get_region(region_key)
+
+    def complete_region_harvest(
+        self,
+        region_key: str,
+        *,
+        owner: str,
+    ) -> None:
+        if not owner.strip():
+            raise ValueError("harvest owner is required")
+        with self.connection:
+            changed = self.connection.execute(
+                """
+                UPDATE source_regions_v1
+                SET state = ?,
+                    harvest_owner = NULL,
+                    harvest_expires_at = NULL,
+                    updated_at = ?
+                WHERE region_key = ?
+                  AND state = ?
+                  AND harvest_owner = ?
+                """,
+                (
+                    RegionState.HARVESTED.value,
+                    float(self.clock()),
+                    region_key,
+                    RegionState.HARVESTING.value,
+                    owner,
+                ),
+            ).rowcount
+        if changed != 1:
+            raise ValueError("region harvest is not owned by caller")
+
+    def release_region_harvest(
+        self,
+        region_key: str,
+        *,
+        owner: str,
+    ) -> None:
+        if not owner.strip():
+            raise ValueError("harvest owner is required")
+        with self.connection:
+            changed = self.connection.execute(
+                """
+                UPDATE source_regions_v1
+                SET state = ?,
+                    harvest_owner = NULL,
+                    harvest_expires_at = NULL,
+                    updated_at = ?
+                WHERE region_key = ?
+                  AND state = ?
+                  AND harvest_owner = ?
+                """,
+                (
+                    RegionState.HARVEST_READY.value,
+                    float(self.clock()),
+                    region_key,
+                    RegionState.HARVESTING.value,
+                    owner,
+                ),
+            ).rowcount
+        if changed != 1:
+            raise ValueError("region harvest is not owned by caller")
+
     def mark_region_state(
         self,
         region_key: str,
         state: RegionState,
     ) -> None:
         state = RegionState(state)
+        if state is RegionState.HARVESTING:
+            raise ValueError(
+                "use claim_region_for_harvest() for HARVESTING state"
+            )
         with self.connection:
             changed = self.connection.execute(
                 """
                 UPDATE source_regions_v1
-                SET state = ?, updated_at = ?
+                SET state = ?,
+                    harvest_owner = NULL,
+                    harvest_expires_at = NULL,
+                    updated_at = ?
                 WHERE region_key = ?
                 """,
                 (state.value, float(self.clock()), region_key),
