@@ -491,6 +491,10 @@ class IncrementalReadinessRuntime:
         self._baseline_signature = ""
         self._model_signature = ""
         self._refresh_authority(force=True)
+        # Publish official EED weights immediately, even when there is no new
+        # evidence batch yet. Pending evidence work can then be value-ranked
+        # from service startup rather than waiting for the first readiness row.
+        self._control_store()
 
     def _refresh_authority(self, *, force: bool = False) -> bool:
         baseline_signature = _metadata_signature(self.baseline_path)
