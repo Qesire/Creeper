@@ -1108,7 +1108,16 @@ class MeasuredYieldScoutExecutor:
                     ),
                 )
 
-        download = await self._download_sample(url)
+        remaining_budget = self.policy.max_download_bytes
+        if progressive:
+            remaining_budget = max(
+                1,
+                self.policy.max_download_bytes - initial.bytes_read,
+            )
+        download = await self._download_sample(
+            url,
+            max_download_bytes=remaining_budget,
+        )
         return self._evaluate_download(
             candidate,
             download,
