@@ -4,6 +4,16 @@ runtime_data_root = "/path/to/Creeper-data/v3-merged260909-3"
 baseline_index = "/path/to/Creeper-data/v3-merged260909-3/baseline.sqlite3"
 
 [limits]
+# Independent source workers claim different durable reservoir leases. This is
+# the outer pipeline layer: source I/O on one reservoir overlaps lookup/planning
+# on other reservoirs.
+source_workers = 4
+
+# Within each lease, records and observations flow through real bounded
+# producer-consumer queues. Extraction workers never own SQLite authority.
+source_extract_workers = 2
+pipeline_batch_size = 1000
+
 queue_source_records = 1000
 queue_observations = 1000
 queue_evidence_tasks = 1000

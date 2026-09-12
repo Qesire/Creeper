@@ -71,6 +71,40 @@ class AutopilotTests(unittest.TestCase):
         self.assertIn("--requests-per-second", evidence)
         self.assertIn("0.5", evidence)
 
+    def test_multiple_source_workers_are_independent_children(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = AutopilotConfig(
+                source_discovery_config=root / "discovery.toml",
+                source_producer_config=root / "producer.toml",
+                runtime_data_root=root / "runtime",
+                supervisor=SupervisorPolicy(),
+                evidence=EvidenceServicePolicy(),
+                source_producer_workers=3,
+            )
+
+            specs = build_child_specs(config)
+
+        self.assertEqual(
+            [spec.name for spec in specs],
+            [
+                "source-discovery",
+                "source-producer-1",
+                "source-producer-2",
+                "source-producer-3",
+                "evidence-worker",
+            ],
+        )
+        owners = [
+            spec.argv[spec.argv.index("--owner") + 1]
+            for spec in specs
+            if spec.name.startswith("source-producer")
+        ]
+        self.assertEqual(
+            owners,
+            ["source-producer-1", "source-producer-2", "source-producer-3"],
+        )
+
     def test_readiness_adds_fourth_isolated_service_process(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -408,7 +442,8 @@ class AutopilotTests(unittest.TestCase):
             )
             disabled = load_autopilot_config(config)
             self.assertIsNone(disabled.readiness)
-            self.assertEqual(len(build_child_specs(disabled)), 3)
+            self.assertEqual(disabled.source_producer_workers, 4)
+            self.assertEqual(len(build_child_specs(disabled)), 6)
 
     def test_config_parses_optional_resource_governor(self):
         with tempfile.TemporaryDirectory() as tmp:

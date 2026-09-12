@@ -89,6 +89,7 @@ class AutopilotConfig:
     runtime_data_root: Path
     supervisor: SupervisorPolicy
     evidence: EvidenceServicePolicy
+    source_producer_workers: int = 1
     baseline_index: Path | None = None
     readiness: ReadinessServicePolicy | None = None
     resource_governor: ResourceGovernorPolicy | None = None
@@ -168,7 +169,7 @@ def _nonnegative_int(value: object, *, name: str) -> int:
     return value
 
 
-def _producer_runtime_config(config_path: Path) -> tuple[Path, Path]:
+def _producer_runtime_config(config_path: Path) -> tuple[Path, Path, int]:
     with config_path.open("rb") as stream:
         root = tomllib.load(stream)
     source_mode = root.get("source_mode", "static")
@@ -186,7 +187,17 @@ def _producer_runtime_config(config_path: Path) -> tuple[Path, Path]:
         base=config_path.parent,
         name="source producer baseline_index",
     )
-    return runtime_root, baseline_index
+    limits = root.get("limits", {})
+    if not isinstance(limits, dict):
+        raise ValueError("source producer [limits] must be a TOML table")
+    workers = _positive_int(
+        limits.get(
+            "source_workers",
+            4 if source_mode == "activated" else 1,
+        ),
+        name="source producer limits.source_workers",
+    )
+    return runtime_root, baseline_index, workers
 
 
 def load_autopilot_config(config_path: Path) -> AutopilotConfig:
@@ -204,7 +215,9 @@ def load_autopilot_config(config_path: Path) -> AutopilotConfig:
         name="source_producer_config",
     )
     discovery = load_source_discovery_config(discovery_path)
-    producer_root, baseline_index = _producer_runtime_config(producer_path)
+    producer_root, baseline_index, source_producer_workers = (
+        _producer_runtime_config(producer_path)
+    )
     if discovery.runtime_data_root.resolve() != producer_root.resolve():
         raise ValueError(
             "source discovery and source producer must share one runtime_data_root"
@@ -430,6 +443,7 @@ def load_autopilot_config(config_path: Path) -> AutopilotConfig:
         runtime_data_root=producer_root,
         supervisor=supervisor,
         evidence=evidence,
+        source_producer_workers=source_producer_workers,
         baseline_index=baseline_index,
         readiness=readiness,
         resource_governor=resource_governor,
@@ -450,16 +464,28 @@ def build_child_specs(config: AutopilotConfig) -> tuple[ChildSpec, ...]:
                 "--watch",
             ),
         ),
-        ChildSpec(
-            "source-producer",
-            (
-                py,
-                "-m",
-                "creeper.source_cli",
-                "--watch",
-                str(config.source_producer_config),
-            ),
-        ),
+    ]
+    for index in range(config.source_producer_workers):
+        worker_name = (
+            "source-producer"
+            if config.source_producer_workers == 1
+            else f"source-producer-{index + 1}"
+        )
+        specs.append(
+            ChildSpec(
+                worker_name,
+                (
+                    py,
+                    "-m",
+                    "creeper.source_cli",
+                    "--watch",
+                    str(config.source_producer_config),
+                    "--owner",
+                    worker_name,
+                ),
+            )
+        )
+    specs.append(
         ChildSpec(
             "evidence-worker",
             (
@@ -496,8 +522,8 @@ def build_child_specs(config: AutopilotConfig) -> tuple[ChildSpec, ...]:
                 "--poll-max-seconds",
                 str(evidence.poll_max_seconds),
             ),
-        ),
-    ]
+        )
+    )
     if config.readiness is not None:
         if config.baseline_index is None:
             raise ValueError("readiness requires producer baseline_index")

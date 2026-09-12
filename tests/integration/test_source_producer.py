@@ -252,6 +252,89 @@ class SourceProducerTests(unittest.TestCase):
         self.assertEqual(self.evidence.count(), 0)
 
 
+    def test_source_records_flow_through_bounded_parallel_pipeline(self):
+        records = [
+            SourceRecord(
+                source_id="pipeline-source",
+                locator=f"fixture://pipeline/{index}",
+                payload=hostname,
+                scope=CandidateSourceScope.LOCAL_DISCOVERY,
+                source_year=1997,
+            )
+            for index, hostname in enumerate(
+                ("one.example", "two.example", "three.example", "four.example"),
+                1,
+            )
+        ]
+        adapter = FakeSource(records)
+        domain = SourceDomain(
+            domain_id="pipeline-domain",
+            family="LOCAL_FIXTURE",
+            discovery_mechanism="test",
+            temporal_scope=(1996, 2001),
+            state=DomainState.EXPLORING,
+        )
+        reservoir = Reservoir(
+            reservoir_id="pipeline-reservoir",
+            domain_id=domain.domain_id,
+            adapter_id=adapter.adapter_id,
+            root_locator="fixture://pipeline",
+            enumeration_kind="finite_list",
+            capacity_lower=4,
+            capacity_upper=4,
+            evidence_mode="discovery_only",
+            state=ReservoirState.READY,
+        )
+        self.control.save_domain(domain)
+        self.control.save_reservoir(reservoir)
+        template = WorkLease.create(
+            reservoir_id=reservoir.reservoir_id,
+            max_records=4,
+            max_requests=1,
+            max_bytes=4096,
+            max_seconds=30,
+            expected_evidence_tasks=4,
+            expected_novel_eed=4.0,
+        )
+        candidate = LeaseCandidate(
+            reservoir_id=reservoir.reservoir_id,
+            expected_novel_eed=4.0,
+            costs=ResourceCost(0, 4, 1, 1),
+            reservoir=reservoir,
+            lease=template,
+            evidence_provider="wayback",
+            expected_evidence_tasks=4,
+            reservation_evidence_tasks=4,
+        )
+        runtime = SourceProducer(
+            baseline=self.baseline,
+            control_store=self.control,
+            evidence_store=self.evidence,
+            scheduler=GlobalScheduler(CreditLedger({"wayback": 4})),
+            candidates=[candidate],
+            adapters={adapter.adapter_id: adapter},
+            backlog_capacities={"wayback": 4},
+            queue_capacities={
+                "source_records": 2,
+                "observations": 2,
+                "evidence_tasks": 2,
+                "commits": 2,
+            },
+            pipeline_batch_size=2,
+            extract_workers=2,
+        )
+
+        report = runtime.run_once()
+
+        self.assertEqual(report.source_records, 4)
+        self.assertEqual(report.observations, 4)
+        self.assertEqual(report.pipeline_batches, 2)
+        self.assertEqual(report.evidence_tasks_enqueued, 4)
+        self.assertGreaterEqual(report.max_source_record_queue_depth, 1)
+        self.assertLessEqual(report.max_source_record_queue_depth, 2)
+        self.assertGreaterEqual(report.max_observation_queue_depth, 1)
+        self.assertLessEqual(report.max_observation_queue_depth, 2)
+
     def test_range_first_reservation_covers_parent_and_future_fanout(self):
         runtime, adapter = self.build_runtime(
             backlog_capacity=6,
