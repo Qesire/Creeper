@@ -31,9 +31,16 @@ class SourceReservoirManagerTests(unittest.TestCase):
         self.tmp.cleanup()
 
     @staticmethod
-    def candidate(name: str, *, family: str = "FAMILY", confidence: float = 0.5):
+    def candidate(
+        name: str,
+        *,
+        family: str = "FAMILY",
+        confidence: float = 0.5,
+        direct_evidence_prior: float = 0.4,
+        origin: str = "https://example.com",
+    ):
         return SourceCandidate(
-            canonical_entrypoint=f"https://example.com/{name}/",
+            canonical_entrypoint=f"{origin}/{name}/",
             source_family=family,
             level=SourceLevel.SOURCE,
             discovered_by="agent:test",
@@ -41,7 +48,7 @@ class SourceReservoirManagerTests(unittest.TestCase):
             expected_volume=1_000,
             temporal_semantics_prior=0.7,
             enumerability_prior=0.7,
-            direct_evidence_prior=0.4,
+            direct_evidence_prior=direct_evidence_prior,
             baseline_overlap_prior=0.4,
             confidence=confidence,
         )
@@ -157,6 +164,47 @@ class SourceReservoirManagerTests(unittest.TestCase):
         self.assertEqual(plan.search_directives[1].strategy, "EXPLOIT_SUCCESS")
         self.assertEqual(plan.search_directives[2].strategy, "META_SOURCE_SEARCH")
         self.assertEqual(len({item.dedup_key for item in plan.search_directives}), 3)
+
+    def test_cold_refill_exploits_proven_direct_origin(self) -> None:
+        proven = self.candidate(
+            "index.cdxj",
+            family="BULK_ARTIFACT",
+            direct_evidence_prior=1.0,
+            origin="https://archive.example",
+        )
+        self.to_warm(
+            proven,
+            novel_eed=30.0,
+            elapsed_seconds=2.0,
+            direct_host_years=50,
+        )
+        manager = SourceReservoirManager(
+            self.registry,
+            targets=SourcePoolTargets(
+                active_min=0,
+                active_target=0,
+                warm_min=0,
+                warm_target=0,
+                cold_min=3,
+                cold_target=6,
+                max_search_directives=3,
+            ),
+        )
+
+        plan = manager.plan()
+
+        self.assertEqual(
+            plan.search_directives[0].strategy,
+            "DIRECT_EVIDENCE_BULK",
+        )
+        self.assertEqual(
+            plan.search_directives[1].strategy,
+            "EXPLOIT_DIRECT_ORIGIN",
+        )
+        self.assertEqual(
+            plan.search_directives[1].subject,
+            "https://archive.example",
+        )
 
     def test_refill_uses_best_observed_search_strategy(self) -> None:
         episode = self.registry.begin_search_episode(
