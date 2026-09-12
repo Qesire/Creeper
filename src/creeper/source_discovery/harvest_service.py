@@ -78,6 +78,7 @@ class RegionHarvestService:
         *,
         max_regions: int = 4,
         byte_budget: int | None = None,
+        index_keys: set[str] | frozenset[str] | tuple[str, ...] | None = None,
         continue_on_error: bool = True,
     ) -> RegionHarvestServiceReport:
         """Plan once, then execute each virtual selection at most once."""
@@ -86,6 +87,7 @@ class RegionHarvestService:
         plan: RegionPortfolioPlan = self.portfolio_planner.plan(
             max_regions=max_regions,
             byte_budget=byte_budget,
+            index_keys=index_keys,
         )
         selected = tuple(item.region.region_key for item in plan.selections)
         claim_skipped: list[str] = []
