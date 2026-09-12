@@ -126,7 +126,7 @@ def _resolve_agent_command(
         path = Path(value)
         if (
             not path.is_absolute()
-            and ("/" in value or "\\\\" in value)
+            and ("/" in value or "\\" in value)
         ):
             value = str((config_path.parent / path).resolve())
         resolved.append(value)
