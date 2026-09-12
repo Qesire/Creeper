@@ -478,19 +478,24 @@ class SourceProducerTests(unittest.TestCase):
         self.assertIsNotNone(self.control.get_evidence_task(rdap_key))
         state = self.control.connection.execute(
             """
-            SELECT observed_self, child_count, query_enqueued, rdap_enqueued
+            SELECT observed_self, child_count, child_sketch,
+                   query_enqueued, rdap_enqueued
             FROM domain_fanout_state
             WHERE parent_hostname = 'example.com'
             """
         ).fetchone()
+        self.assertEqual(state["observed_self"], 0)
+        self.assertEqual(state["child_count"], 4)
+        self.assertEqual(int(state["child_sketch"]).bit_count(), 4)
+        self.assertEqual(state["query_enqueued"], 1)
+        # RDAP now relies on EvidenceTask identity instead of a second per-host
+        # enqueue flag.
+        self.assertEqual(state["rdap_enqueued"], 0)
         self.assertEqual(
-            (
-                state["observed_self"],
-                state["child_count"],
-                state["query_enqueued"],
-                state["rdap_enqueued"],
-            ),
-            (1, 4, 1, 1),
+            self.control.connection.execute(
+                "SELECT COUNT(*) FROM domain_fanout_members"
+            ).fetchone()[0],
+            0,
         )
 
     def test_full_backlog_blocks_source_before_adapter_execution(self):

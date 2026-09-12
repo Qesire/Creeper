@@ -162,6 +162,78 @@ class ControlStoreTests(unittest.TestCase):
             )
             store.close()
 
+    def test_domain_fanout_uses_bounded_parent_sketch_without_child_rows(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ControlStore(Path(tmp) / "control.sqlite3")
+            store.record_domain_fanout_observations(
+                [
+                    "example.com",
+                    "a.example.com",
+                    "b.example.com",
+                    "c.example.com",
+                    "d.example.com",
+                ],
+                source_key="source-a",
+            )
+
+            rows = store.connection.execute(
+                """
+                SELECT parent_hostname, observed_self, child_count, child_sketch
+                FROM domain_fanout_state
+                ORDER BY parent_hostname
+                """
+            ).fetchall()
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["parent_hostname"], "example.com")
+            self.assertEqual(rows[0]["observed_self"], 0)
+            self.assertEqual(rows[0]["child_count"], 4)
+            self.assertEqual(int(rows[0]["child_sketch"]).bit_count(), 4)
+            self.assertEqual(
+                store.connection.execute(
+                    "SELECT COUNT(*) FROM domain_fanout_members"
+                ).fetchone()[0],
+                0,
+            )
+            self.assertEqual(
+                store.ready_domain_fanout_candidates(
+                    min_children=4,
+                    limit=10,
+                ),
+                ["example.com"],
+            )
+            store.close()
+
+    def test_domain_fanout_skips_bare_country_code_public_suffix_shape(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ControlStore(Path(tmp) / "control.sqlite3")
+            store.record_domain_fanout_observations(
+                [
+                    "a.co.uk",
+                    "b.co.uk",
+                    "a.example.co.uk",
+                    "b.example.co.uk",
+                    "c.example.co.uk",
+                    "d.example.co.uk",
+                ]
+            )
+
+            parents = {
+                str(row["parent_hostname"])
+                for row in store.connection.execute(
+                    "SELECT parent_hostname FROM domain_fanout_state"
+                )
+            }
+            self.assertNotIn("co.uk", parents)
+            self.assertIn("example.co.uk", parents)
+            self.assertEqual(
+                store.ready_domain_fanout_candidates(
+                    min_children=4,
+                    limit=10,
+                ),
+                ["example.co.uk"],
+            )
+            store.close()
+
     def test_terminal_tasks_are_not_claimed_but_retryable_tasks_are(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = ControlStore(Path(tmp) / "control.sqlite3")
