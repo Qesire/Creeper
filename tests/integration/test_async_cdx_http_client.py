@@ -339,6 +339,53 @@ class AsyncWaybackCDXClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.candidate_years, (1997,))
         self.assertEqual(result.followup_years, (1996, 1998))
 
+
+    async def test_domain_probe_returns_many_exact_host_years_in_one_request(self):
+        seen_query = None
+
+        async def handler(request):
+            nonlocal seen_query
+            seen_query = parse_qs(request.url.query.decode())
+            payload = [
+                ["timestamp", "original", "statuscode"],
+                ["19970102030405", "http://example.com/", "200"],
+                ["19980102030405", "http://www.example.com/a", "200"],
+                ["19990102030405", "http://shop.example.com/b", "302"],
+                ["20000102030405", "http://outside.test/", "200"],
+                ["resume-token!"],
+            ]
+            return httpx.Response(
+                200,
+                content=json.dumps(payload).encode(),
+                request=request,
+            )
+
+        key = EvidenceQueryKey(
+            "example.com",
+            TemporalScope(1996, 2001),
+            "wayback",
+            "domain-amplification-v1",
+        )
+        async with AsyncWaybackCDXClient(
+            transport=httpx.MockTransport(handler),
+            max_retries=0,
+        ) as client:
+            result = await client.query_domain(key)
+
+        self.assertEqual(result.state, CDXQueryState.PASS)
+        self.assertEqual(result.provider_requests, 1)
+        self.assertEqual(
+            [(capsule.hostname, capsule.year) for capsule in result.capsules],
+            [
+                ("example.com", 1997),
+                ("shop.example.com", 1999),
+                ("www.example.com", 1998),
+            ],
+        )
+        self.assertEqual(seen_query["matchType"], ["domain"])
+        self.assertEqual(seen_query["showResumeKey"], ["true"])
+        self.assertEqual(seen_query["collapse"], ["timestamp:4"])
+
     async def test_rate_limiter_strictly_spaces_requests_above_one_rps(self):
         async with AsyncWaybackCDXClient(
             transport=httpx.MockTransport(
