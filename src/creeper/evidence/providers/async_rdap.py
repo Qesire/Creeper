@@ -11,10 +11,11 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import math
+from email.utils import parsedate_to_datetime
 from urllib.parse import quote
 
 import httpx
-from aiolimiter import AsyncLimiter
 
 from creeper.authority.normalizer import normalize_official
 from creeper.evidence.policies import (
@@ -36,26 +37,59 @@ class AsyncRDAPClient:
         *,
         timeout: float = 20.0,
         requests_per_second: float = 1.0,
+        min_requests_per_second: float = 0.10,
+        decrease_factor: float = 0.70,
+        recovery_successes: int = 20,
+        recovery_step_fraction: float = 0.10,
+        throttle_floor_seconds: float = 2.0,
         max_connections: int = 4,
         max_keepalive_connections: int = 2,
         user_agent: str = "Creeper/2.2 (research; https://github.com/Qesire/Creeper)",
         client: httpx.AsyncClient | None = None,
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
-        if not endpoint.strip() or timeout <= 0 or requests_per_second < 0:
+        if (
+            not endpoint.strip()
+            or timeout <= 0
+            or requests_per_second < 0
+            or min_requests_per_second <= 0
+            or (
+                requests_per_second > 0
+                and min_requests_per_second > requests_per_second
+            )
+            or not math.isfinite(decrease_factor)
+            or not 0 < decrease_factor < 1
+            or not isinstance(recovery_successes, int)
+            or isinstance(recovery_successes, bool)
+            or recovery_successes < 1
+            or not math.isfinite(recovery_step_fraction)
+            or recovery_step_fraction <= 0
+            or throttle_floor_seconds < 0
+        ):
             raise ValueError("invalid RDAP client configuration")
         self.endpoint = endpoint.rstrip("/")
         self.timeout = float(timeout)
         self.requests_per_second = float(requests_per_second)
+        self.min_requests_per_second = float(min_requests_per_second)
+        self.decrease_factor = float(decrease_factor)
+        self.recovery_successes = int(recovery_successes)
+        self.recovery_step_fraction = float(recovery_step_fraction)
+        self.throttle_floor_seconds = float(throttle_floor_seconds)
+        self.effective_requests_per_second = float(requests_per_second)
         self.http_requests = 0
         self.transport_errors = 0
         self.http_status_counts: dict[int, int] = {}
         self.http_elapsed_milliseconds = 0
-        self._limiter = (
-            None
-            if requests_per_second <= 0
-            else AsyncLimiter(1, 1.0 / requests_per_second)
-        )
+        self.throttle_events = 0
+        self.cooldown_wait_milliseconds = 0
+        self.rate_limit_wait_milliseconds = 0
+        self.adaptive_rate_decreases = 0
+        self.adaptive_rate_increases = 0
+        self._pacing_lock = asyncio.Lock()
+        self._health_lock = asyncio.Lock()
+        self._next_request_start = 0.0
+        self._cooldown_until = 0.0
+        self._success_streak = 0
         self._owns_client = client is None
         if client is not None:
             self.client = client
@@ -78,6 +112,90 @@ class AsyncRDAPClient:
                 options["proxy"] = configured_http_proxy()
             self.client = httpx.AsyncClient(**options)
 
+    @staticmethod
+    def _retry_after_seconds(response: httpx.Response) -> float | None:
+        value = response.headers.get("retry-after")
+        if not value:
+            return None
+        text = value.strip()
+        if text.isdigit():
+            return max(0.0, float(text))
+        try:
+            target = parsedate_to_datetime(text)
+            if target.tzinfo is None:
+                return None
+            now = parsedate_to_datetime(response.headers.get("date", "")) if response.headers.get("date") else None
+            if now is None:
+                return None
+            return max(0.0, (target - now).total_seconds())
+        except (TypeError, ValueError, OverflowError):
+            return None
+
+    async def _acquire_request_slot(self) -> None:
+        if self.requests_per_second <= 0:
+            return
+        loop = asyncio.get_running_loop()
+        async with self._pacing_lock:
+            now = loop.time()
+            wait_until = max(self._next_request_start, self._cooldown_until)
+            delay = max(0.0, wait_until - now)
+            if delay > 0:
+                started = loop.time()
+                await asyncio.sleep(delay)
+                waited = max(0, int(round((loop.time() - started) * 1000.0)))
+                if wait_until == self._cooldown_until and self._cooldown_until >= self._next_request_start:
+                    self.cooldown_wait_milliseconds += waited
+                else:
+                    self.rate_limit_wait_milliseconds += waited
+            now = loop.time()
+            interval = 1.0 / max(
+                self.min_requests_per_second,
+                self.effective_requests_per_second,
+            )
+            self._next_request_start = max(now, self._next_request_start) + interval
+
+    async def _register_throttle(self, response: httpx.Response) -> None:
+        loop = asyncio.get_running_loop()
+        retry_after = self._retry_after_seconds(response)
+        cooldown = max(
+            self.throttle_floor_seconds,
+            0.0 if retry_after is None else retry_after,
+        )
+        async with self._health_lock:
+            self.throttle_events += 1
+            self._success_streak = 0
+            if self.requests_per_second > 0:
+                reduced = max(
+                    self.min_requests_per_second,
+                    self.effective_requests_per_second * self.decrease_factor,
+                )
+                if reduced < self.effective_requests_per_second:
+                    self.effective_requests_per_second = reduced
+                    self.adaptive_rate_decreases += 1
+            self._cooldown_until = max(
+                self._cooldown_until,
+                loop.time() + cooldown,
+            )
+
+    async def _register_success(self) -> None:
+        if self.requests_per_second <= 0:
+            return
+        async with self._health_lock:
+            self._success_streak += 1
+            if self._success_streak < self.recovery_successes:
+                return
+            self._success_streak = 0
+            if self.effective_requests_per_second >= self.requests_per_second:
+                return
+            increased = min(
+                self.requests_per_second,
+                self.effective_requests_per_second
+                + self.requests_per_second * self.recovery_step_fraction,
+            )
+            if increased > self.effective_requests_per_second:
+                self.effective_requests_per_second = increased
+                self.adaptive_rate_increases += 1
+
     async def __aenter__(self) -> "AsyncRDAPClient":
         return self
 
@@ -91,8 +209,7 @@ class AsyncRDAPClient:
     async def _get(self, hostname: str) -> tuple[httpx.Response, int]:
         url = f"{self.endpoint}/{quote(hostname, safe='.-')}"
         loop = asyncio.get_running_loop()
-        if self._limiter is not None:
-            await self._limiter.acquire()
+        await self._acquire_request_slot()
         started = loop.time()
         self.http_requests += 1
         try:
@@ -103,9 +220,14 @@ class AsyncRDAPClient:
         finally:
             elapsed = max(0, int(round((loop.time() - started) * 1000.0)))
             self.http_elapsed_milliseconds += elapsed
-        self.http_status_counts[int(response.status_code)] = (
-            self.http_status_counts.get(int(response.status_code), 0) + 1
+        status = int(response.status_code)
+        self.http_status_counts[status] = (
+            self.http_status_counts.get(status, 0) + 1
         )
+        if status == 429:
+            await self._register_throttle(response)
+        elif status < 500:
+            await self._register_success()
         return response, elapsed
 
     @staticmethod
