@@ -13,7 +13,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -103,6 +103,11 @@ class AsyncEvidenceWorker:
         self.host_lock_wait_milliseconds = 0
         self.provider_inflight_wait_milliseconds = 0
         self.claim_wait_milliseconds = 0
+        # Streaming-pump telemetry. These counters describe queue refill
+        # mechanics only and never participate in evidence authority.
+        self.stream_refill_claims = 0
+        self.stream_refill_tasks = 0
+        self.stream_refill_empty_claims = 0
 
         limits = dict(provider_inflight or {})
         unknown_limits = set(limits) - set(self.providers)
@@ -388,6 +393,247 @@ class AsyncEvidenceWorker:
                 CDXQueryState.TRANSIENT_ERROR
             ],
         )
+
+
+    async def run_streaming(
+        self,
+        *,
+        stop_event: asyncio.Event,
+        refill_batch_size: int | None = None,
+    ) -> AsyncIterator[EvidenceWorkerReport]:
+        """Continuously refill one claimed work window as tasks complete.
+
+        ``run_once`` intentionally retains bounded batch semantics for tests and
+        one-shot callers. Production services should use this method instead:
+        the durable claim window is replenished before the current window drains,
+        eliminating the 64 -> 0 -> 64 barrier that otherwise starves the provider
+        rate limiter at every slow batch tail.
+
+        A stop request is graceful: no new durable work is claimed after the
+        event is set, while already-owned tasks keep their visibility heartbeat
+        and drain to a durable state before the generator returns.
+        """
+        if refill_batch_size is None:
+            refill_batch_size = max(1, min(16, self.claim_batch_size))
+        if refill_batch_size < 1 or refill_batch_size > self.claim_batch_size:
+            raise ValueError(
+                "refill_batch_size must be between 1 and claim_batch_size"
+            )
+        low_watermark = max(0, self.claim_batch_size - refill_batch_size)
+        loop = asyncio.get_running_loop()
+
+        def claim(limit: int, *, refill: bool) -> list[EvidenceTask]:
+            if limit < 1:
+                return []
+            started = loop.time()
+            tasks = self.queue.claim(
+                owner=self.owner,
+                limit=limit,
+                providers=self.providers,
+                lease_seconds=self.lease_seconds,
+            )
+            self.claim_wait_milliseconds += max(
+                0,
+                int(round((loop.time() - started) * 1000.0)),
+            )
+            if refill:
+                self.stream_refill_claims += 1
+                self.stream_refill_tasks += len(tasks)
+                if not tasks:
+                    self.stream_refill_empty_claims += 1
+            return tasks
+
+        initial = claim(self.claim_batch_size, refill=False)
+        if not initial:
+            return
+
+        active_keys: set[EvidenceQueryKey] = set()
+        task_by_key: dict[EvidenceQueryKey, EvidenceTask] = {}
+        executions: dict[asyncio.Task, EvidenceTask] = {}
+
+        def launch(tasks: list[EvidenceTask]) -> None:
+            for task in tasks:
+                task_by_key[task.key] = task
+                active_keys.add(task.key)
+                execution = asyncio.create_task(self._execute(task))
+                executions[execution] = task
+
+        launch(initial)
+        claimed = len(initial)
+        terminal = retryable = inserted_capsules = 0
+        state_counts = {
+            CDXQueryState.PASS: 0,
+            CDXQueryState.EMPTY_EXHAUSTIVE: 0,
+            CDXQueryState.INVALID: 0,
+            CDXQueryState.INCOMPLETE: 0,
+            CDXQueryState.TRANSIENT_ERROR: 0,
+        }
+        completed_since_yield = 0
+        writer = CommitWriter(
+            self.evidence_store,
+            self.control_store,
+            owner=self.owner,
+            flush_count=1,
+        )
+        stop_heartbeat = asyncio.Event()
+        heartbeat = asyncio.create_task(
+            self._heartbeat(active_keys, stop_heartbeat)
+        )
+
+        def snapshot_and_reset() -> EvidenceWorkerReport:
+            nonlocal claimed, terminal, retryable, inserted_capsules
+            nonlocal completed_since_yield, state_counts
+            report = EvidenceWorkerReport(
+                claimed=claimed,
+                terminal=terminal,
+                retryable=retryable,
+                inserted_capsules=inserted_capsules,
+                unknown_provider=0,
+                pass_count=state_counts[CDXQueryState.PASS],
+                empty_exhaustive_count=state_counts[
+                    CDXQueryState.EMPTY_EXHAUSTIVE
+                ],
+                invalid_count=state_counts[CDXQueryState.INVALID],
+                incomplete_count=state_counts[CDXQueryState.INCOMPLETE],
+                transient_error_count=state_counts[
+                    CDXQueryState.TRANSIENT_ERROR
+                ],
+            )
+            claimed = terminal = retryable = inserted_capsules = 0
+            completed_since_yield = 0
+            state_counts = {
+                CDXQueryState.PASS: 0,
+                CDXQueryState.EMPTY_EXHAUSTIVE: 0,
+                CDXQueryState.INVALID: 0,
+                CDXQueryState.INCOMPLETE: 0,
+                CDXQueryState.TRANSIENT_ERROR: 0,
+            }
+            return report
+
+        try:
+            while executions:
+                done, _pending = await asyncio.wait(
+                    tuple(executions),
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                for execution in done:
+                    task = executions.pop(execution)
+                    result = await execution
+                    if result.key is None:
+                        raise ValueError(
+                            "provider result must preserve EvidenceQueryKey"
+                        )
+                    state_counts[result.state] += 1
+
+                    if isinstance(result, RangeEvidenceQueryResult):
+                        if result.capsules:
+                            self.control_store.attribute_task_host_years(
+                                result.key,
+                                (capsule.year for capsule in result.capsules),
+                            )
+                            inserted_capsules += self.evidence_store.put_many(
+                                result.capsules
+                            )
+                        capsule_years = {
+                            capsule.year for capsule in result.capsules
+                        }
+                        if result.state in {
+                            CDXQueryState.PASS,
+                            CDXQueryState.EMPTY_EXHAUSTIVE,
+                            CDXQueryState.INVALID,
+                        }:
+                            followups = ()
+                            if result.state is CDXQueryState.PASS:
+                                followups = tuple(
+                                    EvidenceQueryKey(
+                                        result.hostname,
+                                        TemporalScope(year, year),
+                                        result.key.provider,
+                                        result.key.policy_version,
+                                    )
+                                    for year in result.candidate_years
+                                    if year not in capsule_years
+                                )
+                            self.control_store.finish_range_task(
+                                result.key,
+                                result.state,
+                                followup_keys=followups,
+                                owner=self.owner,
+                            )
+                            terminal += 1
+                        elif result.state in {
+                            CDXQueryState.INCOMPLETE,
+                            CDXQueryState.TRANSIENT_ERROR,
+                        }:
+                            self.control_store.finish_evidence_task(
+                                result.key,
+                                result.state,
+                                owner=self.owner,
+                                retry_at=self._retry_at(task.attempt),
+                            )
+                            retryable += 1
+                        else:
+                            raise ValueError(
+                                f"unsupported provider state: {result.state}"
+                            )
+                    elif result.state in {
+                        CDXQueryState.PASS,
+                        CDXQueryState.EMPTY_EXHAUSTIVE,
+                        CDXQueryState.INVALID,
+                    }:
+                        before_inserted = writer.inserted_capsules
+                        writer.submit(result.capsule, result)
+                        inserted_capsules += (
+                            writer.inserted_capsules - before_inserted
+                        )
+                        terminal += 1
+                    elif result.state in {
+                        CDXQueryState.INCOMPLETE,
+                        CDXQueryState.TRANSIENT_ERROR,
+                    }:
+                        self.control_store.finish_evidence_task(
+                            result.key,
+                            result.state,
+                            owner=self.owner,
+                            retry_at=self._retry_at(task.attempt),
+                        )
+                        retryable += 1
+                    else:
+                        raise ValueError(
+                            f"unsupported provider state: {result.state}"
+                        )
+
+                    active_keys.discard(result.key)
+                    task_by_key.pop(result.key, None)
+                    completed_since_yield += 1
+
+                if (
+                    not stop_event.is_set()
+                    and len(executions) <= low_watermark
+                ):
+                    capacity = self.claim_batch_size - len(executions)
+                    refill = claim(
+                        min(refill_batch_size, capacity),
+                        refill=True,
+                    )
+                    launch(refill)
+                    claimed += len(refill)
+
+                if (
+                    completed_since_yield >= refill_batch_size
+                    or not executions
+                ):
+                    report = snapshot_and_reset()
+                    if report.claimed or report.terminal or report.retryable:
+                        yield report
+        finally:
+            for execution in executions:
+                if not execution.done():
+                    execution.cancel()
+            await asyncio.gather(*executions, return_exceptions=True)
+            writer.close()
+            stop_heartbeat.set()
+            await heartbeat
 
     async def run_until_idle(self, *, max_batches: int | None = None) -> EvidenceWorkerReport:
         """Drain currently claimable work without busy-polling future retries."""
