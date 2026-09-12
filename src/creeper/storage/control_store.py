@@ -105,6 +105,7 @@ class ControlStore:
                    (year_to - year_from)
             FROM evidence_tasks
             WHERE year_to > year_from
+              AND policy_version != 'domain-amplification-v1'
               AND state IN ('pending', 'incomplete', 'transient_error');
             CREATE TABLE IF NOT EXISTS runtime_checkpoints (
                 key TEXT PRIMARY KEY,
