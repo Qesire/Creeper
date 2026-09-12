@@ -502,7 +502,13 @@ class ControlStore:
             FROM domain_fanout_state
             WHERE observed_self = 1
               AND rdap_enqueued = 0
-              AND child_count >= ?
+              AND (
+                    child_count >= ?
+                    OR (
+                        LENGTH(parent_hostname)
+                        - LENGTH(REPLACE(parent_hostname, '.', ''))
+                    ) = 1
+              )
             ORDER BY child_count DESC, parent_hostname
             LIMIT ?
             """,
