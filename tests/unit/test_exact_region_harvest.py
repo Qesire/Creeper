@@ -539,6 +539,38 @@ class ExactRegionHarvestTests(unittest.TestCase):
             RegionState.HARVESTED,
         )
 
+    def test_source_size_drift_after_partitioning_fails_closed(self) -> None:
+        path = self.root / "drift.cdxj"
+        path.write_text(
+            self._line("novel", 1998, "0101000000"),
+            encoding="utf-8",
+        )
+        compiled = self._compiled_local(path)
+        region = self._register_ready(compiled)
+        # Simulate a mutable remote/local artifact being replaced or appended
+        # after tomography established byte authority.
+        with path.open("ab") as stream:
+            stream.write(
+                self._line("late", 1999, "0101000000").encode("utf-8")
+            )
+        executor = RegionHarvestExecutor(
+            registry=self.registry,
+            baseline=self.baseline,
+            evidence_store=self.evidence,
+        )
+
+        with self.assertRaisesRegex(
+            RegionHarvestError,
+            "source size changed",
+        ):
+            executor.harvest(region.region_key)
+
+        self.assertEqual(
+            self.registry.get_region(region.region_key).state,
+            RegionState.HARVEST_READY,
+        )
+        self.assertEqual(self.evidence.host_year_count(), 0)
+
     def test_direct_authority_failure_releases_claim_immediately(self) -> None:
         path = self.root / "no-authority.cdxj"
         path.write_text(
