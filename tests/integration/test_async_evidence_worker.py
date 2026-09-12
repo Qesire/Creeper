@@ -608,7 +608,7 @@ class AsyncEvidenceWorkerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             {
                 (row.hostname, row.year)
-                for row in self.evidence.iter_after(0, limit=10)
+                for row in self.evidence.host_years_after(0, limit=10)
             },
             {("example.com", 1997), ("a.example.com", 1998)},
         )
