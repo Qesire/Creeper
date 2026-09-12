@@ -357,36 +357,64 @@ class ControlStore:
                 "child_sketch INTEGER NOT NULL DEFAULT 0 "
                 "CHECK(child_sketch >= 0)"
             )
-        # V3 initially persisted every parent/child pair plus self-only host
-        # rows. child_count is already materialized, so those rows are no
-        # longer needed after the fixed-sketch migration. DELETE makes their
-        # pages reusable by SQLite without an unsafe blocking VACUUM.
-        self.connection.executescript(
-            """
-            DELETE FROM domain_fanout_members;
-            DELETE FROM domain_fanout_state
-            WHERE child_count = 0 AND query_enqueued = 0;
-            """
-        )
-        self.connection.execute(
-            """
-            INSERT OR IGNORE INTO evidence_action_cost_stats(
-                task_kind, attempts, provider_requests,
-                provider_elapsed_milliseconds, pages_seen, records_seen,
-                updated_at
+        # Historical cleanup/backfill must be true one-time migrations.
+        # These used to scan/delete historical tables on every ControlStore
+        # open, creating avoidable startup latency, WAL churn and writer-lock
+        # contention across source/evidence/readiness processes.
+        self.connection.commit()
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            fanout_marker = (
+                "migration:domain-fanout-fixed-sketch-cleanup-v1"
             )
-            SELECT task_kind,
-                   COUNT(*),
-                   COALESCE(SUM(provider_requests), 0),
-                   COALESCE(SUM(provider_elapsed_milliseconds), 0),
-                   COALESCE(SUM(pages_seen), 0),
-                   COALESCE(SUM(records_seen), 0),
-                   ?
-            FROM evidence_task_attempt_metrics
-            GROUP BY task_kind
-            """,
-            (float(self.clock()),),
-        )
+            if self.connection.execute(
+                "SELECT 1 FROM runtime_checkpoints WHERE key = ?",
+                (fanout_marker,),
+            ).fetchone() is None:
+                self.connection.execute("DELETE FROM domain_fanout_members")
+                self.connection.execute(
+                    """
+                    DELETE FROM domain_fanout_state
+                    WHERE child_count = 0 AND query_enqueued = 0
+                    """
+                )
+                self.connection.execute(
+                    "INSERT INTO runtime_checkpoints(key, value) VALUES (?, ?)",
+                    (fanout_marker, "complete"),
+                )
+
+            action_marker = "migration:evidence-action-cost-backfill-v1"
+            if self.connection.execute(
+                "SELECT 1 FROM runtime_checkpoints WHERE key = ?",
+                (action_marker,),
+            ).fetchone() is None:
+                self.connection.execute(
+                    """
+                    INSERT OR IGNORE INTO evidence_action_cost_stats(
+                        task_kind, attempts, provider_requests,
+                        provider_elapsed_milliseconds, pages_seen, records_seen,
+                        updated_at
+                    )
+                    SELECT task_kind,
+                           COUNT(*),
+                           COALESCE(SUM(provider_requests), 0),
+                           COALESCE(SUM(provider_elapsed_milliseconds), 0),
+                           COALESCE(SUM(pages_seen), 0),
+                           COALESCE(SUM(records_seen), 0),
+                           ?
+                    FROM evidence_task_attempt_metrics
+                    GROUP BY task_kind
+                    """,
+                    (float(self.clock()),),
+                )
+                self.connection.execute(
+                    "INSERT INTO runtime_checkpoints(key, value) VALUES (?, ?)",
+                    (action_marker, "complete"),
+                )
+            self.connection.commit()
+        except BaseException:
+            self.connection.rollback()
+            raise
         self.connection.executescript(
             """
             CREATE TABLE IF NOT EXISTS eed_tld_weights (
