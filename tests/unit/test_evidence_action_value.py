@@ -176,6 +176,74 @@ class EvidenceActionValueTests(unittest.TestCase):
             self.assertEqual([task.key for task in claimed], [exact])
             store.close()
 
+    def test_range_first_stays_configured_until_formal_reward_then_adapts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ControlStore(Path(tmp) / "control.sqlite3")
+            self.assertAlmostEqual(
+                store.recommended_range_first_fraction(0.10),
+                0.10,
+            )
+            exact = self._exact("adapt-exact.com")
+            ranged = EvidenceQueryKey(
+                "adapt-range.com",
+                TemporalScope(1996, 2001),
+                "wayback",
+                "cdx-v1",
+            )
+            store.enqueue_evidence_tasks([exact, ranged])
+            store.record_evidence_task_attempt_metric(
+                exact,
+                attempt=1,
+                state=CDXQueryState.PASS,
+                provider_requests=25,
+                provider_elapsed_milliseconds=100,
+                pages_seen=25,
+                records_seen=25,
+            )
+            store.record_evidence_task_attempt_metric(
+                ranged,
+                attempt=1,
+                state=CDXQueryState.PASS,
+                provider_requests=25,
+                provider_elapsed_milliseconds=100,
+                pages_seen=25,
+                records_seen=25,
+            )
+            # Cost data alone must not mutate generation policy; only formal
+            # readiness reward is allowed to close the control loop.
+            self.assertAlmostEqual(
+                store.recommended_range_first_fraction(0.10),
+                0.10,
+            )
+            store.publish_evidence_action_final_rewards(
+                {
+                    "exact": {
+                        "novel_host_years": 5,
+                        "novel_eed": "5",
+                    },
+                    "range": {
+                        "novel_host_years": 30,
+                        "novel_eed": "30",
+                    },
+                },
+                baseline_signature="baseline-a",
+                model_signature="model-a",
+            )
+
+            exact_yield = (5 + 4 * 0.25) / (25 + 4)
+            range_yield = (30 + 4 * 0.50) / (25 + 4)
+            expected = range_yield / (exact_yield + range_yield)
+            self.assertAlmostEqual(
+                store.recommended_range_first_fraction(0.10),
+                expected,
+            )
+            # Zero remains an explicit operator kill-switch.
+            self.assertEqual(
+                store.recommended_range_first_fraction(0.0),
+                0.0,
+            )
+            store.close()
+
     def test_duplicate_attempt_metric_does_not_double_count_action_cost(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = ControlStore(Path(tmp) / "control.sqlite3")
