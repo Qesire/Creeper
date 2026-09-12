@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from typing import Iterable
 from uuid import uuid4
 
+from creeper.evidence.domain_amplification import is_domain_amplification_key
 from creeper.evidence.policies import CDXQueryState, EvidenceQueryKey
 from creeper.storage.control_store import ControlStore
 
@@ -324,7 +325,9 @@ class EvidenceBacklogAdmission:
                     inserted_keys.append(key)
 
             fanout_capacity = sum(
-                max(
+                0
+                if is_domain_amplification_key(key)
+                else max(
                     0,
                     key.temporal_scope.year_to - key.temporal_scope.year_from,
                 )
@@ -337,9 +340,13 @@ class EvidenceBacklogAdmission:
                 )
 
             for key in inserted_keys:
-                extra = max(
-                    0,
-                    key.temporal_scope.year_to - key.temporal_scope.year_from,
+                extra = (
+                    0
+                    if is_domain_amplification_key(key)
+                    else max(
+                        0,
+                        key.temporal_scope.year_to - key.temporal_scope.year_from,
+                    )
                 )
                 if extra:
                     self.connection.execute(
