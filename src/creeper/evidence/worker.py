@@ -289,6 +289,10 @@ class AsyncEvidenceWorker:
                         range_inserted_capsules += self.evidence_store.put_many(
                             result.capsules
                         )
+                        self.control_store.attribute_task_host_years(
+                            result.key,
+                            (capsule.year for capsule in result.capsules),
+                        )
                     capsule_years = {
                         capsule.year for capsule in result.capsules
                     }
