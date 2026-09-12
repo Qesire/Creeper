@@ -80,6 +80,7 @@ class IndexSpaceRegistry:
                 state TEXT NOT NULL DEFAULT 'DISCOVERED',
                 harvest_owner TEXT,
                 harvest_expires_at REAL,
+                harvest_cursor INTEGER,
                 parent_region_key TEXT,
                 depth INTEGER NOT NULL,
                 byte_start INTEGER,
@@ -148,6 +149,10 @@ class IndexSpaceRegistry:
         if "harvest_expires_at" not in region_columns:
             self.connection.execute(
                 "ALTER TABLE source_regions_v1 ADD COLUMN harvest_expires_at REAL"
+            )
+        if "harvest_cursor" not in region_columns:
+            self.connection.execute(
+                "ALTER TABLE source_regions_v1 ADD COLUMN harvest_cursor INTEGER"
             )
         self.connection.commit()
 
@@ -358,6 +363,20 @@ class IndexSpaceRegistry:
             ).rowcount
         return int(changed)
 
+    def get_region_harvest_cursor(self, region_key: str) -> int | None:
+        row = self.connection.execute(
+            """
+            SELECT harvest_cursor
+            FROM source_regions_v1
+            WHERE region_key = ?
+            """,
+            (region_key,),
+        ).fetchone()
+        if row is None:
+            raise KeyError(f"unknown source region: {region_key}")
+        value = row["harvest_cursor"]
+        return None if value is None else int(value)
+
     def claim_region_for_harvest(
         self,
         region_key: str,
@@ -432,6 +451,7 @@ class IndexSpaceRegistry:
                 SET state = ?,
                     harvest_owner = NULL,
                     harvest_expires_at = NULL,
+                    harvest_cursor = NULL,
                     updated_at = ?
                 WHERE region_key = ?
                   AND state = ?
@@ -453,16 +473,43 @@ class IndexSpaceRegistry:
         region_key: str,
         *,
         owner: str,
+        resume_cursor: int | None = None,
     ) -> None:
         if not owner.strip():
             raise ValueError("harvest owner is required")
+        if resume_cursor is not None and resume_cursor < 0:
+            raise ValueError("resume_cursor must be non-negative")
         with self.connection:
+            row = self.connection.execute(
+                """
+                SELECT byte_start, byte_end
+                FROM source_regions_v1
+                WHERE region_key = ?
+                  AND state = ?
+                  AND harvest_owner = ?
+                """,
+                (
+                    region_key,
+                    RegionState.HARVESTING.value,
+                    owner,
+                ),
+            ).fetchone()
+            if row is None:
+                raise ValueError("region harvest is not owned by caller")
+            if resume_cursor is not None:
+                start = row["byte_start"]
+                end = row["byte_end"]
+                if start is not None and resume_cursor < int(start):
+                    raise ValueError("resume_cursor precedes region start")
+                if end is not None and resume_cursor > int(end) + 1:
+                    raise ValueError("resume_cursor exceeds region end")
             changed = self.connection.execute(
                 """
                 UPDATE source_regions_v1
                 SET state = ?,
                     harvest_owner = NULL,
                     harvest_expires_at = NULL,
+                    harvest_cursor = ?,
                     updated_at = ?
                 WHERE region_key = ?
                   AND state = ?
@@ -470,6 +517,7 @@ class IndexSpaceRegistry:
                 """,
                 (
                     RegionState.HARVEST_READY.value,
+                    resume_cursor,
                     float(self.clock()),
                     region_key,
                     RegionState.HARVESTING.value,
