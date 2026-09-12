@@ -320,6 +320,27 @@ def load_source_discovery_config(config_path: Path) -> SourceDiscoveryServiceCon
                 timeout_seconds=_positive_float(
                     measurement_raw.get("timeout_seconds", defaults.timeout_seconds), name="measurement.timeout_seconds"
                 ),
+                progressive_initial_bytes=_positive_int(
+                    measurement_raw.get(
+                        "progressive_initial_bytes",
+                        defaults.progressive_initial_bytes,
+                    ),
+                    name="measurement.progressive_initial_bytes",
+                ),
+                early_accept_multiplier=_positive_float(
+                    measurement_raw.get(
+                        "early_accept_multiplier",
+                        defaults.early_accept_multiplier,
+                    ),
+                    name="measurement.early_accept_multiplier",
+                ),
+                early_reject_unseen_fraction=_unit_float(
+                    measurement_raw.get(
+                        "early_reject_unseen_fraction",
+                        defaults.early_reject_unseen_fraction,
+                    ),
+                    name="measurement.early_reject_unseen_fraction",
+                ),
             ),
         )
         if not measurement.baseline_index.is_file():
