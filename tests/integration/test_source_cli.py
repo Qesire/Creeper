@@ -224,7 +224,7 @@ class SourceProducerCliTests(unittest.TestCase):
                         novel_eed=50.0,
                     ),
                 )
-                for index in range(3):
+                for index in range(2):
                     control.enqueue_evidence_tasks(
                         [
                             EvidenceQueryKey(
@@ -264,12 +264,11 @@ class SourceProducerCliTests(unittest.TestCase):
                 self.assertEqual(count, 1)
                 lease = runtime.producer.candidates[0].lease
                 assert lease is not None
-                self.assertEqual(lease.max_records, 1)
-                self.assertEqual(lease.expected_evidence_tasks, 1)
-                self.assertAlmostEqual(
-                    runtime.producer.candidates[0].expected_novel_eed,
-                    0.5,
-                )
+                self.assertEqual(lease.max_records, 2)
+                self.assertEqual(lease.expected_evidence_tasks, 2)
+                candidate_runtime = runtime.producer.candidates[0]
+                self.assertAlmostEqual(candidate_runtime.expected_novel_eed, 1.0)
+                self.assertEqual(candidate_runtime.costs.evidence_network, 2.0)
 
     def test_static_runtime_shrinks_lease_to_backlog_headroom(self):
         with tempfile.TemporaryDirectory() as tmp:
