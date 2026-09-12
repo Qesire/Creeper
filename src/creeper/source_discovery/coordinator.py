@@ -51,9 +51,18 @@ class ScoutDisposition(StrEnum):
 class TriageResult:
     disposition: TriageDisposition
     reason: str = ""
+    status_code: int | None = None
+    method: str | None = None
+    content_type: str | None = None
+    content_length: int | None = None
+    range_supported: bool | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "disposition", TriageDisposition(self.disposition))
+        if self.status_code is not None and not 100 <= self.status_code <= 599:
+            raise ValueError("triage status_code must be a valid HTTP status")
+        if self.content_length is not None and self.content_length < 0:
+            raise ValueError("triage content_length must be non-negative")
 
 
 @dataclass(frozen=True)
@@ -306,6 +315,14 @@ class SourceDiscoveryCoordinator:
                 continue
             result = outcome.value
             assert result is not None
+            self.registry.record_triage_observation(
+                candidate.source_key,
+                status_code=result.status_code,
+                method=result.method,
+                content_type=result.content_type,
+                content_length=result.content_length,
+                range_supported=result.range_supported,
+            )
             self.registry.transition(candidate.source_key, SourceState.TRIAGED)
             if result.disposition is TriageDisposition.SCOUT:
                 self.registry.transition(candidate.source_key, SourceState.SCOUT_READY)
