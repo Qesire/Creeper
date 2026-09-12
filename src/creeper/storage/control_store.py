@@ -20,6 +20,7 @@ from creeper.evidence.policies import (
 TERMINAL_STATES = frozenset({
     CDXQueryState.PASS.value,
     CDXQueryState.EMPTY_EXHAUSTIVE.value,
+    CDXQueryState.DECOMPOSED.value,
     CDXQueryState.INVALID.value,
 })
 RETRYABLE_STATES = frozenset({
@@ -164,6 +165,32 @@ class ControlStore:
             ) WITHOUT ROWID;
             CREATE INDEX IF NOT EXISTS idx_evidence_task_origins_source
                 ON evidence_task_origins(source_key, first_observed_at);
+            CREATE TABLE IF NOT EXISTS evidence_task_attempt_metrics (
+                hostname TEXT NOT NULL,
+                year_from INTEGER NOT NULL,
+                year_to INTEGER NOT NULL,
+                provider TEXT NOT NULL,
+                policy_version TEXT NOT NULL,
+                attempt INTEGER NOT NULL,
+                state TEXT NOT NULL,
+                task_kind TEXT NOT NULL,
+                provider_requests INTEGER NOT NULL CHECK(provider_requests >= 0),
+                provider_elapsed_milliseconds INTEGER NOT NULL
+                    CHECK(provider_elapsed_milliseconds >= 0),
+                pages_seen INTEGER NOT NULL CHECK(pages_seen >= 0),
+                records_seen INTEGER NOT NULL CHECK(records_seen >= 0),
+                recorded_at REAL NOT NULL,
+                PRIMARY KEY(
+                    hostname, year_from, year_to, provider, policy_version, attempt
+                ),
+                FOREIGN KEY(
+                    hostname, year_from, year_to, provider, policy_version
+                ) REFERENCES evidence_tasks(
+                    hostname, year_from, year_to, provider, policy_version
+                )
+            ) WITHOUT ROWID;
+            CREATE INDEX IF NOT EXISTS idx_evidence_task_attempt_metrics_kind
+                ON evidence_task_attempt_metrics(task_kind, state);
             CREATE TABLE IF NOT EXISTS evidence_host_year_origins (
                 hostname TEXT NOT NULL,
                 year INTEGER NOT NULL,
@@ -283,6 +310,159 @@ class ControlStore:
                 rows,
             )
         return self.connection.total_changes - before
+
+
+    def record_evidence_task_attempt_metric(
+        self,
+        key: EvidenceQueryKey,
+        *,
+        attempt: int,
+        state: CDXQueryState | str,
+        provider_requests: int,
+        provider_elapsed_milliseconds: int,
+        pages_seen: int,
+        records_seen: int,
+        recorded_at: float | None = None,
+    ) -> bool:
+        """Persist operational provider cost for one durable task attempt.
+
+        This table is non-authoritative. It exists only to measure the real
+        provider cost of exact/range strategies and source-origin yield.
+        """
+        if attempt < 1:
+            raise ValueError("attempt must be positive")
+        metrics = (
+            provider_requests,
+            provider_elapsed_milliseconds,
+            pages_seen,
+            records_seen,
+        )
+        if any(int(value) < 0 for value in metrics):
+            raise ValueError("attempt metrics must be non-negative")
+        value = state.value if isinstance(state, CDXQueryState) else str(state)
+        task_kind = (
+            "exact"
+            if key.temporal_scope.year_from == key.temporal_scope.year_to
+            else "range"
+        )
+        when = float(self.clock()) if recorded_at is None else float(recorded_at)
+        before = self.connection.total_changes
+        with self.connection:
+            self.connection.execute(
+                """
+                INSERT OR IGNORE INTO evidence_task_attempt_metrics(
+                    hostname, year_from, year_to, provider, policy_version,
+                    attempt, state, task_kind, provider_requests,
+                    provider_elapsed_milliseconds, pages_seen, records_seen,
+                    recorded_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    *self._values(key),
+                    int(attempt),
+                    value,
+                    task_kind,
+                    int(provider_requests),
+                    int(provider_elapsed_milliseconds),
+                    int(pages_seen),
+                    int(records_seen),
+                    when,
+                ),
+            )
+        return self.connection.total_changes > before
+
+    def evidence_attempt_metric_summary(self) -> dict[str, dict[str, int]]:
+        """Aggregate provider attempt cost by task kind without materializing rows."""
+        result: dict[str, dict[str, int]] = {}
+        for row in self.connection.execute(
+            """
+            SELECT task_kind,
+                   COUNT(*) AS attempts,
+                   COALESCE(SUM(provider_requests), 0) AS provider_requests,
+                   COALESCE(SUM(provider_elapsed_milliseconds), 0) AS elapsed_ms,
+                   COALESCE(SUM(pages_seen), 0) AS pages_seen,
+                   COALESCE(SUM(records_seen), 0) AS records_seen
+            FROM evidence_task_attempt_metrics
+            GROUP BY task_kind
+            ORDER BY task_kind
+            """
+        ):
+            result[str(row["task_kind"])] = {
+                "attempts": int(row["attempts"]),
+                "provider_requests": int(row["provider_requests"]),
+                "provider_elapsed_milliseconds": int(row["elapsed_ms"]),
+                "pages_seen": int(row["pages_seen"]),
+                "records_seen": int(row["records_seen"]),
+            }
+        return result
+
+    def evidence_task_origin_coverage(self) -> dict[str, dict[str, int]]:
+        """Count durable tasks with source lineage, grouped by task state."""
+        result: dict[str, dict[str, int]] = {}
+        for row in self.connection.execute(
+            """
+            SELECT e.state AS state,
+                   COUNT(*) AS tasks,
+                   SUM(
+                       CASE WHEN EXISTS (
+                           SELECT 1
+                           FROM evidence_task_origins o
+                           WHERE o.hostname = e.hostname
+                             AND o.year_from = e.year_from
+                             AND o.year_to = e.year_to
+                             AND o.provider = e.provider
+                             AND o.policy_version = e.policy_version
+                       ) THEN 1 ELSE 0 END
+                   ) AS with_origin
+            FROM evidence_tasks e
+            GROUP BY e.state
+            ORDER BY e.state
+            """
+        ):
+            result[str(row["state"])] = {
+                "tasks": int(row["tasks"]),
+                "with_origin": int(row["with_origin"] or 0),
+            }
+        return result
+
+    def source_provider_request_totals(self) -> dict[str, int]:
+        """Attribute provider requests to each task's deterministic primary source."""
+        result: dict[str, int] = {}
+        unattributed = 0
+        rows = self.connection.execute(
+            """
+            SELECT m.hostname, m.year_from, m.year_to, m.provider,
+                   m.policy_version, m.provider_requests
+            FROM evidence_task_attempt_metrics m
+            """
+        ).fetchall()
+        for row in rows:
+            origin = self.connection.execute(
+                """
+                SELECT source_key
+                FROM evidence_task_origins
+                WHERE hostname = ? AND year_from = ? AND year_to = ?
+                  AND provider = ? AND policy_version = ?
+                ORDER BY first_observed_at, source_key, reservoir_id, lease_id
+                LIMIT 1
+                """,
+                (
+                    row["hostname"],
+                    row["year_from"],
+                    row["year_to"],
+                    row["provider"],
+                    row["policy_version"],
+                ),
+            ).fetchone()
+            requests = int(row["provider_requests"])
+            if origin is None:
+                unattributed += requests
+            else:
+                source_key = str(origin["source_key"])
+                result[source_key] = result.get(source_key, 0) + requests
+        if unattributed:
+            result["__unattributed__"] = unattributed
+        return result
 
     def record_evidence_task_origins(
         self,
