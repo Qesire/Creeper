@@ -661,7 +661,7 @@ class HistoricalIndexOptimizerRuntime:
             int(round((time.perf_counter() - cycle_started) * 1000.0)),
         )
         network_requests = cycle.probe_requests + cycle.harvest_requests
-        network_bytes = cycle.probe_bytes_read + cycle.harvest_bytes_read
+        io_bytes = cycle.probe_bytes_read + cycle.harvest_bytes_read
         self.telemetry.add_counters(
             {
                 "historical_index_cycles": 1,
@@ -675,7 +675,7 @@ class HistoricalIndexOptimizerRuntime:
                     cycle.harvest_failed_regions
                 ),
                 "historical_index_network_requests": network_requests,
-                "historical_index_network_bytes": network_bytes,
+                "historical_index_io_bytes": io_bytes,
                 "historical_index_direct_capsules_inserted": (
                     cycle.direct_capsules_inserted
                 ),
