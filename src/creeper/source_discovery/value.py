@@ -22,6 +22,8 @@ class SourceValueEstimate:
     descendant_value: float
     uncertainty_bonus: float
     overlap_penalty: float
+    success_probability: float = 1.0
+    positive_conversion: float = 1.0
 
     @property
     def score(self) -> float:
@@ -51,19 +53,35 @@ class InterpretableSourceValueModel:
         self.exploration_weight = float(exploration_weight)
         self.descendant_discount = float(descendant_discount)
 
-    def _family_conversion(self, family: str) -> tuple[float, int]:
+    def _family_hurdle(
+        self,
+        family: str,
+    ) -> tuple[float, float, int]:
+        """Return P(final>0), conditional final/scout conversion, sample count."""
         row = self.registry.connection.execute(
             """
             SELECT
                 COUNT(*) AS n,
                 SUM(
+                    CASE WHEN f.final_accepted_eed > 0 THEN 1 ELSE 0 END
+                ) AS successes,
+                SUM(
                     CASE
-                        WHEN m.measurement_mode = 'HOST_YEAR'
+                        WHEN f.final_accepted_eed > 0
+                             AND m.measurement_mode = 'HOST_YEAR'
                             THEN m.novel_pair_eed
-                        ELSE m.novel_eed
+                        WHEN f.final_accepted_eed > 0
+                            THEN m.novel_eed
+                        ELSE 0
                     END
-                ) AS scout_sum,
-                SUM(f.final_accepted_eed) AS final_sum
+                ) AS successful_scout_sum,
+                SUM(
+                    CASE
+                        WHEN f.final_accepted_eed > 0
+                            THEN f.final_accepted_eed
+                        ELSE 0
+                    END
+                ) AS positive_final_sum
             FROM source_candidates c
             JOIN source_scout_metrics m ON m.source_key = c.source_key
             JOIN source_final_rewards f ON f.source_key = c.source_key
@@ -72,11 +90,19 @@ class InterpretableSourceValueModel:
             (family,),
         ).fetchone()
         n = int(row["n"] or 0)
-        scout_sum = float(row["scout_sum"] or 0.0)
-        final_sum = float(row["final_sum"] or 0.0)
-        if n == 0 or scout_sum <= 0:
-            return 1.0, n
-        return max(0.0, final_sum / scout_sum), n
+        if n == 0:
+            return 1.0, 1.0, 0
+        successes = int(row["successes"] or 0)
+        # Beta(1,1) prior prevents one early source from becoming certainty.
+        success_probability = (successes + 1.0) / (n + 2.0)
+        scout_sum = float(row["successful_scout_sum"] or 0.0)
+        final_sum = float(row["positive_final_sum"] or 0.0)
+        positive_conversion = (
+            max(0.0, final_sum / scout_sum)
+            if scout_sum > 0
+            else 0.0
+        )
+        return success_probability, positive_conversion, n
 
     def _descendant_reward(self, source_key: str) -> float:
         rows = self.registry.connection.execute(
@@ -128,7 +154,8 @@ class InterpretableSourceValueModel:
             )
         else:
             direct_eed = (
-                measurement.novel_eed_for_ranking * conversion
+                measurement.novel_eed_for_ranking
+                * expected_conversion
             )
             elapsed = max(1e-3, measurement.elapsed_seconds)
 
@@ -145,4 +172,6 @@ class InterpretableSourceValueModel:
             descendant_value=descendant,
             uncertainty_bonus=uncertainty,
             overlap_penalty=overlap_penalty,
+            success_probability=success_probability,
+            positive_conversion=positive_conversion,
         )
