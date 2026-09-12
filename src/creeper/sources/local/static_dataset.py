@@ -54,6 +54,7 @@ class StaticDatasetAdapter:
         emitted = 0
         bytes_read = 0
         started = time.monotonic()
+        downstream_wait_seconds = 0.0
         next_cursor: str | None = str(start)
         request_allowed = lease.max_requests > 0 and lease.max_seconds > 0
 
@@ -67,7 +68,10 @@ class StaticDatasetAdapter:
                     break
                 if emitted >= lease.max_records:
                     break
-                if time.monotonic() - started >= lease.max_seconds:
+                if (
+                    time.monotonic() - started - downstream_wait_seconds
+                    >= lease.max_seconds
+                ):
                     break
 
                 raw_line = source.readline()
@@ -79,6 +83,7 @@ class StaticDatasetAdapter:
                     next_cursor = str(offset)
                     break
 
+                emit_started = time.monotonic()
                 emit_record(
                     SourceRecord(
                         source_id=self.source_id,
@@ -90,6 +95,7 @@ class StaticDatasetAdapter:
                         source_year=self.source_year,
                     )
                 )
+                downstream_wait_seconds += time.monotonic() - emit_started
                 emitted += 1
                 bytes_read += len(raw_line)
                 next_cursor = str(source.tell())
@@ -100,7 +106,10 @@ class StaticDatasetAdapter:
                     else:
                         source.seek(probe_position)
 
-        elapsed = time.monotonic() - started
+        elapsed = max(
+            0.0,
+            time.monotonic() - started - downstream_wait_seconds,
+        )
         return LeaseResult(
             lease_id=lease.lease_id,
             records=emitted,
