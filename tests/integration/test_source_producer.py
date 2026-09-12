@@ -447,7 +447,7 @@ class SourceProducerTests(unittest.TestCase):
             scheduler=GlobalScheduler(CreditLedger({"wayback": 35})),
             candidates=[candidate],
             adapters={adapter.adapter_id: adapter},
-            backlog_capacities={"wayback": 35},
+            backlog_capacities={"wayback": 35, "rdap": 2},
             queue_capacities={
                 "source_records": 8,
                 "observations": 8,
@@ -467,18 +467,30 @@ class SourceProducerTests(unittest.TestCase):
             "cdx-domain-v1",
         )
         self.assertEqual(report.leases_succeeded, 1)
-        self.assertEqual(report.evidence_tasks_enqueued, 6)
+        rdap_key = EvidenceQueryKey(
+            "example.com",
+            TemporalScope(1996, 2001),
+            "rdap",
+            "rdap-registration-v1",
+        )
+        self.assertEqual(report.evidence_tasks_enqueued, 7)
         self.assertIsNotNone(self.control.get_evidence_task(domain_key))
+        self.assertIsNotNone(self.control.get_evidence_task(rdap_key))
         state = self.control.connection.execute(
             """
-            SELECT observed_self, child_count, query_enqueued
+            SELECT observed_self, child_count, query_enqueued, rdap_enqueued
             FROM domain_fanout_state
             WHERE parent_hostname = 'example.com'
             """
         ).fetchone()
         self.assertEqual(
-            (state["observed_self"], state["child_count"], state["query_enqueued"]),
-            (1, 4, 1),
+            (
+                state["observed_self"],
+                state["child_count"],
+                state["query_enqueued"],
+                state["rdap_enqueued"],
+            ),
+            (1, 4, 1, 1),
         )
 
     def test_full_backlog_blocks_source_before_adapter_execution(self):
