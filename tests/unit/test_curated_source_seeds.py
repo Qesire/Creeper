@@ -39,6 +39,12 @@ class CuratedSourceSeedTests(unittest.TestCase):
                 self.assertEqual(ensure_curated_direct_catalogs(registry), 2)
                 self.assertEqual(ensure_curated_direct_catalogs(registry), 0)
                 self.assertEqual(len(registry.list_candidates()), 2)
+                self.assertTrue(
+                    all(
+                        registry.proposal_count(seed.source_key) == 1
+                        for seed in seeds
+                    )
+                )
             finally:
                 control.close()
 
