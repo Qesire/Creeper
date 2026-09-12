@@ -6,6 +6,7 @@ from pathlib import Path
 
 from creeper.evidence.policies import (
     CDXQueryState,
+    DomainEvidenceQueryResult,
     EvidenceCapsule,
     EvidenceQueryKey,
     EvidenceQueryResult,
@@ -148,6 +149,44 @@ class FakeDecomposedRangeProvider(FakeProvider):
             records_seen=3,
             provider_requests=1,
             provider_elapsed_milliseconds=12,
+        )
+
+
+class FakeDomainProvider(FakeProvider):
+    async def query_range(self, key):
+        capsules = (
+            EvidenceCapsule(
+                hostname="example.com",
+                year=1997,
+                provider=key.provider,
+                temporal_semantics="capture_timestamp_year",
+                evidence_timestamp="19970102030405",
+                source_locator="http://example.com/",
+                payload_hash="e" * 64,
+                policy_version=key.policy_version,
+                evidence_type="domain_scope_cdx_capture",
+            ),
+            EvidenceCapsule(
+                hostname="a.example.com",
+                year=1998,
+                provider=key.provider,
+                temporal_semantics="capture_timestamp_year",
+                evidence_timestamp="19980102030405",
+                source_locator="http://a.example.com/",
+                payload_hash="f" * 64,
+                policy_version=key.policy_version,
+                evidence_type="domain_scope_cdx_capture",
+            ),
+        )
+        return DomainEvidenceQueryResult(
+            domain=key.hostname,
+            key=key,
+            state=CDXQueryState.DECOMPOSED,
+            capsules=capsules,
+            pages_seen=1,
+            records_seen=20,
+            provider_requests=1,
+            provider_elapsed_milliseconds=10,
         )
 
 
@@ -545,6 +584,52 @@ class AsyncEvidenceWorkerTests(unittest.IsolatedAsyncioTestCase):
         report = await task
         self.assertEqual(report.terminal, 1)
 
+
+    async def test_domain_task_commits_multiple_hostnames_without_negative_coverage(self):
+        key = EvidenceQueryKey(
+            "example.com",
+            TemporalScope(1996, 2001),
+            "wayback",
+            "cdx-domain-v1",
+        )
+        self.control.enqueue_evidence_tasks([key])
+        worker = AsyncEvidenceWorker(
+            control_store=self.control,
+            evidence_store=self.evidence,
+            providers={"wayback": FakeDomainProvider()},
+            owner="worker-domain",
+        )
+
+        report = await worker.run_once()
+
+        self.assertEqual(report.terminal, 1)
+        self.assertEqual(report.decomposed_count, 1)
+        self.assertEqual(report.inserted_capsules, 2)
+        self.assertEqual(
+            {
+                (row.hostname, row.year)
+                for row in self.evidence.iter_after(0, limit=10)
+            },
+            {("example.com", 1997), ("a.example.com", 1998)},
+        )
+        self.assertEqual(
+            self.control.resolve_provider_coverage_masks(
+                ["example.com"],
+                provider="wayback",
+                policy_version="cdx-domain-v1",
+            )["example.com"],
+            0,
+        )
+        kinds = self.control.resolve_host_year_task_kinds(
+            [("example.com", 1997), ("a.example.com", 1998)]
+        )
+        self.assertEqual(set(kinds.values()), {"domain"})
+        self.assertEqual(
+            self.control.evidence_attempt_metric_summary()["domain"][
+                "provider_requests"
+            ],
+            1,
+        )
 
     async def test_decomposed_range_commits_positive_and_fans_out_missing_years(self):
         key = EvidenceQueryKey(
