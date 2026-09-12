@@ -13,6 +13,7 @@ from creeper.authority.baseline_index import YEAR_BITS
 from creeper.authority.normalizer import normalize_official
 from creeper.evidence.actions import (
     ACTION_PRIOR_STRENGTH,
+    ACTION_RETRY_PENALTY,
     EvidenceActionKind,
     EvidenceActionValueStats,
     action_prior_yield,
@@ -1572,16 +1573,39 @@ class ControlStore:
             clauses.append("(" + " OR ".join(key_clauses) + ")")
         params.append(limit)
         query = (
-            "SELECT * FROM evidence_tasks WHERE "
+            "WITH eligible AS ("
+            "SELECT e.*, CASE "
+            "WHEN e.policy_version LIKE 'cdx-domain-%' THEN 'domain' "
+            "WHEN e.provider = 'rdap' THEN 'rdap' "
+            "WHEN e.year_to > e.year_from THEN 'range' "
+            "ELSE 'exact' END AS action_kind "
+            "FROM evidence_tasks e WHERE "
             + " AND ".join(clauses)
-            + " ORDER BY "
-            + "CASE "
-            + "WHEN policy_version LIKE 'cdx-domain-%' THEN 3 "
-            + "WHEN provider = 'rdap' THEN 2 "
-            + "WHEN year_to > year_from THEN 1 ELSE 0 END DESC, "
-            + "eed_weight DESC, "
-            + "(year_to - year_from) DESC, year_from, hostname, "
-            + "year_to, provider, policy_version LIMIT ?"
+            + ") "
+            "SELECT eligible.* FROM eligible "
+            "LEFT JOIN evidence_action_cost_stats cost "
+            "ON cost.task_kind = eligible.action_kind "
+            "LEFT JOIN evidence_action_final_rewards reward "
+            "ON reward.task_kind = eligible.action_kind "
+            "ORDER BY "
+            "(eligible.eed_weight * "
+            "(COALESCE(reward.final_novel_host_years, 0) + "
+            f"{ACTION_PRIOR_STRENGTH} * CASE eligible.action_kind "
+            f"WHEN 'domain' THEN {action_prior_yield(EvidenceActionKind.DOMAIN)} "
+            f"WHEN 'rdap' THEN {action_prior_yield(EvidenceActionKind.RDAP)} "
+            f"WHEN 'range' THEN {action_prior_yield(EvidenceActionKind.RANGE)} "
+            f"ELSE {action_prior_yield(EvidenceActionKind.EXACT)} END) "
+            "/ (MAX(COALESCE(cost.provider_requests, 0), "
+            "COALESCE(cost.attempts, 0)) + "
+            f"{ACTION_PRIOR_STRENGTH}) "
+            f"/ (1.0 + {ACTION_RETRY_PENALTY} * eligible.attempt)) DESC, "
+            "CASE eligible.action_kind "
+            "WHEN 'domain' THEN 3 WHEN 'rdap' THEN 2 "
+            "WHEN 'range' THEN 1 ELSE 0 END DESC, "
+            "eligible.eed_weight DESC, "
+            "(eligible.year_to - eligible.year_from) DESC, "
+            "eligible.year_from, eligible.hostname, eligible.year_to, "
+            "eligible.provider, eligible.policy_version LIMIT ?"
         )
         lease_until = now + float(lease_seconds)
         self.connection.execute("BEGIN IMMEDIATE")
