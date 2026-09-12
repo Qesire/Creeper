@@ -458,6 +458,8 @@ class SourceProducerTests(unittest.TestCase):
         report = runtime.run_once()
 
         self.assertEqual(report.direct_capsules_committed, 1)
+        self.assertEqual(report.observations, 3)
+        self.assertEqual(report.planning_observations, 1)
         self.assertEqual(self.evidence.count(), 1)
         self.assertEqual(report.evidence_tasks_enqueued, 0)
 
