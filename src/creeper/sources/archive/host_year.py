@@ -28,6 +28,7 @@ from creeper.authority.baseline_index import (
 from creeper.authority.normalizer import normalize_official
 from creeper.records.models import SourceRecord
 from creeper.source_discovery.index_space import RegionSynopsis
+from creeper.source_discovery.models import MeasurementMode
 from creeper.source_discovery.overlap import MinHashAccumulator
 from creeper.sources.archive.cdx import parse_cdx_line
 from creeper.sources.archive.cdxj import parse_cdxj_line
@@ -268,6 +269,7 @@ def summarize_region(
     sketch = MinHashAccumulator(width=minhash_width)
     sampled_records = 0
     unique_hosts = 0
+    novel_hosts = 0
     observed_pairs = 0
     novel_pairs = 0
     novel_eed = Decimal("0")
@@ -280,6 +282,8 @@ def summarize_region(
             tld = item.hostname.rsplit(".", 1)[-1]
             baseline_mask = resolved.get(item.hostname, (0, False))[0]
             novel_mask = novel_year_mask(item.year_mask, baseline_mask)
+            if novel_mask:
+                novel_hosts += 1
 
             for year, bit in YEAR_BITS.items():
                 if item.year_mask & bit:
@@ -296,11 +300,13 @@ def summarize_region(
         region_key=region_key,
         sampled_records=sampled_records,
         unique_hosts=unique_hosts,
+        novel_hosts=novel_hosts,
         observed_host_year_pairs=observed_pairs,
         novel_host_year_pairs=novel_pairs,
         novel_eed=float(novel_eed),
         bytes_read=bytes_read,
         requests=requests,
+        measurement_mode=MeasurementMode.HOST_YEAR,
         observed_year_histogram=_histogram_tuple(observed_years),
         novel_year_histogram=_histogram_tuple(novel_years),
         tld_host_year_histogram=_histogram_tuple(tld_host_years),
