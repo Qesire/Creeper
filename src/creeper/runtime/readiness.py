@@ -536,23 +536,48 @@ class IncrementalReadinessRuntime:
         self,
         rows: list[EvidenceHostYear],
     ) -> dict[tuple[str, int], str]:
+        pairs = [(row.hostname, row.year) for row in rows]
+        direct_sources = self.evidence.resolve_direct_source_origins(pairs)
         control = self._control_store()
-        if control is None:
-            return {}
-        return control.resolve_host_year_task_kinds(
-            (row.hostname, row.year) for row in rows
+        kinds = (
+            {}
+            if control is None
+            else control.resolve_host_year_task_kinds(pairs)
         )
+        for pair in pairs:
+            kind = kinds.get(pair)
+            has_direct_proof = pair in direct_sources
+            if kind == "direct" and not has_direct_proof:
+                # A pre-evidence ControlStore commit can survive a crash.
+                # Never let that orphan metadata turn later provider evidence
+                # into direct-source reward.
+                kinds.pop(pair, None)
+            elif kind is None and has_direct_proof:
+                kinds[pair] = "direct"
+        return kinds
 
     def _source_origins(
         self,
         rows: list[EvidenceHostYear],
     ) -> dict[tuple[str, int], str]:
+        pairs = [(row.hostname, row.year) for row in rows]
+        direct_sources = self.evidence.resolve_direct_source_origins(pairs)
         control = self._control_store()
-        if control is None:
-            return {}
-        return control.resolve_primary_source_origins(
-            (row.hostname, row.year) for row in rows
+        origins = (
+            {}
+            if control is None
+            else control.resolve_primary_source_origins(pairs)
         )
+        for pair, sources in direct_sources.items():
+            existing = origins.get(pair)
+            if existing in sources:
+                continue
+            # Persisted direct evidence is stronger than an orphan/missing
+            # cross-database attribution row. Multiple direct proofs are
+            # resolved deterministically; reward remains first-proof-agnostic
+            # when the exact cross-DB commit order is unrecoverable.
+            origins[pair] = sources[0]
+        return origins
 
     def _publish_evidence_action_rewards(
         self,
