@@ -241,6 +241,10 @@ class ScoutMeasurement:
     observed_host_year_pairs: int = 0
     novel_host_year_pairs: int = 0
     novel_pair_eed: float = 0.0
+    singleton_observations: int = 0
+    doubleton_observations: int = 0
+    estimated_unseen_fraction: float = 0.0
+    minhash_values: tuple[int, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "measurement_mode", MeasurementMode(self.measurement_mode))
@@ -253,6 +257,8 @@ class ScoutMeasurement:
             "bytes_read",
             "observed_host_year_pairs",
             "novel_host_year_pairs",
+            "singleton_observations",
+            "doubleton_observations",
         ):
             if getattr(self, name) < 0:
                 raise ValueError(f"{name} must be non-negative")
@@ -266,6 +272,18 @@ class ScoutMeasurement:
             raise ValueError("novel_eed must be finite and non-negative")
         if not math.isfinite(self.novel_pair_eed) or self.novel_pair_eed < 0:
             raise ValueError("novel_pair_eed must be finite and non-negative")
+        if (
+            not math.isfinite(self.estimated_unseen_fraction)
+            or not 0.0 <= self.estimated_unseen_fraction <= 1.0
+        ):
+            raise ValueError(
+                "estimated_unseen_fraction must be within [0, 1]"
+            )
+        if any(
+            isinstance(value, bool) or not isinstance(value, int) or value < 0
+            for value in self.minhash_values
+        ):
+            raise ValueError("minhash_values must be non-negative integers")
 
     @property
     def measured_baseline_overlap(self) -> float:
@@ -300,6 +318,14 @@ class ScoutMeasurement:
         if self.elapsed_seconds <= 0:
             return 0.0
         return self.novel_eed_for_ranking / self.elapsed_seconds
+
+    @property
+    def residual_opportunity(self) -> float:
+        """Good-Turing-style residual mass used only for scheduling."""
+        return (
+            self.estimated_unseen_fraction
+            * max(1, self.observed_count_for_threshold)
+        )
 
 
 @dataclass(frozen=True)
