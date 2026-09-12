@@ -26,6 +26,18 @@ direct year-specific evidence when its timestamp and record provenance are
 preserved; undated discovery sources and metadata-only hints remain outside
 the annual master files.
 
+## Codex source intelligence
+
+The source-discovery parent process can explicitly launch bounded Codex child
+agents for new-source discovery, successful-pattern exploitation, structure
+interpretation, and stagnation recovery. Codex has proposal-only authority:
+baseline reconciliation, measured scouting, evidence acceptance, source state,
+and submission remain deterministic Creeper responsibilities.
+
+The full request/response contract, bounded context contents, multi-fidelity
+scout, value model, reward attribution, and validation procedure are documented
+in [docs/source-intelligence-vnext.md](docs/source-intelligence-vnext.md).
+
 ## Autonomous runtime
 
 For competition-scale continuous work, Creeper can run the durable production
