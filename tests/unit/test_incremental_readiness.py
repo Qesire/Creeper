@@ -165,6 +165,66 @@ class IncrementalReadinessTests(unittest.TestCase):
                 self.assertEqual(after.novel_host_years, 0)
                 self.assertEqual(after.novel_eed, "0")
 
+
+    def test_readiness_attributes_novel_eed_by_task_kind(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            runtime_root = root / "runtime"
+            runtime_root.mkdir()
+            baseline = self._build_baseline(root)
+            model = self._model(root)
+
+            control = ControlStore(runtime_root / "control.sqlite3")
+            exact = EvidenceQueryKey(
+                "exact.org",
+                TemporalScope(1997, 1997),
+                "wayback",
+                "evidence-v1",
+            )
+            ranged = EvidenceQueryKey(
+                "range.com",
+                TemporalScope(1996, 1998),
+                "wayback",
+                "evidence-v1",
+            )
+            control.enqueue_evidence_tasks([exact, ranged])
+            control.attribute_task_host_years(exact, [1997])
+            control.attribute_task_host_years(ranged, [1996, 1998])
+            control.close()
+
+            evidence = EvidenceStore(runtime_root / "evidence.sqlite3")
+            evidence.put_many(
+                [
+                    self._capsule("exact.org", 1997),
+                    self._capsule("range.com", 1996),
+                    self._capsule("range.com", 1998),
+                ]
+            )
+            evidence.close()
+
+            with IncrementalReadinessRuntime(
+                runtime_root,
+                baseline_index=baseline,
+                eed_model=model,
+                baseline_eed="20",
+            ) as runtime:
+                report = runtime.sync_until_current()
+
+            self.assertEqual(report.report_version if hasattr(report, "report_version") else "incremental-readiness-v2", "incremental-readiness-v2")
+            self.assertEqual(
+                report.task_kind_attribution,
+                {
+                    "exact": {
+                        "novel_host_years": 1,
+                        "novel_eed": "1",
+                    },
+                    "range": {
+                        "novel_host_years": 2,
+                        "novel_eed": "1.0",
+                    },
+                },
+            )
+
     def test_gate_report_uses_exact_decimal_thresholds(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
