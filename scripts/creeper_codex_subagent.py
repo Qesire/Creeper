@@ -146,18 +146,18 @@ def main(argv: list[str] | None = None) -> int:
             )
         command.append("-")
 
-        completed = subprocess.run(
-            command,
-            input=prompt,
-            text=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-            check=False,
-        )
         stderr_path = response_path.with_suffix(
             response_path.suffix + ".codex-stderr.log"
         )
-        stderr_path.write_text(completed.stderr or "", encoding="utf-8")
+        with stderr_path.open("w", encoding="utf-8") as stderr_stream:
+            completed = subprocess.run(
+                command,
+                input=prompt,
+                text=True,
+                stdout=subprocess.DEVNULL,
+                stderr=stderr_stream,
+                check=False,
+            )
         if completed.returncode != 0:
             raise SystemExit(completed.returncode)
         if not output.is_file():
