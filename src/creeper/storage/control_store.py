@@ -382,7 +382,7 @@ class ControlStore:
                 )
         return self.connection.total_changes - before
 
-    def claim_domain_fanout_candidates(
+    def ready_domain_fanout_candidates(
         self,
         *,
         min_children: int = 4,
@@ -390,35 +390,40 @@ class ControlStore:
     ) -> list[str]:
         if min_children < 1 or limit < 1:
             raise ValueError("domain fanout thresholds must be positive")
-        self.connection.execute("BEGIN IMMEDIATE")
-        try:
-            rows = self.connection.execute(
+        rows = self.connection.execute(
+            """
+            SELECT parent_hostname
+            FROM domain_fanout_state
+            WHERE observed_self = 1
+              AND query_enqueued = 0
+              AND child_count >= ?
+            ORDER BY child_count DESC, parent_hostname
+            LIMIT ?
+            """,
+            (int(min_children), int(limit)),
+        ).fetchall()
+        return [str(row["parent_hostname"]) for row in rows]
+
+    def mark_domain_fanout_enqueued(self, parents: Iterable[str]) -> int:
+        values = list(dict.fromkeys(
+            hostname
+            for raw in parents
+            if (hostname := normalize_official(str(raw))) is not None
+        ))
+        if not values:
+            return 0
+        before = self.connection.total_changes
+        now = float(self.clock())
+        with self.connection:
+            self.connection.executemany(
                 """
-                SELECT parent_hostname
-                FROM domain_fanout_state
-                WHERE observed_self = 1
-                  AND query_enqueued = 0
-                  AND child_count >= ?
-                ORDER BY child_count DESC, parent_hostname
-                LIMIT ?
+                UPDATE domain_fanout_state
+                SET query_enqueued = 1, updated_at = ?
+                WHERE parent_hostname = ? AND query_enqueued = 0
                 """,
-                (int(min_children), int(limit)),
-            ).fetchall()
-            parents = [str(row["parent_hostname"]) for row in rows]
-            if parents:
-                self.connection.executemany(
-                    """
-                    UPDATE domain_fanout_state
-                    SET query_enqueued = 1, updated_at = ?
-                    WHERE parent_hostname = ?
-                    """,
-                    [(float(self.clock()), parent) for parent in parents],
-                )
-            self.connection.commit()
-            return parents
-        except BaseException:
-            self.connection.rollback()
-            raise
+                [(now, parent) for parent in values],
+            )
+        return self.connection.total_changes - before
 
     def resolve_provider_coverage_masks(
         self,
