@@ -47,6 +47,16 @@ class RegionKind(StrEnum):
     SHARD = "SHARD"
 
 
+class RegionState(StrEnum):
+    """Durable lifecycle of one finite index region."""
+
+    DISCOVERED = "DISCOVERED"
+    PROBED = "PROBED"
+    HARVEST_READY = "HARVEST_READY"
+    HARVESTED = "HARVESTED"
+    DROPPED = "DROPPED"
+
+
 @dataclass(frozen=True)
 class QueryCapabilityHints:
     """Explicitly verified query features.
@@ -160,6 +170,7 @@ class HarvestRegion:
     index_key: str
     kind: RegionKind
     locator: str
+    state: RegionState = RegionState.DISCOVERED
     parent_region_key: str | None = None
     depth: int = 0
     byte_start: int | None = None
@@ -170,6 +181,7 @@ class HarvestRegion:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "kind", RegionKind(self.kind))
+        object.__setattr__(self, "state", RegionState(self.state))
         if not self.region_key or not self.index_key or not self.locator.strip():
             raise ValueError("region identity and locator are required")
         if self.depth < 0:
