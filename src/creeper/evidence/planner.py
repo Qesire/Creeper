@@ -38,9 +38,9 @@ class EvidencePlanner:
 
     MAX_EXTERNAL_TASKS_PER_OBSERVATION = 3
     # Admission must reserve not only the initial disjoint range/exact tasks,
-    # but also the worst-case exact fanout of a bounded multi-year probe. Across
-    # six competition years, the peak nonterminal backlog contribution of one
-    # observation is therefore at most six slots.
+    # but also the worst-case exact fanout of a bounded multi-year probe plus
+    # one domain-amplification task. Across six competition years, the peak
+    # nonterminal backlog contribution of one observation is at most seven.
     MAX_BACKLOG_CAPACITY_PER_OBSERVATION = 7
 
     def plan(
