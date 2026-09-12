@@ -192,8 +192,17 @@ class EvidenceBacklogAdmission:
         self,
         reservation: CapacityReservation,
         keys: Iterable[EvidenceQueryKey],
+        *,
+        source_key: str | None = None,
+        reservoir_id: str | None = None,
+        lease_id: str | None = None,
     ) -> int:
-        """Atomically transfer reserved capacity into durable task rows."""
+        """Atomically transfer reserved capacity into durable task rows.
+
+        Optional source lineage is operational metadata only. It is inserted in
+        the same transaction but never changes reservation consumption or the
+        returned count of newly created EvidenceTask rows.
+        """
         rows = list(keys)
         if not rows:
             return 0
@@ -201,6 +210,15 @@ class EvidenceBacklogAdmission:
             raise RuntimeError("external evidence work exceeded zero reservation")
         if any(key.provider != reservation.provider for key in rows):
             raise ValueError("all reserved evidence keys must use the reserved provider")
+        lineage = (source_key, reservoir_id, lease_id)
+        if any(value is not None for value in lineage):
+            if not all(
+                isinstance(value, str) and value.strip()
+                for value in lineage
+            ):
+                raise ValueError(
+                    "source_key, reservoir_id, and lease_id must be provided together"
+                )
 
         now = self._now()
         self.connection.execute("BEGIN IMMEDIATE")
@@ -236,6 +254,30 @@ class EvidenceBacklogAdmission:
                 ],
             )
             inserted = self.connection.total_changes - before
+            if source_key is not None:
+                assert reservoir_id is not None and lease_id is not None
+                self.connection.executemany(
+                    """
+                    INSERT OR IGNORE INTO evidence_task_origins(
+                        hostname, year_from, year_to, provider, policy_version,
+                        source_key, reservoir_id, lease_id, first_observed_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    [
+                        (
+                            key.hostname,
+                            key.temporal_scope.year_from,
+                            key.temporal_scope.year_to,
+                            key.provider,
+                            key.policy_version,
+                            source_key,
+                            reservoir_id,
+                            lease_id,
+                            now,
+                        )
+                        for key in rows
+                    ],
+                )
             if inserted > remaining:
                 raise RuntimeError(
                     "actual evidence work exceeded the SourceLease capacity reservation"
