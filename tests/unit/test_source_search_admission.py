@@ -70,6 +70,34 @@ class SearchAdmissionPolicyTests(unittest.TestCase):
             or "",
         )
 
+    def test_direct_evidence_index_may_self_describe_target_years(self) -> None:
+        policy = SearchAdmissionPolicy(
+            min_expected_volume=100_000,
+            direct_min_expected_volume=10_000,
+            require_year_bounds=True,
+        )
+        direct = self.candidate(
+            canonical_entrypoint="https://archive.example/index.cdxj.gz",
+            source_family="BULK_ARTIFACT",
+            level=SourceLevel.SOURCE,
+            expected_year_from=None,
+            expected_year_to=None,
+            expected_volume=25_000,
+            direct_evidence_prior=1.0,
+        )
+        generic = self.candidate(
+            canonical_entrypoint="https://archive.example/urls.txt.gz",
+            expected_year_from=None,
+            expected_year_to=None,
+            expected_volume=200_000,
+        )
+
+        self.assertTrue(policy.accepts(direct))
+        self.assertIn(
+            "missing expected target-year bounds",
+            policy.rejection_reason(generic) or "",
+        )
+
     def test_rejects_common_crawl_corpus_before_scout(self) -> None:
         policy = SearchAdmissionPolicy(min_expected_volume=100_000)
         reason = policy.rejection_reason(
@@ -93,6 +121,7 @@ a = p.parse_args()
 request = json.loads(Path(a.request).read_text(encoding="utf-8"))
 assert request["admission"]["min_expected_volume"] == 100000
 assert request["admission"]["direct_min_expected_volume"] == 10000
+assert request["admission"]["direct_evidence_year_bounds_optional"] is True
 assert request["requirements"]["prefer_direct_evidence_bulk"] is True
 assert ".cdxj.gz" in request["requirements"]["direct_evidence_suffixes"]
 payload = {
