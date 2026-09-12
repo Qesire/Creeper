@@ -24,6 +24,7 @@ from creeper.source_discovery.tomography import (
     RegionTomographyPolicy,
     TomographyActionKind,
 )
+from creeper.source_discovery.tomography_service import RegionTomographyService
 from creeper.storage.control_store import ControlStore
 
 
@@ -151,6 +152,48 @@ class RegionTomographyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(result.sampled_ranges), 4)
         self.assertGreater(result.synopsis.novel_host_year_pairs, 0)
         self.assertLess(result.synopsis.confidence, 1.0)
+
+    async def test_service_closes_probe_to_harvest_ready_without_harvesting(self) -> None:
+        path = self.root / "service.cdxj"
+        path.write_text(
+            'com,novel)/ 19980101000000 {"url":"http://novel.com/"}\n',
+            encoding="utf-8",
+        )
+        compiled = self._compiled_local(path)
+        self.registry.register_index_space(compiled)
+        executor = RegionProbeExecutor(
+            self.baseline,
+            {"com": Decimal("1")},
+            policy=RegionProbePolicy(max_sample_bytes=4096, minhash_width=8),
+        )
+        planner = RegionTomographyPlanner(
+            self.registry,
+            policy=RegionTomographyPolicy(max_depth=0),
+        )
+        service = RegionTomographyService(
+            self.registry,
+            probe_executor=executor,
+            planner=planner,
+            probe_parallelism=2,
+        )
+
+        report = await service.run_once(
+            compiled.index.index_key,
+            max_probe_actions=4,
+        )
+
+        self.assertEqual(report.probe_attempts, 1)
+        self.assertEqual(report.probes_succeeded, 1)
+        self.assertEqual(report.probes_failed, 0)
+        self.assertEqual(report.errors, ())
+        self.assertEqual(
+            report.harvest_ready_regions,
+            (compiled.root_region.region_key,),
+        )
+        self.assertEqual(
+            self.registry.get_region(compiled.root_region.region_key).state,
+            RegionState.HARVEST_READY,
+        )
 
     async def test_compressed_cdx_fails_closed_for_byte_tomography(self) -> None:
         path = self.root / "index.cdxj.gz"
