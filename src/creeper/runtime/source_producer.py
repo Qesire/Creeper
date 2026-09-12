@@ -281,7 +281,7 @@ class SourceProducer:
             def enqueue_auxiliary_keys(
                 aux_provider: str,
                 keys: Iterable[EvidenceQueryKey],
-            ) -> int:
+            ) -> int | None:
                 """Enqueue independently budgeted provider work with source lineage."""
                 nonlocal enqueued
                 rows = list(dict.fromkeys(keys))
@@ -289,7 +289,7 @@ class SourceProducer:
                     return 0
                 capacity = self.backlog_capacities.get(aux_provider, 0)
                 if capacity <= 0:
-                    return 0
+                    return None
                 aux_reservation = self.admission.try_reserve(
                     provider=aux_provider,
                     amount=len(rows),
@@ -297,7 +297,7 @@ class SourceProducer:
                     ttl_seconds=postprocess_ttl,
                 )
                 if aux_reservation is None:
-                    return 0
+                    return None
                 try:
                     self.admission.bind_lease(
                         aux_reservation,
@@ -423,7 +423,8 @@ class SourceProducer:
                         # Mark only after the durable admission call succeeds.
                         # Duplicates are still safe to mark because the same
                         # provider/key identity is already durable.
-                        if enqueue_auxiliary_keys("rdap", rdap_keys) >= 0:
+                        rdap_inserted = enqueue_auxiliary_keys("rdap", rdap_keys)
+                        if rdap_inserted is not None:
                             self.control_store.mark_rdap_enqueued(rdap_hosts)
                 pending.clear()
 
