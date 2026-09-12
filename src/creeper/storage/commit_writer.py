@@ -68,7 +68,10 @@ class CommitWriter:
         pending = self._pending
         capsules = [capsule for capsule, _ in pending if capsule is not None]
         if capsules:
-            self.inserted_capsules += self.evidence_store.put_many(capsules)
+            # Publish non-authoritative lineage first. Readiness can observe a
+            # new EvidenceStore host-year immediately after put_many returns;
+            # origin-first ordering prevents that concurrent consumer from
+            # permanently advancing past an otherwise attributable host-year.
             for capsule, result in pending:
                 if capsule is None or result.key is None:
                     continue
@@ -76,6 +79,7 @@ class CommitWriter:
                     result.key,
                     (capsule.year,),
                 )
+            self.inserted_capsules += self.evidence_store.put_many(capsules)
         results = [result for _, result in pending if result.key is not None]
         if results:
             self.finished_tasks += self.control_store.finish_evidence_tasks(
