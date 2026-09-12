@@ -533,6 +533,7 @@ class AsyncEvidenceWorker:
             state_counts = {
                 CDXQueryState.PASS: 0,
                 CDXQueryState.EMPTY_EXHAUSTIVE: 0,
+                CDXQueryState.DECOMPOSED: 0,
                 CDXQueryState.INVALID: 0,
                 CDXQueryState.INCOMPLETE: 0,
                 CDXQueryState.TRANSIENT_ERROR: 0,
