@@ -9,8 +9,10 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from creeper.authority.baseline_index import YEAR_BITS
+from creeper.authority.normalizer import normalize_official
 from creeper.evidence.policies import (
     CDXQueryState,
+    EvidenceCapsule,
     EvidenceQueryKey,
     EvidenceQueryResult,
     TemporalScope,
@@ -243,6 +245,23 @@ class ControlStore:
             ) WITHOUT ROWID;
             CREATE INDEX IF NOT EXISTS idx_evidence_host_year_task_kinds_kind
                 ON evidence_host_year_task_kinds(task_kind, year);
+            CREATE TABLE IF NOT EXISTS domain_fanout_state (
+                parent_hostname TEXT PRIMARY KEY,
+                observed_self INTEGER NOT NULL DEFAULT 0 CHECK(observed_self IN (0,1)),
+                child_count INTEGER NOT NULL DEFAULT 0 CHECK(child_count >= 0),
+                query_enqueued INTEGER NOT NULL DEFAULT 0 CHECK(query_enqueued IN (0,1)),
+                first_source_key TEXT,
+                updated_at REAL NOT NULL
+            ) WITHOUT ROWID;
+            CREATE TABLE IF NOT EXISTS domain_fanout_members (
+                parent_hostname TEXT NOT NULL,
+                child_hostname TEXT NOT NULL,
+                PRIMARY KEY(parent_hostname, child_hostname),
+                FOREIGN KEY(parent_hostname)
+                    REFERENCES domain_fanout_state(parent_hostname)
+            ) WITHOUT ROWID;
+            CREATE INDEX IF NOT EXISTS idx_domain_fanout_ready
+                ON domain_fanout_state(query_enqueued, observed_self, child_count);
             """
         )
         self.connection.commit()
@@ -277,6 +296,129 @@ class ControlStore:
             lease_owner=row["lease_owner"],
             lease_until=row["lease_until"],
         )
+
+    def record_domain_fanout_observations(
+        self,
+        hostnames: Iterable[str],
+        *,
+        source_key: str | None = None,
+    ) -> int:
+        """Accumulate one-level parent/child fanout from normalized observations.
+
+        A parent is eligible for domain amplification only if it was also
+        observed as an exact hostname, preventing accidental broad queries for
+        bare public-suffix-like labels.
+        """
+        values = []
+        for raw in hostnames:
+            hostname = normalize_official(str(raw))
+            if hostname is not None:
+                values.append(hostname)
+        values = list(dict.fromkeys(values))
+        if not values:
+            return 0
+        now = float(self.clock())
+        parents: set[str] = set()
+        before = self.connection.total_changes
+        with self.connection:
+            for hostname in values:
+                self.connection.execute(
+                    """
+                    INSERT INTO domain_fanout_state(
+                        parent_hostname, observed_self, child_count,
+                        query_enqueued, first_source_key, updated_at
+                    ) VALUES (?, 1, 0, 0, ?, ?)
+                    ON CONFLICT(parent_hostname) DO UPDATE SET
+                        observed_self = 1,
+                        first_source_key = COALESCE(
+                            domain_fanout_state.first_source_key,
+                            excluded.first_source_key
+                        ),
+                        updated_at = excluded.updated_at
+                    """,
+                    (hostname, source_key, now),
+                )
+                labels = hostname.split(".")
+                if len(labels) < 3:
+                    continue
+                parent = ".".join(labels[1:])
+                parents.add(parent)
+                self.connection.execute(
+                    """
+                    INSERT INTO domain_fanout_state(
+                        parent_hostname, observed_self, child_count,
+                        query_enqueued, first_source_key, updated_at
+                    ) VALUES (?, 0, 0, 0, ?, ?)
+                    ON CONFLICT(parent_hostname) DO UPDATE SET
+                        first_source_key = COALESCE(
+                            domain_fanout_state.first_source_key,
+                            excluded.first_source_key
+                        ),
+                        updated_at = excluded.updated_at
+                    """,
+                    (parent, source_key, now),
+                )
+                self.connection.execute(
+                    """
+                    INSERT OR IGNORE INTO domain_fanout_members(
+                        parent_hostname, child_hostname
+                    ) VALUES (?, ?)
+                    """,
+                    (parent, hostname),
+                )
+            for parent in parents:
+                self.connection.execute(
+                    """
+                    UPDATE domain_fanout_state
+                    SET child_count = (
+                        SELECT COUNT(*)
+                        FROM domain_fanout_members m
+                        WHERE m.parent_hostname = domain_fanout_state.parent_hostname
+                    ),
+                    updated_at = ?
+                    WHERE parent_hostname = ?
+                    """,
+                    (now, parent),
+                )
+        return self.connection.total_changes - before
+
+    def claim_domain_fanout_candidates(
+        self,
+        *,
+        min_children: int = 4,
+        limit: int = 16,
+    ) -> list[str]:
+        if min_children < 1 or limit < 1:
+            raise ValueError("domain fanout thresholds must be positive")
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            rows = self.connection.execute(
+                """
+                SELECT parent_hostname
+                FROM domain_fanout_state
+                WHERE observed_self = 1
+                  AND query_enqueued = 0
+                  AND child_count >= ?
+                ORDER BY child_count DESC, parent_hostname
+                LIMIT ?
+                """,
+                (int(min_children), int(limit)),
+            ).fetchall()
+            parents = [str(row["parent_hostname"]) for row in rows]
+            if parents:
+                self.connection.executemany(
+                    """
+                    UPDATE domain_fanout_state
+                    SET query_enqueued = 1, updated_at = ?
+                    WHERE parent_hostname = ?
+                    """,
+                    [(float(self.clock()), parent) for parent in parents],
+                )
+            self.connection.commit()
+            return parents
+        except BaseException:
+            self.connection.rollback()
+            raise
 
     def resolve_provider_coverage_masks(
         self,
@@ -376,7 +518,9 @@ class ControlStore:
             raise ValueError("attempt metrics must be non-negative")
         value = state.value if isinstance(state, CDXQueryState) else str(state)
         task_kind = (
-            "exact"
+            "domain"
+            if key.policy_version.startswith("cdx-domain-")
+            else "exact"
             if key.temporal_scope.year_from == key.temporal_scope.year_to
             else "range"
         )
@@ -621,6 +765,81 @@ class ControlStore:
                         when,
                     )
                     for year in year_list
+                ],
+            )
+        return self.connection.total_changes - before
+
+    def attribute_domain_task_host_years(
+        self,
+        key: EvidenceQueryKey,
+        capsules: Iterable[EvidenceCapsule],
+        *,
+        attributed_at: float | None = None,
+    ) -> int:
+        """Credit multi-host positives from one bounded domain-scope task."""
+        values = list(dict.fromkeys(
+            (capsule.hostname, int(capsule.year), capsule.provider)
+            for capsule in capsules
+        ))
+        if not values:
+            return 0
+        when = float(self.clock()) if attributed_at is None else float(attributed_at)
+        scope = key.temporal_scope
+        with self.connection:
+            self.connection.executemany(
+                """
+                INSERT OR IGNORE INTO evidence_host_year_task_kinds(
+                    hostname, year, task_kind, evidence_provider,
+                    task_year_from, task_year_to, task_policy_version,
+                    attributed_at
+                ) VALUES (?, ?, 'domain', ?, ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        hostname, year, provider,
+                        scope.year_from, scope.year_to, key.policy_version, when,
+                    )
+                    for hostname, year, provider in values
+                ],
+            )
+
+        origin = self.connection.execute(
+            """
+            SELECT source_key, reservoir_id, lease_id
+            FROM evidence_task_origins
+            WHERE hostname = ? AND year_from = ? AND year_to = ?
+              AND provider = ? AND policy_version = ?
+            ORDER BY first_observed_at, source_key, reservoir_id, lease_id
+            LIMIT 1
+            """,
+            self._values(key),
+        ).fetchone()
+        if origin is None:
+            return 0
+        before = self.connection.total_changes
+        with self.connection:
+            self.connection.executemany(
+                """
+                INSERT OR IGNORE INTO evidence_host_year_origins(
+                    hostname, year, source_key, reservoir_id, lease_id,
+                    evidence_provider, task_year_from, task_year_to,
+                    task_policy_version, attributed_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        hostname,
+                        year,
+                        str(origin["source_key"]),
+                        str(origin["reservoir_id"]),
+                        str(origin["lease_id"]),
+                        provider,
+                        scope.year_from,
+                        scope.year_to,
+                        key.policy_version,
+                        when,
+                    )
+                    for hostname, year, provider in values
                 ],
             )
         return self.connection.total_changes - before
