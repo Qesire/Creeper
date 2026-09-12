@@ -30,6 +30,7 @@ from creeper.source_discovery.coordinator import (
     SourceDiscoveryCoordinator,
 )
 from creeper.source_discovery.curated_seeds import ensure_curated_direct_catalogs
+from creeper.source_discovery.intelligence import SourceIntelligenceContextBuilder
 from creeper.source_discovery.manager import SourcePoolTargets, SourceReservoirManager
 from creeper.source_discovery.measured_scout import (
     MeasuredYieldScoutExecutor,
@@ -54,6 +55,8 @@ class CoordinatorConfig:
     search_parallelism: int = 3
     failure_retry_seconds: float = 30.0
     search_cooldown_seconds: float = 30.0
+    search_ucb_exploration: float = 0.35
+    stagnation_window: int = 6
 
 
 @dataclass(frozen=True)
@@ -190,6 +193,14 @@ def load_source_discovery_config(config_path: Path) -> SourceDiscoveryServiceCon
         search_cooldown_seconds=_nonnegative_float(
             coordinator_raw.get("search_cooldown_seconds", 30.0), name="coordinator.search_cooldown_seconds"
         ),
+        search_ucb_exploration=_nonnegative_float(
+            coordinator_raw.get("search_ucb_exploration", 0.35),
+            name="coordinator.search_ucb_exploration",
+        ),
+        stagnation_window=_positive_int(
+            coordinator_raw.get("stagnation_window", 6),
+            name="coordinator.stagnation_window",
+        ),
     )
 
     triage_raw = _table(root, "triage")
@@ -252,6 +263,14 @@ def load_source_discovery_config(config_path: Path) -> SourceDiscoveryServiceCon
             ),
             max_returned_candidates=_positive_int(
                 agent_raw.get("max_returned_candidates", 2_000), name="agent.max_returned_candidates"
+            ),
+            max_returned_hypotheses=_positive_int(
+                agent_raw.get("max_returned_hypotheses", 128),
+                name="agent.max_returned_hypotheses",
+            ),
+            max_motif_expansions=_positive_int(
+                agent_raw.get("max_motif_expansions", 256),
+                name="agent.max_motif_expansions",
             ),
         ),
         admission=admission,
@@ -360,6 +379,8 @@ async def _open_runtime(config: SourceDiscoveryServiceConfig):
                 registry,
                 targets=config.pool,
                 search_cooldown_seconds=config.coordinator.search_cooldown_seconds,
+                search_ucb_exploration=config.coordinator.search_ucb_exploration,
+                stagnation_window=config.coordinator.stagnation_window,
             )
             max_io = max(config.coordinator.triage_parallelism, config.coordinator.scout_parallelism)
             limits = httpx.Limits(
@@ -392,6 +413,7 @@ async def _open_runtime(config: SourceDiscoveryServiceConfig):
                     structural_executor=structural,
                     measured_executor=measured,
                 )
+                intelligence_context = SourceIntelligenceContextBuilder(registry)
                 search = CommandAgentSearchExecutor(
                     config.agent.command,
                     discovery_root / "agent-invocations",
@@ -400,6 +422,7 @@ async def _open_runtime(config: SourceDiscoveryServiceConfig):
                     cwd=config.agent.cwd,
                     policy=config.agent.policy,
                     admission_policy=config.agent.admission,
+                    context_builder=intelligence_context,
                 )
                 coordinator = SourceDiscoveryCoordinator(
                     registry,
