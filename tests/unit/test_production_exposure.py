@@ -129,6 +129,36 @@ class ProductionExposureTests(unittest.TestCase):
         self.assertEqual(stored.final_accepted_eed, 4.0)
         self.assertEqual(stored.accepted_host_years, 3)
 
+    def test_late_read_progress_does_not_regress_validation(self) -> None:
+        exposure = self.store.begin_production_exposure(
+            source_key="source:race",
+            reservoir_id="reservoir:race",
+            lease_id="lease:race",
+            lane="sequential",
+            baseline_signature="baseline:v1",
+            model_signature="model:v1",
+        )
+        self.store.record_production_exposure_progress(
+            exposure.exposure_id,
+            state=VALIDATING,
+            evidence_frontier=4,
+            accepted_host_years=2,
+        )
+
+        current = self.store.record_production_exposure_progress(
+            exposure.exposure_id,
+            state=READ_COMPLETE,
+            source_records=10,
+            source_bytes=100,
+            source_requests=1,
+        )
+
+        self.assertEqual(current.state, VALIDATING)
+        self.assertEqual(current.source_records, 10)
+        self.assertEqual(current.source_bytes, 100)
+        self.assertEqual(current.evidence_frontier, 4)
+        self.assertEqual(current.accepted_host_years, 2)
+
     def test_abort_and_expire_are_terminal_without_reward(self) -> None:
         aborted = self.store.begin_production_exposure(
             source_key="source:abort",

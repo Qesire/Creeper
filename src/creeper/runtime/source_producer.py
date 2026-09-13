@@ -206,7 +206,24 @@ class SourceProducer:
         self,
     ) -> tuple[LeaseCandidate, WorkLease, CapacityReservation | None] | None:
         self.control_store.recover_expired_leases()
-        for candidate in self.scheduler.rank(self.candidates):
+        ranked = self.scheduler.rank(self.candidates)
+        # A high scout/FINAL score must not permanently starve another source
+        # that has already passed real activation.  The count is durable in
+        # source_run_outcomes, so concurrent workers converge on the remaining
+        # never-read sources through the reservoir claim fence. After every
+        # source has one real exposure, the ordinary FINAL-first ranking is
+        # unchanged.
+        source_run_count = getattr(self.source_registry, "source_run_count", None)
+        if callable(source_run_count):
+            unseen: list[LeaseCandidate] = []
+            seen: list[LeaseCandidate] = []
+            for candidate in ranked:
+                if candidate.source_key is not None and source_run_count(candidate.source_key) == 0:
+                    unseen.append(candidate)
+                else:
+                    seen.append(candidate)
+            ranked = unseen + seen
+        for candidate in ranked:
             template = candidate.lease
             if template is None:
                 raise ValueError("source candidate requires a lease template")

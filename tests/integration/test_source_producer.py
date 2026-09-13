@@ -1,6 +1,7 @@
 import tempfile
 import threading
 import unittest
+from dataclasses import replace
 from pathlib import Path
 
 from creeper.authority.baseline_index import BaselineIndex
@@ -891,6 +892,36 @@ class SourceProducerTests(unittest.TestCase):
         self.assertEqual(sorted(results), [False, True])
         stored = self.control.get_reservoir(candidate.reservoir_id)
         self.assertEqual(stored.state, ReservoirState.LEASED)
+
+    def test_real_activation_sources_without_prior_reads_get_first_exposure(self):
+        class Registry:
+            def source_run_count(self, source_key):
+                return {"new-source": 0, "used-source": 3}[source_key]
+
+        runtime, _adapter, first = self.build_direct_runtime(
+            backlog_capacities={},
+            owner="fairness-test",
+        )
+        second_reservoir = replace(
+            runtime.candidates[0].reservoir,
+            reservoir_id="used-reservoir",
+        )
+        self.control.save_reservoir(second_reservoir)
+        second = replace(
+            runtime.candidates[0],
+            reservoir_id=second_reservoir.reservoir_id,
+            reservoir=second_reservoir,
+            source_key="used-source",
+            expected_novel_eed=100.0,
+        )
+        first = replace(first, source_key="new-source", expected_novel_eed=1.0)
+        runtime.candidates = (second, first)
+        runtime.source_registry = Registry()
+
+        granted = runtime._grant_fresh_lease()
+
+        self.assertIsNotNone(granted)
+        self.assertEqual(granted[0].source_key, "new-source")
 
     def test_full_backlog_blocks_source_before_adapter_execution(self):
         occupied = EvidenceQueryKey(

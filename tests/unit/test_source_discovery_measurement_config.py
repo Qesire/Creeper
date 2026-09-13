@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -19,6 +21,22 @@ class SourceDiscoveryMeasurementConfigTests(unittest.TestCase):
         self.baseline.write_bytes(b"")
         self.eed = self.root / "eed.json"
         self.eed.write_text("{}", encoding="utf-8")
+        self.manifest = self.root / "authority.json"
+        model_hash = hashlib.sha256(self.eed.read_bytes()).hexdigest()
+        self.manifest.write_text(
+            json.dumps(
+                {
+                    "baseline_id": "baseline-test",
+                    "annual_file_hashes": {
+                        f"{year}.txt": "0" * 64 for year in range(1996, 2002)
+                    },
+                    "candidate_file_hash": "1" * 64,
+                    "model_hash": model_hash,
+                    "baseline_eed": "1",
+                }
+            ),
+            encoding="utf-8",
+        )
 
     def tearDown(self) -> None:
         self.tmp.cleanup()
@@ -106,6 +124,17 @@ actor = "agent:test"
         path.write_text(text, encoding="utf-8")
         with self.assertRaisesRegex(ValueError, "measurement.min_novel_fraction"):
             load_source_discovery_config(path)
+
+    def test_measurement_authority_manifest_is_bound_to_model(self) -> None:
+        path = self._config()
+        text = path.read_text(encoding="utf-8").replace(
+            'eed_model = "eed.json"',
+            'eed_model = "eed.json"\nauthority_manifest = "authority.json"',
+        )
+        path.write_text(text, encoding="utf-8")
+        config = load_source_discovery_config(path)
+        assert config.measurement is not None
+        self.assertEqual(config.measurement.authority_manifest, self.manifest.resolve())
 
 
 if __name__ == "__main__":

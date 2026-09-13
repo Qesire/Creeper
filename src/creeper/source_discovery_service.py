@@ -21,6 +21,7 @@ import httpx
 from creeper.authority.baseline_index import BaselineIndex
 from creeper.authority.eed import load_english_weights
 from creeper.authority.identity import (
+    AuthoritySnapshot,
     baseline_authority_signature,
     eed_model_authority_signature,
 )
@@ -88,6 +89,7 @@ class AgentConfig:
 class MeasurementConfig:
     baseline_index: Path
     eed_model: Path
+    authority_manifest: Path | None
     policy: MeasuredYieldScoutPolicy
 
 
@@ -371,6 +373,11 @@ def load_source_discovery_config(config_path: Path) -> SourceDiscoveryServiceCon
             eed_model=_resolve_path(
                 measurement_raw.get("eed_model"), config_path=config_path, name="measurement.eed_model"
             ),
+            authority_manifest=_optional_path(
+                measurement_raw.get("authority_manifest"),
+                config_path=config_path,
+                name="measurement.authority_manifest",
+            ),
             policy=MeasuredYieldScoutPolicy(
                 max_download_bytes=_positive_int(
                     measurement_raw.get("max_download_bytes", defaults.max_download_bytes), name="measurement.max_download_bytes"
@@ -429,6 +436,12 @@ def load_source_discovery_config(config_path: Path) -> SourceDiscoveryServiceCon
             raise ValueError(f"measurement.baseline_index does not exist: {measurement.baseline_index}")
         if not measurement.eed_model.is_file():
             raise ValueError(f"measurement.eed_model does not exist: {measurement.eed_model}")
+        if measurement.authority_manifest is not None:
+            authority = AuthoritySnapshot.from_manifest_path(measurement.authority_manifest)
+            if eed_model_authority_signature(measurement.eed_model) != authority.model_hash:
+                raise ValueError(
+                    "measurement.eed_model does not match measurement.authority_manifest"
+                )
 
     if not scrapy_project_dir.is_dir():
         raise ValueError(f"scrapy_project_dir does not exist: {scrapy_project_dir}")
@@ -512,10 +525,15 @@ async def _open_runtime(config: SourceDiscoveryServiceConfig):
         try:
             registry = SourceDiscoveryRegistry(control)
             if config.measurement is not None:
+                authority = (
+                    AuthoritySnapshot.from_manifest_path(config.measurement.authority_manifest)
+                    if config.measurement.authority_manifest is not None
+                    else None
+                )
                 scout_authority = (
-                    baseline_authority_signature(
-                        config.measurement.baseline_index
-                    ),
+                    authority.authority_digest
+                    if authority is not None
+                    else baseline_authority_signature(config.measurement.baseline_index),
                     eed_model_authority_signature(
                         config.measurement.eed_model
                     ),
@@ -559,7 +577,15 @@ async def _open_runtime(config: SourceDiscoveryServiceConfig):
                 )
                 measured = None
                 if config.measurement is not None:
-                    baseline = BaselineIndex(config.measurement.baseline_index)
+                    authority = (
+                        AuthoritySnapshot.from_manifest_path(config.measurement.authority_manifest)
+                        if config.measurement.authority_manifest is not None
+                        else None
+                    )
+                    baseline = BaselineIndex(
+                        config.measurement.baseline_index,
+                        authority=authority,
+                    )
                     measured = MeasuredYieldScoutExecutor(
                         client,
                         baseline,

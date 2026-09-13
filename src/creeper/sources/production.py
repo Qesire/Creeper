@@ -168,6 +168,10 @@ class StructuredProductionAdapter:
         self.compressed = path.endswith(".gz")
         self._stream = None
         self._pending_line: tuple[int, bytes] | None = None
+        self._streaming_mode = False
+        self._stream_buffer: tuple[int, bytes] | None = None
+        self._stream_position = 0
+        self._last_line_offset = 0
 
     @staticmethod
     def _kind_from_locator(locator: str) -> str:
@@ -301,19 +305,90 @@ class StructuredProductionAdapter:
             evidence_contract_version="",
         )
 
-    def _open_stream(self):
+    def _open_stream(self, *, streaming: bool = False):
         options = {
-            "block_size": 4 * 1024 * 1024,
+            "block_size": 0 if streaming else 4 * 1024 * 1024,
         }
         if self.compressed:
             options["compression"] = "gzip"
         return fsspec.open(self.source, "rb", **options).open()
 
+    def _stream_at(self, start: int):
+        """Open a non-range HTTP stream and advance it to a durable cursor."""
+
+        self.close()
+        self._stream = self._open_stream(streaming=True)
+        self._streaming_mode = True
+        self._stream_position = int(start)
+        remaining = int(start)
+        while remaining:
+            chunk = self._stream.read(min(1024 * 1024, remaining))
+            if not chunk:
+                self.close()
+                raise ProductionAdapterError(
+                    "streaming HTTP source ended before durable cursor"
+                )
+            remaining -= len(chunk)
+        return self._stream
+
+    def _read_streaming_line(self, size: int = -1) -> bytes:
+        """Read one line without calling seek on HTTPStreamFile."""
+
+        source = self._stream
+        if source is None:
+            return b""
+        if self._stream_buffer is None:
+            buffer_start = self._stream_position
+            buffer = b""
+        else:
+            buffer_start, buffer = self._stream_buffer
+
+        limit = None if size < 0 else int(size)
+        while True:
+            newline = buffer.find(b"\n")
+            if newline >= 0:
+                end = newline + 1
+                line = buffer[:end]
+                self._stream_buffer = (
+                    buffer_start + end,
+                    buffer[end:],
+                )
+                self._stream_position = buffer_start + end
+                self._last_line_offset = buffer_start
+                return line
+            if limit is not None and len(buffer) >= limit:
+                line = buffer[:limit]
+                self._stream_buffer = (
+                    buffer_start + len(line),
+                    buffer[len(line):],
+                )
+                self._stream_position = buffer_start + len(line)
+                self._last_line_offset = buffer_start
+                return line
+
+            request_size = 64 * 1024
+            if limit is not None:
+                request_size = min(request_size, limit - len(buffer))
+            chunk = source.read(request_size)
+            if not chunk:
+                if not buffer:
+                    self._stream_buffer = None
+                    self._last_line_offset = self._stream_position
+                    return b""
+                self._stream_buffer = None
+                self._stream_position = buffer_start + len(buffer)
+                self._last_line_offset = buffer_start
+                return buffer
+            buffer += chunk
+            self._stream_buffer = (buffer_start, buffer)
+
     def _ensure_stream(self, start: int):
-        opened = False
+        opened = 0
         if self._stream is None or getattr(self._stream, "closed", False):
             self._stream = self._open_stream()
-            opened = True
+            self._streaming_mode = False
+            self._stream_position = 0
+            opened = 1
 
         if self._pending_line is not None and self._pending_line[0] == start:
             # The underlying stream is already positioned after this buffered
@@ -322,13 +397,27 @@ class StructuredProductionAdapter:
 
         self._pending_line = None
         if self._stream.tell() != start:
-            self._stream.seek(start)
+            try:
+                self._stream.seek(start)
+            except (OSError, ValueError, io.UnsupportedOperation):
+                if urlsplit(self.source).scheme.lower() not in {"http", "https"}:
+                    raise
+                # Some HTTP origins answer the initial request but reject all
+                # byte ranges.  Reopen in streaming mode and discard the
+                # already committed prefix so a durable nonzero cursor still
+                # has a correct, resumable meaning.
+                self._stream_at(start)
+                opened += 1
         return self._stream, opened
 
     def close(self) -> None:
         stream = self._stream
         self._stream = None
         self._pending_line = None
+        self._streaming_mode = False
+        self._stream_buffer = None
+        self._stream_position = 0
+        self._last_line_offset = 0
         if stream is not None and not getattr(stream, "closed", False):
             stream.close()
 
@@ -516,6 +605,29 @@ class StructuredProductionAdapter:
             return LeaseResult(lease.lease_id, next_cursor=None)
 
         source, opened = self._ensure_stream(start)
+
+        stream_fallback_used = False
+
+        def read_line(size: int = -1) -> bytes:
+            nonlocal source, opened, stream_fallback_used
+            if self._streaming_mode:
+                return self._read_streaming_line(size)
+            try:
+                return source.readline() if size < 0 else source.readline(size)
+            except (OSError, ValueError, io.UnsupportedOperation):
+                if stream_fallback_used or urlsplit(self.source).scheme.lower() not in {
+                    "http",
+                    "https",
+                }:
+                    raise
+                offset = int(source.tell())
+                self._stream_at(offset)
+                source = self._stream
+                assert source is not None
+                opened += 1
+                stream_fallback_used = True
+                return self._read_streaming_line(size)
+
         try:
             if end is not None and start > 0 and self._pending_line is None:
                 source.seek(start - 1)
@@ -556,9 +668,11 @@ class StructuredProductionAdapter:
                             next_cursor = None
                             self.close()
                             break
-                        raw = source.readline(remaining)
+                        raw = read_line(remaining)
                     else:
-                        raw = source.readline()
+                        raw = read_line()
+                    if self._streaming_mode:
+                        offset = self._last_line_offset
 
                 if not raw:
                     next_cursor = None
@@ -609,7 +723,7 @@ class StructuredProductionAdapter:
                     emit_record(record)
                     downstream_wait_seconds += time.monotonic() - emit_started
                     emitted += 1
-                next_cursor = f"byte:{source.tell()}"
+                next_cursor = f"byte:{self._stream_position if self._streaming_mode else source.tell()}"
                 if end is not None and source.tell() >= end:
                     next_cursor = None
                     self.close()
@@ -622,7 +736,7 @@ class StructuredProductionAdapter:
         return LeaseResult(
             lease_id=lease.lease_id,
             records=emitted,
-            requests=1 if opened else 0,
+            requests=opened,
             bytes_read=bytes_read,
             elapsed_seconds=max(
                 0.0,

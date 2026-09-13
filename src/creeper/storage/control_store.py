@@ -977,9 +977,11 @@ class ControlStore:
                 ProductionExposureState.VALIDATING: 2,
             }
             if order[target] < order[current.state]:
-                raise ValueError(
-                    f"invalid production exposure transition: {current.state} -> {target}"
-                )
+                # A late writer may be reporting an earlier phase after a
+                # readiness or recovery worker has already advanced the same
+                # durable exposure.  Preserve the furthest state so retries
+                # converge without regressing the lifecycle.
+                target = current.state
             updated = {
                 "source_records": current.source_records if source_records is None else int(source_records),
                 "source_requests": current.source_requests if source_requests is None else int(source_requests),
@@ -989,7 +991,7 @@ class ControlStore:
                 "source_elapsed_seconds": current.source_elapsed_seconds if source_elapsed_seconds is None else float(source_elapsed_seconds),
                 "provider_elapsed_seconds": current.provider_elapsed_seconds if provider_elapsed_seconds is None else float(provider_elapsed_seconds),
                 "evidence_frontier": current.evidence_frontier if evidence_frontier is None else int(evidence_frontier),
-                "accepted_host_years": current.accepted_host_years if accepted_host_years is None else int(accepted_host_years),
+                    "accepted_host_years": current.accepted_host_years if accepted_host_years is None else int(accepted_host_years),
             }
             changed = self.connection.execute(
                 """

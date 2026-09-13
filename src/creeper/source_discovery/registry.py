@@ -995,6 +995,23 @@ class SourceDiscoveryRegistry:
         assert row is not None
         return row
 
+    def source_run_count(self, source_key: str) -> int:
+        """Return the number of source runs that have read source records.
+
+        The production scheduler uses this durable count only to give an
+        ACTIVE source its first real exposure.  Once every source has been
+        exercised, normal FINAL-value ranking remains authoritative.
+        """
+        row = self.connection.execute(
+            """
+            SELECT COUNT(*) AS count
+            FROM source_run_outcomes
+            WHERE source_key = ? AND source_records > 0
+            """,
+            (source_key,),
+        ).fetchone()
+        return 0 if row is None else int(row["count"])
+
     def begin_source_run_for_exposure(
         self,
         source_key: str,

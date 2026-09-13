@@ -27,6 +27,7 @@ import httpx
 from creeper.authority.baseline_index import BaselineIndex
 from creeper.authority.eed import load_english_weights
 from creeper.authority.identity import (
+    AuthoritySnapshot,
     baseline_authority_signature,
     eed_model_authority_signature,
 )
@@ -73,6 +74,7 @@ class HistoricalIndexOptimizerConfig:
     runtime_data_root: Path
     baseline_index: Path
     eed_model: Path
+    authority_manifest: Path | None = None
     enabled: bool = False
     max_indexes_per_cycle: int = 4
     max_probe_actions_per_index: int = 4
@@ -227,6 +229,17 @@ def load_historical_index_optimizer_config(
         raise ValueError(f"baseline_index does not exist: {baseline}")
     if not model.is_file():
         raise ValueError(f"eed_model does not exist: {model}")
+    authority_manifest = None
+    raw_authority_manifest = root.get("authority_manifest")
+    if raw_authority_manifest is not None:
+        authority_manifest = _resolve(
+            raw_authority_manifest,
+            base=producer_config_path.parent,
+            name="authority_manifest",
+        )
+        authority = AuthoritySnapshot.from_manifest_path(authority_manifest)
+        if eed_model_authority_signature(model) != authority.model_hash:
+            raise ValueError("eed_model does not match authority_manifest")
 
     probe_default = RegionProbePolicy()
     tomography_default = RegionTomographyPolicy()
@@ -238,6 +251,7 @@ def load_historical_index_optimizer_config(
         runtime_data_root=runtime_root,
         baseline_index=baseline,
         eed_model=model,
+        authority_manifest=authority_manifest,
         enabled=_strict_bool(
             raw.get("enabled", False),
             name="historical_index.enabled",
@@ -450,7 +464,15 @@ class HistoricalIndexOptimizerRuntime:
         self.telemetry = RuntimeTelemetryStore(
             config.runtime_data_root / "telemetry.sqlite3"
         )
-        self.baseline = BaselineIndex(config.baseline_index)
+        self.authority = (
+            AuthoritySnapshot.from_manifest_path(config.authority_manifest)
+            if config.authority_manifest is not None
+            else None
+        )
+        self.baseline = BaselineIndex(
+            config.baseline_index,
+            authority=self.authority,
+        )
         self.discovery = SourceDiscoveryRegistry(self.control)
         self._recover_historical_exposures()
         self.compiler = SourceActivationCompiler(
@@ -605,7 +627,9 @@ class HistoricalIndexOptimizerRuntime:
 
     def _historical_authority(self) -> tuple[str, str]:
         return (
-            baseline_authority_signature(self.config.baseline_index),
+            self.authority.authority_digest
+            if self.authority is not None
+            else baseline_authority_signature(self.config.baseline_index),
             eed_model_authority_signature(self.config.eed_model),
         )
 
