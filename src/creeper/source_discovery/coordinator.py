@@ -283,17 +283,6 @@ class SourceDiscoveryCoordinator:
         return tuple(eligible), skipped
 
     def _claim_scouts(self, source_keys: tuple[str, ...]) -> list[SourceCandidate]:
-        if (
-            self.scout_authority is not None
-            and not self.registry.is_current_scout_authority(
-                self.scout_authority[0],
-                self.scout_authority[1],
-            )
-        ):
-            # The measured executor was opened against immutable authority assets
-            # that are no longer current. Do not produce mislabeled measurements;
-            # a service restart will bind a fresh executor to the new authority.
-            return []
         claimed: list[SourceCandidate] = []
         for source_key in source_keys[: self.scout_parallelism]:
             candidate = self.registry.get_candidate(source_key)
