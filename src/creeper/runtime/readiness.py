@@ -19,6 +19,7 @@ from creeper.authority.identity import (
 )
 from creeper.scheduler.leases import LeaseState
 from creeper.source_discovery.registry import SourceDiscoveryRegistry, SourceRunOutcome
+from creeper.storage.candidate_store import CandidateStore
 from creeper.storage.control_store import ControlStore, TERMINAL_STATES
 from creeper.storage.evidence_store import EvidenceHostYear, EvidenceStore
 
@@ -666,6 +667,9 @@ class IncrementalReadinessRuntime:
         self.evidence = EvidenceStore(
             self.runtime_data_root / "evidence.sqlite3"
         )
+        self.candidates = CandidateStore(
+            self.runtime_data_root / "candidates.sqlite3"
+        )
         self.control: ControlStore | None = None
         self.ledger = IncrementalReadinessLedger(
             self.runtime_data_root / "readiness.sqlite3"
@@ -1174,6 +1178,12 @@ class IncrementalReadinessRuntime:
         )
         if rows:
             assert self.baseline is not None
+            # Resolve candidate state from proof already durable in EvidenceStore
+            # before advancing readiness. CandidateStore is a separate DB, so
+            # this remains idempotent without a cross-database transaction.
+            self.candidates.mark_annual_evidence_obtained_many(
+                row.hostname for row in rows
+            )
             (
                 task_kinds,
                 source_origins,
@@ -1251,6 +1261,7 @@ class IncrementalReadinessRuntime:
             self.control.close()
             self.control = None
         self.ledger.close()
+        self.candidates.close()
         self.evidence.close()
 
     def __enter__(self) -> "IncrementalReadinessRuntime":
