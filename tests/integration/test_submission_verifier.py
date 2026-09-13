@@ -16,6 +16,7 @@ from creeper.submission.verify import (
     recompute_submission_archive,
     verify_submission_archive,
 )
+from creeper.submission.streaming_reader import iter_archive_lines
 
 
 def _sha256(path: Path) -> str:
@@ -177,7 +178,10 @@ def _entries(
     growth: str | None = None,
     lane_contribution: dict[str, dict[str, object]] | None = None,
 ) -> dict[str, bytes]:
-    records = records or [_candidate_record()]
+    records = sorted(
+        records or [_candidate_record()],
+        key=lambda record: (str(record["hostname"]), int(record["year"])),
+    )
     annual: dict[int, list[str]] = {year: [] for year in range(1996, 2002)}
     for record in records:
         annual[int(record["year"])].append(str(record["hostname"]))
@@ -294,6 +298,18 @@ def _write_archive(
 
 
 class SubmissionVerifierTests(unittest.TestCase):
+    def test_archive_line_reader_decodes_lines_across_small_chunks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            archive = Path(tmp) / "lines.zip"
+            with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as bundle:
+                bundle.writestr("payload", "first\nsecond\nthird")
+
+            with zipfile.ZipFile(archive) as bundle:
+                self.assertEqual(
+                    list(iter_archive_lines(bundle, "payload", chunk_size=3)),
+                    ["first", "second", "third"],
+                )
+
     def _verify(
         self,
         archive: Path,
@@ -518,6 +534,26 @@ class SubmissionVerifierTests(unittest.TestCase):
                 for item in recomputed.lane_contribution.values()
             )
             self.assertEqual(total, __import__("decimal").Decimal("2"))
+
+    def test_unordered_evidence_stream_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            authority, authority_path, index_path, model_path = _authority_fixture(root)
+            records = [_candidate_record(), _direct_record()]
+            entries = _entries(records)
+            entries["evidence.jsonl"] = b"\n".join(
+                reversed(entries["evidence.jsonl"].splitlines())
+            ) + b"\n"
+            archive = _write_archive(
+                root, _package_manifest(authority, entries), entries
+            )
+
+            report = self._verify(archive, authority_path, index_path, model_path)
+
+            self.assertFalse(report.ready)
+            self.assertTrue(
+                any("evidence entries are not ordered" in error for error in report.errors)
+            )
 
     def test_verifier_fails_closed_without_all_independent_authority_inputs(self):
         with tempfile.TemporaryDirectory() as tmp:

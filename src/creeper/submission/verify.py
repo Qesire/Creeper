@@ -10,14 +10,13 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 from creeper.authority.baseline_index import BaselineIndex, YEAR_BITS
-from creeper.authority.eed import calculate_eed_values
+from creeper.authority.eed import load_english_weights
 from creeper.authority.identity import (
     AuthoritySnapshot,
     eed_model_authority_signature,
 )
 from creeper.authority.normalizer import normalize_official
 from creeper.evidence.classification import (
-    AcquisitionLane,
     classify_acquisition_lane,
     contribution_bucket,
     validate_evidence_semantics,
@@ -28,6 +27,7 @@ from creeper.evidence.contract_registry import (
 )
 from creeper.evidence.policies import EvidenceCapsule
 from creeper.submission.precheck import format_growth_rate
+from creeper.submission.streaming_reader import iter_archive_lines
 
 
 @dataclass(frozen=True)
@@ -81,94 +81,59 @@ def _decimal(value: object, name: str, errors: list[str]) -> Decimal | None:
     return parsed
 
 
-def _read_annual_hosts(
-    bundle: zipfile.ZipFile,
-    errors: list[str],
-) -> dict[int, set[str]]:
-    names = set(bundle.namelist())
-    result = {year: set() for year in YEAR_BITS}
-    for year in YEAR_BITS:
-        name = f"{year}.txt"
-        if name not in names:
-            errors.append(f"missing required entry: {name}")
-            continue
-        for raw in bundle.read(name).decode("utf-8", errors="replace").splitlines():
-            hostname = normalize_official(raw)
-            if hostname is None:
-                errors.append(f"invalid hostname in {name}: {raw}")
-                continue
-            if hostname in result[year]:
-                errors.append(f"duplicate hostname in {name}: {hostname}")
-            result[year].add(hostname)
-    return result
+def _tld(hostname: str) -> str:
+    return hostname.rsplit(".", 1)[-1].lower()
 
 
-def _read_evidence(
+def _increment_tld(counts: dict[str, int], hostname: str) -> None:
+    tld = _tld(hostname)
+    counts[tld] = counts.get(tld, 0) + 1
+
+
+def _weighted_eed(
+    counts_by_year: dict[int, dict[str, int]],
+    weights: dict[str, Decimal],
+) -> Decimal:
+    return sum(
+        (
+            Decimal(count) * weights.get(tld, Decimal("0"))
+            for counts in counts_by_year.values()
+            for tld, count in counts.items()
+        ),
+        Decimal("0"),
+    )
+
+
+def _archive_entry_digest(
     bundle: zipfile.ZipFile,
-    errors: list[str],
+    name: str,
     *,
-    reviewed_contracts: ReviewedContractRegistry | None = None,
-) -> tuple[dict[tuple[str, int], EvidenceCapsule], int]:
-    if "evidence.jsonl" not in set(bundle.namelist()):
-        errors.append("missing required entry: evidence.jsonl")
-        return {}, 0
-    evidence: dict[tuple[str, int], EvidenceCapsule] = {}
-    lines = bundle.read("evidence.jsonl").decode("utf-8", errors="replace").splitlines()
-    for line_number, raw in enumerate(lines, 1):
-        try:
-            record = json.loads(raw)
-            if not isinstance(record, dict):
-                raise ValueError("evidence row must be an object")
-            for field in _REQUIRED_EVIDENCE_FIELDS:
-                if field not in record or not str(record[field]).strip():
-                    raise ValueError(f"missing evidence provenance: {field}")
-            capsule = EvidenceCapsule(
-                hostname=str(record["hostname"]),
-                year=int(record["year"]),
-                provider=str(record["provider"]),
-                temporal_semantics=str(record["temporal_semantics"]),
-                evidence_timestamp=str(record["evidence_timestamp"]),
-                source_locator=str(record["source_locator"]),
-                payload_hash=str(record["payload_hash"]),
-                policy_version=str(record["policy_version"]),
-                evidence_type=str(record["evidence_type"]),
-                source_id=str(record["source_id"]),
-                original_url=str(record["original_url"]),
-                record_locator=str(record["record_locator"]),
-                extraction_method=str(record["extraction_method"]),
-            )
-        except (ValueError, KeyError, TypeError, json.JSONDecodeError) as exc:
-            errors.append(f"invalid evidence line {line_number}: {exc}")
-            continue
-        validation = validate_evidence_semantics(
-            capsule,
-            reviewed_contracts=reviewed_contracts,
-        )
-        if not validation.accepted_for_annual:
-            for error in validation.errors:
-                errors.append(
-                    f"invalid evidence line {line_number}: {error}"
-                )
-        key = (capsule.hostname, capsule.year)
-        if key in evidence:
-            errors.append(
-                f"duplicate evidence host-year: {capsule.hostname}/{capsule.year}"
-            )
-        else:
-            evidence[key] = capsule
-    return evidence, len(evidence)
+    chunk_size: int = 1024 * 1024,
+) -> tuple[str, int]:
+    digest = hashlib.sha256()
+    size = 0
+    with bundle.open(name, "r") as source:
+        while True:
+            chunk = source.read(chunk_size)
+            if not chunk:
+                break
+            digest.update(chunk)
+            size += len(chunk)
+    return digest.hexdigest(), size
 
 
-def _eed_total(values_by_year: dict[int, set[str]], model_path: Path) -> Decimal:
-    total = Decimal("0")
-    for year in sorted(values_by_year):
-        summary, _rows = calculate_eed_values(
-            values_by_year[year],
-            model_path,
-            input_file=f"<submission-verifier:{year}>",
-        )
-        total += Decimal(str(summary["equivalent_english_domains"]))
-    return total
+def _iter_normalized_annual_hosts(
+    bundle: zipfile.ZipFile,
+    names: set[str],
+    year: int,
+):
+    name = f"{year}.txt"
+    if name not in names:
+        return
+    for raw in iter_archive_lines(bundle, name):
+        hostname = normalize_official(raw)
+        if hostname is not None:
+            yield hostname
 
 
 def _recompute_from_bundle(
@@ -180,21 +145,27 @@ def _recompute_from_bundle(
     reviewed_contracts: ReviewedContractRegistry | None = None,
 ) -> RecomputedSubmission:
     errors: list[str] = []
-    annual = _read_annual_hosts(bundle, errors)
-    evidence, evidence_records = _read_evidence(
-        bundle,
-        errors,
-        reviewed_contracts=reviewed_contracts,
-    )
-    annual_pairs = {
-        (hostname, year)
-        for year, hostnames in annual.items()
-        for hostname in hostnames
-    }
+    names = set(bundle.namelist())
 
-    missing = annual_pairs - set(evidence)
-    if missing:
-        errors.append(f"annual records without evidence: {len(missing)}")
+    baseline: BaselineIndex | None = None
+    baseline_has_rows = False
+    try:
+        baseline = BaselineIndex(baseline_index_path)
+        baseline.assert_authority(authority)
+        baseline_has_rows = (
+            baseline.connection.execute(
+                "SELECT 1 FROM annual_hostnames LIMIT 1"
+            ).fetchone()
+            is not None
+        )
+    except (OSError, ValueError) as exc:
+        errors.append(f"cannot verify supplied baseline index authority: {exc}")
+
+    weights: dict[str, Decimal] = {}
+    try:
+        weights = load_english_weights(eed_model_path)
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        errors.append(f"cannot independently recompute EED: {exc}")
 
     try:
         actual_model_hash = eed_model_authority_signature(eed_model_path)
@@ -203,56 +174,178 @@ def _recompute_from_bundle(
     except (OSError, ValueError, json.JSONDecodeError) as exc:
         errors.append(f"cannot load supplied EED model: {exc}")
 
-    baseline: BaselineIndex | None = None
-    try:
-        baseline = BaselineIndex(baseline_index_path)
-        baseline.assert_authority(authority)
-        overlap = 0
-        for hostname, year in annual_pairs:
-            if baseline.year_mask(hostname) & YEAR_BITS[year]:
-                overlap += 1
-        if overlap:
-            errors.append(
-                f"annual output overlaps target-year baseline: {overlap}"
-            )
-    except (OSError, ValueError) as exc:
-        errors.append(f"cannot verify supplied baseline index authority: {exc}")
-    finally:
-        if baseline is not None:
-            baseline.close()
-
-    total_eed = Decimal("0")
-    lane_sets = {
-        "direct_annual": {year: set() for year in YEAR_BITS},
-        "verified_candidate": {year: set() for year in YEAR_BITS},
-        "other_restricted": {year: set() for year in YEAR_BITS},
+    annual_counts = {year: {} for year in YEAR_BITS}
+    lane_counts = {
+        bucket: {year: {} for year in YEAR_BITS}
+        for bucket in (
+            "direct_annual",
+            "verified_candidate",
+            "other_restricted",
+        )
     }
-    try:
-        total_eed = _eed_total(annual, eed_model_path)
-        for hostname, year in annual_pairs:
-            capsule = evidence.get((hostname, year))
-            lane = (
-                AcquisitionLane.UNKNOWN
-                if capsule is None
-                else classify_acquisition_lane(
+    lane_records = {
+        bucket: {year: 0 for year in YEAR_BITS}
+        for bucket in lane_counts
+    }
+    annual_current: dict[int, str | None] = {}
+    annual_previous: dict[int, str | None] = {year: None for year in YEAR_BITS}
+    annual_iterators = {}
+    annual_records = 0
+    baseline_overlap = 0
+
+    for year in YEAR_BITS:
+        name = f"{year}.txt"
+        if name not in names:
+            errors.append(f"missing required entry: {name}")
+            annual_iterators[year] = iter(())
+        else:
+            annual_iterators[year] = iter_archive_lines(bundle, name)
+
+    def next_annual(year: int) -> str | None:
+        nonlocal annual_records, baseline_overlap
+        name = f"{year}.txt"
+        while True:
+            try:
+                raw = next(annual_iterators[year])
+            except StopIteration:
+                return None
+            hostname = normalize_official(raw)
+            if hostname is None:
+                errors.append(f"invalid hostname in {name}: {raw}")
+                continue
+            previous = annual_previous[year]
+            if previous is not None and hostname == previous:
+                errors.append(f"duplicate hostname in {name}: {hostname}")
+                continue
+            if previous is not None and hostname < previous:
+                errors.append(
+                    f"annual entries are not ordered in {name}: {hostname} after {previous}"
+                )
+                continue
+            annual_previous[year] = hostname
+            annual_records += 1
+            _increment_tld(annual_counts[year], hostname)
+            if (
+                baseline is not None
+                and baseline_has_rows
+                and baseline.year_mask(hostname) & YEAR_BITS[year]
+            ):
+                baseline_overlap += 1
+            return hostname
+
+    for year in YEAR_BITS:
+        annual_current[year] = next_annual(year)
+
+    missing_annual = 0
+
+    def assign_annual(year: int, bucket: str) -> None:
+        hostname = annual_current[year]
+        if hostname is None:
+            return
+        lane_records[bucket][year] += 1
+        _increment_tld(lane_counts[bucket][year], hostname)
+        annual_current[year] = next_annual(year)
+
+    evidence_records = 0
+    previous_evidence_key: tuple[str, int] | None = None
+    if "evidence.jsonl" not in names:
+        errors.append("missing required entry: evidence.jsonl")
+    else:
+        for line_number, raw in enumerate(
+            iter_archive_lines(bundle, "evidence.jsonl"),
+            1,
+        ):
+            try:
+                record = json.loads(raw)
+                if not isinstance(record, dict):
+                    raise ValueError("evidence row must be an object")
+                for field in _REQUIRED_EVIDENCE_FIELDS:
+                    if field not in record or not str(record[field]).strip():
+                        raise ValueError(f"missing evidence provenance: {field}")
+                capsule = EvidenceCapsule(
+                    hostname=str(record["hostname"]),
+                    year=int(record["year"]),
+                    provider=str(record["provider"]),
+                    temporal_semantics=str(record["temporal_semantics"]),
+                    evidence_timestamp=str(record["evidence_timestamp"]),
+                    source_locator=str(record["source_locator"]),
+                    payload_hash=str(record["payload_hash"]),
+                    policy_version=str(record["policy_version"]),
+                    evidence_type=str(record["evidence_type"]),
+                    source_id=str(record["source_id"]),
+                    original_url=str(record["original_url"]),
+                    record_locator=str(record["record_locator"]),
+                    extraction_method=str(record["extraction_method"]),
+                )
+            except (ValueError, KeyError, TypeError, json.JSONDecodeError) as exc:
+                errors.append(f"invalid evidence line {line_number}: {exc}")
+                continue
+
+            key = (capsule.hostname, capsule.year)
+            if previous_evidence_key is not None and key == previous_evidence_key:
+                errors.append(
+                    f"duplicate evidence host-year: {capsule.hostname}/{capsule.year}"
+                )
+                continue
+            if previous_evidence_key is not None and key < previous_evidence_key:
+                errors.append(
+                    "evidence entries are not ordered by (hostname, year): "
+                    f"{capsule.hostname}/{capsule.year} after "
+                    f"{previous_evidence_key[0]}/{previous_evidence_key[1]}"
+                )
+                continue
+            previous_evidence_key = key
+            evidence_records += 1
+
+            validation = validate_evidence_semantics(
+                capsule,
+                reviewed_contracts=reviewed_contracts,
+            )
+            if not validation.accepted_for_annual:
+                for error in validation.errors:
+                    errors.append(f"invalid evidence line {line_number}: {error}")
+
+            bucket = contribution_bucket(
+                classify_acquisition_lane(
                     capsule,
                     reviewed_contracts=reviewed_contracts,
                 )
             )
-            lane_sets[contribution_bucket(lane)][year].add(hostname)
-    except (OSError, ValueError, json.JSONDecodeError) as exc:
-        errors.append(f"cannot independently recompute EED: {exc}")
+            if capsule.year not in annual_current:
+                continue
+            while (
+                annual_current[capsule.year] is not None
+                and annual_current[capsule.year] < capsule.hostname
+            ):
+                missing_annual += 1
+                assign_annual(capsule.year, "other_restricted")
+            if annual_current[capsule.year] == capsule.hostname:
+                assign_annual(capsule.year, bucket)
+            else:
+                errors.append(
+                    f"evidence host-year is not present in annual output: "
+                    f"{capsule.hostname}/{capsule.year}"
+                )
+
+    for year in YEAR_BITS:
+        while annual_current[year] is not None:
+            missing_annual += 1
+            assign_annual(year, "other_restricted")
+    if missing_annual:
+        errors.append(f"annual records without evidence: {missing_annual}")
+    if baseline_overlap:
+        errors.append(
+            f"annual output overlaps target-year baseline: {baseline_overlap}"
+        )
 
     lane_contribution: dict[str, dict[str, object]] = {}
+    total_eed = _weighted_eed(annual_counts, weights)
     lane_sum = Decimal("0")
-    for bucket, values_by_year in lane_sets.items():
-        try:
-            eed = _eed_total(values_by_year, eed_model_path)
-        except (OSError, ValueError, json.JSONDecodeError):
-            eed = Decimal("0")
+    for bucket in lane_counts:
+        eed = _weighted_eed(lane_counts[bucket], weights)
         lane_sum += eed
         lane_contribution[bucket] = {
-            "novel_host_years": sum(len(values) for values in values_by_year.values()),
+            "novel_host_years": sum(lane_records[bucket].values()),
             "novel_eed": format(eed, "f"),
         }
     if lane_sum != total_eed:
@@ -265,15 +358,18 @@ def _recompute_from_bundle(
     else:
         growth = format_growth_rate(total_eed, baseline_eed)
 
-    return RecomputedSubmission(
+    result = RecomputedSubmission(
         ready=not errors,
         errors=tuple(errors),
-        annual_records=len(annual_pairs),
+        annual_records=annual_records,
         evidence_records=evidence_records,
         novel_eed=format(total_eed, "f"),
         growth_rate=growth,
         lane_contribution=lane_contribution,
     )
+    if baseline is not None:
+        baseline.close()
+    return result
 
 
 def recompute_submission_archive(
@@ -398,11 +494,11 @@ def verify_submission_archive(
                 errors.append("reviewed contract registry artifact is missing")
                 continue
             expected_hash = row.get("sha256")
-            actual_hash = hashlib.sha256(bundle.read(registry_name)).hexdigest()
+            actual_hash, actual_size = _archive_entry_digest(bundle, registry_name)
             if expected_hash != actual_hash:
                 errors.append("reviewed contract registry artifact hash mismatch")
             try:
-                if int(row.get("size", -1)) != len(bundle.read(registry_name)):
+                if int(row.get("size", -1)) != actual_size:
                     errors.append("reviewed contract registry artifact size mismatch")
             except (TypeError, ValueError):
                 errors.append("reviewed contract registry artifact size is invalid")
@@ -426,8 +522,10 @@ def verify_submission_archive(
         for name, expected_hash in manifest.get("entry_sha256", {}).items():
             if name not in names:
                 errors.append(f"manifest hash entry missing from archive: {name}")
-            elif hashlib.sha256(bundle.read(name)).hexdigest() != expected_hash:
-                errors.append(f"entry hash mismatch: {name}")
+            else:
+                actual_hash, _actual_size = _archive_entry_digest(bundle, name)
+                if actual_hash != expected_hash:
+                    errors.append(f"entry hash mismatch: {name}")
 
         for required in (
             "reports/eed.json",
@@ -529,25 +627,37 @@ def verify_submission_archive(
                 except (InvalidOperation, ValueError, TypeError, json.JSONDecodeError) as exc:
                     errors.append(f"invalid source contribution report: {exc}")
 
-        active_bytes = require("active_candidates.txt")
-        if active_bytes is not None:
-            annual_hostnames: set[str] = set()
-            for year in YEAR_BITS:
-                name = f"{year}.txt"
-                if name in names:
-                    annual_hostnames.update(
-                        value
-                        for raw in bundle.read(name).decode("utf-8", errors="replace").splitlines()
-                        if (value := normalize_official(raw)) is not None
-                    )
-            for raw in active_bytes.decode("utf-8", errors="replace").splitlines():
+        if "active_candidates.txt" not in names:
+            errors.append("missing required entry: active_candidates.txt")
+        else:
+            annual_iters = {
+                year: iter(_iter_normalized_annual_hosts(bundle, names, year))
+                for year in YEAR_BITS
+            }
+            annual_current = {
+                year: next(annual_iters[year], None) for year in YEAR_BITS
+            }
+            previous_active: str | None = None
+            for raw in iter_archive_lines(bundle, "active_candidates.txt"):
                 hostname = normalize_official(raw)
                 if hostname is None:
                     errors.append(f"invalid active candidate: {raw}")
                     continue
+                if previous_active is not None and hostname < previous_active:
+                    errors.append(
+                        "active candidates are not ordered: "
+                        f"{hostname} after {previous_active}"
+                    )
+                previous_active = hostname
                 active_candidates += 1
-                if hostname in annual_hostnames:
-                    errors.append(f"active candidate overlaps annual host: {hostname}")
+                for year in YEAR_BITS:
+                    while (
+                        annual_current[year] is not None
+                        and annual_current[year] < hostname
+                    ):
+                        annual_current[year] = next(annual_iters[year], None)
+                    if annual_current[year] == hostname:
+                        errors.append(f"active candidate overlaps annual host: {hostname}")
         scopes = manifest.get("active_candidate_scopes", [])
         if any("common_crawl" in str(scope).lower().replace("-", "_") for scope in scopes):
             errors.append("Common Crawl scope is present in active candidates")
