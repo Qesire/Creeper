@@ -26,8 +26,12 @@ class QueryFamily:
         for name, values in self.dimensions.items():
             if not isinstance(name, str) or not name:
                 raise ValueError("query-family dimension names must be non-empty")
-            if isinstance(values, (str, bytes)) or not isinstance(values, Iterable):
-                raise ValueError(f"dimension {name!r} must be finite")
+            if (
+                isinstance(values, (str, bytes))
+                or not isinstance(values, Iterable)
+                or not hasattr(values, "__len__")
+            ):
+                raise ValueError(f"dimension {name!r} must be a finite sized container")
             materialized = tuple(values)
             if not materialized:
                 raise ValueError(f"dimension {name!r} must not be empty")
