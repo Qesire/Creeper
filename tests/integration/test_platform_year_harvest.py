@@ -8,9 +8,15 @@ from urllib.parse import parse_qs
 
 import httpx
 
+from creeper.authority.baseline_index import BaselineIndex
+from creeper.authority.identity import (
+    baseline_authority_signature,
+    eed_model_authority_signature,
+)
 from creeper.evidence.platform_harvest import (
     PlatformHarvestState,
     PlatformYearHarvestWorker,
+    platform_authority_digest,
 )
 from creeper.evidence.platform_admission import (
     PlatformYearAdmission,
@@ -18,11 +24,40 @@ from creeper.evidence.platform_admission import (
     PlatformYearObservation,
 )
 from creeper.evidence.providers.async_cdx import AsyncWaybackCDXClient
+from creeper.runtime.readiness import IncrementalReadinessRuntime
+from creeper.source_discovery.models import SourceCandidate, SourceLevel
+from creeper.source_discovery.production_value import ProductionValueModel
+from creeper.source_discovery.registry import SourceDiscoveryRegistry
 from creeper.storage.control_store import ControlStore
 from creeper.storage.evidence_store import EvidenceStore
 
 
 class PlatformYearHarvestIntegrationTests(unittest.IsolatedAsyncioTestCase):
+    @staticmethod
+    def _authority_fixture(root: Path) -> tuple[Path, Path, str, str]:
+        model = root / "eed-model.json"
+        model.write_text(
+            json.dumps(
+                {
+                    "tld": ["com", "org", "net"],
+                    "lang": ["eng", "eng", "eng"],
+                    "perc_of_tld": ["50", "100", "75"],
+                }
+            ),
+            encoding="utf-8",
+        )
+        task_root = root / "baseline-task"
+        merged = task_root / "merged"
+        merged.mkdir(parents=True)
+        for year in range(1996, 2002):
+            (merged / f"{year}.txt").write_text("", encoding="utf-8")
+        (merged / "candidate_pool.txt").write_text("", encoding="utf-8")
+        baseline = root / "baseline.sqlite3"
+        BaselineIndex.build(task_root, baseline).close()
+        baseline_signature = baseline_authority_signature(baseline)
+        model_signature = eed_model_authority_signature(model)
+        return baseline, model, baseline_signature, model_signature
+
     async def test_three_page_harvest_survives_restart_and_completes_exact_set(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -279,6 +314,146 @@ class PlatformYearHarvestIntegrationTests(unittest.IsolatedAsyncioTestCase):
 
             await client.aclose()
             evidence.close()
+            control.close()
+
+    async def test_complete_platform_task_closes_final_source_reward(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            runtime_root = root / "runtime"
+            runtime_root.mkdir()
+            baseline, model, baseline_signature, model_signature = (
+                self._authority_fixture(root)
+            )
+            control = ControlStore(runtime_root / "control.sqlite3")
+            registry = SourceDiscoveryRegistry(control)
+            registry.set_scout_authority(
+                baseline_signature=baseline_signature,
+                model_signature=model_signature,
+            )
+            candidate = SourceCandidate(
+                canonical_entrypoint="https://archive.example/platform.jsonl",
+                source_family="BULK_ARTIFACT",
+                level=SourceLevel.SOURCE,
+                discovered_by="integration",
+                discovery_strategy="PLATFORM_FINAL_REWARD",
+                expected_volume=10,
+                temporal_semantics_prior=1.0,
+                enumerability_prior=1.0,
+                direct_evidence_prior=1.0,
+                confidence=1.0,
+            )
+            registry.register_proposal(candidate)
+            authority_digest = platform_authority_digest(
+                baseline_signature=baseline_signature,
+                model_signature=model_signature,
+            )
+
+            async def handler(request):
+                payload = [
+                    ["urlkey", "timestamp", "original", "statuscode"],
+                    [
+                        "com,example,a)/",
+                        "19970101000000",
+                        "http://a.example.com/",
+                        "200",
+                    ],
+                ]
+                return httpx.Response(
+                    200,
+                    content=json.dumps(payload).encode(),
+                    request=request,
+                )
+
+            client = AsyncWaybackCDXClient(
+                transport=httpx.MockTransport(handler),
+                max_retries=0,
+                limit=100,
+            )
+            template_hash = client.platform_year_request_template_hash(
+                "example.com",
+                1997,
+                policy_version="platform-v1",
+            )
+            task = PlatformYearAdmission(control).admit(
+                [
+                    PlatformYearObservation(
+                        provider="wayback",
+                        subject="example.com",
+                        target_year=1997,
+                        request_template_hash=template_hash,
+                        policy_version="platform-v1",
+                        source_key=candidate.source_key,
+                        reservoir_id="reservoir:platform",
+                        authority_digest=authority_digest,
+                    )
+                ]
+            ).tasks[0]
+            evidence = EvidenceStore(runtime_root / "evidence.sqlite3")
+            worker = PlatformYearHarvestWorker(
+                control_store=control,
+                evidence_store=evidence,
+                providers={"wayback": client},
+                owner="platform-final-reward",
+                claim_batch_size=1,
+                retry_base_seconds=0,
+            )
+            report = await worker.run_once()
+            self.assertEqual(report.complete, 1)
+            exposure = control.get_production_exposure(task.exposure_id)
+            self.assertIsNotNone(exposure)
+            assert exposure is not None
+            self.assertEqual(exposure.state.value, "READ_COMPLETE")
+            run = registry.get_source_run_outcome(
+                candidate.source_key,
+                reservoir_id="reservoir:platform",
+                lease_id=task.exposure_id,
+                baseline_signature=baseline_signature,
+                model_signature=model_signature,
+            )
+            self.assertIsNotNone(run)
+            assert run is not None
+            self.assertTrue(run.read_complete)
+            control.close()
+            evidence.close()
+            await client.aclose()
+
+            with IncrementalReadinessRuntime(
+                runtime_root,
+                baseline_index=baseline,
+                eed_model=model,
+                baseline_eed="10",
+            ) as readiness:
+                readiness.sync_until_current()
+
+            control = ControlStore(runtime_root / "control.sqlite3")
+            registry = SourceDiscoveryRegistry(control)
+            final_exposure = control.get_production_exposure(task.exposure_id)
+            self.assertIsNotNone(final_exposure)
+            assert final_exposure is not None
+            self.assertEqual(final_exposure.state.value, "FINAL_CLOSED")
+            self.assertGreater(final_exposure.final_accepted_eed, 0.0)
+            final_task = control.get_platform_year_harvest(task.harvest_id)
+            self.assertIsNotNone(final_task)
+            assert final_task is not None
+            self.assertEqual(final_task.terminal_reason, "finalized")
+            self.assertEqual(final_task.final_eed, final_exposure.final_accepted_eed)
+            final_run = registry.get_source_run_outcome(
+                candidate.source_key,
+                reservoir_id="reservoir:platform",
+                lease_id=task.exposure_id,
+                baseline_signature=baseline_signature,
+                model_signature=model_signature,
+            )
+            self.assertIsNotNone(final_run)
+            assert final_run is not None
+            self.assertTrue(final_run.closed)
+            estimate = ProductionValueModel(registry).estimate(
+                candidate,
+                baseline_signature=baseline_signature,
+                model_signature=model_signature,
+            )
+            self.assertEqual(estimate.closed_runs, 1)
+            self.assertEqual(estimate.zero_runs, 0)
             control.close()
 
 

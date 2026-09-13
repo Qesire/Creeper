@@ -3238,6 +3238,8 @@ class ControlStore:
     def ensure_platform_year_exposure(
         self,
         task: PlatformYearHarvestTask,
+        *,
+        authority: tuple[str, str] | None = None,
     ) -> ProductionExposure | None:
         """Create the task exposure once lineage has been admitted."""
 
@@ -3246,14 +3248,18 @@ class ControlStore:
         existing = self.get_production_exposure(task.exposure_id)
         if existing is not None:
             return existing
+        if authority is None:
+            # Compatibility for pre-authority fixtures and already-admitted
+            # tasks.  Production workers pass the real paired authority and
+            # therefore never use the task digest as either signature.
+            authority = (task.authority_digest, task.authority_digest)
         return self.begin_production_exposure(
             source_key=task.source_key,
             reservoir_id=task.reservoir_id,
             task_id=task.harvest_id,
             exposure_id=task.exposure_id,
             lane="platform_year",
-            baseline_signature=task.authority_digest,
-            model_signature=task.authority_digest,
+            authority=authority,
         )
 
     def record_platform_year_exposure_progress(
@@ -3343,6 +3349,46 @@ class ControlStore:
                 WHERE harvest_id = ?
                 """,
                 (float(final_eed), int(evidence_frontier), "finalized", float(self.clock()), harvest_id),
+            )
+        return True
+
+    def publish_platform_year_final(
+        self,
+        exposure_id: str,
+        *,
+        final_eed: float,
+        accepted_host_years: int,
+        evidence_frontier: int,
+    ) -> bool:
+        """Persist FINAL reward fields after readiness closes the exposure."""
+
+        if final_eed < 0 or accepted_host_years < 0 or evidence_frontier < 0:
+            raise ValueError("platform final counters must be non-negative")
+        exposure = self.get_production_exposure(exposure_id)
+        if exposure is None or exposure.state is not ProductionExposureState.FINAL_CLOSED:
+            return False
+        row = self.connection.execute(
+            "SELECT state FROM platform_year_harvests WHERE exposure_id = ?",
+            (exposure_id,),
+        ).fetchone()
+        if row is None or str(row["state"]) != PlatformHarvestState.COMPLETE.value:
+            return False
+        with self.connection:
+            self.connection.execute(
+                """
+                UPDATE platform_year_harvests
+                SET final_eed = ?, evidence_frontier = ?,
+                    terminal_reason = ?, updated_at = ?
+                WHERE exposure_id = ? AND state = ?
+                """,
+                (
+                    float(final_eed),
+                    int(evidence_frontier),
+                    "finalized",
+                    float(self.clock()),
+                    exposure_id,
+                    PlatformHarvestState.COMPLETE.value,
+                ),
             )
         return True
 

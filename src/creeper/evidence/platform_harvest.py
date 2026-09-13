@@ -112,6 +112,26 @@ def platform_year_exposure_id(
     return "platform-exposure:" + hashlib.sha256(task_id.encode("utf-8")).hexdigest()
 
 
+def platform_authority_digest(
+    *,
+    baseline_signature: str,
+    model_signature: str,
+) -> str:
+    """Return the durable identity for the paired platform authority."""
+
+    if not baseline_signature.strip() or not model_signature.strip():
+        raise ValueError("platform authority signatures are required")
+    payload = json.dumps(
+        {
+            "baseline_signature": baseline_signature,
+            "model_signature": model_signature,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
 def platform_year_request_template_hash(
     *,
     endpoint: str,
@@ -378,10 +398,39 @@ class PlatformYearHarvestWorker:
         if not tasks:
             return PlatformYearHarvestWorkerReport()
 
+        # Platform tasks admitted under the current authority get a source-run
+        # projection before proof is written.  Older tasks without a matching
+        # authority still retain their exposure and can be safely replayed, but
+        # they are intentionally not turned into a guessed FINAL reward.
+        from creeper.source_discovery.registry import SourceDiscoveryRegistry
+
+        source_registry = SourceDiscoveryRegistry(self.control_store)
+        authority = source_registry.current_scout_authority
+
         pages_committed = complete = partial = retryable = failed_invalid = 0
         inserted_capsules = rows_seen = provider_requests = bytes_seen = 0
         for task in tasks:
-            self.control_store.ensure_platform_year_exposure(task)
+            authority_matches = (
+                authority is not None
+                and platform_authority_digest(
+                    baseline_signature=authority[0],
+                    model_signature=authority[1],
+                )
+                == task.authority_digest
+            )
+            exposure = self.control_store.ensure_platform_year_exposure(
+                task,
+                authority=authority if authority_matches else None,
+            )
+            if authority_matches and exposure is not None:
+                source_registry.begin_source_run_for_exposure(
+                    task.source_key,
+                    reservoir_id=task.reservoir_id,
+                    lease_id=task.exposure_id,
+                    exposure_id=exposure.exposure_id,
+                    baseline_signature=authority[0],
+                    model_signature=authority[1],
+                )
             provider = self.providers.get(task.provider)
             if provider is None:
                 result = PlatformYearHarvestResult(
@@ -466,6 +515,21 @@ class PlatformYearHarvestWorker:
                     evidence_frontier=frontier,
                     accepted_host_years=stored.unique_host_years_seen,
                 )
+                if authority_matches and result.state is PlatformHarvestState.COMPLETE:
+                    # A platform page has no source-file read phase.  Mark only
+                    # the read gate here; readiness still owns the evidence
+                    # frontier, FINAL EED, and terminal publication.
+                    source_registry.record_source_run_read(
+                        task.source_key,
+                        reservoir_id=task.reservoir_id,
+                        lease_id=task.exposure_id,
+                        baseline_signature=authority[0],
+                        model_signature=authority[1],
+                        source_records=stored.rows_seen,
+                        bytes_read=0,
+                        source_requests=0,
+                        read_complete=True,
+                    )
 
             if result.state in {
                 PlatformHarvestState.PARTIAL,

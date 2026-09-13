@@ -1046,10 +1046,62 @@ class IncrementalReadinessRuntime:
         if control is None:
             return False, 0, 0, 0, 0, 0.0
 
+        exposure = (
+            None
+            if run.exposure_id is None
+            else control.get_production_exposure(run.exposure_id)
+        )
+        if exposure is not None and exposure.lane == "platform_year":
+            # Platform enumeration has no ordinary WorkLease or evidence task
+            # rows.  Its durable terminal boundary is the platform harvest
+            # task, while proof completeness is the EvidenceStore provenance
+            # frontier committed before that task became COMPLETE.
+            task = control.connection.execute(
+                """
+                SELECT state, requests, elapsed_seconds
+                FROM platform_year_harvests
+                WHERE harvest_id = ? AND exposure_id = ?
+                """,
+                (exposure.task_id, run.exposure_id),
+            ).fetchone()
+            lease_terminal = (
+                task is not None and str(task["state"]) == "COMPLETE"
+            )
+            provenance = self.evidence.connection.execute(
+                """
+                SELECT COUNT(*) AS n
+                FROM (
+                    SELECT DISTINCT hostname, year
+                    FROM evidence_capsule_task_provenance
+                    WHERE task_kind = 'platform_year'
+                      AND source_key = ?
+                      AND reservoir_id = ?
+                      AND lease_id = ?
+                )
+                """,
+                (run.source_key, run.reservoir_id, run.exposure_id),
+            ).fetchone()
+            evidence_count = int(provenance["n"] or 0)
+            requests = max(
+                int(exposure.provider_requests),
+                0 if task is None else int(task["requests"] or 0),
+            )
+            elapsed = max(
+                float(exposure.provider_elapsed_seconds),
+                0.0 if task is None else float(task["elapsed_seconds"] or 0.0),
+            )
+            return (
+                lease_terminal,
+                evidence_count,
+                evidence_count,
+                evidence_count,
+                requests,
+                elapsed,
+            )
+
         lease_identity = run.lease_id
-        if run.exposure_id is not None:
-            exposure = control.get_production_exposure(run.exposure_id)
-            if exposure is not None and exposure.task_id:
+        if exposure is not None:
+            if exposure.task_id:
                 # Historical-region exposures use exposure_id as the
                 # source-run proof identity, while task_id is the separate
                 # durable reservoir ownership fence.

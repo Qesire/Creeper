@@ -995,6 +995,73 @@ class SourceDiscoveryRegistry:
         assert row is not None
         return row
 
+    def begin_source_run_for_exposure(
+        self,
+        source_key: str,
+        *,
+        reservoir_id: str,
+        lease_id: str,
+        exposure_id: str,
+        baseline_signature: str,
+        model_signature: str,
+        read_started: float | None = None,
+    ) -> SourceRunOutcome:
+        """Project a non-sequential production exposure into source learning.
+
+        Platform and historical lanes own their work identity outside the
+        ordinary sequential WorkLease.  They still need the same durable
+        source-run row so FINAL readiness can publish one authority-scoped
+        outcome for ProductionValueModel.
+        """
+
+        if self.get_candidate(source_key) is None:
+            raise KeyError(f"unknown source: {source_key}")
+        exposure = self.control_store.get_production_exposure(exposure_id)
+        if exposure is None:
+            raise KeyError(f"unknown production exposure: {exposure_id}")
+        if (
+            exposure.source_key != source_key
+            or exposure.reservoir_id != reservoir_id
+            or exposure.authority != (baseline_signature, model_signature)
+        ):
+            raise ValueError("production exposure/source-run identity mismatch")
+        if not lease_id.strip():
+            raise ValueError("source-run lease identity is required")
+        now = float(self.clock())
+        started = None if read_started is None else float(read_started)
+        with self.connection:
+            self.connection.execute(
+                """
+                INSERT OR IGNORE INTO source_run_outcomes(
+                    source_key, reservoir_id, lease_id, exposure_id,
+                    baseline_signature, model_signature,
+                    read_started, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    source_key,
+                    reservoir_id,
+                    lease_id,
+                    exposure_id,
+                    baseline_signature,
+                    model_signature,
+                    started,
+                    now,
+                    now,
+                ),
+            )
+        row = self.get_source_run_outcome(
+            source_key,
+            reservoir_id=reservoir_id,
+            lease_id=lease_id,
+            baseline_signature=baseline_signature,
+            model_signature=model_signature,
+        )
+        assert row is not None
+        if row.exposure_id != exposure_id:
+            raise ValueError("source-run exposure identity mismatch")
+        return row
+
     def get_source_run_outcome(
         self,
         source_key: str,
@@ -1381,12 +1448,22 @@ class SourceDiscoveryRegistry:
                 return False
             if run.evidence_tasks_terminal != run.evidence_tasks_created:
                 return False
+            exposure = self.control_store.get_production_exposure(run.exposure_id)
+            if exposure is None:
+                return False
             if not self.control_store.finalize_production_exposure(
                 run.exposure_id,
                 final_accepted_eed=run.final_accepted_eed,
                 accepted_host_years=run.accepted_host_years,
                 evidence_frontier=run.max_evidence_sequence,
                 authority=authority,
+            ):
+                return False
+            if exposure.lane == "platform_year" and not self.control_store.publish_platform_year_final(
+                run.exposure_id,
+                final_eed=run.final_accepted_eed,
+                accepted_host_years=run.accepted_host_years,
+                evidence_frontier=run.max_evidence_sequence,
             ):
                 return False
 
