@@ -22,6 +22,7 @@ from creeper.source_research.agent.compiler import (
 from creeper.source_research.agent.protocol import (
     ContractFamilyProposal,
     ExplorationRegionProposal,
+    ProposalEnvelope,
     ProposalType,
     UnifiedLLMTask,
     stable_identity,
@@ -102,6 +103,7 @@ class CompiledScoutPlan:
     state: RegionState = RegionState.VALIDATED
     context_hash: str = ""
     created_by_episode_id: str = ""
+    purpose: str = ""
 
     def as_region(self) -> dict[str, Any]:
         return {
@@ -110,6 +112,7 @@ class CompiledScoutPlan:
             "reuse_key": self.reuse_key,
             "source": self.root,
             "surface_kind": self.surface_kind.value,
+            "purpose": self.purpose,
             "root": self.root,
             "query_family": self.query_family,
             "enumerator_spec": self.enumerator_spec,
@@ -193,6 +196,20 @@ class ResearchCompiler:
         except (UnifiedCompilerError, ValueError) as exc:
             raise ResearchCompilerError(str(exc)) from exc
 
+        return self.compile_execution_envelope(
+            envelope,
+            episode_id=episode_id,
+        )
+
+    def compile_execution_envelope(
+        self,
+        envelope: ProposalEnvelope,
+        *,
+        episode_id: str = "",
+    ) -> tuple[tuple[CompiledScoutPlan, ...], tuple[CompiledContractPlan, ...]]:
+        """Validate an already schema-compiled L6 envelope for L1/L3 commit."""
+        if not isinstance(envelope, ProposalEnvelope):
+            raise ResearchCompilerError("expected a ProposalEnvelope")
         regions: list[CompiledScoutPlan] = []
         contracts: list[CompiledContractPlan] = []
         for proposal in envelope.proposals:
@@ -365,6 +382,7 @@ class ResearchCompiler:
             validation=dict(proposal.validation),
             context_hash=context_hash,
             created_by_episode_id=episode_id,
+            purpose=proposal.purpose,
         )
 
     def _verified_fanout(
