@@ -540,13 +540,35 @@ class ResearchRegistry:
         if not source_key:
             raise ValueError("source_key is required")
         with self.connection:
+            # Binding is intentionally two-phase. Research can identify the
+            # durable source before production creates an exposure; later the
+            # same source may fill the still-empty exposure exactly once.
+            # Neither source identity nor a non-empty exposure may be rebound.
             changed = self.connection.execute(
                 """
                 UPDATE research_artifact_lineage
-                SET source_key=?, source_exposure_id=?
-                WHERE artifact_id=? AND source_key=''
+                SET source_key = CASE
+                        WHEN source_key='' THEN ? ELSE source_key
+                    END,
+                    source_exposure_id = CASE
+                        WHEN source_exposure_id='' THEN ? ELSE source_exposure_id
+                    END
+                WHERE artifact_id=?
+                  AND (source_key='' OR source_key=?)
+                  AND (
+                      source_exposure_id=''
+                      OR source_exposure_id=?
+                      OR ?=''
+                  )
                 """,
-                (source_key, source_exposure_id, artifact_id),
+                (
+                    source_key,
+                    source_exposure_id,
+                    artifact_id,
+                    source_key,
+                    source_exposure_id,
+                    source_exposure_id,
+                ),
             ).rowcount
         return int(changed)
 
