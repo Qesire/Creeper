@@ -165,6 +165,31 @@ class UnifiedCompilerTests(unittest.TestCase):
                 task_type=UnifiedLLMTask.DISCOVER_NEW_SOURCE,
             )
 
+    def test_nested_runtime_and_authority_state_is_rejected(self):
+        for field in ("cursor", "hits", "evidence", "submission_authority"):
+            payload = region_payload()
+            payload["proposals"][0]["validation"] = {field: "forbidden"}
+            with self.subTest(field=field):
+                with self.assertRaises(UnifiedCompilerError):
+                    UnifiedResearchCompiler().compile(
+                        payload,
+                        task_type=UnifiedLLMTask.DISCOVER_NEW_SOURCE,
+                    )
+
+    def test_url_list_is_rejected_in_reusable_region(self):
+        payload = region_payload()
+        payload["proposals"][0]["query_family"] = {
+            "urls": [
+                "https://example.test/a",
+                "https://example.test/b",
+            ]
+        }
+        with self.assertRaisesRegex(UnifiedCompilerError, "URL list"):
+            UnifiedResearchCompiler().compile(
+                payload,
+                task_type=UnifiedLLMTask.DISCOVER_NEW_SOURCE,
+            )
+
     def test_duplicate_reuse_identity_is_rejected(self):
         payload = region_payload()
         second = dict(payload["proposals"][0])
@@ -213,6 +238,30 @@ class UnifiedCompilerTests(unittest.TestCase):
             UnifiedResearchCompiler().compile(
                 payload,
                 task_type=UnifiedLLMTask.COMPILE_ROOT_QUERY_PROGRAM,
+                context=research_context(),
+            )
+
+    def test_common_crawl_root_is_rejected(self):
+        with self.assertRaisesRegex(UnifiedCompilerError, "Common Crawl"):
+            UnifiedResearchCompiler().compile(
+                {
+                    "query": "propose a reusable root",
+                    "proposals": [
+                        {
+                            "type": "RootSurfaceProposal",
+                            "proposal_id": "root-1",
+                            "kind": "API",
+                            "entrypoint": "https://index.commoncrawl.org/",
+                            "capabilities": ["search", "enumerate"],
+                            "rationale": "large corpus",
+                            "hard_bounds": {"max_requests": 10},
+                            "stop_conditions": ["budget exhausted"],
+                            "reuse_key": "commoncrawl-index",
+                            "confidence": 0.9,
+                        }
+                    ],
+                },
+                task_type=UnifiedLLMTask.PROPOSE_NEW_ROOT,
                 context=research_context(),
             )
 
