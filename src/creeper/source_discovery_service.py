@@ -201,6 +201,13 @@ def _positive_int(value: Any, *, name: str) -> int:
     return value
 
 
+def _min_int(value: Any, *, name: str, minimum: int) -> int:
+    value = _nonnegative_int(value, name=name)
+    if value < minimum:
+        raise ValueError(f"{name} must be at least {minimum}")
+    return value
+
+
 def _nonnegative_float(value: Any, *, name: str) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
         raise ValueError(f"{name} must be a non-negative number")
@@ -291,13 +298,15 @@ def load_source_discovery_config(config_path: Path) -> SourceDiscoveryServiceCon
             coordinator_raw.get("research_ready_minutes_threshold", 30.0),
             name="coordinator.research_ready_minutes_threshold",
         ),
-        research_stagnation_min_closed_runs=_positive_int(
+        research_stagnation_min_closed_runs=_min_int(
             coordinator_raw.get("research_stagnation_min_closed_runs", 3),
             name="coordinator.research_stagnation_min_closed_runs",
+            minimum=2,
         ),
-        research_stagnation_zero_tail=_positive_int(
+        research_stagnation_zero_tail=_min_int(
             coordinator_raw.get("research_stagnation_zero_tail", 3),
             name="coordinator.research_stagnation_zero_tail",
+            minimum=2,
         ),
         research_stagnation_yield_fraction=_positive_unit_float(
             coordinator_raw.get("research_stagnation_yield_fraction", 0.25),
