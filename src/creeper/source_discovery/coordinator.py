@@ -680,6 +680,41 @@ class SourceDiscoveryCoordinator:
         self._research_context_failures.pop(directive.context_key, None)
         if self.research_result_committer is not None and outcome.value is not None:
             self.research_result_committer(directive, outcome.value, elapsed)
+        elif isinstance(outcome.value, SearchBatch):
+            # Transitional compatibility path for the pre-L6 command-agent
+            # executor.  The integrated L6 adapter should instead provide a
+            # result committer that validates proposal envelopes parent-side.
+            task_value = directive.task_type
+            try:
+                from creeper.source_discovery.manager import (
+                    SearchDirectiveKind,
+                    SourceIntelligenceTask,
+                )
+
+                task_type = SourceIntelligenceTask(task_value)
+                kind = {
+                    "DISCOVER_NEW_SOURCE": SearchDirectiveKind.DISCOVER_NEW_FAMILY,
+                    "EXPLOIT_SUCCESS_PATTERN": SearchDirectiveKind.EXPLOIT_SOURCE_FAMILY,
+                    "INTERPRET_STRUCTURE": SearchDirectiveKind.INTERPRET_STRUCTURE,
+                    "INTERPRET_EVIDENCE_CONTRACT": SearchDirectiveKind.INTERPRET_STRUCTURE,
+                    "RECOVER_STAGNATION": SearchDirectiveKind.RECOVER_STAGNATION,
+                }[task_value]
+                legacy = SearchDirective(
+                    kind=kind,
+                    strategy=directive.strategy,
+                    desired_candidates=max(1, len(outcome.value.candidates)),
+                    subject=directive.subject,
+                    reason=directive.reason,
+                    task_type=task_type,
+                )
+                self._commit_searches(
+                    (legacy,),
+                    [_Outcome(value=outcome.value, elapsed_seconds=elapsed)],
+                    counts,
+                )
+            except (KeyError, ValueError):
+                counts["research_failures"] += 1
+                return
         counts["research_completed"] += 1
 
     async def _run_regions(
@@ -785,6 +820,31 @@ class SourceDiscoveryCoordinator:
         """Run one finite cycle; slow research is always off the hot path."""
         with _coordinator_lock(self.lock_path):
             counts: dict[str, int | bool | float] = {
+                "recovered_scouts": 0,
+                "production_exhausted": 0,
+                "suppressions_pruned": 0,
+                "saturated_origins": 0,
+                "saturation_updates": 0,
+                "usable_cold_count": 0,
+                "effective_cold_count": 0,
+                "search_directives_planned": 0,
+                "activated": 0,
+                "triaged_to_scout": 0,
+                "triaged_hold": 0,
+                "triaged_rejected": 0,
+                "triage_failures": 0,
+                "scouted_warm": 0,
+                "scouted_hold": 0,
+                "scouted_rejected": 0,
+                "scout_failures": 0,
+                "scout_children_registered": 0,
+                "scout_edges_added": 0,
+                "scout_children_dropped": 0,
+                "search_episodes": 0,
+                "search_candidates_registered": 0,
+                "search_candidates_dropped": 0,
+                "search_failures": 0,
+                "search_backoff_skipped": 0,
                 "regions_started": 0,
                 "regions_completed": 0,
                 "regions_exhausted": 0,
@@ -832,23 +892,7 @@ class SourceDiscoveryCoordinator:
                 "usable_cold_count": plan.cold_count,
                 "effective_cold_count": plan.effective_cold_count,
                 "search_directives_planned": len(plan.search_directives),
-                "activated": 0,
-                "triaged_to_scout": 0,
-                "triaged_hold": 0,
-                "triaged_rejected": 0,
-                "triage_failures": 0,
-                "scouted_warm": 0,
-                "scouted_hold": 0,
-                "scouted_rejected": 0,
-                "scout_failures": 0,
-                "scout_children_registered": 0,
-                "scout_edges_added": 0,
-                "scout_children_dropped": 0,
-                "search_episodes": 0,
-                "search_candidates_registered": 0,
-                "search_candidates_dropped": 0,
-                "search_failures": 0,
-                "search_backoff_skipped": search_backoff_skipped,
+                "search_backoff_skipped": counts["search_backoff_skipped"] + search_backoff_skipped,
             })
 
             for source_key in plan.activate_source_keys:
