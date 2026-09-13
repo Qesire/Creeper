@@ -213,6 +213,7 @@ class UnifiedCompilerRequest:
         return {
             "contract": self.contract,
             "prompt_version": self.prompt_version,
+            "call_identity": self.call_identity,
             "execution": {
                 "authority": "proposal_only",
                 "mode": "RESEARCH_COMPILER",
