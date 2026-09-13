@@ -11,10 +11,14 @@ from pathlib import Path
 import signal
 from threading import Event
 
+from creeper.records.candidates import CandidateStatus
 from creeper.runtime.readiness import (
     IncrementalReadinessReport,
     IncrementalReadinessRuntime,
 )
+from creeper.source_discovery.production_value import ProductionValueModel
+from creeper.source_discovery.registry import SourceDiscoveryRegistry
+from creeper.storage.telemetry_store import RuntimeTelemetryStore
 
 
 def _write_marker(
@@ -64,6 +68,102 @@ def _publish(
     )
 
 
+def _publish_runtime_observability(
+    runtime: IncrementalReadinessRuntime,
+    report: IncrementalReadinessReport,
+    telemetry: RuntimeTelemetryStore,
+    runtime_data_root: Path,
+) -> None:
+    contribution = report.source_contribution or {}
+    direct = contribution.get("direct_annual", {})
+    verified = contribution.get("verified_candidate", {})
+    restricted = contribution.get("other_restricted", {})
+    direct_eed = float(direct.get("novel_eed", 0) or 0)
+    verified_eed = float(verified.get("novel_eed", 0) or 0)
+    restricted_eed = float(restricted.get("novel_eed", 0) or 0)
+    total_eed = float(report.novel_eed)
+
+    gauges: dict[str, int | float] = {
+        "readiness_cursor_lag": max(
+            0,
+            int(report.latest_evidence_sequence) - int(report.evidence_cursor),
+        ),
+        "candidate_active": runtime.candidates.count(
+            CandidateStatus.ACTIVE_CANDIDATE
+        ),
+        "candidate_resolved": runtime.candidates.count(
+            CandidateStatus.ANNUAL_EVIDENCE_OBTAINED
+        ),
+        "candidate_unparsed": runtime.candidates.unparsed_count(),
+        "direct_annual_eed": direct_eed,
+        "verified_candidate_eed": verified_eed,
+        "other_restricted_eed": restricted_eed,
+        "direct_fraction": (
+            direct_eed / total_eed if total_eed > 0 else 0.0
+        ),
+    }
+
+    production_rows: list[dict[str, object]] = []
+    if runtime.control is not None:
+        registry = SourceDiscoveryRegistry(runtime.control)
+        outcomes = registry.list_source_run_outcomes(
+            baseline_signature=report.baseline_signature,
+            model_signature=report.model_signature,
+            closed_only=True,
+        )
+        gauges["closed_source_runs"] = len(outcomes)
+        gauges["zero_final_source_runs"] = sum(
+            1 for outcome in outcomes if outcome.final_accepted_eed <= 0.0
+        )
+
+        value_model = ProductionValueModel(registry)
+        for candidate in registry.list_candidates():
+            estimate = value_model.estimate(
+                candidate,
+                baseline_signature=report.baseline_signature,
+                model_signature=report.model_signature,
+            )
+            if estimate.closed_runs < 1:
+                continue
+            production_rows.append(
+                {
+                    "source_key": candidate.source_key,
+                    "state": candidate.state.value,
+                    "score": estimate.score,
+                    "expected_final_eed": estimate.expected_final_eed,
+                    "expected_cost": estimate.expected_cost,
+                    "recent_marginal_eed_per_second": (
+                        estimate.recent_marginal_eed_per_second
+                    ),
+                    "recent_marginal_eed_per_request": (
+                        estimate.recent_marginal_eed_per_request
+                    ),
+                    "closed_runs": estimate.closed_runs,
+                    "zero_runs": estimate.zero_runs,
+                }
+            )
+    else:
+        gauges["closed_source_runs"] = 0
+        gauges["zero_final_source_runs"] = 0
+
+    telemetry.set_gauges(gauges)
+    production_rows.sort(
+        key=lambda row: (
+            -float(row["recent_marginal_eed_per_second"]),
+            -float(row["score"]),
+            str(row["source_key"]),
+        )
+    )
+    IncrementalReadinessRuntime.write_payload_atomic(
+        {
+            "baseline_signature": report.baseline_signature,
+            "model_signature": report.model_signature,
+            "top_final_marginal_sources": production_rows[:20],
+        },
+        runtime_data_root / "readiness" / "production_value.json",
+    )
+
+
 def run_service(
     runtime_data_root: Path,
     *,
@@ -86,6 +186,7 @@ def run_service(
 
     root = Path(runtime_data_root)
     root.mkdir(parents=True, exist_ok=True)
+    telemetry = RuntimeTelemetryStore(root / "telemetry.sqlite3")
     lock_path = root / "locks" / "readiness-worker.lock"
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     lock_fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
@@ -113,6 +214,12 @@ def run_service(
                     max_batches=max_batches_per_cycle
                 )
                 _publish(runtime, report, root)
+                _publish_runtime_observability(
+                    runtime,
+                    report,
+                    telemetry,
+                    root,
+                )
                 signature = (
                     report.evidence_cursor,
                     report.latest_evidence_sequence,
@@ -140,6 +247,7 @@ def run_service(
                     continue
                 stop.wait(poll_seconds)
     finally:
+        telemetry.close()
         try:
             fcntl.flock(lock_fd, fcntl.LOCK_UN)
         finally:
