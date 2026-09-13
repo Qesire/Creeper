@@ -150,6 +150,20 @@ class AdaptivePolicyTests(unittest.TestCase):
         self.assertTrue(replay.matches)
         self.assertEqual(replay.absolute_error, 0.0)
 
+    def test_closed_zero_final_never_falls_back_to_proxy(self):
+        class Arm:
+            arm_id = "root:a"
+            pulls = 3
+            proxy_reward = 9.0
+            final_reward = 0.0
+            final_observation_count = 1
+            decayed_reward = 0.0
+            updated_at = 0.0
+
+        stats = BanditStats.from_object(Arm())
+        self.assertTrue(stats.has_final)
+        self.assertEqual(stats.authoritative_reward, 0.0)
+
     def test_drift_and_decay_are_derived_views(self):
         source = BanditStats(
             "root:a", pulls=2, final_reward=8.0, decayed_reward=8.0, updated_at=0.0
