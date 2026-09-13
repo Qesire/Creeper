@@ -741,9 +741,8 @@ class SourceDiscoveryCoordinator:
                 continue
             if bool(getattr(value, "terminal", False)):
                 counts["regions_exhausted"] += 1
-            counts["region_candidates_registered"] += int(
-                getattr(value, "new_candidates", 0)
-            )
+            candidates = getattr(value, "candidates", ())
+            counts["region_candidates_registered"] += len(candidates)
 
     def _current_research_snapshot(self) -> ResearchTriggerSnapshot | None:
         if self.research_snapshot_provider is None:
