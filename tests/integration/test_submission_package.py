@@ -177,5 +177,95 @@ class SubmissionPackageTests(unittest.TestCase):
         self.assertIn("novel_eed must match the exact EED report", report.reasons)
 
 
+    def test_precheck_rejects_capture_timestamp_year_mismatch(self):
+        baseline_hashes = {
+            str(year): "b" * 64 for year in range(1996, 2002)
+        }
+        authority = _authority_fields(
+            "merged260912-3",
+            baseline_hashes,
+            baseline_eed="10",
+        )
+        capsule = EvidenceCapsule(
+            "new.example",
+            1997,
+            "wayback",
+            "capture_timestamp_year",
+            "20000101000000",
+            "http://new.example/",
+            "a" * 64,
+            "cdx-v1",
+            evidence_type="exact_host_cdx_capture",
+        )
+        snapshot = SubmissionSnapshot(
+            submission_snapshot_id="semantic-year-mismatch",
+            created_at="2026-09-13T00:00:00+00:00",
+            baseline_id="merged260912-3",
+            baseline_hashes=baseline_hashes,
+            normalizer_version="normalizer-v1",
+            evidence_policy_version="evidence-v1",
+            eed_policy_version="eed-v1",
+            novel_records=(capsule,),
+            novel_eed="1",
+            growth_rate="0.1",
+            evidence_coverage="1",
+            invalid_count=0,
+            overlap_count=0,
+            source_report_set=("source.json",),
+            cdx_audit_set=("audit.json",),
+            code_revision="e" * 64,
+            eed_report={"equivalent_english_domains": "1"},
+            **authority,
+        )
+
+        report = precheck_submission(snapshot)
+
+        self.assertFalse(report.ready)
+        self.assertTrue(
+            any(
+                "evidence timestamp year does not match capsule target year"
+                in reason
+                for reason in report.reasons
+            )
+        )
+
+    def test_precheck_rejects_contradictory_growth_rate(self):
+        baseline_hashes = {
+            str(year): "b" * 64 for year in range(1996, 2002)
+        }
+        authority = _authority_fields(
+            "merged260912-3",
+            baseline_hashes,
+            baseline_eed="10",
+        )
+        snapshot = SubmissionSnapshot(
+            submission_snapshot_id="growth-mismatch",
+            created_at="2026-09-13T00:00:00+00:00",
+            baseline_id="merged260912-3",
+            baseline_hashes=baseline_hashes,
+            normalizer_version="normalizer-v1",
+            evidence_policy_version="evidence-v1",
+            eed_policy_version="eed-v1",
+            novel_records=(),
+            novel_eed="1",
+            growth_rate="0.99",
+            evidence_coverage="1",
+            invalid_count=0,
+            overlap_count=0,
+            source_report_set=("source.json",),
+            cdx_audit_set=("audit.json",),
+            code_revision="f" * 64,
+            eed_report={"equivalent_english_domains": "1"},
+            **authority,
+        )
+
+        report = precheck_submission(snapshot)
+
+        self.assertFalse(report.ready)
+        self.assertIn(
+            "growth_rate must equal novel_eed / baseline_eed exactly",
+            report.reasons,
+        )
+
 if __name__ == "__main__":
     unittest.main()
