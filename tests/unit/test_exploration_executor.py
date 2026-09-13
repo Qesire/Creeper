@@ -87,7 +87,7 @@ class ExplorationExecutorTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_common_crawl_is_rejected_by_parent_predicate(self) -> None:
         plan = self.plan(
-            urls=("https://data.example/cc.cdxj",),
+            urls=("https://data.commoncrawl.org/cc.cdxj",),
             artifact_predicate=lambda url: "commoncrawl" not in url,
         )
         result = await ExplorationExecutor().execute(plan)
