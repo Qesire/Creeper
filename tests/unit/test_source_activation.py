@@ -656,6 +656,47 @@ class SourceActivationCompilerTests(unittest.TestCase):
             finally:
                 control.close()
 
+    def test_compile_active_isolates_bad_source_and_promotes_good_source(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            control = ControlStore(Path(tmp) / "control.sqlite3")
+            try:
+                bad = _candidate("https://archive.example/bad.html", state=SourceState.WARM)
+                good = _candidate("https://archive.example/good.warc", state=SourceState.WARM)
+                registry = SourceDiscoveryRegistry(control)
+                self._registry(control, bad)
+                self._registry(control, good)
+                registry.begin_activation(bad.source_key)
+                registry.begin_activation(good.source_key)
+
+                specs = SourceActivationCompiler(control, registry=registry).compile_active()
+
+                self.assertEqual([spec.source_key for spec in specs], [good.source_key])
+                self.assertEqual(registry.get_candidate(bad.source_key).state, SourceState.REJECTED)
+                self.assertIn("unsupported adapter", registry.get_candidate(bad.source_key).state_reason)
+                self.assertEqual(registry.get_candidate(good.source_key).state, SourceState.ACTIVE)
+            finally:
+                control.close()
+
+    def test_warm_candidate_enters_activating_before_compiler_promotes_it(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            control = ControlStore(Path(tmp) / "control.sqlite3")
+            try:
+                candidate = _candidate(
+                    "https://archive.example/warm.warc",
+                    state=SourceState.WARM,
+                )
+                registry = self._registry(control, candidate)
+                activating = registry.begin_activation(candidate.source_key)
+                self.assertEqual(activating.state, SourceState.ACTIVATING)
+                self.assertEqual(registry.get_candidate(candidate.source_key).state, SourceState.ACTIVATING)
+
+                specs = SourceActivationCompiler(control, registry=registry).compile_active()
+
+                self.assertEqual(len(specs), 1)
+                self.assertEqual(registry.get_candidate(candidate.source_key).state, SourceState.ACTIVE)
+            finally:
+                control.close()
+
 
 if __name__ == "__main__":
     unittest.main()

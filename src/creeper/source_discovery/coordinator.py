@@ -268,6 +268,10 @@ class SourceDiscoveryCoordinator:
             recovered += 1
         return recovered
 
+    def _recover_stranded_activations(self) -> int:
+        recover = getattr(self.registry, "recover_stranded_activations", None)
+        return int(recover()) if callable(recover) else 0
+
     async def _bounded_batch(self, items, executor, parallelism: int):
         semaphore = asyncio.Semaphore(parallelism)
 
@@ -602,6 +606,7 @@ class SourceDiscoveryCoordinator:
             recovered = 0
             if not self._startup_recovered:
                 recovered = self._recover_stranded_scouts()
+                self._recover_stranded_activations()
                 self._startup_recovered = True
 
             production_exhausted = self.registry.reconcile_exhausted_activations()
@@ -659,7 +664,7 @@ class SourceDiscoveryCoordinator:
             for source_key in plan.activate_source_keys:
                 candidate = self.registry.get_candidate(source_key)
                 if candidate is not None and candidate.state is SourceState.WARM:
-                    self.registry.transition(source_key, SourceState.ACTIVE)
+                    self.registry.begin_activation(source_key)
                     counts["activated"] += 1
 
             triage_candidates = [

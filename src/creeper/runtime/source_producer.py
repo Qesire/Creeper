@@ -288,6 +288,9 @@ class SourceProducer:
             ttl_seconds=max(60.0, self.reservation_grace_seconds),
             max_needs=256,
         )
+        recover_source_runs = getattr(self.source_registry, "recover_source_runs", None)
+        if callable(recover_source_runs):
+            recover_source_runs()
         granted = self._grant_fresh_lease()
         if granted is None:
             # A READY durable source with no grant means admission/backpressure
@@ -805,6 +808,20 @@ class SourceProducer:
         except BaseException:
             if not source_finalized:
                 self.control_store.abort_lease(running)
+            abort_source_run = getattr(self.source_registry, "abort_source_run", None)
+            if (
+                callable(abort_source_run)
+                and candidate.source_key is not None
+                and run_authority is not None
+            ):
+                abort_source_run(
+                    candidate.source_key,
+                    reservoir_id=candidate.reservoir_id,
+                    lease_id=running.lease_id,
+                    baseline_signature=run_authority[0],
+                    model_signature=run_authority[1],
+                    reason="source producer failed after source-run began",
+                )
             self.admission.release(reservation)
             raise
 

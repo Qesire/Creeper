@@ -39,6 +39,10 @@ from creeper.source_discovery.registry import SourceDiscoveryRegistry
 class SourceActivationError(ValueError):
     """Raised when a discovered source cannot be safely activated."""
 
+    def __init__(self, message: str, *, permanent: bool = False) -> None:
+        super().__init__(message)
+        self.permanent = bool(permanent)
+
 
 @dataclass(frozen=True)
 class ProductionSourceSpec:
@@ -72,7 +76,8 @@ def _adapter_kind(entrypoint: str) -> tuple[str, str]:
     if name.endswith(structured):
         return "structured", "structured_records"
     raise SourceActivationError(
-        f"unsupported adapter for discovered source: {entrypoint}"
+        f"unsupported adapter for discovered source: {entrypoint}",
+        permanent=True,
     )
 
 
@@ -97,13 +102,13 @@ class SourceActivationCompiler:
         self._verified_reviewed_adapters: set[str] = set()
 
     def compile(self, candidate: SourceCandidate) -> ProductionSourceSpec:
-        if candidate.state is not SourceState.ACTIVE:
-            raise SourceActivationError("only ACTIVE candidates can be activated")
+        if candidate.state not in {SourceState.ACTIVE, SourceState.ACTIVATING}:
+            raise SourceActivationError("only ACTIVE or ACTIVATING candidates can be activated")
         stored = self.registry.get_candidate(candidate.source_key)
         if stored is None:
             raise SourceActivationError("candidate is not registered in discovery registry")
-        if stored.state is not SourceState.ACTIVE:
-            raise SourceActivationError("only ACTIVE candidates can be activated")
+        if stored.state not in {SourceState.ACTIVE, SourceState.ACTIVATING}:
+            raise SourceActivationError("only ACTIVE or ACTIVATING candidates can be activated")
         adapter_kind, enumeration_kind = _adapter_kind(candidate.canonical_entrypoint)
         source_key = candidate.source_key
         domain_id = f"domain:{source_key.removeprefix('src:')}"
@@ -141,7 +146,8 @@ class SourceActivationCompiler:
                     ReviewedArtifactIdentityUnverifiable,
                 ) as exc:
                     raise SourceActivationError(
-                        "frozen reviewed artifact identity is no longer verifiable"
+                        "frozen reviewed artifact identity is no longer verifiable",
+                        permanent=True,
                     ) from exc
                 self._verified_reviewed_adapters.add(existing.adapter_id)
             if self.index_registry.get_index_for_source(source_key) is not None:
@@ -198,7 +204,8 @@ class SourceActivationCompiler:
                     reviewed_binding = None
                 except ReviewedArtifactIdentityError as exc:
                     raise SourceActivationError(
-                        "reviewed artifact identity mismatch"
+                        "reviewed artifact identity mismatch",
+                        permanent=True,
                     ) from exc
                 else:
                     contract = reviewed_binding.contract
@@ -213,7 +220,8 @@ class SourceActivationCompiler:
                 ):
                     raise SourceActivationError(
                         "structured DIRECT_WEB_YEAR authority requires a "
-                        "versioned reviewed contract registry"
+                        "versioned reviewed contract registry",
+                        permanent=True,
                     )
                 contract = resolve_source_evidence_contract(
                     stored.canonical_entrypoint,
@@ -382,13 +390,30 @@ class SourceActivationCompiler:
         )
 
     def compile_active(self, *, limit: int | None = None) -> list[ProductionSourceSpec]:
-        """Compile all currently ACTIVE candidates in deterministic order."""
+        """Compile activation claims independently and promote only successes."""
         if limit is not None and limit < 1:
             raise ValueError("limit must be positive")
         candidates = sorted(
-            self.registry.list_candidates(state=SourceState.ACTIVE),
+            self.registry.list_candidates_in_states(
+                (SourceState.ACTIVATING, SourceState.ACTIVE)
+            ),
             key=lambda item: item.source_key,
         )
         if limit is not None:
             candidates = candidates[:limit]
-        return [self.compile(candidate) for candidate in candidates]
+        specs: list[ProductionSourceSpec] = []
+        for candidate in candidates:
+            try:
+                spec = self.compile(candidate)
+            except (SourceActivationError, ValueError, OSError) as exc:
+                permanent = bool(getattr(exc, "permanent", False))
+                self.registry.record_activation_failure(
+                    candidate.source_key,
+                    reason=f"activation {'permanent' if permanent else 'transient'} failure: {exc}",
+                    permanent=permanent,
+                )
+                continue
+            if candidate.state is SourceState.ACTIVATING:
+                self.registry.transition(candidate.source_key, SourceState.ACTIVE)
+            specs.append(spec)
+        return specs

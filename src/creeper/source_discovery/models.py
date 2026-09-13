@@ -32,6 +32,7 @@ class SourceState(StrEnum):
     SCOUT_READY = "SCOUT_READY"
     SCOUTING = "SCOUTING"
     WARM = "WARM"
+    ACTIVATING = "ACTIVATING"
     ACTIVE = "ACTIVE"
     HOLD = "HOLD"
     REJECTED = "REJECTED"
@@ -138,6 +139,9 @@ class SourceCandidate:
     adapter_cost_prior: float = 1.0
     confidence: float = 0.0
     state: SourceState = SourceState.DISCOVERED
+    state_reason: str = ""
+    activation_retry_at: float | None = None
+    activation_attempts: int = 0
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -147,6 +151,12 @@ class SourceCandidate:
         )
         object.__setattr__(self, "level", SourceLevel(self.level))
         object.__setattr__(self, "state", SourceState(self.state))
+        if not isinstance(self.state_reason, str):
+            raise ValueError("state_reason must be a string")
+        if self.activation_retry_at is not None and self.activation_retry_at < 0:
+            raise ValueError("activation_retry_at must be non-negative")
+        if self.activation_attempts < 0:
+            raise ValueError("activation_attempts must be non-negative")
         if not self.source_family.strip():
             raise ValueError("source_family is required")
         if not self.discovered_by.strip() or not self.discovery_strategy.strip():

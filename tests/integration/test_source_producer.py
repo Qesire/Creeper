@@ -8,6 +8,8 @@ from creeper.evidence.policies import CDXQueryState, EvidenceQueryKey, TemporalS
 from creeper.records.candidates import CandidateSourceScope
 from creeper.records.models import HostObservation, SourceRecord
 from creeper.runtime.source_producer import SourceProducer
+from creeper.source_discovery.models import SourceCandidate, SourceLevel, SourceState
+from creeper.source_discovery.registry import SourceDiscoveryRegistry
 from creeper.scheduler.credits import CreditLedger
 from creeper.scheduler.global_scheduler import GlobalScheduler
 from creeper.scheduler.leases import LeaseResult, WorkLease
@@ -264,6 +266,94 @@ class SourceProducerTests(unittest.TestCase):
         self.assertEqual(calls[1][2]["source_records"], 1)
         self.assertEqual(calls[1][2]["source_requests"], 1)
         self.assertTrue(calls[1][2]["read_complete"])
+
+    def test_source_run_is_aborted_after_begin_when_adapter_fails(self):
+        class FailingSource(FakeSource):
+            def execute(self, lease):
+                raise RuntimeError("adapter crashed after exposure began")
+
+        source = SourceCandidate(
+            canonical_entrypoint="https://archive.example/failure.warc",
+            source_family="BULK_ARTIFACT",
+            level=SourceLevel.SOURCE,
+            discovered_by="test",
+            discovery_strategy="fixture",
+            state=SourceState.ACTIVE,
+        )
+        registry = SourceDiscoveryRegistry(self.control)
+        registry.register_proposal(source)
+        registry.set_scout_authority(
+            baseline_signature="baseline-v4",
+            model_signature="eed-v4",
+        )
+
+        runtime, _adapter = self.build_runtime(
+            backlog_capacity=1,
+            source_key=source.source_key,
+            source_registry=registry,
+        )
+        runtime.adapters["fixture-source"] = FailingSource(())
+
+        with self.assertRaisesRegex(RuntimeError, "adapter crashed"):
+            runtime.run_once()
+
+        self.assertEqual(registry.list_source_run_outcomes(source.source_key), [])
+        row = self.control.connection.execute(
+            """
+            SELECT terminal_state, terminal_reason, closed, source_records,
+                   bytes_read, source_requests
+            FROM source_run_outcomes
+            WHERE source_key = ?
+            """,
+            (source.source_key,),
+        ).fetchone()
+        self.assertIsNotNone(row)
+        self.assertEqual(row["terminal_state"], "ABORTED")
+        self.assertEqual(row["closed"], 0)
+        self.assertEqual(row["source_records"], 0)
+        self.assertIn("failed", row["terminal_reason"])
+
+    def test_source_run_recovery_after_lease_abort_is_idempotent(self):
+        source = SourceCandidate(
+            canonical_entrypoint="https://archive.example/recovery.warc",
+            source_family="BULK_ARTIFACT",
+            level=SourceLevel.SOURCE,
+            discovered_by="test",
+            discovery_strategy="fixture",
+            state=SourceState.ACTIVE,
+        )
+        registry = SourceDiscoveryRegistry(self.control)
+        registry.register_proposal(source)
+        registry.set_scout_authority(
+            baseline_signature="baseline-v4",
+            model_signature="eed-v4",
+        )
+        runtime, _adapter = self.build_runtime(
+            backlog_capacity=1,
+            source_key=source.source_key,
+            source_registry=registry,
+        )
+        granted = runtime._grant_fresh_lease()
+        self.assertIsNotNone(granted)
+        candidate, lease, _reservation = granted
+        running = lease.start()
+        self.control.save_lease(running)
+        registry.begin_source_run(
+            candidate.source_key,
+            reservoir_id=candidate.reservoir_id,
+            lease_id=running.lease_id,
+            baseline_signature="baseline-v4",
+            model_signature="eed-v4",
+        )
+        self.control.abort_lease(running)
+
+        self.assertEqual(registry.recover_source_runs(), 1)
+        self.assertEqual(registry.recover_source_runs(), 0)
+        row = self.control.connection.execute(
+            "SELECT terminal_state FROM source_run_outcomes WHERE source_key = ?",
+            (source.source_key,),
+        ).fetchone()
+        self.assertEqual(row["terminal_state"], "ABORTED")
 
     def test_source_producer_only_enqueues_durable_work(self):
         runtime, adapter = self.build_runtime(backlog_capacity=1)

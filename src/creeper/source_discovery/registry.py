@@ -38,13 +38,18 @@ _TRANSITIONS: dict[SourceState, frozenset[SourceState]] = {
         {SourceState.WARM, SourceState.HOLD, SourceState.REJECTED}
     ),
     SourceState.WARM: frozenset(
-        {SourceState.ACTIVE, SourceState.HOLD, SourceState.REJECTED}
+        # Legacy callers may still explicitly promote WARM; coordinator and
+        # compiler-backed paths use ACTIVATING below.
+        {SourceState.ACTIVATING, SourceState.ACTIVE, SourceState.HOLD, SourceState.REJECTED}
+    ),
+    SourceState.ACTIVATING: frozenset(
+        {SourceState.ACTIVE, SourceState.WARM, SourceState.HOLD, SourceState.REJECTED}
     ),
     SourceState.ACTIVE: frozenset(
         {SourceState.WARM, SourceState.HOLD, SourceState.EXHAUSTED}
     ),
     SourceState.HOLD: frozenset(
-        {SourceState.TRIAGED, SourceState.SCOUT_READY, SourceState.REJECTED}
+        {SourceState.TRIAGED, SourceState.SCOUT_READY, SourceState.WARM, SourceState.REJECTED}
     ),
     SourceState.REJECTED: frozenset(),
     SourceState.EXHAUSTED: frozenset(),
@@ -80,6 +85,8 @@ class SourceRunOutcome:
     created_at: float
     updated_at: float
     exposure_id: str | None = None
+    terminal_state: str | None = None
+    terminal_reason: str | None = None
 
     @property
     def resource_cost_seconds(self) -> float:
@@ -135,6 +142,9 @@ class SourceDiscoveryRegistry:
                 adapter_cost_prior REAL NOT NULL,
                 confidence REAL NOT NULL,
                 state TEXT NOT NULL,
+                state_reason TEXT NOT NULL DEFAULT '',
+                activation_retry_at REAL,
+                activation_attempts INTEGER NOT NULL DEFAULT 0,
                 created_at REAL NOT NULL,
                 updated_at REAL NOT NULL
             ) WITHOUT ROWID;
@@ -227,6 +237,8 @@ class SourceDiscoveryRegistry:
                 closed INTEGER NOT NULL DEFAULT 0 CHECK(closed IN (0,1)),
                 closed_at REAL,
                 max_evidence_sequence INTEGER NOT NULL DEFAULT 0 CHECK(max_evidence_sequence >= 0),
+                terminal_state TEXT,
+                terminal_reason TEXT,
                 created_at REAL NOT NULL,
                 updated_at REAL NOT NULL,
                 PRIMARY KEY(
@@ -355,6 +367,25 @@ class SourceDiscoveryRegistry:
             self.connection.execute(
                 "ALTER TABLE source_run_outcomes ADD COLUMN exposure_id TEXT"
             )
+        candidate_columns = {
+            str(row[1])
+            for row in self.connection.execute(
+                "PRAGMA table_info(source_candidates)"
+            ).fetchall()
+        }
+        for name, statement in {
+            "state_reason": "ALTER TABLE source_candidates ADD COLUMN state_reason TEXT NOT NULL DEFAULT ''",
+            "activation_retry_at": "ALTER TABLE source_candidates ADD COLUMN activation_retry_at REAL",
+            "activation_attempts": "ALTER TABLE source_candidates ADD COLUMN activation_attempts INTEGER NOT NULL DEFAULT 0",
+        }.items():
+            if name not in candidate_columns:
+                self.connection.execute(statement)
+        for name, statement in {
+            "terminal_state": "ALTER TABLE source_run_outcomes ADD COLUMN terminal_state TEXT",
+            "terminal_reason": "ALTER TABLE source_run_outcomes ADD COLUMN terminal_reason TEXT",
+        }.items():
+            if name not in source_run_columns:
+                self.connection.execute(statement)
         scout_columns = {
             str(row[1])
             for row in self.connection.execute(
@@ -427,6 +458,12 @@ class SourceDiscoveryRegistry:
             adapter_cost_prior=float(row["adapter_cost_prior"]),
             confidence=float(row["confidence"]),
             state=SourceState(str(row["state"])),
+            state_reason=str(row["state_reason"] or ""),
+            activation_retry_at=(
+                None if row["activation_retry_at"] is None
+                else float(row["activation_retry_at"])
+            ),
+            activation_attempts=int(row["activation_attempts"] or 0),
         )
 
     def _load_scout_authority(self) -> tuple[str, str] | None:
@@ -871,6 +908,16 @@ class SourceDiscoveryRegistry:
                 if "exposure_id" not in row.keys() or row["exposure_id"] is None
                 else str(row["exposure_id"])
             ),
+            terminal_state=(
+                None
+                if "terminal_state" not in row.keys() or row["terminal_state"] is None
+                else str(row["terminal_state"])
+            ),
+            terminal_reason=(
+                None
+                if "terminal_reason" not in row.keys() or row["terminal_reason"] is None
+                else str(row["terminal_reason"])
+            ),
         )
 
     def begin_source_run(
@@ -994,6 +1041,7 @@ class SourceDiscoveryRegistry:
         if source_key is not None:
             clauses.append("sro.source_key = ?")
             params.append(source_key)
+        clauses.append("(sro.terminal_state IS NULL OR sro.terminal_state = 'FINAL_CLOSED')")
         if baseline_signature is not None:
             clauses.extend(
                 ["sro.baseline_signature = ?", "sro.model_signature = ?"]
@@ -1326,6 +1374,8 @@ class SourceDiscoveryRegistry:
         )
         if run is None:
             raise KeyError("unknown source run")
+        if run.terminal_state is not None and run.terminal_state != "FINAL_CLOSED":
+            return False
         if run.exposure_id is not None:
             if not run.read_complete or not run.validation_complete:
                 return False
@@ -1412,6 +1462,96 @@ class SourceDiscoveryRegistry:
         except BaseException:
             self.connection.rollback()
             raise
+
+    def abort_source_run(
+        self,
+        source_key: str,
+        *,
+        reservoir_id: str,
+        lease_id: str,
+        baseline_signature: str,
+        model_signature: str,
+        state: str = "ABORTED",
+        reason: str,
+    ) -> bool:
+        """Terminate an interrupted exposure without manufacturing a zero reward.
+
+        ``closed`` means FINAL reward publication. An aborted run therefore stays
+        outside the learning projection while its durable counters and evidence
+        remain available for audit and cost accounting.
+        """
+        if state not in {"ABORTED", "EXPIRED"}:
+            raise ValueError("source-run terminal state must be ABORTED or EXPIRED")
+        if not reason.strip():
+            raise ValueError("source-run terminal reason is required")
+        run = self.get_source_run_outcome(
+            source_key,
+            reservoir_id=reservoir_id,
+            lease_id=lease_id,
+            baseline_signature=baseline_signature,
+            model_signature=model_signature,
+        )
+        if run is None:
+            raise KeyError("unknown source run")
+        if run.terminal_state is not None:
+            return run.terminal_state == state and run.terminal_reason == reason
+        if run.exposure_id is not None:
+            self.control_store.abort_production_exposure(
+                run.exposure_id,
+                state=state,
+                reason=reason,
+                authority=(baseline_signature, model_signature),
+            )
+        now = float(self.clock())
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            changed = self.connection.execute(
+                """
+                UPDATE source_run_outcomes
+                SET terminal_state = ?, terminal_reason = ?, updated_at = ?
+                WHERE source_key = ? AND reservoir_id = ? AND lease_id = ?
+                  AND baseline_signature = ? AND model_signature = ?
+                  AND terminal_state IS NULL AND closed = 0
+                """,
+                (
+                    state, reason.strip(), now, source_key, reservoir_id, lease_id,
+                    baseline_signature, model_signature,
+                ),
+            ).rowcount
+            self.connection.commit()
+            return changed == 1
+        except BaseException:
+            self.connection.rollback()
+            raise
+
+    def recover_source_runs(self) -> int:
+        """Converge source runs whose work lease ended during a crash."""
+        self.control_store.recover_open_production_exposures()
+        rows = self.connection.execute(
+            """
+            SELECT sro.source_key, sro.reservoir_id, sro.lease_id,
+                   sro.baseline_signature, sro.model_signature,
+                   wl.state AS lease_state
+            FROM source_run_outcomes AS sro
+            JOIN work_leases AS wl ON wl.lease_id = sro.lease_id
+            WHERE sro.closed = 0 AND sro.terminal_state IS NULL
+              AND wl.state IN ('ABORTED', 'EXPIRED')
+            ORDER BY sro.source_key, sro.lease_id
+            """
+        ).fetchall()
+        recovered = 0
+        for row in rows:
+            if self.abort_source_run(
+                str(row["source_key"]),
+                reservoir_id=str(row["reservoir_id"]),
+                lease_id=str(row["lease_id"]),
+                baseline_signature=str(row["baseline_signature"]),
+                model_signature=str(row["model_signature"]),
+                state=str(row["lease_state"]),
+                reason=f"recovered source run after lease {str(row['lease_state']).lower()}",
+            ):
+                recovered += 1
+        return recovered
 
     def record_final_reward(
         self,
@@ -1653,8 +1793,9 @@ class SourceDiscoveryRegistry:
                     expected_year_to, expected_volume, temporal_semantics_prior,
                     enumerability_prior, direct_evidence_prior,
                     baseline_overlap_prior, access_cost_prior, adapter_cost_prior,
-                    confidence, state, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    confidence, state, state_reason, activation_retry_at,
+                    activation_attempts, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     candidate.source_key,
@@ -1674,6 +1815,9 @@ class SourceDiscoveryRegistry:
                     candidate.adapter_cost_prior,
                     candidate.confidence,
                     candidate.state.value,
+                    candidate.state_reason,
+                    candidate.activation_retry_at,
+                    candidate.activation_attempts,
                     now,
                     now,
                 ),
@@ -1781,6 +1925,152 @@ class SourceDiscoveryRegistry:
         ):
             result[SourceState(str(row["state"]))] = int(row["n"])
         return result
+
+    def begin_activation(self, source_key: str) -> SourceCandidate:
+        """Claim one WARM candidate for durable, compiler-backed activation."""
+        now = float(self.clock())
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            row = self.connection.execute(
+                "SELECT state, activation_retry_at FROM source_candidates WHERE source_key = ?",
+                (source_key,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"unknown source: {source_key}")
+            current = SourceState(str(row["state"]))
+            if current is SourceState.ACTIVATING:
+                self.connection.commit()
+                candidate = self.get_candidate(source_key)
+                assert candidate is not None
+                return candidate
+            if current is SourceState.HOLD:
+                retry_at = row["activation_retry_at"]
+                if retry_at is None or float(retry_at) > now:
+                    raise StateTransitionError("activation backoff is still active")
+            elif current is not SourceState.WARM:
+                raise StateTransitionError(
+                    f"invalid activation claim from {current}"
+                )
+            measured = self.connection.execute(
+                """
+                SELECT m.baseline_signature, m.model_signature,
+                       a.baseline_signature AS current_baseline_signature,
+                       a.model_signature AS current_model_signature
+                FROM source_scout_metrics m
+                LEFT JOIN source_scout_authority a ON a.singleton = 1
+                WHERE m.source_key = ?
+                """,
+                (source_key,),
+            ).fetchone()
+            if measured is None:
+                raise StateTransitionError(
+                    "current-authority measured scout evidence is required before activation"
+                )
+            if measured["current_baseline_signature"] is not None and (
+                str(measured["baseline_signature"] or "")
+                != str(measured["current_baseline_signature"])
+                or str(measured["model_signature"] or "")
+                != str(measured["current_model_signature"])
+            ):
+                raise StateTransitionError(
+                    "current-authority measured scout evidence is required before activation"
+                )
+            self.connection.execute(
+                """
+                UPDATE source_candidates
+                SET state = ?, state_reason = '', activation_retry_at = NULL,
+                    activation_attempts = activation_attempts + 1, updated_at = ?
+                WHERE source_key = ?
+                """,
+                (SourceState.ACTIVATING.value, now, source_key),
+            )
+            self.connection.commit()
+        except BaseException:
+            self.connection.rollback()
+            raise
+        candidate = self.get_candidate(source_key)
+        assert candidate is not None
+        return candidate
+
+    def record_activation_failure(
+        self,
+        source_key: str,
+        *,
+        reason: str,
+        permanent: bool,
+        retry_seconds: float = 30.0,
+    ) -> SourceCandidate:
+        if not reason.strip():
+            raise ValueError("activation failure reason is required")
+        if not permanent and retry_seconds <= 0:
+            raise ValueError("retry_seconds must be positive for transient failures")
+        target = SourceState.REJECTED if permanent else SourceState.HOLD
+        now = float(self.clock())
+        retry_at = None if permanent else now + float(retry_seconds)
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            row = self.connection.execute(
+                "SELECT state FROM source_candidates WHERE source_key = ?",
+                (source_key,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"unknown source: {source_key}")
+            current = SourceState(str(row["state"]))
+            if current not in {SourceState.ACTIVATING, SourceState.ACTIVE}:
+                raise StateTransitionError(
+                    f"cannot record activation failure from {current}"
+                )
+            self.connection.execute(
+                """
+                UPDATE source_candidates
+                SET state = ?, state_reason = ?, activation_retry_at = ?, updated_at = ?
+                WHERE source_key = ?
+                """,
+                (target.value, reason.strip(), retry_at, now, source_key),
+            )
+            self.connection.commit()
+        except BaseException:
+            self.connection.rollback()
+            raise
+        candidate = self.get_candidate(source_key)
+        assert candidate is not None
+        return candidate
+
+    def retry_due_activations(self, *, now: float | None = None) -> int:
+        current_time = float(self.clock() if now is None else now)
+        rows = self.connection.execute(
+            """
+            SELECT source_key FROM source_candidates
+            WHERE state = ? AND activation_retry_at IS NOT NULL
+              AND activation_retry_at <= ?
+            ORDER BY source_key
+            """,
+            (SourceState.HOLD.value, current_time),
+        ).fetchall()
+        changed = 0
+        for row in rows:
+            try:
+                self.transition(str(row["source_key"]), SourceState.WARM)
+            except StateTransitionError:
+                continue
+            changed += 1
+        return changed
+
+    def recover_stranded_activations(self) -> int:
+        """Return compiler claims left mid-flight to retryable HOLD state."""
+        rows = self.connection.execute(
+            "SELECT source_key FROM source_candidates WHERE state = ? ORDER BY source_key",
+            (SourceState.ACTIVATING.value,),
+        ).fetchall()
+        changed = 0
+        for row in rows:
+            self.record_activation_failure(
+                str(row["source_key"]),
+                reason="recovered stranded ACTIVATING state after coordinator restart",
+                permanent=False,
+            )
+            changed += 1
+        return changed
 
     def transition(self, source_key: str, target: SourceState) -> SourceCandidate:
         target = SourceState(target)
