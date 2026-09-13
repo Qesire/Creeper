@@ -103,6 +103,46 @@ class L8NonblockingRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(third.research_active)
         self.assertEqual(third.agent_hot_path_block_seconds, 0.0)
 
+    async def test_operator_request_waits_for_deterministic_frontier(self) -> None:
+        executable = 1
+        release = asyncio.Event()
+
+        def snapshot() -> ResearchTriggerSnapshot:
+            return ResearchTriggerSnapshot(
+                ready_minutes=60.0,
+                executable_regions=executable,
+                context_hash=f"operator:{executable}",
+            )
+
+        async def research(_directive):
+            await release.wait()
+            return {"proposal": "operator"}
+
+        coordinator = SourceDiscoveryCoordinator(
+            self.registry,
+            self.manager,
+            lock_path=self.root / "coordinator.lock",
+            triage_executor=self._triage,
+            scout_executor=self._scout,
+            search_executor=self._search,
+            research_snapshot_provider=snapshot,
+            research_executor=research,
+            research_result_committer=lambda *_args: None,
+        )
+        coordinator.request_research_once(subject="https://example.invalid/root")
+
+        first = await coordinator.run_once()
+        self.assertEqual(first.research_started, 0)
+        self.assertFalse(first.research_active)
+
+        executable = 0
+        second = await coordinator.run_once()
+        self.assertEqual(second.research_started, 1)
+        self.assertTrue(second.research_active)
+
+        release.set()
+        await coordinator.shutdown()
+
     async def test_child_failure_is_recorded_and_runtime_stays_alive(self) -> None:
         failures: list[str] = []
 
