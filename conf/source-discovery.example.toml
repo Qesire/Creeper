@@ -38,6 +38,15 @@ region_parallelism = 2
 # Merge-safe default: enable only after the L6 proposal compiler and parent-side
 # validators are present in the integrated runtime.
 nonblocking_research = false
+# Research gate tuning.  These are scheduler thresholds only; they never create
+# evidence authority. ready_minutes is estimated from WARM/ACTIVE production cost.
+research_ready_minutes_threshold = 30.0
+# RECOVER_STAGNATION needs both a closed-run sample and a consecutive zero-FINAL tail.
+research_stagnation_min_closed_runs = 3
+research_stagnation_zero_tail = 3
+# Trigger when the recent 15m FINAL EED/hour rate falls below this fraction of
+# the 60m FINAL EED/hour baseline.
+research_stagnation_yield_fraction = 0.25
 # Transient executor failures are retried after this process-local backoff.
 failure_retry_seconds = 30.0
 # Completed strategies, including valid empty-result searches, are durably cooled down.
