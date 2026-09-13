@@ -304,16 +304,6 @@ class SourceProducer:
         running = lease.start()
         self.control_store.save_lease(running)
         run_authority: tuple[str, str] | None = None
-        if self.source_registry is not None and candidate.source_key is not None:
-            run_authority = self.source_registry.current_scout_authority
-            if run_authority is not None:
-                self.source_registry.begin_source_run(
-                    candidate.source_key,
-                    reservoir_id=candidate.reservoir_id,
-                    lease_id=running.lease_id,
-                    baseline_signature=run_authority[0],
-                    model_signature=run_authority[1],
-                )
         source_records = observations = planning_observations = 0
         enqueued = direct_committed = 0
         max_source = max_observations = 0
@@ -348,6 +338,16 @@ class SourceProducer:
             next_renew_at = now + max(1.0, postprocess_ttl / 3.0)
 
         try:
+            if self.source_registry is not None and candidate.source_key is not None:
+                run_authority = self.source_registry.current_scout_authority
+                if run_authority is not None:
+                    self.source_registry.begin_source_run(
+                        candidate.source_key,
+                        reservoir_id=candidate.reservoir_id,
+                        lease_id=running.lease_id,
+                        baseline_signature=run_authority[0],
+                        model_signature=run_authority[1],
+                    )
             adapter = self._adapter_for(candidate)
             execute = getattr(adapter, "execute")
             execute_stream = getattr(adapter, "execute_stream", None)
