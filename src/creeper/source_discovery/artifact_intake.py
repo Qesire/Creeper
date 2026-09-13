@@ -168,10 +168,10 @@ def assess_artifact_intake(
     elif policy.reject_html and _looks_like_html_login(sample_preview):
         access_ok = False
         reason = "HTML/login or error object is not an artifact"
-    elif format_kind not in policy.allow_formats:
-        reason = "UNSUPPORTED_FORMAT"
     elif contract_match is None:
         reason = "UNKNOWN_CONTRACT_FAMILY"
+    elif format_kind not in policy.allow_formats:
+        reason = "UNSUPPORTED_FORMAT"
 
     strength = _identity_strength(identity)
     random_access = _is_compressed_random_access_safe(
