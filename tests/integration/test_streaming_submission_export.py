@@ -280,5 +280,67 @@ class StreamingSubmissionExportTests(unittest.TestCase):
                 )
 
 
+    def test_formal_streaming_export_is_byte_deterministic_and_requires_config(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source_root, documentation, artifacts = _fixture_files(root)
+            records = (
+                EvidenceCapsule(
+                    "deterministic.example",
+                    1998,
+                    "fixture",
+                    "capture_timestamp_year",
+                    "19980101000000",
+                    "http://deterministic.example/",
+                    "f" * 64,
+                    "fixture-v1",
+                    "exact_host_cdx_capture",
+                    "fixture",
+                    "http://deterministic.example/",
+                    "fixture:deterministic",
+                    "synthetic",
+                ),
+            )
+            snapshot = _snapshot(created_at="2026-09-13T06:02:00+00:00")
+
+            with self.assertRaisesRegex(ValueError, "production_config"):
+                build_streaming_submission_zip(
+                    snapshot,
+                    "missing-config",
+                    root / "missing-config-out",
+                    source_root=source_root,
+                    documentation_path=documentation,
+                    evidence_records=iter(records),
+                    artifact_specs=(),
+                    artifact_allowed_roots=(root,),
+                )
+
+            first = build_streaming_submission_zip(
+                snapshot,
+                "deterministic",
+                root / "out-a",
+                source_root=source_root,
+                documentation_path=documentation,
+                evidence_records=iter(records),
+                artifact_specs=artifacts,
+                artifact_allowed_roots=(root,),
+            )
+            second = build_streaming_submission_zip(
+                snapshot,
+                "deterministic",
+                root / "out-b",
+                source_root=source_root,
+                documentation_path=documentation,
+                evidence_records=iter(records),
+                artifact_specs=artifacts,
+                artifact_allowed_roots=(root,),
+            )
+
+            self.assertEqual(
+                hashlib.sha256(first.read_bytes()).hexdigest(),
+                hashlib.sha256(second.read_bytes()).hexdigest(),
+            )
+
+
 if __name__ == "__main__":
     unittest.main()
