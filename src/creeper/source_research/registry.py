@@ -915,6 +915,8 @@ class ResearchRegistry:
     def record_reward(self, reward: RewardRecord) -> bool:
         if reward.kind is RewardKind.FINAL and not reward.validation_closed:
             raise ValueError("FINAL reward requires validation closure")
+        if reward.scope is RewardScope.DECISION:
+            self.get_decision(reward.decision_id)
         with self.connection:
             changed = self.connection.execute(
                 """
