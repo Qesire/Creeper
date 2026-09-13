@@ -89,7 +89,7 @@ class IntegerPaginationEnumerator:
             else:
                 raw = await fetcher(_render_url(str(config["url_template"]), page), page)
                 batch = _coerce_batch(raw, page=page)
-                terminal = batch.terminal or _terminal(batch, terminal_rule)
+                terminal = batch.terminal or _terminal(batch, terminal_rule, stop)
                 yield EnumeratedBatch(batch.artifacts, page, None, None, batch.bytes_read, batch.requests, terminal)
                 if terminal:
                     return
@@ -166,10 +166,10 @@ def _coerce_batch(raw: Any, *, page: int) -> EnumeratedBatch:
     raise TypeError("fetcher must return an EnumeratedBatch, mapping, or sequence")
 
 
-def _terminal(batch: EnumeratedBatch, rule: str) -> bool:
+def _terminal(batch: EnumeratedBatch, rule: str, max_page: int | None = None) -> bool:
     rule = rule.upper()
     if rule in {"EMPTY", "EMPTY_PAGE"}:
         return not batch.artifacts
     if rule in {"LAST", "MAX_PAGE"}:
-        return batch.page is not None and batch.page >= 0
+        return max_page is not None and batch.page is not None and batch.page >= max_page
     return False
