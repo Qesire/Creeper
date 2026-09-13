@@ -452,30 +452,30 @@ class EvidenceStore:
         """
         if batch_size < 1:
             raise ValueError("batch_size must be positive")
+        # The WITHOUT ROWID primary key is ordered as
+        # (hostname, year, provider, payload_hash, policy_version). Scan it
+        # directly instead of using ROW_NUMBER/PARTITION, which can require a
+        # corpus-sized SQLite temp sort even when Python uses fetchmany().
         cursor = self.connection.execute(
             """
-            WITH ranked AS (
-                SELECT *,
-                       ROW_NUMBER() OVER (
-                           PARTITION BY hostname, year
-                           ORDER BY provider, payload_hash, policy_version
-                       ) AS rn
-                FROM evidence_capsules
-            )
             SELECT hostname, year, provider, temporal_semantics,
                    evidence_timestamp, source_locator, payload_hash,
                    policy_version, evidence_type, source_id, original_url,
                    record_locator, extraction_method
-            FROM ranked
-            WHERE rn = 1
-            ORDER BY hostname, year
+            FROM evidence_capsules
+            ORDER BY hostname, year, provider, payload_hash, policy_version
             """
         )
+        last_key: tuple[str, int] | None = None
         while True:
             rows = cursor.fetchmany(int(batch_size))
             if not rows:
                 break
             for row in rows:
+                key = (str(row["hostname"]), int(row["year"]))
+                if key == last_key:
+                    continue
+                last_key = key
                 yield EvidenceCapsule(**dict(row))
 
     def canonical_host_year_capsules(self) -> list[EvidenceCapsule]:
