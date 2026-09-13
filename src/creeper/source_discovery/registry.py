@@ -2937,7 +2937,7 @@ class SourceDiscoveryRegistry:
     def register_region(self, region: ExplorationRegion) -> tuple[ExplorationRegion, bool]:
         now = float(self.clock())
         with self.connection:
-            self.connection.execute(
+            cursor = self.connection.execute(
                 """
                 INSERT INTO source_exploration_regions(
                     region_id, region_key, surface_kind, root, purpose,
@@ -2963,7 +2963,7 @@ class SourceDiscoveryRegistry:
         stored = self.get_region(region.region_id) or self.get_region(region.region_key)
         if stored is None:
             raise RuntimeError("region disappeared after registration")
-        return stored, stored.region_id == region.region_id and stored.region_key == region.region_key
+        return stored, cursor.rowcount == 1
 
     def get_region(self, region_id_or_key: str) -> ExplorationRegion | None:
         row = self.connection.execute(
