@@ -719,6 +719,18 @@ class AsyncWaybackCDXClient:
                     next_resume_key=next_key,
                     capsules=ordered,
                 )
+            if len(rows) >= self.limit:
+                # showResumeKey normally makes a full page resumable.  If the
+                # provider omits the cursor anyway, completion is not proven:
+                # keep every positive capsule, but fail closed on coverage.
+                return result(
+                    PlatformHarvestState.RETRYABLE,
+                    capsules=ordered,
+                    error=(
+                        "platform-year page reached the configured row limit "
+                        "without an explicit continuation"
+                    ),
+                )
             return result(
                 PlatformHarvestState.COMPLETE,
                 capsules=ordered,

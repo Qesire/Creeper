@@ -644,6 +644,53 @@ class AsyncWaybackCDXClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result.exhaustive)
         self.assertIsNone(result.next_resume_key)
 
+    async def test_platform_year_full_page_without_resume_is_not_complete(self):
+        async def handler(request):
+            payload = [
+                ["urlkey", "timestamp", "original", "statuscode"],
+                ["com,example,a)/", "19970101000000", "http://a.example.com/", "200"],
+            ]
+            return httpx.Response(
+                200,
+                content=json.dumps(payload).encode(),
+                request=request,
+            )
+
+        async with AsyncWaybackCDXClient(
+            transport=httpx.MockTransport(handler),
+            max_retries=0,
+            limit=1,
+        ) as client:
+            template_hash = client.platform_year_request_template_hash(
+                "example.com",
+                1997,
+                policy_version="platform-v1",
+            )
+            task = PlatformYearHarvestTask(
+                harvest_id=platform_year_harvest_id(
+                    provider="wayback",
+                    subject="example.com",
+                    target_year=1997,
+                    request_template_hash=template_hash,
+                    policy_version="platform-v1",
+                ),
+                provider="wayback",
+                subject="example.com",
+                target_year=1997,
+                request_template_hash=template_hash,
+                policy_version="platform-v1",
+            )
+            result = await client.harvest_platform_year(task)
+
+        self.assertEqual(result.state, PlatformHarvestState.RETRYABLE)
+        self.assertFalse(result.exhaustive)
+        self.assertIsNone(result.next_resume_key)
+        self.assertEqual(
+            {(capsule.hostname, capsule.year) for capsule in result.capsules},
+            {("a.example.com", 1997)},
+        )
+        self.assertIn("row limit", result.error)
+
     async def test_platform_year_retryable_http_preserves_resume_state(self):
         async def handler(request):
             return httpx.Response(503, request=request)
