@@ -1039,6 +1039,22 @@ class ControlStore:
                 )
         return inserted
 
+    def invalidate_evidence_action_final_rewards(self) -> None:
+        """Remove formal action reward authority while readiness is rebuilding.
+
+        Historical provider cost remains durable because it will be paired with
+        a full historical reward again once readiness catches up. Schedulers
+        must ignore that cost until a new complete authority snapshot exists.
+        """
+
+        with self.connection:
+            self.connection.execute(
+                "DELETE FROM evidence_action_final_rewards"
+            )
+            self.connection.execute(
+                "DELETE FROM evidence_action_reward_authority"
+            )
+
     def publish_evidence_action_final_rewards(
         self,
         attribution: dict[str, dict[str, object]],
@@ -1121,6 +1137,18 @@ class ControlStore:
             self.connection.rollback()
             raise
         return changed_authority
+
+    def evidence_action_reward_authoritative(self) -> bool:
+        return (
+            self.connection.execute(
+                """
+                SELECT 1
+                FROM evidence_action_reward_authority
+                WHERE singleton = 1
+                """
+            ).fetchone()
+            is not None
+        )
 
     def recommended_range_first_fraction(
         self,
