@@ -821,6 +821,52 @@ def _write_governor_status(
     os.replace(temporary, target)
 
 
+def _write_runtime_topology(config: AutopilotConfig) -> None:
+    """Persist one human-readable startup topology record atomically."""
+    authority_manifest = (
+        config.readiness.authority_manifest
+        if config.readiness is not None
+        else None
+    )
+    baseline_authority: dict[str, object] = {
+        "baseline_index": (
+            None if config.baseline_index is None else str(config.baseline_index)
+        ),
+        "authority_manifest": (
+            None if authority_manifest is None else str(authority_manifest)
+        ),
+    }
+    if authority_manifest is not None and authority_manifest.is_file():
+        try:
+            raw = json.loads(authority_manifest.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            raw = None
+        if isinstance(raw, dict):
+            baseline_authority["baseline_id"] = raw.get("baseline_id")
+            baseline_authority["authority_digest"] = raw.get("authority_digest")
+
+    payload = {
+        "producer_mode": SourceProducerMode(config.producer_mode).value,
+        "producer_mode_explicit": bool(config.producer_mode_explicit),
+        "historical_index_enabled": bool(config.historical_index_enabled),
+        "source_worker_count": int(config.source_producer_workers),
+        "discovery_enabled": True,
+        "platform_year_harvest_enabled": bool(
+            config.evidence.platform_harvest_enabled
+        ),
+        "baseline_authority": baseline_authority,
+    }
+    root = config.runtime_data_root
+    root.mkdir(parents=True, exist_ok=True)
+    target = root / "topology.json"
+    temporary = root / "topology.json.tmp"
+    temporary.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    os.replace(temporary, target)
+
+
 def run_autopilot(
     config: AutopilotConfig,
     *,
@@ -838,6 +884,21 @@ def run_autopilot(
         config.runtime_data_root / "telemetry.sqlite3"
     )
     telemetry.add_counters({"autopilot_runs": 1})
+    _write_runtime_topology(config)
+    telemetry.set_gauges(
+        {
+            "producer_mode_activated": int(
+                SourceProducerMode(config.producer_mode)
+                is SourceProducerMode.ACTIVATED
+            ),
+            "historical_index_enabled": int(config.historical_index_enabled),
+            "source_worker_count": int(config.source_producer_workers),
+            "discovery_enabled": 1,
+            "platform_year_harvest_enabled": int(
+                config.evidence.platform_harvest_enabled
+            ),
+        }
+    )
     children = {
         spec.name: _ChildRuntime(spec)
         for spec in build_child_specs(config)
