@@ -22,6 +22,7 @@ from .paths import find_baseline_dir
 
 YEAR_BITS = {year: 1 << (year - 1996) for year in range(1996, 2002)}
 ALL_YEAR_MASK = sum(YEAR_BITS.values())
+BASELINE_INDEX_SCHEMA_VERSION = "baseline-index-v2"
 
 
 def _coerce_authority(
@@ -38,6 +39,7 @@ def _coerce_authority(
 
 def _authority_metadata(authority: AuthoritySnapshot) -> dict[str, str]:
     return {
+        "index_schema_version": BASELINE_INDEX_SCHEMA_VERSION,
         "baseline_id": authority.baseline_id,
         "authority_digest": authority.authority_digest,
         "annual_file_hashes": json.dumps(
@@ -86,13 +88,15 @@ class BaselineIndex:
                 "baseline index has no embedded authority identity; refusing to resume"
             )
         expected = _authority_metadata(authority)
-        mismatches = [
-            key for key, value in expected.items() if actual.get(key) != value
-        ]
-        if mismatches:
+        if actual != expected:
+            mismatches = sorted(
+                key
+                for key in set(actual) | set(expected)
+                if actual.get(key) != expected.get(key)
+            )
             raise ValueError(
                 "baseline index authority mismatch; refusing to resume: "
-                + ", ".join(sorted(mismatches))
+                + ", ".join(mismatches)
             )
 
     def assert_authority(self, authority: AuthoritySnapshot) -> None:
@@ -105,29 +109,37 @@ class BaselineIndex:
         path: Path,
         authority: AuthoritySnapshot,
     ) -> "BaselineIndex":
-        """Bind a verified, already-built index to its immutable authority."""
+        """Bind only an empty index shell; populated unbound indexes must rebuild."""
         connection = sqlite3.connect(path)
         try:
             connection.execute(
                 "CREATE TABLE IF NOT EXISTS authority_metadata "
                 "(key TEXT PRIMARY KEY, value TEXT NOT NULL) WITHOUT ROWID"
             )
-            expected = _authority_metadata(authority)
             existing = {
                 str(row[0]): str(row[1])
                 for row in connection.execute(
                     "SELECT key, value FROM authority_metadata"
                 )
             }
-            mismatches = [
-                key
-                for key, value in existing.items()
-                if key in expected and value != expected[key]
-            ]
-            if mismatches:
+            expected = _authority_metadata(authority)
+            if existing and existing != expected:
+                raise ValueError("baseline index authority mismatch")
+            populated = False
+            for table in ("annual_hostnames", "candidate_hostnames", "import_state"):
+                exists = connection.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                    (table,),
+                ).fetchone()
+                if exists and connection.execute(
+                    f"SELECT 1 FROM {table} LIMIT 1"
+                ).fetchone():
+                    populated = True
+                    break
+            if populated and not existing:
                 raise ValueError(
-                    "baseline index authority mismatch: "
-                    + ", ".join(sorted(mismatches))
+                    "cannot bind authority to a populated unbound index; "
+                    "build a new authority-bound index"
                 )
             connection.executemany(
                 "INSERT INTO authority_metadata(key, value) VALUES (?, ?) "
@@ -163,12 +175,23 @@ class BaselineIndex:
             else find_baseline_dir(Path(task_root))
         )
         authority = _coerce_authority(authority_manifest)
-        if authority is not None and authority.baseline_id != baseline_dir.name:
+        if authority is None:
             raise ValueError(
-                "authority baseline_id does not match baseline directory: "
-                f"{authority.baseline_id} != {baseline_dir.name}"
+                "authority_manifest is required for baseline index construction"
             )
+        if baseline_dir is None:
+            assert task_root is not None
+            baseline_dir = Path(task_root) / authority.baseline_id
+        else:
+            baseline_dir = Path(baseline_dir)
+        authority.verify_baseline_dir(baseline_dir)
 
+        output_path = Path(output_path)
+        if not resume and output_path.exists() and output_path.stat().st_size > 0:
+            raise ValueError(
+                "non-resume rebuild refuses to mutate an existing index; "
+                "choose a new output path or remove it after readers are quiesced"
+            )
         output_path.parent.mkdir(parents=True, exist_ok=True)
         connection = sqlite3.connect(output_path)
         connection.execute("PRAGMA journal_mode=WAL")
@@ -211,39 +234,34 @@ class BaselineIndex:
                 "SELECT key, value FROM authority_metadata"
             )
         }
-        if authority is not None:
-            expected_metadata = _authority_metadata(authority)
-            mismatches = [
-                key
-                for key, value in expected_metadata.items()
-                if key in existing_metadata and existing_metadata[key] != value
-            ]
-            if mismatches and resume:
+        expected_metadata = _authority_metadata(authority)
+        has_work = any(
+            connection.execute(f"SELECT 1 FROM {table} LIMIT 1").fetchone()
+            is not None
+            for table in ("annual_hostnames", "candidate_hostnames", "import_state")
+        )
+        if existing_metadata:
+            if existing_metadata != expected_metadata:
+                mismatches = sorted(
+                    key
+                    for key in set(existing_metadata) | set(expected_metadata)
+                    if existing_metadata.get(key) != expected_metadata.get(key)
+                )
                 connection.close()
                 raise ValueError(
                     "baseline index authority mismatch; refusing to resume: "
-                    + ", ".join(sorted(mismatches))
+                    + ", ".join(mismatches)
                 )
-            if resume and not existing_metadata:
-                has_state = connection.execute(
-                    "SELECT 1 FROM import_state LIMIT 1"
-                ).fetchone()
-                if has_state:
-                    connection.close()
-                    raise ValueError(
-                        "baseline index has unbound import_state; refusing to resume"
-                    )
-        if not resume:
-            connection.execute("DELETE FROM annual_hostnames")
-            connection.execute("DELETE FROM candidate_hostnames")
-            connection.execute("DELETE FROM import_state")
-            connection.execute("DELETE FROM authority_metadata")
-        if authority is not None:
-            connection.executemany(
-                "INSERT INTO authority_metadata(key, value) VALUES (?, ?) "
-                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                sorted(_authority_metadata(authority).items()),
+        elif has_work:
+            connection.close()
+            raise ValueError(
+                "baseline index has unbound data/import_state; refusing to resume"
             )
+        connection.executemany(
+            "INSERT INTO authority_metadata(key, value) VALUES (?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            sorted(expected_metadata.items()),
+        )
         connection.commit()
 
         def get_state(stage: str) -> tuple[int, bool]:

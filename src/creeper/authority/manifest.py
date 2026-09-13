@@ -2,25 +2,16 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 from decimal import Decimal
 from pathlib import Path
 
 from .eed import calculate_eed
-from .identity import authority_digest
+from .identity import authority_digest, sha256_file
 from .paths import find_baseline_dir
 
 
 ANNUAL_YEARS = tuple(range(1996, 2002))
-
-
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as source:
-        for chunk in iter(lambda: source.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def _line_count(path: Path) -> int:
@@ -52,9 +43,15 @@ def build_manifest(
     task_root: Path,
     output_path: Path,
     *,
+    baseline_dir: Path | None = None,
     source_archive_path: Path | None = None,
 ) -> dict:
-    baseline_dir = find_baseline_dir(task_root)
+    task_root = Path(task_root)
+    baseline_dir = (
+        Path(baseline_dir)
+        if baseline_dir is not None
+        else find_baseline_dir(task_root)
+    )
 
     annual_paths = {f"{year}.txt": baseline_dir / f"{year}.txt" for year in ANNUAL_YEARS}
     for path in annual_paths.values():
@@ -74,9 +71,9 @@ def build_manifest(
         raise FileNotFoundError("Missing authority files: " + ", ".join(missing))
 
     annual_eed, baseline_eed = _baseline_eed(annual_paths, model_path)
-    annual_file_hashes = {name: _sha256(path) for name, path in annual_paths.items()}
-    candidate_file_hash = _sha256(candidate_path)
-    model_hash = _sha256(model_path)
+    annual_file_hashes = {name: sha256_file(path) for name, path in annual_paths.items()}
+    candidate_file_hash = sha256_file(candidate_path)
+    model_hash = sha256_file(model_path)
     digest = authority_digest(
         baseline_id=baseline_dir.name,
         annual_file_hashes=annual_file_hashes,
@@ -91,9 +88,9 @@ def build_manifest(
         "normalizer_policy": "official-calculator-regex-v1",
         "annual_file_hashes": annual_file_hashes,
         "candidate_file_hash": candidate_file_hash,
-        "unparsed_file_hash": _sha256(unparsed_path),
+        "unparsed_file_hash": sha256_file(unparsed_path),
         "isc_file_hashes": {
-            path.name: _sha256(path)
+            path.name: sha256_file(path)
             for path in sorted(isc_dir.glob("*.txt"))
         },
         "model_hash": model_hash,
@@ -111,7 +108,7 @@ def build_manifest(
             for path in sorted(isc_dir.glob("*.txt"))
         },
         "auxiliary_file_hashes": {
-            path.name: _sha256(path)
+            path.name: sha256_file(path)
             for path in sorted(baseline_dir.glob("deduplicated_urls_*.txt"))
         },
         "auxiliary_line_counts": {
@@ -120,7 +117,7 @@ def build_manifest(
         },
     }
     if source_archive_path is not None:
-        manifest["source_archive_hash"] = _sha256(source_archive_path)
+        manifest["source_archive_hash"] = sha256_file(source_archive_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",

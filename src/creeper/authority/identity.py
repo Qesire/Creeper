@@ -11,6 +11,15 @@ from pathlib import Path
 from typing import Mapping
 
 
+def sha256_file(path: Path) -> str:
+    """Return the exact SHA-256 content identity of a file."""
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 @dataclass(frozen=True)
 class AuthoritySnapshot:
     """The complete immutable identity used by every V4-aware component."""
@@ -80,6 +89,30 @@ class AuthoritySnapshot:
             raise ValueError("authority manifest must contain a JSON object")
         return cls.from_manifest(manifest)
 
+    def verify_baseline_dir(self, baseline_dir: Path) -> None:
+        """Verify immutable annual/candidate files before index construction."""
+        baseline_dir = Path(baseline_dir)
+        if baseline_dir.name != self.baseline_id:
+            raise ValueError(
+                "authority baseline_id does not match baseline directory: "
+                f"{self.baseline_id} != {baseline_dir.name}"
+            )
+        for name, expected in sorted(self.annual_file_hashes.items()):
+            path = baseline_dir / name
+            if not path.is_file():
+                raise FileNotFoundError(path)
+            if sha256_file(path) != expected:
+                raise ValueError(f"authority file hash mismatch: {name}")
+        candidate = baseline_dir / "candidate_pool.txt"
+        if not candidate.is_file():
+            raise FileNotFoundError(candidate)
+        if sha256_file(candidate) != self.candidate_file_hash:
+            raise ValueError("authority file hash mismatch: candidate_pool.txt")
+
+    def verify_model(self, model_path: Path) -> None:
+        if sha256_file(model_path) != self.model_hash:
+            raise ValueError("authority model hash mismatch")
+
     def as_dict(self) -> dict[str, object]:
         return {
             "baseline_id": self.baseline_id,
@@ -135,11 +168,4 @@ def baseline_authority_signature(path: Path) -> str:
 
 def eed_model_authority_signature(path: Path) -> str:
     """Hash the small EED weighting model exactly."""
-    digest = hashlib.sha256()
-    with Path(path).open("rb") as source:
-        while True:
-            chunk = source.read(1024 * 1024)
-            if not chunk:
-                break
-            digest.update(chunk)
-    return digest.hexdigest()
+    return sha256_file(path)

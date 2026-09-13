@@ -15,7 +15,12 @@ def main() -> int:
     parser.add_argument("task_root", type=Path)
     parser.add_argument("output", type=Path)
     parser.add_argument("--baseline-dir", type=Path)
-    parser.add_argument("--authority-manifest", type=Path, required=True)
+    parser.add_argument(
+        "--authority-manifest",
+        type=Path,
+        required=True,
+        help="immutable authority manifest matching the selected baseline",
+    )
     parser.add_argument("--batch-size", type=int, default=50_000)
     args = parser.parse_args()
     started = time.perf_counter()
