@@ -18,40 +18,60 @@ from typing import Any, Protocol
 from urllib.parse import unquote, urljoin, urlsplit
 
 
-@dataclass(frozen=True)
-class RootQuery:
-    query_id: str
-    root_id: str
-    query_text: str
-    max_pages: int
-    max_wall_seconds: float
-    page_size: int = 1000
-    native_filters: dict[str, str] = field(default_factory=dict)
-    expected_signal: str = ""
-    expected_artifact_family: str = ""
+from ..models import (
+    ArtifactLead as _KernelArtifactLead,
+    RootQuery as _KernelRootQuery,
+    SearchCheckpoint as _KernelSearchCheckpoint,
+    SearchHit as _KernelSearchHit,
+)
 
-    def __post_init__(self) -> None:
-        if not self.query_id.strip() or not self.root_id.strip():
+
+class RootQuery(_KernelRootQuery):
+    """L4 ABI adapter over the canonical L3 RootQuery model.
+
+    The historical structured-root constructor accepted query_id first.
+    Keep that call surface while forwarding storage and identity semantics to L3.
+    """
+
+    def __init__(
+        self,
+        query_id: str,
+        root_id: str,
+        query_text: str,
+        max_pages: int,
+        max_wall_seconds: float,
+        page_size: int = 1000,
+        native_filters: Mapping[str, Any] | None = None,
+        expected_signal: str = "",
+        expected_artifact_family: str = "",
+    ) -> None:
+        if not str(query_id).strip() or not str(root_id).strip():
             raise ValueError("query_id and root_id are required")
-        if self.max_pages < 1:
+        if max_pages < 1:
             raise ValueError("max_pages must be positive")
-        if not math.isfinite(self.max_wall_seconds) or self.max_wall_seconds <= 0:
+        if not math.isfinite(max_wall_seconds) or max_wall_seconds <= 0:
             raise ValueError("max_wall_seconds must be finite and positive")
-        if self.page_size < 1:
+        if page_size < 1:
             raise ValueError("page_size must be positive")
-        if not isinstance(self.native_filters, dict):
-            raise TypeError("native_filters must be a dict")
-        if any(not isinstance(key, str) or not isinstance(value, str) for key, value in self.native_filters.items()):
+        native = dict(native_filters or {})
+        if any(not isinstance(key, str) or not isinstance(value, str) for key, value in native.items()):
             raise TypeError("native_filters keys and values must be strings")
+        super().__init__(
+            root_id=str(root_id),
+            query_text=str(query_text),
+            max_pages=int(max_pages),
+            max_wall_seconds=float(max_wall_seconds),
+            page_size=int(page_size),
+            native_filters=native,
+            expected_signal=str(expected_signal),
+            expected_artifact_family=str(expected_artifact_family),
+            query_id=str(query_id),
+        )
 
 
 @dataclass(frozen=True)
-class SearchCheckpoint:
-    cursor: str | None = None
-    next_url: str | None = None
-    page: int = 1
-    start: int = 0
-    query_variant: str | None = None
+class SearchCheckpoint(_KernelSearchCheckpoint):
+    """L4 validation shim over the canonical L3 checkpoint model."""
 
     def __post_init__(self) -> None:
         if self.page < 1:
@@ -61,17 +81,8 @@ class SearchCheckpoint:
 
 
 @dataclass(frozen=True)
-class SearchHit:
-    root_id: str
-    query_id: str
-    provider_native_id: str
-    provider_url: str
-    provider_type: str
-    title: str = ""
-    description: str = ""
-    metadata: dict[str, Any] = field(default_factory=dict)
-    observed_at: float = 0.0
-    research_node_id: str = ""
+class SearchHit(_KernelSearchHit):
+    """Structured-root hit that is also a canonical L3 SearchHit."""
 
     def __post_init__(self) -> None:
         if not self.root_id.strip() or not self.query_id.strip():
@@ -80,20 +91,12 @@ class SearchHit:
             raise ValueError("provider_native_id is required")
         if not self.provider_type.strip():
             raise ValueError("provider_type is required")
+        object.__setattr__(self, "metadata", dict(self.metadata))
 
 
 @dataclass(frozen=True)
-class ArtifactLead:
-    root_id: str
-    provider_native_id: str
-    locator: str
-    content_type: str = ""
-    size: int | None = None
-    checksum: str | None = None
-    persistent_id: str | None = None
-    parent_persistent_id: str | None = None
-    kind: str = field(default="ARTIFACT_LEAD", init=False)
-    evidence_year: None = field(default=None, init=False)
+class ArtifactLead(_KernelArtifactLead):
+    """Structured-root artifact lead with L3 identity and lineage semantics."""
 
     def __post_init__(self) -> None:
         if not self.root_id.strip() or not self.provider_native_id.strip():
@@ -101,8 +104,7 @@ class ArtifactLead:
         parsed = urlsplit(self.locator)
         if parsed.scheme not in {"http", "https"} or not parsed.netloc:
             raise ValueError("artifact locator must be an absolute http(s) URL")
-        if self.size is not None and self.size < 0:
-            raise ValueError("artifact size must be non-negative")
+        super().__post_init__()
 
 
 @dataclass(frozen=True)
