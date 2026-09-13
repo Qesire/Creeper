@@ -45,34 +45,19 @@ DEFAULT_CODEX_MODEL = ""
 def _default_backend() -> str:
     return os.environ.get("CREEPER_SOURCE_INTELLIGENCE_BACKEND", DEFAULT_BACKEND)
 
-_SYSTEM_POLICY = """You are a source-intelligence child agent of Creeper.
+_SYSTEM_POLICY = """You are the proposal-only research compiler for Creeper.
 
-Your only authority is to propose bounded, testable source hypotheses.
-Optimize expected marginal FINAL Accepted Novel EED per total resource cost.
+Compress uncertain source research into a small number of finite, reusable,
+deterministic exploration regions. Optimize expected marginal FINAL Accepted
+Novel EED per total resource cost.
 
-You must not:
-- declare a hostname or host-year novel,
-- declare evidence valid,
-- bypass baseline checks,
-- authorize submission,
-- invent measurements,
-- modify the Creeper repository or runtime state,
-- create, edit, or delete any file.
-
-You must not use file-writing tools. Read-only inspection and live web research
-are allowed when the task requires discovery.
-
-Prefer:
-1. large enumerable historical-web resources,
-2. timestamp-bearing direct evidence,
-3. compact URL templates over long URL lists,
-4. metasources/catalogs that reveal many concrete resources,
-5. hypotheses testable with very few requests.
-
-Return ONLY one JSON object matching the supplied schema. Emit no prose,
-markdown, or code fences around the JSON. The object must contain a non-empty
-``query`` string and a ``hypotheses`` array. Every hypothesis must include all
-required fields; use JSON null for unused candidate/template/variables fields.
+Never enumerate long URL lists, select individual records, claim novelty or
+evidence validity, invent measurements, edit files/runtime, or authorize
+submission. Current Common Crawl corpus is excluded for active discovery.
+Every region must use an allowed surface and enumerator, explicit finite query
+variables, positive hard bounds, stop conditions, expected fanout, and a
+validation plan. Return ONLY one JSON object with query, regions, and
+contract_proposals; no prose or markdown.
 """
 
 
@@ -440,17 +425,21 @@ def main(argv: list[str] | None = None) -> int:
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
 
-    hypotheses = payload.get("hypotheses")
-    if not isinstance(hypotheses, list):
-        raise SystemExit(f"{args.backend} response hypotheses must be an array")
+    if not isinstance(payload.get("regions"), list):
+        raise SystemExit(f"{args.backend} response regions must be an array")
+    if not isinstance(payload.get("contract_proposals"), list):
+        raise SystemExit(f"{args.backend} response contract_proposals must be an array")
     query = payload.get("query")
     if not isinstance(query, str) or not query.strip():
-        query = "source-intelligence episode"
+        raise SystemExit(f"{args.backend} response query must be non-empty")
     normalized = {
         "query": query,
-        "hypotheses": [
-            _normalize_hypothesis(item)
-            for item in hypotheses
+        "regions": [
+            item for item in payload["regions"]
+            if isinstance(item, dict)
+        ],
+        "contract_proposals": [
+            item for item in payload["contract_proposals"]
             if isinstance(item, dict)
         ],
     }

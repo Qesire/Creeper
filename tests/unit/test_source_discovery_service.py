@@ -69,6 +69,9 @@ triage_parallelism = 6
 scout_parallelism = 2
 search_parallelism = 3
 failure_retry_seconds = 15.0
+region_parallelism = 5
+research_poll_seconds = 0.25
+nonblocking_research = true
 
 [triage]
 timeout_seconds = 4.0
@@ -116,6 +119,9 @@ max_returned_candidates = 17
         self.assertEqual(config.saturation.suppression_ttl_seconds, 1800.0)
         self.assertEqual(config.coordinator.triage_parallelism, 6)
         self.assertEqual(config.coordinator.scout_parallelism, 2)
+        self.assertEqual(config.coordinator.region_parallelism, 5)
+        self.assertEqual(config.coordinator.research_poll_seconds, 0.25)
+        self.assertTrue(config.coordinator.nonblocking_research)
         self.assertEqual(config.scrapy.max_pages, 20)
         self.assertFalse(config.scrapy.follow_query)
         self.assertEqual(
@@ -123,9 +129,28 @@ max_returned_candidates = 17
             ("python", str((self.root / "agent.py").resolve())),
         )
         self.assertEqual(config.agent.policy.max_returned_candidates, 17)
+        self.assertEqual(config.agent.max_active_calls, 1)
+        self.assertEqual(config.agent.min_seconds_between_starts, 120.0)
+        self.assertEqual(config.agent.max_regions_per_response, 8)
         self.assertEqual(config.agent.admission.min_expected_volume, 123456)
         self.assertEqual(config.agent.admission.direct_min_expected_volume, 12345)
         self.assertEqual(config.agent.admission.min_enumerability_prior, 0.6)
+
+    def test_legacy_config_uses_v7_compatibility_defaults(self) -> None:
+        path = self.write_config()
+        text = path.read_text(encoding="utf-8")
+        for line in (
+            "region_parallelism = 5\n",
+            "research_poll_seconds = 0.25\n",
+            "nonblocking_research = true\n",
+        ):
+            text = text.replace(line, "")
+        path.write_text(text, encoding="utf-8")
+        config = load_source_discovery_config(path)
+        self.assertEqual(config.coordinator.region_parallelism, 2)
+        self.assertEqual(config.coordinator.research_poll_seconds, 0.0)
+        self.assertFalse(config.coordinator.nonblocking_research)
+        self.assertEqual(config.agent.max_active_calls, 1)
 
     def test_follow_query_rejects_string_truthiness(self) -> None:
         with self.assertRaisesRegex(ValueError, "scrapy.follow_query must be a boolean"):
