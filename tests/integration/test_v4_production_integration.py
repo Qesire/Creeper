@@ -156,7 +156,7 @@ class V4DirectRoutingIntegrationTests(unittest.TestCase):
         lease = WorkLease.create(
             reservoir_id=reservoir.reservoir_id,
             cursor_start="byte:0",
-            max_records=1,
+            max_records=2,
             max_requests=1,
             max_bytes=4096,
             max_seconds=30,
