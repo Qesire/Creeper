@@ -5,12 +5,6 @@
 
 source_discovery_config = "source-discovery.example.toml"
 source_producer_config = "creeper.activated.example.toml"
-[coordinator]
-# The discovery service keeps model calls off the coordinator hot path.
-nonblocking_research = true
-region_parallelism = 2
-research_poll_seconds = 0.0
-
 # The admission producer turns durable source host-year observations into
 # platform-year tasks. Its budget is separate from exact/range production.
 

@@ -13,11 +13,6 @@ from creeper.source_discovery.models import (
 )
 from creeper.source_discovery.overlap import MinHashSketch
 from creeper.source_discovery.registry import SourceDiscoveryRegistry
-from creeper.source_discovery.research_trigger import (
-    ResearchDirective,
-    ResearchTriggerGate,
-    ResearchTriggerSnapshot,
-)
 from creeper.source_discovery.value import InterpretableSourceValueModel
 
 
@@ -151,7 +146,6 @@ class SourceReservoirManager:
         self.search_ucb_exploration = float(search_ucb_exploration)
         self.stagnation_window = int(stagnation_window)
         self.value_model = InterpretableSourceValueModel(registry)
-        self.trigger_gate = ResearchTriggerGate()
 
     def _usable(self, candidates: list[SourceCandidate]) -> list[SourceCandidate]:
         return [
@@ -626,38 +620,6 @@ class SourceReservoirManager:
                 task_type=task_type,
             )
             for kind, strategy, subject, reason, task_type in selected
-        )
-
-    def plan_research(
-        self,
-        snapshot: ResearchTriggerSnapshot,
-    ) -> ResearchDirective | None:
-        """Return at most one bounded LLM directive after the trigger gate.
-
-        This method is pure from the registry's perspective: it does not create
-        an LLM episode, mutate inventory, or launch a child process. The runtime
-        owns those side effects after accepting the directive.
-        """
-        decision = self.trigger_gate.decide(snapshot)
-        if not decision.allow:
-            return None
-        assert decision.reason is not None
-        assert decision.task_type is not None
-        strategy = {
-            "DISCOVER_NEW_SOURCE": "META_SOURCE_SEARCH",
-            "EXPLOIT_SUCCESS_PATTERN": "EXPLOIT_SUCCESS",
-            "INTERPRET_STRUCTURE": "INTERPRET_STRUCTURE",
-            "INTERPRET_EVIDENCE_CONTRACT": "INTERPRET_EVIDENCE_CONTRACT",
-            "RECOVER_STAGNATION": "RECOVER_STAGNATION",
-        }.get(decision.task_type, "META_SOURCE_SEARCH")
-        return ResearchDirective(
-            task_type=decision.task_type,
-            trigger_reason=decision.reason,
-            strategy=strategy,
-            subject=decision.subject,
-            desired_regions=decision.desired_regions,
-            reason=decision.explanation,
-            context_key=decision.context_key,
         )
 
     def plan(self) -> ReservoirPlan:
