@@ -809,6 +809,498 @@ class SourceDiscoveryRegistry:
                 (source_key, hypothesis_id),
             )
 
+    @staticmethod
+    def _source_run_from_row(row: sqlite3.Row) -> SourceRunOutcome:
+        return SourceRunOutcome(
+            source_key=str(row["source_key"]),
+            reservoir_id=str(row["reservoir_id"]),
+            lease_id=str(row["lease_id"]),
+            baseline_signature=str(row["baseline_signature"]),
+            model_signature=str(row["model_signature"]),
+            read_started=(
+                None if row["read_started"] is None else float(row["read_started"])
+            ),
+            read_finished=(
+                None if row["read_finished"] is None else float(row["read_finished"])
+            ),
+            source_records=int(row["source_records"]),
+            bytes_read=int(row["bytes_read"]),
+            source_requests=int(row["source_requests"]),
+            evidence_tasks_created=int(row["evidence_tasks_created"]),
+            evidence_tasks_terminal=int(row["evidence_tasks_terminal"]),
+            direct_capsules_committed=int(row["direct_capsules_committed"]),
+            provider_requests=int(row["provider_requests"]),
+            provider_elapsed_seconds=float(row["provider_elapsed_seconds"]),
+            candidate_duplicates=int(row["candidate_duplicates"]),
+            baseline_duplicates=int(row["baseline_duplicates"]),
+            accepted_host_years=int(row["accepted_host_years"]),
+            final_accepted_eed=float(row["final_accepted_eed"]),
+            read_complete=bool(row["read_complete"]),
+            validation_complete=bool(row["validation_complete"]),
+            closed=bool(row["closed"]),
+            closed_at=None if row["closed_at"] is None else float(row["closed_at"]),
+            max_evidence_sequence=int(row["max_evidence_sequence"]),
+            created_at=float(row["created_at"]),
+            updated_at=float(row["updated_at"]),
+        )
+
+    def begin_source_run(
+        self,
+        source_key: str,
+        *,
+        reservoir_id: str,
+        lease_id: str,
+        baseline_signature: str,
+        model_signature: str,
+        read_started: float | None = None,
+    ) -> SourceRunOutcome:
+        """Register one production lease under an immutable authority identity.
+
+        Registration is explicit so upgrading an existing runtime cannot
+        retroactively turn historical leases with incomplete telemetry into
+        zero-reward training examples.
+        """
+        if self.get_candidate(source_key) is None:
+            raise KeyError(f"unknown source: {source_key}")
+        values = (reservoir_id, lease_id, baseline_signature, model_signature)
+        if any(not isinstance(value, str) or not value.strip() for value in values):
+            raise ValueError("source-run identity and authority are required")
+        now = float(self.clock())
+        started = now if read_started is None else float(read_started)
+        with self.connection:
+            self.connection.execute(
+                """
+                INSERT OR IGNORE INTO source_run_outcomes(
+                    source_key, reservoir_id, lease_id,
+                    baseline_signature, model_signature,
+                    read_started, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    source_key,
+                    reservoir_id,
+                    lease_id,
+                    baseline_signature,
+                    model_signature,
+                    started,
+                    now,
+                    now,
+                ),
+            )
+        row = self.get_source_run_outcome(
+            source_key,
+            reservoir_id=reservoir_id,
+            lease_id=lease_id,
+            baseline_signature=baseline_signature,
+            model_signature=model_signature,
+        )
+        assert row is not None
+        return row
+
+    def get_source_run_outcome(
+        self,
+        source_key: str,
+        *,
+        reservoir_id: str,
+        lease_id: str,
+        baseline_signature: str,
+        model_signature: str,
+    ) -> SourceRunOutcome | None:
+        row = self.connection.execute(
+            """
+            SELECT *
+            FROM source_run_outcomes
+            WHERE source_key = ?
+              AND reservoir_id = ?
+              AND lease_id = ?
+              AND baseline_signature = ?
+              AND model_signature = ?
+            """,
+            (
+                source_key,
+                reservoir_id,
+                lease_id,
+                baseline_signature,
+                model_signature,
+            ),
+        ).fetchone()
+        return None if row is None else self._source_run_from_row(row)
+
+    def list_source_run_outcomes(
+        self,
+        source_key: str | None = None,
+        *,
+        baseline_signature: str | None = None,
+        model_signature: str | None = None,
+        closed_only: bool = False,
+    ) -> list[SourceRunOutcome]:
+        if (baseline_signature is None) != (model_signature is None):
+            raise ValueError(
+                "baseline_signature and model_signature must be provided together"
+            )
+        clauses: list[str] = []
+        params: list[object] = []
+        if source_key is not None:
+            clauses.append("source_key = ?")
+            params.append(source_key)
+        if baseline_signature is not None:
+            clauses.extend(
+                ["baseline_signature = ?", "model_signature = ?"]
+            )
+            params.extend((baseline_signature, model_signature))
+        if closed_only:
+            clauses.append("closed = 1")
+        where = "" if not clauses else "WHERE " + " AND ".join(clauses)
+        rows = self.connection.execute(
+            f"""
+            SELECT *
+            FROM source_run_outcomes
+            {where}
+            ORDER BY COALESCE(closed_at, updated_at), source_key, lease_id
+            """,
+            params,
+        ).fetchall()
+        return [self._source_run_from_row(row) for row in rows]
+
+    def record_source_run_read(
+        self,
+        source_key: str,
+        *,
+        reservoir_id: str,
+        lease_id: str,
+        baseline_signature: str,
+        model_signature: str,
+        source_records: int,
+        bytes_read: int,
+        source_requests: int,
+        candidate_duplicates: int = 0,
+        baseline_duplicates: int = 0,
+        read_finished: float | None = None,
+        read_complete: bool = True,
+    ) -> SourceRunOutcome:
+        metrics = (
+            source_records,
+            bytes_read,
+            source_requests,
+            candidate_duplicates,
+            baseline_duplicates,
+        )
+        if any(int(value) < 0 for value in metrics):
+            raise ValueError("source-run read counters must be non-negative")
+        now = float(self.clock())
+        finished = (
+            None
+            if not read_complete and read_finished is None
+            else now if read_finished is None else float(read_finished)
+        )
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            changed = self.connection.execute(
+                """
+                UPDATE source_run_outcomes
+                SET source_records = ?,
+                    bytes_read = ?,
+                    source_requests = ?,
+                    candidate_duplicates = ?,
+                    baseline_duplicates = ?,
+                    read_finished = ?,
+                    read_complete = ?,
+                    updated_at = ?
+                WHERE source_key = ?
+                  AND reservoir_id = ?
+                  AND lease_id = ?
+                  AND baseline_signature = ?
+                  AND model_signature = ?
+                  AND closed = 0
+                """,
+                (
+                    int(source_records),
+                    int(bytes_read),
+                    int(source_requests),
+                    int(candidate_duplicates),
+                    int(baseline_duplicates),
+                    finished,
+                    int(bool(read_complete)),
+                    now,
+                    source_key,
+                    reservoir_id,
+                    lease_id,
+                    baseline_signature,
+                    model_signature,
+                ),
+            ).rowcount
+            if changed != 1:
+                raise KeyError("unknown or closed source run")
+            self.connection.commit()
+        except BaseException:
+            self.connection.rollback()
+            raise
+        row = self.get_source_run_outcome(
+            source_key,
+            reservoir_id=reservoir_id,
+            lease_id=lease_id,
+            baseline_signature=baseline_signature,
+            model_signature=model_signature,
+        )
+        assert row is not None
+        return row
+
+    def record_source_run_validation(
+        self,
+        source_key: str,
+        *,
+        reservoir_id: str,
+        lease_id: str,
+        baseline_signature: str,
+        model_signature: str,
+        evidence_tasks_created: int,
+        evidence_tasks_terminal: int,
+        direct_capsules_committed: int,
+        provider_requests: int,
+        provider_elapsed_seconds: float,
+        accepted_host_years: int,
+        final_accepted_eed: float,
+        max_evidence_sequence: int,
+        validation_complete: bool,
+    ) -> SourceRunOutcome:
+        integer_metrics = (
+            evidence_tasks_created,
+            evidence_tasks_terminal,
+            direct_capsules_committed,
+            provider_requests,
+            accepted_host_years,
+            max_evidence_sequence,
+        )
+        if any(int(value) < 0 for value in integer_metrics):
+            raise ValueError("source-run validation counters must be non-negative")
+        if int(evidence_tasks_terminal) > int(evidence_tasks_created):
+            raise ValueError("terminal evidence tasks cannot exceed created tasks")
+        if provider_elapsed_seconds < 0 or final_accepted_eed < 0:
+            raise ValueError("source-run final reward and cost must be non-negative")
+        now = float(self.clock())
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            changed = self.connection.execute(
+                """
+                UPDATE source_run_outcomes
+                SET evidence_tasks_created = ?,
+                    evidence_tasks_terminal = ?,
+                    direct_capsules_committed = ?,
+                    provider_requests = ?,
+                    provider_elapsed_seconds = ?,
+                    accepted_host_years = ?,
+                    final_accepted_eed = ?,
+                    max_evidence_sequence = ?,
+                    validation_complete = ?,
+                    updated_at = ?
+                WHERE source_key = ?
+                  AND reservoir_id = ?
+                  AND lease_id = ?
+                  AND baseline_signature = ?
+                  AND model_signature = ?
+                  AND closed = 0
+                """,
+                (
+                    int(evidence_tasks_created),
+                    int(evidence_tasks_terminal),
+                    int(direct_capsules_committed),
+                    int(provider_requests),
+                    float(provider_elapsed_seconds),
+                    int(accepted_host_years),
+                    float(final_accepted_eed),
+                    int(max_evidence_sequence),
+                    int(bool(validation_complete)),
+                    now,
+                    source_key,
+                    reservoir_id,
+                    lease_id,
+                    baseline_signature,
+                    model_signature,
+                ),
+            ).rowcount
+            if changed != 1:
+                raise KeyError("unknown or closed source run")
+            self.connection.commit()
+        except BaseException:
+            self.connection.rollback()
+            raise
+        row = self.get_source_run_outcome(
+            source_key,
+            reservoir_id=reservoir_id,
+            lease_id=lease_id,
+            baseline_signature=baseline_signature,
+            model_signature=model_signature,
+        )
+        assert row is not None
+        return row
+
+    def _publish_source_aggregate_locked(
+        self,
+        source_key: str,
+        *,
+        baseline_signature: str,
+        model_signature: str,
+    ) -> None:
+        aggregate = self.connection.execute(
+            """
+            SELECT
+                COUNT(*) AS closed_runs,
+                SUM(CASE WHEN final_accepted_eed = 0 THEN 1 ELSE 0 END) AS zero_runs,
+                SUM(final_accepted_eed) AS final_accepted_eed,
+                SUM(
+                    provider_elapsed_seconds
+                    + CASE
+                        WHEN read_started IS NOT NULL
+                         AND read_finished IS NOT NULL
+                        THEN MAX(0, read_finished - read_started)
+                        ELSE 0
+                      END
+                ) AS cost_seconds
+            FROM source_run_outcomes
+            WHERE source_key = ?
+              AND baseline_signature = ?
+              AND model_signature = ?
+              AND closed = 1
+            """,
+            (source_key, baseline_signature, model_signature),
+        ).fetchone()
+        closed_runs = int(aggregate["closed_runs"] or 0)
+        if closed_runs < 1:
+            return
+        final_accepted_eed = float(aggregate["final_accepted_eed"] or 0.0)
+        cost_seconds = float(aggregate["cost_seconds"] or 0.0)
+        zero_runs = int(aggregate["zero_runs"] or 0)
+        self.connection.execute(
+            """
+            INSERT INTO source_final_rewards(
+                source_key, final_accepted_eed, cost_seconds,
+                baseline_signature, model_signature,
+                closed_runs, zero_runs, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(source_key) DO UPDATE SET
+                final_accepted_eed = excluded.final_accepted_eed,
+                cost_seconds = excluded.cost_seconds,
+                baseline_signature = excluded.baseline_signature,
+                model_signature = excluded.model_signature,
+                closed_runs = excluded.closed_runs,
+                zero_runs = excluded.zero_runs,
+                updated_at = excluded.updated_at
+            """,
+            (
+                source_key,
+                final_accepted_eed,
+                cost_seconds,
+                baseline_signature,
+                model_signature,
+                closed_runs,
+                zero_runs,
+                float(self.clock()),
+            ),
+        )
+        self._attribute_search_reward_locked(
+            source_key,
+            accepted_novel_eed=final_accepted_eed,
+            reward_kind="final",
+            baseline_signature=baseline_signature,
+            model_signature=model_signature,
+        )
+        self.connection.execute(
+            """
+            UPDATE source_llm_source_attribution
+            SET credited_eed = ?
+            WHERE source_key = ?
+            """,
+            (final_accepted_eed, source_key),
+        )
+
+    def close_source_run(
+        self,
+        source_key: str,
+        *,
+        reservoir_id: str,
+        lease_id: str,
+        baseline_signature: str,
+        model_signature: str,
+    ) -> bool:
+        """Publish a FINAL run only after read, evidence and readiness closure."""
+        current = self.current_scout_authority
+        authority = (baseline_signature, model_signature)
+        if current is not None and current != authority:
+            return False
+
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            row = self.connection.execute(
+                """
+                SELECT *
+                FROM source_run_outcomes
+                WHERE source_key = ?
+                  AND reservoir_id = ?
+                  AND lease_id = ?
+                  AND baseline_signature = ?
+                  AND model_signature = ?
+                """,
+                (
+                    source_key,
+                    reservoir_id,
+                    lease_id,
+                    baseline_signature,
+                    model_signature,
+                ),
+            ).fetchone()
+            if row is None:
+                raise KeyError("unknown source run")
+            if bool(row["closed"]):
+                self.connection.commit()
+                return False
+            if not bool(row["read_complete"]):
+                self.connection.commit()
+                return False
+            if not bool(row["validation_complete"]):
+                self.connection.commit()
+                return False
+            if int(row["evidence_tasks_terminal"]) != int(
+                row["evidence_tasks_created"]
+            ):
+                self.connection.commit()
+                return False
+
+            now = float(self.clock())
+            changed = self.connection.execute(
+                """
+                UPDATE source_run_outcomes
+                SET closed = 1, closed_at = ?, updated_at = ?
+                WHERE source_key = ?
+                  AND reservoir_id = ?
+                  AND lease_id = ?
+                  AND baseline_signature = ?
+                  AND model_signature = ?
+                  AND closed = 0
+                """,
+                (
+                    now,
+                    now,
+                    source_key,
+                    reservoir_id,
+                    lease_id,
+                    baseline_signature,
+                    model_signature,
+                ),
+            ).rowcount
+            if changed != 1:
+                self.connection.rollback()
+                return False
+            self._publish_source_aggregate_locked(
+                source_key,
+                baseline_signature=baseline_signature,
+                model_signature=model_signature,
+            )
+            self.connection.commit()
+            return True
+        except BaseException:
+            self.connection.rollback()
+            raise
+
     def record_final_reward(
         self,
         source_key: str,
