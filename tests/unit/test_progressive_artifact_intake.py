@@ -112,7 +112,7 @@ class ArtifactIntakeTests(unittest.TestCase):
             sample_stats={"novel_eed": 99.0},
         )
 
-        self.assertEqual(result.admission, "HOLD")
+        self.assertEqual(result.admission, "WARM")
         self.assertEqual(result.sample_stats["novel_eed"], 99.0)
         self.assertFalse(result.sample_is_formal_evidence)
 
