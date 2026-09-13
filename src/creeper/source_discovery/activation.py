@@ -2,11 +2,20 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 import hashlib
 from pathlib import PurePosixPath
 from urllib.parse import urlsplit
 
+from creeper.evidence.contracts import (
+    SourceEvidenceContract,
+    bind_contract_to_adapter_id,
+    contract_from_adapter_id,
+    freeze_contract_bindings,
+    parser_kind_from_locator,
+    resolve_source_evidence_contract,
+)
 from creeper.source_discovery.index_registry import IndexSpaceRegistry
 from creeper.source_discovery.index_space import RegionSynopsis, compile_candidate_index_space
 from creeper.source_discovery.models import SourceCandidate, SourceState
@@ -56,11 +65,6 @@ def _adapter_kind(entrypoint: str) -> tuple[str, str]:
     )
 
 
-def _direct_year_capable(entrypoint: str) -> bool:
-    name = PurePosixPath(urlsplit(entrypoint).path.lower()).name
-    return name.endswith((".cdx", ".cdx.gz", ".cdxj", ".cdxj.gz"))
-
-
 class SourceActivationCompiler:
     """Turn an ACTIVE candidate into one idempotent durable Reservoir."""
 
@@ -69,10 +73,12 @@ class SourceActivationCompiler:
         control_store: ControlStore,
         *,
         registry: SourceDiscoveryRegistry,
+        evidence_contracts: Mapping[str, SourceEvidenceContract] | None = None,
     ) -> None:
         self.control_store = control_store
         self.registry = registry
         self.index_registry = IndexSpaceRegistry(control_store)
+        self.evidence_contracts = freeze_contract_bindings(evidence_contracts)
 
     def compile(self, candidate: SourceCandidate) -> ProductionSourceSpec:
         if candidate.state is not SourceState.ACTIVE:
@@ -86,7 +92,7 @@ class SourceActivationCompiler:
         source_key = candidate.source_key
         domain_id = f"domain:{source_key.removeprefix('src:')}"
         reservoir_id = f"reservoir:{source_key.removeprefix('src:')}"
-        adapter_id = f"{adapter_kind}:{source_key.removeprefix('src:')}"
+        base_adapter_id = f"{adapter_kind}:{source_key.removeprefix('src:')}"
         year_from = candidate.expected_year_from or 1996
         year_to = candidate.expected_year_to or 2001
 
@@ -119,6 +125,30 @@ class SourceActivationCompiler:
                     cursor=existing.cursor,
                 )
 
+        # Freeze authority at activation. Existing reservoirs keep their
+        # durable contract; newly supplied allowlists cannot upgrade authority
+        # in the middle of a lease or after a restart.
+        if existing is not None:
+            contract = contract_from_adapter_id(existing.adapter_id)
+            if contract is None:
+                contract = resolve_source_evidence_contract(
+                    existing.root_locator,
+                    parser_kind=parser_kind_from_locator(existing.root_locator),
+                )
+            adapter_id = existing.adapter_id
+        else:
+            contract = resolve_source_evidence_contract(
+                stored.canonical_entrypoint,
+                explicit_contracts=self.evidence_contracts,
+                parser_kind=parser_kind_from_locator(
+                    stored.canonical_entrypoint
+                ),
+            )
+            adapter_id = bind_contract_to_adapter_id(
+                base_adapter_id,
+                contract,
+            )
+
         measurement = self.registry.get_scout_measurement(source_key)
         if measurement is None:
             raise SourceActivationError("ACTIVE candidate requires scout measurement")
@@ -138,9 +168,7 @@ class SourceActivationCompiler:
                 if triage is None
                 else triage.get("content_length")
             ),
-            direct_evidence_authority=_direct_year_capable(
-                stored.canonical_entrypoint
-            ),
+            direct_evidence_authority=contract.grants_direct_web_year,
         )
         self.index_registry.register_index_space(compiled_index_space)
         if (
@@ -186,6 +214,7 @@ class SourceActivationCompiler:
                     candidate.canonical_entrypoint,
                     str(year_from),
                     str(year_to),
+                    contract.binding_digest,
                 )
             ).encode("utf-8")
         ).hexdigest()
@@ -224,8 +253,7 @@ class SourceActivationCompiler:
             enumeration_kind=enumeration_kind,
             capacity_lower=capacity_lower,
             capacity_upper=capacity_upper,
-            evidence_mode=("direct_year" if _direct_year_capable(candidate.canonical_entrypoint)
-                           else "discovery_only"),
+            evidence_mode=contract.evidence_mode,
             state=ReservoirState.READY,
         )
         self.control_store.save_activation(
