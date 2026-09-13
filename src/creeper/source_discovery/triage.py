@@ -95,6 +95,8 @@ class HttpSourceTriageExecutor:
             content_type=response.headers.get("content-type"),
             content_length=content_length,
             range_supported=range_supported,
+            etag=response.headers.get("etag"),
+            last_modified=response.headers.get("last-modified"),
         )
 
     def _raise_if_transient(self, status: int, *, method: str) -> None:
