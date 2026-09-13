@@ -197,6 +197,48 @@ class L8NonblockingRuntimeTests(unittest.IsolatedAsyncioTestCase):
         release.set()
         await coordinator.shutdown()
 
+    async def test_parent_validation_rejection_does_not_stop_runtime(self) -> None:
+        failures: list[str] = []
+
+        async def research(_directive):
+            return {"proposal": "invalid"}
+
+        def reject(_directive, _value, _elapsed):
+            raise ValueError("proposal rejected by parent validator")
+
+        coordinator = SourceDiscoveryCoordinator(
+            self.registry,
+            self.manager,
+            lock_path=self.root / "coordinator.lock",
+            triage_executor=self._triage,
+            scout_executor=self._scout,
+            search_executor=self._search,
+            research_snapshot_provider=self._snapshot,
+            research_executor=research,
+            research_result_committer=reject,
+            research_failure_recorder=(
+                lambda _directive, error, _elapsed: failures.append(str(error))
+            ),
+        )
+
+        first = await coordinator.run_once()
+        self.assertEqual(first.research_started, 1)
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+        second = await coordinator.run_once()
+        self.assertEqual(second.research_failures, 1)
+        self.assertEqual(
+            failures,
+            ["proposal rejected by parent validator"],
+        )
+        self.assertEqual(second.research_completed, 0)
+        self.assertFalse(second.research_active)
+
+        third = await coordinator.run_once()
+        self.assertEqual(third.research_started, 0)
+        self.assertEqual(third.agent_hot_path_block_seconds, 0.0)
+
     async def test_child_failure_is_recorded_and_runtime_stays_alive(self) -> None:
         failures: list[str] = []
 
