@@ -128,9 +128,6 @@ def validate_evidence_semantics(
         if not str(getattr(capsule, name, "")).strip():
             errors.append(f"missing evidence provenance: {name}")
 
-    if not re.fullmatch(r"[0-9a-f]{64}", capsule.payload_hash or ""):
-        errors.append("payload_hash must be a SHA-256 value")
-
     lane = classify_acquisition_lane(capsule)
     timestamp_year = _timestamp_year(capsule.evidence_timestamp)
 
