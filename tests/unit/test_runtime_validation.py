@@ -7,12 +7,48 @@ from pathlib import Path
 
 from creeper.evidence.policies import EvidenceCapsule, EvidenceQueryKey, TemporalScope
 from creeper.metrics.validation import finish_validation_run, start_validation_run
+from creeper.runtime.readiness import IncrementalReadinessReport
 from creeper.storage.control_store import ControlStore
 from creeper.storage.evidence_store import EvidenceStore
 from creeper.storage.telemetry_store import RuntimeTelemetryStore
 
 
 class RuntimeValidationTests(unittest.TestCase):
+    def test_readiness_checkpoint_separates_observed_and_output_overlap(self):
+        report = IncrementalReadinessReport(
+            baseline_signature="base-a",
+            model_signature="model-a",
+            evidence_cursor=12,
+            latest_evidence_sequence=12,
+            processed_host_years=12,
+            novel_host_years=9,
+            novel_eed="10",
+            baseline_eed="100",
+            growth_rate="0.1",
+            five_percent_delta="5",
+            confirmed_fraction_of_five_percent="2",
+            prewarm_reached=True,
+            formal_gate_reached=True,
+            annual={},
+            source_attribution={},
+            task_kind_attribution={},
+            baseline_reconciliation={
+                "baseline_overlap": 3,
+                "observed_baseline_overlap": 3,
+                "output_baseline_overlap": 0,
+            },
+        )
+        payload = report.as_dict()
+        self.assertEqual(payload["evidence_sequence_frontier"], 12)
+        self.assertEqual(
+            payload["baseline_reconciliation"]["observed_baseline_overlap"],
+            3,
+        )
+        self.assertEqual(
+            payload["baseline_reconciliation"]["output_baseline_overlap"],
+            0,
+        )
+
     @staticmethod
     def _readiness(
         root: Path,

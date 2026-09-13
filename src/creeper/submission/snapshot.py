@@ -38,3 +38,9 @@ class SubmissionSnapshot:
     authority_digest: str = ""
     source_contribution: dict[str, object] | None = None
     within_year_duplicates: int = 0
+    # ``overlap_count`` is retained for reports produced before V5 Task 6.
+    # Formal gating uses the explicit output invariant below.
+    observed_baseline_overlap: int = 0
+    output_baseline_overlap: int = 0
+    evidence_sequence_frontier: int | None = None
+    candidate_snapshot_id: str = ""

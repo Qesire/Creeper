@@ -93,6 +93,27 @@ def _build_snapshot_from_readiness(
 
     novel_eed = _required_text(readiness, "novel_eed")
     growth_rate = _required_text(readiness, "growth_rate")
+    evidence_sequence_frontier = int(
+        readiness.get(
+            "evidence_sequence_frontier",
+            readiness.get("evidence_cursor", 0),
+        )
+        or 0
+    )
+    if evidence_sequence_frontier < 0:
+        raise ValueError("evidence_sequence_frontier must be non-negative")
+    candidate_snapshot_id = readiness.get("candidate_snapshot_id", "")
+    if not isinstance(candidate_snapshot_id, str):
+        raise ValueError("candidate_snapshot_id must be text")
+    observed_overlap = int(
+        reconciliation.get(
+            "observed_baseline_overlap",
+            # Compatibility with pre-Task-6 readiness reports.
+            reconciliation.get("baseline_overlap", 0),
+        )
+        or 0
+    )
+    output_overlap = int(reconciliation.get("output_baseline_overlap", 0) or 0)
     baseline_hashes = {
         name.removesuffix(".txt"): digest
         for name, digest in authority.annual_file_hashes.items()
@@ -111,7 +132,7 @@ def _build_snapshot_from_readiness(
         growth_rate=growth_rate,
         evidence_coverage="1",
         invalid_count=int(reconciliation.get("invalid_records", 0) or 0),
-        overlap_count=int(reconciliation.get("baseline_overlap", 0) or 0),
+        overlap_count=observed_overlap,
         source_report_set=source_report_set,
         cdx_audit_set=cdx_audit_set,
         code_revision=code_revision,
@@ -130,6 +151,10 @@ def _build_snapshot_from_readiness(
         within_year_duplicates=int(
             reconciliation.get("within_year_duplicates", 0) or 0
         ),
+        observed_baseline_overlap=observed_overlap,
+        output_baseline_overlap=output_overlap,
+        evidence_sequence_frontier=evidence_sequence_frontier,
+        candidate_snapshot_id=candidate_snapshot_id,
     )
 
 

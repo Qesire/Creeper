@@ -76,6 +76,10 @@ class IncrementalReadinessReport:
             "model_signature": self.model_signature,
             "evidence_cursor": self.evidence_cursor,
             "latest_evidence_sequence": self.latest_evidence_sequence,
+            # The processed cursor is the immutable evidence checkpoint used
+            # by a formal submission.  A caller must still ensure it equals
+            # latest_evidence_sequence before treating the report as ready.
+            "evidence_sequence_frontier": self.evidence_cursor,
             "processed_host_years": self.processed_host_years,
             "novel_host_years": self.novel_host_years,
             "novel_eed": self.novel_eed,
@@ -599,7 +603,17 @@ class IncrementalReadinessLedger:
             "input_records": int(state["processed_host_years"]),
             "within_year_duplicates": 0,
             "invalid_records": 0,
+            # Keep the historical key for old readers, while making the two
+            # different meanings explicit for formal submission.
             "baseline_overlap": int(state["processed_host_years"]) - int(state["novel_host_years"]),
+            "observed_baseline_overlap": (
+                int(state["processed_host_years"])
+                - int(state["novel_host_years"])
+            ),
+            # Readiness has already removed baseline host-years from its novel
+            # frontier.  The formal output invariant is checked again during
+            # export, so this remains zero unless the output itself is wrong.
+            "output_baseline_overlap": 0,
             "novel_host_years": int(state["novel_host_years"]),
             "novel_eed": format(novel_eed, "f"),
             "growth_rate": format(growth_rate, "f"),

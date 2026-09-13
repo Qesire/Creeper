@@ -40,6 +40,8 @@ class RuntimeSubmissionContext:
     growth_rate: str = "0"
     eed_model_path: Path | None = None
     baseline_eed: str = "0"
+    candidate_snapshot_id: str = ""
+    evidence_sequence_frontier: int | None = None
 
 
 def _annual_eed_report(
@@ -137,6 +139,8 @@ def build_runtime_snapshot(
     evidence_store: EvidenceStore,
     baseline: BaselineIndex,
     snapshot_id: str,
+    evidence_sequence_frontier: int | None = None,
+    candidate_snapshot_id: str | None = None,
 ) -> SubmissionSnapshot:
     """Build a snapshot from durable runtime stores using the canonical builder."""
     authority = AuthoritySnapshot.from_manifest(context.baseline_manifest)
@@ -152,9 +156,27 @@ def build_runtime_snapshot(
         != authority.model_hash
     ):
         raise ValueError("submission EED model does not match authority manifest")
+    current_frontier = evidence_store.max_host_year_sequence()
+    requested_frontier = (
+        context.evidence_sequence_frontier
+        if evidence_sequence_frontier is None
+        else evidence_sequence_frontier
+    )
+    frontier = (
+        current_frontier
+        if requested_frontier is None
+        else int(requested_frontier)
+    )
+    if frontier < 0 or frontier > current_frontier:
+        raise ValueError("evidence_sequence_frontier is outside the evidence store")
+    checkpoint_capsules = list(
+        evidence_store.iter_canonical_host_year_capsules(
+            max_sequence=frontier,
+        )
+    )
     novel_capsules = [
         capsule
-        for capsule in evidence_store.canonical_host_year_capsules()
+        for capsule in checkpoint_capsules
         if capsule.year in YEAR_BITS
         and not baseline.year_mask(capsule.hostname) & YEAR_BITS[capsule.year]
     ]
@@ -178,9 +200,9 @@ def build_runtime_snapshot(
             if baseline_eed > 0
             else "0"
         )
-    return build_snapshot(
+    built = build_snapshot(
         snapshot_id,
-        novel_capsules,
+        checkpoint_capsules,
         baseline,
         context.baseline_manifest,
         code_revision=context.code_revision,
@@ -198,6 +220,21 @@ def build_runtime_snapshot(
             if isinstance(eed_report, dict)
             else None
         ),
+    )
+    return SubmissionSnapshot(
+        **{
+            **built.__dict__,
+            # Legacy callers used overlap_count for the final emitted output.
+            "overlap_count": 0,
+            "observed_baseline_overlap": built.overlap_count,
+            "output_baseline_overlap": 0,
+            "evidence_sequence_frontier": frontier,
+            "candidate_snapshot_id": (
+                context.candidate_snapshot_id
+                if candidate_snapshot_id is None
+                else candidate_snapshot_id
+            ),
+        }
     )
 
 
@@ -235,7 +272,10 @@ def export_runtime_submission(
     baseline = BaselineIndex(Path(baseline_index_path), authority=authority)
     try:
         def novel_records():
-            for capsule in evidence_store.iter_canonical_host_year_capsules():
+            max_sequence = snapshot.evidence_sequence_frontier
+            for capsule in evidence_store.iter_canonical_host_year_capsules(
+                max_sequence=max_sequence,
+            ):
                 bit = YEAR_BITS.get(int(capsule.year))
                 if bit is None:
                     continue

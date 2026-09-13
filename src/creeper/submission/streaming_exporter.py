@@ -576,13 +576,17 @@ def build_streaming_submission_zip(
                     metrics=stream_metrics,
                 )
                 streamed_count = int(evidence_stage["count"])
+                observed_overlap = max(
+                    int(snapshot.observed_baseline_overlap),
+                    int(snapshot.overlap_count),
+                )
                 reconciliation = {
                     "baseline_id": snapshot.baseline_id,
                     "baseline_eed": snapshot.baseline_eed,
                     "input_records": (
                         streamed_count
                         + snapshot.invalid_count
-                        + snapshot.overlap_count
+                        + observed_overlap
                         + snapshot.within_year_duplicates
                         + int(evidence_stage["duplicate_count"])
                     ),
@@ -591,7 +595,12 @@ def build_streaming_submission_zip(
                         + int(evidence_stage["duplicate_count"])
                     ),
                     "invalid_records": snapshot.invalid_count,
-                    "baseline_overlap": snapshot.overlap_count,
+                    # ``baseline_overlap`` remains as a compatibility alias
+                    # for the formal output invariant.  Audit observations
+                    # are carried separately and do not fail precheck.
+                    "baseline_overlap": snapshot.output_baseline_overlap,
+                    "observed_baseline_overlap": observed_overlap,
+                    "output_baseline_overlap": snapshot.output_baseline_overlap,
                     "novel_host_years": streamed_count,
                     "novel_eed": snapshot.novel_eed,
                     "growth_rate": snapshot.growth_rate,
@@ -735,6 +744,10 @@ def build_streaming_submission_zip(
                     "model_hash": snapshot.model_hash,
                     "baseline_eed": snapshot.baseline_eed,
                     "authority_digest": snapshot.authority_digest,
+                    "observed_baseline_overlap": observed_overlap,
+                    "output_baseline_overlap": snapshot.output_baseline_overlap,
+                    "evidence_sequence_frontier": snapshot.evidence_sequence_frontier,
+                    "candidate_snapshot_id": snapshot.candidate_snapshot_id,
                     "policy_versions": {
                         "normalizer": snapshot.normalizer_version,
                         "evidence": snapshot.evidence_policy_version,

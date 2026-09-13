@@ -106,7 +106,7 @@ def precheck_submission(snapshot: SubmissionSnapshot) -> PrecheckReport:
         reasons.append("exact EED report is required")
     if snapshot.invalid_count:
         reasons.append("invalid annual records remain")
-    if snapshot.overlap_count:
+    if snapshot.output_baseline_overlap:
         reasons.append("annual baseline overlap remains")
     if snapshot.incomplete_query_count:
         reasons.append("incomplete queries cannot be submitted as negative evidence")

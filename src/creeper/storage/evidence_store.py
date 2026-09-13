@@ -506,6 +506,7 @@ class EvidenceStore:
         self,
         *,
         batch_size: int = 5_000,
+        max_sequence: int | None = None,
     ):
         """Stream one deterministic capsule per proven host-year.
 
@@ -515,20 +516,35 @@ class EvidenceStore:
         """
         if batch_size < 1:
             raise ValueError("batch_size must be positive")
+        if max_sequence is not None and max_sequence < 0:
+            raise ValueError("max_sequence must be non-negative")
         # The WITHOUT ROWID primary key is ordered as
         # (hostname, year, provider, payload_hash, policy_version). Scan it
         # directly instead of using ROW_NUMBER/PARTITION, which can require a
         # corpus-sized SQLite temp sort even when Python uses fetchmany().
-        cursor = self.connection.execute(
-            """
+        query = """
             SELECT hostname, year, provider, temporal_semantics,
                    evidence_timestamp, source_locator, payload_hash,
                    policy_version, evidence_type, source_id, original_url,
                    record_locator, extraction_method
             FROM evidence_capsules
-            ORDER BY hostname, year, provider, payload_hash, policy_version
+        """
+        params: tuple[object, ...] = ()
+        if max_sequence is not None:
+            query += """
+            WHERE EXISTS (
+                SELECT 1
+                FROM evidence_host_years AS indexed
+                WHERE indexed.hostname = evidence_capsules.hostname
+                  AND indexed.year = evidence_capsules.year
+                  AND indexed.sequence <= ?
+            )
             """
-        )
+            params = (int(max_sequence),)
+        query += """
+            ORDER BY hostname, year, provider, payload_hash, policy_version
+        """
+        cursor = self.connection.execute(query, params)
         last_key: tuple[str, int] | None = None
         while True:
             rows = cursor.fetchmany(int(batch_size))
