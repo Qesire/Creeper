@@ -3,15 +3,16 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, localcontext
 import re
 
 from creeper.authority.identity import authority_digest
-from creeper.authority.normalizer import normalize_official
+from creeper.evidence.classification import validate_evidence_semantics
 from creeper.submission.snapshot import SubmissionSnapshot
 
 
 MINIMUM_GROWTH_RATE = Decimal("0.05")
+GROWTH_DECIMAL_PRECISION = 50
 
 
 @dataclass(frozen=True)
@@ -32,6 +33,22 @@ def _decimal(value: object, name: str, reasons: list[str]) -> Decimal | None:
     return parsed
 
 
+def canonical_growth_rate(novel_eed: Decimal, baseline_eed: Decimal) -> Decimal:
+    """Return the one formal growth value used by runtime, precheck and verifier."""
+
+    if not novel_eed.is_finite() or novel_eed < 0:
+        raise ValueError("novel_eed must be finite and non-negative")
+    if not baseline_eed.is_finite() or baseline_eed <= 0:
+        raise ValueError("baseline_eed must be finite and positive")
+    with localcontext() as context:
+        context.prec = GROWTH_DECIMAL_PRECISION
+        return +(novel_eed / baseline_eed)
+
+
+def format_growth_rate(novel_eed: Decimal, baseline_eed: Decimal) -> str:
+    return format(canonical_growth_rate(novel_eed, baseline_eed), "f")
+
+
 def precheck_submission(snapshot: SubmissionSnapshot) -> PrecheckReport:
     reasons: list[str] = []
     if not snapshot.baseline_id:
@@ -47,8 +64,8 @@ def precheck_submission(snapshot: SubmissionSnapshot) -> PrecheckReport:
     if not sha256.fullmatch(snapshot.model_hash):
         reasons.append("model_hash must be a SHA-256 value")
     baseline_eed = _decimal(snapshot.baseline_eed, "baseline_eed", reasons)
-    if baseline_eed is not None and baseline_eed < 0:
-        reasons.append("baseline_eed cannot be negative")
+    if baseline_eed is not None and baseline_eed <= 0:
+        reasons.append("baseline_eed must be positive")
     if not sha256.fullmatch(snapshot.authority_digest):
         reasons.append("authority_digest must be a SHA-256 value")
     elif (
@@ -57,7 +74,7 @@ def precheck_submission(snapshot: SubmissionSnapshot) -> PrecheckReport:
         and sha256.fullmatch(snapshot.candidate_file_hash)
         and sha256.fullmatch(snapshot.model_hash)
         and baseline_eed is not None
-        and baseline_eed >= 0
+        and baseline_eed > 0
         and snapshot.baseline_id
     ):
         expected_digest = authority_digest(
@@ -100,11 +117,23 @@ def precheck_submission(snapshot: SubmissionSnapshot) -> PrecheckReport:
     growth_rate = _decimal(snapshot.growth_rate, "growth_rate", reasons)
     if novel_eed is not None and novel_eed < 0:
         reasons.append("novel_eed cannot be negative")
-    if growth_rate is not None:
-        if growth_rate < 0:
-            reasons.append("growth_rate cannot be negative")
-        elif growth_rate < MINIMUM_GROWTH_RATE:
+    if growth_rate is not None and growth_rate < 0:
+        reasons.append("growth_rate cannot be negative")
+
+    if (
+        novel_eed is not None
+        and novel_eed >= 0
+        and baseline_eed is not None
+        and baseline_eed > 0
+        and growth_rate is not None
+    ):
+        expected_growth = canonical_growth_rate(novel_eed, baseline_eed)
+        if growth_rate != expected_growth:
+            reasons.append("growth_rate must equal novel_eed / baseline_eed exactly")
+        if expected_growth < MINIMUM_GROWTH_RATE:
             reasons.append("formal submission requires at least 5% EED growth")
+    elif growth_rate is not None and growth_rate < MINIMUM_GROWTH_RATE:
+        reasons.append("formal submission requires at least 5% EED growth")
 
     if snapshot.eed_report is not None and "equivalent_english_domains" in snapshot.eed_report:
         reported_eed = _decimal(
@@ -116,10 +145,11 @@ def precheck_submission(snapshot: SubmissionSnapshot) -> PrecheckReport:
             reasons.append("novel_eed must match the exact EED report")
 
     for capsule in snapshot.novel_records:
-        if normalize_official(capsule.hostname) is None:
-            reasons.append(f"invalid evidence hostname: {capsule.hostname}")
-        if capsule.year not in range(1996, 2002):
-            reasons.append(f"evidence year out of range: {capsule.year}")
+        validation = validate_evidence_semantics(capsule)
+        for error in validation.errors:
+            reasons.append(
+                f"invalid evidence {capsule.hostname}/{capsule.year}: {error}"
+            )
     for scope in snapshot.active_candidate_scopes:
         normalized_scope = scope.lower().replace("-", "_").replace(" ", "_")
         if "common_crawl" in normalized_scope:
