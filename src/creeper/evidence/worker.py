@@ -13,7 +13,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import time
-from collections.abc import AsyncIterator, Callable, Mapping
+from collections.abc import AsyncIterator, Callable, Iterable, Mapping
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -28,7 +28,7 @@ from creeper.evidence.policies import (
 from creeper.storage.commit_writer import CommitWriter
 from creeper.storage.control_store import ControlStore, EvidenceTask
 from creeper.storage.evidence_queue import DurableEvidenceQueue
-from creeper.storage.evidence_store import EvidenceStore
+from creeper.storage.evidence_store import EvidenceStore, EvidenceTaskProvenance
 
 
 class AsyncEvidenceProvider(Protocol):
@@ -231,6 +231,39 @@ class AsyncEvidenceWorker:
             key=task.key,
         )
 
+    def _persist_positive_capsules(
+        self,
+        key: EvidenceQueryKey,
+        capsules: Iterable,
+        *,
+        domain: bool = False,
+    ) -> int:
+        capsule_rows = tuple(capsules)
+        if not capsule_rows:
+            return 0
+        origin = self.control_store.primary_evidence_task_origin(key)
+        provenance = EvidenceTaskProvenance(
+            key=key,
+            source_key="" if origin is None else origin[0],
+            reservoir_id="" if origin is None else origin[1],
+            lease_id="" if origin is None else origin[2],
+            committed_at=float(self.control_store.clock()),
+        )
+        inserted = self.evidence_store.put_many_with_task_provenance(
+            (capsule, provenance) for capsule in capsule_rows
+        )
+        if domain:
+            self.control_store.attribute_domain_task_host_years(
+                key,
+                capsule_rows,
+            )
+        else:
+            self.control_store.attribute_task_host_years(
+                key,
+                (capsule.year for capsule in capsule_rows),
+            )
+        return inserted
+
     def _record_attempt_metric(
         self,
         task: EvidenceTask,
@@ -384,12 +417,10 @@ class AsyncEvidenceWorker:
 
                 if isinstance(result, DomainEvidenceQueryResult):
                     if result.capsules:
-                        self.control_store.attribute_domain_task_host_years(
+                        range_inserted_capsules += self._persist_positive_capsules(
                             result.key,
                             result.capsules,
-                        )
-                        range_inserted_capsules += self.evidence_store.put_many(
-                            result.capsules
+                            domain=True,
                         )
                     if result.state in {
                         CDXQueryState.DECOMPOSED,
@@ -416,12 +447,9 @@ class AsyncEvidenceWorker:
                         )
                 elif isinstance(result, RangeEvidenceQueryResult):
                     if result.capsules:
-                        self.control_store.attribute_task_host_years(
+                        range_inserted_capsules += self._persist_positive_capsules(
                             result.key,
-                            (capsule.year for capsule in result.capsules),
-                        )
-                        range_inserted_capsules += self.evidence_store.put_many(
-                            result.capsules
+                            result.capsules,
                         )
                     capsule_years = {
                         capsule.year for capsule in result.capsules
@@ -659,12 +687,10 @@ class AsyncEvidenceWorker:
 
                     if isinstance(result, DomainEvidenceQueryResult):
                         if result.capsules:
-                            self.control_store.attribute_domain_task_host_years(
+                            inserted_capsules += self._persist_positive_capsules(
                                 result.key,
                                 result.capsules,
-                            )
-                            inserted_capsules += self.evidence_store.put_many(
-                                result.capsules
+                                domain=True,
                             )
                         if result.state in {
                             CDXQueryState.DECOMPOSED,
@@ -691,12 +717,9 @@ class AsyncEvidenceWorker:
                             )
                     elif isinstance(result, RangeEvidenceQueryResult):
                         if result.capsules:
-                            self.control_store.attribute_task_host_years(
+                            inserted_capsules += self._persist_positive_capsules(
                                 result.key,
-                                (capsule.year for capsule in result.capsules),
-                            )
-                            inserted_capsules += self.evidence_store.put_many(
-                                result.capsules
+                                result.capsules,
                             )
                         capsule_years = {
                             capsule.year for capsule in result.capsules

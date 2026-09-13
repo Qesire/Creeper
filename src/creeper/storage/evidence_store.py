@@ -9,7 +9,7 @@ from pathlib import Path
 
 from creeper.authority.baseline_index import YEAR_BITS
 from creeper.authority.normalizer import normalize_official
-from creeper.evidence.policies import EvidenceCapsule
+from creeper.evidence.policies import EvidenceCapsule, EvidenceQueryKey
 
 
 @dataclass(frozen=True)
@@ -17,6 +17,26 @@ class EvidenceHostYear:
     sequence: int
     hostname: str
     year: int
+
+
+@dataclass(frozen=True)
+class EvidenceTaskProvenance:
+    key: EvidenceQueryKey
+    source_key: str = ""
+    reservoir_id: str = ""
+    lease_id: str = ""
+    committed_at: float = 0.0
+
+
+@dataclass(frozen=True)
+class EvidenceHostYearTaskProvenance:
+    hostname: str
+    year: int
+    task_kind: str
+    source_key: str
+    reservoir_id: str
+    lease_id: str
+    committed_at: float
 
 
 class EvidenceStore:
@@ -27,6 +47,7 @@ class EvidenceStore:
         self.connection.execute("PRAGMA journal_mode=WAL")
         self.connection.execute("PRAGMA synchronous=NORMAL")
         self.connection.execute("PRAGMA busy_timeout=30000")
+        self.connection.execute("PRAGMA foreign_keys=ON")
         self._ensure_schema()
 
     def _ensure_schema(self) -> None:
@@ -115,6 +136,38 @@ class EvidenceStore:
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
             ) WITHOUT ROWID;
+            CREATE TABLE IF NOT EXISTS evidence_capsule_task_provenance (
+                hostname TEXT NOT NULL,
+                year INTEGER NOT NULL,
+                provider TEXT NOT NULL,
+                payload_hash TEXT NOT NULL,
+                policy_version TEXT NOT NULL,
+                task_kind TEXT NOT NULL,
+                task_hostname TEXT NOT NULL,
+                task_year_from INTEGER NOT NULL,
+                task_year_to INTEGER NOT NULL,
+                task_provider TEXT NOT NULL,
+                task_policy_version TEXT NOT NULL,
+                source_key TEXT NOT NULL DEFAULT '',
+                reservoir_id TEXT NOT NULL DEFAULT '',
+                lease_id TEXT NOT NULL DEFAULT '',
+                committed_at REAL NOT NULL,
+                PRIMARY KEY(
+                    hostname, year, provider, payload_hash, policy_version,
+                    task_kind, task_hostname, task_year_from, task_year_to,
+                    task_provider, task_policy_version,
+                    source_key, reservoir_id, lease_id
+                ),
+                FOREIGN KEY(
+                    hostname, year, provider, payload_hash, policy_version
+                ) REFERENCES evidence_capsules(
+                    hostname, year, provider, payload_hash, policy_version
+                )
+            ) WITHOUT ROWID;
+            CREATE INDEX IF NOT EXISTS idx_evidence_capsule_task_provenance_host_year
+                ON evidence_capsule_task_provenance(
+                    hostname, year, committed_at, task_kind
+                );
             """
         )
         # Serialize the one-time backfill across independently started
@@ -142,6 +195,27 @@ class EvidenceStore:
                     VALUES (?, ?)
                     """,
                     ("host-year-index-v1", "complete"),
+                )
+            provenance_cutover = self.connection.execute(
+                "SELECT 1 FROM evidence_store_meta WHERE key = ?",
+                ("provider-task-provenance-v1-cutover-sequence",),
+            ).fetchone()
+            if provenance_cutover is None:
+                max_sequence = int(
+                    self.connection.execute(
+                        "SELECT COALESCE(MAX(sequence), 0) FROM evidence_host_years"
+                    ).fetchone()[0]
+                    or 0
+                )
+                self.connection.execute(
+                    """
+                    INSERT INTO evidence_store_meta(key, value)
+                    VALUES (?, ?)
+                    """,
+                    (
+                        "provider-task-provenance-v1-cutover-sequence",
+                        str(max_sequence),
+                    ),
                 )
             self.connection.commit()
         except BaseException:
@@ -192,6 +266,172 @@ class EvidenceStore:
                 host_years,
             )
         return inserted_capsules
+
+    @staticmethod
+    def _task_kind(key: EvidenceQueryKey) -> str:
+        scope = key.temporal_scope
+        if key.provider == "rdap":
+            return "rdap"
+        if key.policy_version.startswith("cdx-domain-"):
+            return "domain"
+        if scope.year_from == scope.year_to:
+            return "exact"
+        return "range"
+
+    def put_many_with_task_provenance(
+        self,
+        items: Iterable[tuple[EvidenceCapsule, EvidenceTaskProvenance]],
+    ) -> int:
+        """Atomically persist provider proof and the task lineage that earned it.
+
+        EvidenceStore is the crash-recovery authority for positive proof.
+        ControlStore attribution may lag or be absent after a process crash, but
+        a provider task can never claim final reward unless its provenance row
+        was committed in the same SQLite transaction as the capsule.
+        """
+
+        capsule_rows: list[tuple[object, ...]] = []
+        provenance_rows: list[tuple[object, ...]] = []
+        host_years: list[tuple[str, int]] = []
+        for capsule, provenance in items:
+            hostname = normalize_official(capsule.hostname)
+            if hostname is None:
+                raise ValueError("evidence capsule contains an invalid hostname")
+            key = provenance.key
+            scope = key.temporal_scope
+            task_kind = self._task_kind(key)
+            if capsule.provider != key.provider:
+                raise ValueError("capsule provider does not match evidence task")
+            if capsule.policy_version != key.policy_version:
+                raise ValueError("capsule policy does not match evidence task")
+            if not scope.year_from <= int(capsule.year) <= scope.year_to:
+                raise ValueError("capsule year falls outside evidence task scope")
+            if task_kind != "domain" and hostname != key.hostname:
+                raise ValueError("non-domain capsule hostname must match evidence task")
+            capsule_rows.append(
+                (
+                    hostname, capsule.year, capsule.provider,
+                    capsule.temporal_semantics, capsule.evidence_timestamp,
+                    capsule.source_locator, capsule.payload_hash,
+                    capsule.policy_version, capsule.evidence_type,
+                    capsule.source_id, capsule.original_url,
+                    capsule.record_locator, capsule.extraction_method,
+                )
+            )
+            host_years.append((hostname, int(capsule.year)))
+            provenance_rows.append(
+                (
+                    hostname, int(capsule.year), capsule.provider,
+                    capsule.payload_hash, capsule.policy_version,
+                    task_kind, key.hostname, scope.year_from, scope.year_to,
+                    key.provider, key.policy_version,
+                    str(provenance.source_key), str(provenance.reservoir_id),
+                    str(provenance.lease_id), float(provenance.committed_at),
+                )
+            )
+        if not capsule_rows:
+            return 0
+
+        before = self.connection.total_changes
+        with self.connection:
+            self.connection.executemany(
+                """
+                INSERT OR IGNORE INTO evidence_capsules(
+                    hostname, year, provider, temporal_semantics,
+                    evidence_timestamp, source_locator, payload_hash,
+                    policy_version, evidence_type, source_id, original_url,
+                    record_locator, extraction_method
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                capsule_rows,
+            )
+            inserted_capsules = self.connection.total_changes - before
+            self.connection.executemany(
+                """
+                INSERT OR IGNORE INTO evidence_host_years(hostname, year)
+                VALUES (?, ?)
+                """,
+                list(dict.fromkeys(host_years)),
+            )
+            self.connection.executemany(
+                """
+                INSERT OR IGNORE INTO evidence_capsule_task_provenance(
+                    hostname, year, provider, payload_hash, policy_version,
+                    task_kind, task_hostname, task_year_from, task_year_to,
+                    task_provider, task_policy_version,
+                    source_key, reservoir_id, lease_id, committed_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                provenance_rows,
+            )
+        return inserted_capsules
+
+    def provider_task_provenance_cutover_sequence(self) -> int:
+        row = self.connection.execute(
+            "SELECT value FROM evidence_store_meta WHERE key = ?",
+            ("provider-task-provenance-v1-cutover-sequence",),
+        ).fetchone()
+        return 0 if row is None else int(row[0])
+
+    def resolve_provider_task_provenance(
+        self,
+        host_years: Iterable[tuple[str, int]],
+        *,
+        chunk_size: int = 300,
+    ) -> dict[tuple[str, int], EvidenceHostYearTaskProvenance]:
+        """Resolve deterministic proof-side provider attribution per host-year."""
+
+        if chunk_size < 1:
+            raise ValueError("chunk_size must be positive")
+        values = list(dict.fromkeys(
+            (hostname, int(year))
+            for raw_hostname, year in host_years
+            if isinstance(raw_hostname, str)
+            and (hostname := normalize_official(raw_hostname)) is not None
+        ))
+        result: dict[tuple[str, int], EvidenceHostYearTaskProvenance] = {}
+        limit = min(int(chunk_size), 300)
+        for start in range(0, len(values), limit):
+            chunk = values[start:start + limit]
+            predicates = " OR ".join(
+                "(hostname = ? AND year = ?)" for _ in chunk
+            )
+            params: list[object] = []
+            for hostname, year in chunk:
+                params.extend((hostname, year))
+            for row in self.connection.execute(
+                f"""
+                WITH ranked AS (
+                    SELECT hostname, year, task_kind, source_key,
+                           reservoir_id, lease_id, committed_at,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY hostname, year
+                               ORDER BY committed_at, task_kind, task_provider,
+                                        task_policy_version, source_key,
+                                        reservoir_id, lease_id, provider,
+                                        payload_hash, policy_version
+                           ) AS rn
+                    FROM evidence_capsule_task_provenance
+                    WHERE {predicates}
+                )
+                SELECT hostname, year, task_kind, source_key,
+                       reservoir_id, lease_id, committed_at
+                FROM ranked
+                WHERE rn = 1
+                """,
+                params,
+            ):
+                key = (str(row["hostname"]), int(row["year"]))
+                result[key] = EvidenceHostYearTaskProvenance(
+                    hostname=key[0],
+                    year=key[1],
+                    task_kind=str(row["task_kind"]),
+                    source_key=str(row["source_key"]),
+                    reservoir_id=str(row["reservoir_id"]),
+                    lease_id=str(row["lease_id"]),
+                    committed_at=float(row["committed_at"]),
+                )
+        return result
 
     def for_hostname(self, hostname: str) -> list[EvidenceCapsule]:
         value = normalize_official(hostname)

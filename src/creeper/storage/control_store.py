@@ -1396,6 +1396,31 @@ class ControlStore:
             )
         return self.connection.total_changes - before
 
+    def primary_evidence_task_origin(
+        self,
+        key: EvidenceQueryKey,
+    ) -> tuple[str, str, str] | None:
+        """Return the deterministic first source/reservoir/lease for a task."""
+
+        row = self.connection.execute(
+            """
+            SELECT source_key, reservoir_id, lease_id
+            FROM evidence_task_origins
+            WHERE hostname = ? AND year_from = ? AND year_to = ?
+              AND provider = ? AND policy_version = ?
+            ORDER BY first_observed_at, source_key, reservoir_id, lease_id
+            LIMIT 1
+            """,
+            self._values(key),
+        ).fetchone()
+        if row is None:
+            return None
+        return (
+            str(row["source_key"]),
+            str(row["reservoir_id"]),
+            str(row["lease_id"]),
+        )
+
     def attribute_task_host_years(
         self,
         key: EvidenceQueryKey,

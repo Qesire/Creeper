@@ -7,7 +7,7 @@ from collections.abc import Callable
 
 from creeper.evidence.policies import EvidenceCapsule, EvidenceQueryResult
 from creeper.storage.control_store import ControlStore
-from creeper.storage.evidence_store import EvidenceStore
+from creeper.storage.evidence_store import EvidenceStore, EvidenceTaskProvenance
 
 
 class CommitWriter:
@@ -68,18 +68,33 @@ class CommitWriter:
         pending = self._pending
         capsules = [capsule for capsule, _ in pending if capsule is not None]
         if capsules:
-            # Publish non-authoritative lineage first. Readiness can observe a
-            # new EvidenceStore host-year immediately after put_many returns;
-            # origin-first ordering prevents that concurrent consumer from
-            # permanently advancing past an otherwise attributable host-year.
+            proof_rows: list[tuple[EvidenceCapsule, EvidenceTaskProvenance]] = []
+            attributed = []
             for capsule, result in pending:
                 if capsule is None or result.key is None:
                     continue
-                self.control_store.attribute_task_host_years(
-                    result.key,
-                    (capsule.year,),
+                origin = self.control_store.primary_evidence_task_origin(result.key)
+                proof_rows.append(
+                    (
+                        capsule,
+                        EvidenceTaskProvenance(
+                            key=result.key,
+                            source_key="" if origin is None else origin[0],
+                            reservoir_id="" if origin is None else origin[1],
+                            lease_id="" if origin is None else origin[2],
+                            committed_at=float(self.control_store.clock()),
+                        ),
+                    )
                 )
-            self.inserted_capsules += self.evidence_store.put_many(capsules)
+                attributed.append((result.key, capsule.year))
+            # Positive proof and provider lineage are one EvidenceStore
+            # transaction. ControlStore first-touch rows are only an
+            # operational cache and are published after the proof authority.
+            self.inserted_capsules += (
+                self.evidence_store.put_many_with_task_provenance(proof_rows)
+            )
+            for key, year in attributed:
+                self.control_store.attribute_task_host_years(key, (year,))
         results = [result for _, result in pending if result.key is not None]
         if results:
             self.finished_tasks += self.control_store.finish_evidence_tasks(
