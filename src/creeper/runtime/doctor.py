@@ -8,6 +8,8 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+from creeper.authority.paths import find_baseline_dir
+
 
 @dataclass(frozen=True)
 class DoctorReport:
@@ -33,9 +35,15 @@ def run_doctor(task_root: Path, data_root: Path, *, min_free_bytes: int = 20 * 1
     data_root.mkdir(parents=True, exist_ok=True)
     free_bytes = shutil.disk_usage(data_root).free
     writable = os.access(data_root, os.W_OK)
+    try:
+        find_baseline_dir(task_root)
+    except (FileNotFoundError, ValueError):
+        task_root_ok = False
+    else:
+        task_root_ok = True
     return DoctorReport(
         python_ok=sys.version_info >= (3, 12),
-        task_root_ok=(task_root / "merged260909-3").is_dir(),
+        task_root_ok=task_root_ok,
         data_root_ok=data_root.is_dir(),
         writable_data_root=writable,
         free_bytes=free_bytes,

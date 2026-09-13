@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify a V3 submission archive independently of the exporter."""
+"""Verify a submission archive against an explicit authority manifest."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from creeper.submission.verify import verify_submission_archive
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("archive", type=Path)
-    parser.add_argument("--baseline-manifest", type=Path)
+    parser.add_argument("--baseline-manifest", type=Path, required=True)
     args = parser.parse_args()
     report = verify_submission_archive(
         args.archive, baseline_manifest_path=args.baseline_manifest

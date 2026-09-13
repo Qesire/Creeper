@@ -1,6 +1,6 @@
-baseline_id = "merged260909-3"
+baseline_id = "merged260912-3"
 task_root = "/path/to/Domain_Data_Collection_Task"
-runtime_data_root = "/path/to/Creeper-data/v3-merged260909-3"
+runtime_data_root = "/path/to/Creeper-data/v4-merged260912-3"
 baseline_index = "indexes/baseline-fast.sqlite3"
 dataset = "sources/local-hosts.txt"
 source_id = "local_dataset"

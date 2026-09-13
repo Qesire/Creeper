@@ -68,6 +68,8 @@ class EvidenceServicePolicy:
 class ReadinessServicePolicy:
     eed_model: Path
     baseline_eed: str
+    authority_manifest: Path | None = None
+    dispatch_threshold: str = "0.0525"
     batch_size: int = 50_000
     max_batches_per_cycle: int = 20
     poll_seconds: float = 30.0
@@ -402,9 +404,33 @@ def load_autopilot_config(config_path: Path) -> AutopilotConfig:
                 readiness_raw.get("baseline_eed"),
                 name="readiness.baseline_eed",
             )
+            authority_manifest = None
+            raw_manifest = readiness_raw.get("authority_manifest")
+            if raw_manifest is not None:
+                authority_manifest = _resolve(
+                    raw_manifest,
+                    base=config_path.parent,
+                    name="readiness.authority_manifest",
+                )
+                from creeper.authority.identity import AuthoritySnapshot
+
+                authority = AuthoritySnapshot.from_manifest_path(authority_manifest)
+                if (
+                    "baseline_eed" in readiness_raw
+                    and baseline_eed != authority.baseline_eed
+                ):
+                    raise ValueError(
+                        "readiness.baseline_eed conflicts with authority_manifest"
+                    )
+                baseline_eed = authority.baseline_eed
             readiness = ReadinessServicePolicy(
                 eed_model=eed_model,
                 baseline_eed=baseline_eed,
+                authority_manifest=authority_manifest,
+                dispatch_threshold=_decimal_string(
+                    readiness_raw.get("dispatch_threshold", "0.0525"),
+                    name="readiness.dispatch_threshold",
+                ),
                 batch_size=_positive_int(
                     readiness_raw.get("batch_size", 50_000),
                     name="readiness.batch_size",
@@ -590,8 +616,13 @@ def build_child_specs(config: AutopilotConfig) -> tuple[ChildSpec, ...]:
                     str(config.baseline_index),
                     "--eed-model",
                     str(readiness.eed_model),
-                    "--baseline-eed",
-                    readiness.baseline_eed,
+                    *(
+                        ("--authority-manifest", str(readiness.authority_manifest))
+                        if readiness.authority_manifest is not None
+                        else ("--baseline-eed", readiness.baseline_eed)
+                    ),
+                    "--dispatch-threshold",
+                    readiness.dispatch_threshold,
                     "--batch-size",
                     str(readiness.batch_size),
                     "--max-batches-per-cycle",

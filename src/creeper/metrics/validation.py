@@ -571,6 +571,32 @@ def build_validation_report(
         )
     )
 
+    direct_eed_delta = _decimal(
+        task_kind_attribution.get("direct", {}).get("novel_eed_delta", "0")
+    ) or Decimal("0")
+    wayback_eed_delta = sum(
+        (
+            _decimal(
+                task_kind_attribution.get(kind, {}).get(
+                    "novel_eed_delta", "0"
+                )
+            )
+            or Decimal("0")
+            for kind in ("exact", "range", "domain")
+        ),
+        Decimal("0"),
+    )
+    direct_final_eed_fraction = (
+        None
+        if not valid or eed_delta is None or eed_delta <= 0
+        else direct_eed_delta / eed_delta
+    )
+    wayback_novel_eed_per_request = (
+        None
+        if not valid or http_requests <= 0
+        else wayback_eed_delta / Decimal(http_requests)
+    )
+
     def ratio(numerator: int, denominator: int) -> str | None:
         if denominator <= 0:
             return None
@@ -764,6 +790,16 @@ def build_validation_report(
         "novel_eed_delta": None if eed_delta is None else format(eed_delta, "f"),
         "novel_eed_per_hour": (
             None if eed_per_hour is None else format(eed_per_hour, "f")
+        ),
+        "direct_final_eed_fraction": (
+            None
+            if direct_final_eed_fraction is None
+            else format(direct_final_eed_fraction, "f")
+        ),
+        "wayback_novel_eed_per_request": (
+            None
+            if wayback_novel_eed_per_request is None
+            else format(wayback_novel_eed_per_request, "f")
         ),
         "novel_eed_per_day": (
             None if eed_per_day is None else format(eed_per_day, "f")

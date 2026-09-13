@@ -32,3 +32,9 @@ class SubmissionSnapshot:
     unparsed: tuple[str, ...] = ()
     eed_report: dict[str, object] | None = None
     incomplete_query_count: int = 0
+    candidate_file_hash: str = ""
+    model_hash: str = ""
+    baseline_eed: str = "0"
+    authority_digest: str = ""
+    source_contribution: dict[str, object] | None = None
+    within_year_duplicates: int = 0

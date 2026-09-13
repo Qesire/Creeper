@@ -17,7 +17,9 @@ stable_reset_seconds = 300.0
 shutdown_grace_seconds = 10.0
 
 [evidence]
-# Conservative public Wayback profile. Increase only after bounded A/B tests.
+# Conservative public Wayback fallback profile. Direct-year source production
+# is intentionally independent from this worker's availability/backlog.
+# Increase only after bounded A/B tests.
 endpoint = "https://web.archive.org/cdx/search/cdx"
 claim_batch_size = 64
 lease_seconds = 300.0
@@ -45,7 +47,7 @@ enabled = true
 # This value is authority-specific. Update it together with baseline_index if
 # the competition baseline changes; a baseline file change automatically
 # resets/replays novelty, while this denominator remains explicit configuration.
-baseline_eed = "35266393.8852"
+baseline_eed = "46483739.2890"
 batch_size = 50000
 max_batches_per_cycle = 20
 poll_seconds = 30.0

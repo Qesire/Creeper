@@ -9,6 +9,7 @@ from pathlib import Path
 import time
 
 from creeper.authority.baseline_index import BaselineIndex
+from creeper.authority.paths import find_baseline_dir
 from creeper.sources.reference_pilot import hash_sample_host_file_with_stats
 
 
@@ -25,7 +26,7 @@ def main() -> int:
         raise SystemExit("--per-source must be positive")
 
     started = time.perf_counter()
-    directory = args.task_root / "merged260909-3" / "isc_survey_hostnames"
+    directory = find_baseline_dir(args.task_root) / "isc_survey_hostnames"
     sampled = []
     source_stats = {}
     for year in (1996, 1997):

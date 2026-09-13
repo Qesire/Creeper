@@ -8,7 +8,7 @@ from typing import Iterable, Mapping
 
 from creeper.scheduler.credits import CreditLedger
 from creeper.scheduler.leases import WorkLease
-from creeper.scheduler.priority import LeaseCandidate
+from creeper.scheduler.priority import LeaseCandidate, ResourceCost
 from creeper.sources.reservoirs import ReservoirState
 
 
@@ -40,7 +40,18 @@ class GlobalScheduler:
         self.resource_capacities = dict(resource_capacities or {})
 
     def score(self, candidate: LeaseCandidate) -> float:
-        denominator = candidate.costs.normalized(self.resource_capacities)
+        costs = candidate.costs
+        if self._is_direct(candidate):
+            # Direct-year production does not consume per-host external
+            # evidence-network capacity.  Ignore stale/compatibility cost
+            # estimates that still carry a fictitious Wayback component.
+            costs = ResourceCost(
+                general_network=costs.general_network,
+                evidence_network=0.0,
+                cpu=costs.cpu,
+                ssd=costs.ssd,
+            )
+        denominator = costs.normalized(self.resource_capacities)
         return candidate.expected_novel_eed / (denominator or 1.0)
 
     def rank(self, candidates: Iterable[LeaseCandidate]) -> list[LeaseCandidate]:

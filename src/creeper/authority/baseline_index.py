@@ -1,6 +1,6 @@
-"""Year-aware V3 baseline index.
+"""Year-aware baseline index.
 
-The V3 authority files are large enough that the candidate pool must not be
+The authority files are large enough that the candidate pool must not be
 implemented as a second pass of updates over the annual table. The index
 therefore keeps annual presence and official-candidate membership in separate
 tables. Each input file has a durable line offset so a killed build can be
@@ -11,14 +11,78 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Iterator
 from itertools import islice
+import json
 import sqlite3
 from pathlib import Path
 
+from .identity import (
+    AuthoritySnapshot,
+    baseline_authority_digest,
+    sha256_file,
+)
 from .normalizer import normalize_official
+from .paths import find_baseline_dir
 
 
 YEAR_BITS = {year: 1 << (year - 1996) for year in range(1996, 2002)}
 ALL_YEAR_MASK = sum(YEAR_BITS.values())
+BASELINE_INDEX_SCHEMA_VERSION = "baseline-index-v2"
+
+
+def _coerce_authority(
+    value: Path | dict[str, object] | AuthoritySnapshot | None,
+) -> AuthoritySnapshot | None:
+    if value is None:
+        return None
+    if isinstance(value, AuthoritySnapshot):
+        return value
+    if isinstance(value, Path):
+        return AuthoritySnapshot.from_manifest_path(value)
+    return AuthoritySnapshot.from_manifest(value)
+
+
+def _baseline_metadata(
+    *,
+    baseline_id: str,
+    annual_file_hashes: dict[str, str],
+    candidate_file_hash: str,
+) -> dict[str, str]:
+    return {
+        "index_schema_version": BASELINE_INDEX_SCHEMA_VERSION,
+        "baseline_id": baseline_id,
+        "authority_digest": baseline_authority_digest(
+            baseline_id=baseline_id,
+            annual_file_hashes=annual_file_hashes,
+            candidate_file_hash=candidate_file_hash,
+        ),
+        "annual_file_hashes": json.dumps(
+            annual_file_hashes,
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        "candidate_file_hash": candidate_file_hash,
+    }
+
+
+def _authority_metadata(authority: AuthoritySnapshot) -> dict[str, str]:
+    return _baseline_metadata(
+        baseline_id=authority.baseline_id,
+        annual_file_hashes=authority.annual_file_hashes,
+        candidate_file_hash=authority.candidate_file_hash,
+    )
+
+
+def _baseline_metadata_from_dir(baseline_dir: Path) -> dict[str, str]:
+    annual = {
+        f"{year}.txt": sha256_file(baseline_dir / f"{year}.txt")
+        for year in YEAR_BITS
+    }
+    candidate = sha256_file(baseline_dir / "candidate_pool.txt")
+    return _baseline_metadata(
+        baseline_id=baseline_dir.name,
+        annual_file_hashes=annual,
+        candidate_file_hash=candidate,
+    )
 
 
 def novel_year_mask(evidence_mask: int, baseline_mask: int, target_mask: int = ALL_YEAR_MASK) -> int:
@@ -26,27 +90,143 @@ def novel_year_mask(evidence_mask: int, baseline_mask: int, target_mask: int = A
 
 
 class BaselineIndex:
-    def __init__(self, path: Path):
+    def __init__(
+        self,
+        path: Path,
+        *,
+        authority: AuthoritySnapshot | None = None,
+    ):
         self.path = path
         self.connection = sqlite3.connect(path)
         self.connection.row_factory = sqlite3.Row
+        if authority is not None:
+            try:
+                self._assert_authority(authority)
+            except BaseException:
+                self.connection.close()
+                raise
+
+    def _metadata(self) -> dict[str, str]:
+        try:
+            rows = self.connection.execute(
+                "SELECT key, value FROM authority_metadata"
+            ).fetchall()
+        except sqlite3.OperationalError:
+            return {}
+        return {str(row["key"]): str(row["value"]) for row in rows}
+
+    def _assert_authority(self, authority: AuthoritySnapshot) -> None:
+        actual = self._metadata()
+        if not actual:
+            raise ValueError(
+                "baseline index has no embedded authority identity; refusing to resume"
+            )
+        expected = _authority_metadata(authority)
+        if actual != expected:
+            mismatches = sorted(
+                key
+                for key in set(actual) | set(expected)
+                if actual.get(key) != expected.get(key)
+            )
+            raise ValueError(
+                "baseline index authority mismatch; refusing to resume: "
+                + ", ".join(mismatches)
+            )
+
+    def assert_authority(self, authority: AuthoritySnapshot) -> None:
+        """Verify this open index is bound to the requested authority."""
+        self._assert_authority(authority)
+
+    @classmethod
+    def bind_authority(
+        cls,
+        path: Path,
+        authority: AuthoritySnapshot,
+    ) -> "BaselineIndex":
+        """Bind only an empty index shell; populated unbound indexes must rebuild."""
+        connection = sqlite3.connect(path)
+        try:
+            connection.execute(
+                "CREATE TABLE IF NOT EXISTS authority_metadata "
+                "(key TEXT PRIMARY KEY, value TEXT NOT NULL) WITHOUT ROWID"
+            )
+            existing = {
+                str(row[0]): str(row[1])
+                for row in connection.execute(
+                    "SELECT key, value FROM authority_metadata"
+                )
+            }
+            expected = _authority_metadata(authority)
+            if existing and existing != expected:
+                raise ValueError("baseline index authority mismatch")
+            populated = False
+            for table in ("annual_hostnames", "candidate_hostnames", "import_state"):
+                exists = connection.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                    (table,),
+                ).fetchone()
+                if exists and connection.execute(
+                    f"SELECT 1 FROM {table} LIMIT 1"
+                ).fetchone():
+                    populated = True
+                    break
+            if populated and not existing:
+                raise ValueError(
+                    "cannot bind authority to a populated unbound index; "
+                    "build a new authority-bound index"
+                )
+            connection.executemany(
+                "INSERT INTO authority_metadata(key, value) VALUES (?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                sorted(expected.items()),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        return cls(path, authority=authority)
 
     @classmethod
     def build(
         cls,
-        task_root: Path,
-        output_path: Path,
+        task_root: Path | None = None,
+        output_path: Path | None = None,
         *,
+        baseline_dir: Path | None = None,
+        authority_manifest: Path | dict[str, object] | AuthoritySnapshot | None = None,
         batch_size: int = 50_000,
         resume: bool = True,
     ) -> "BaselineIndex":
-        """Build or resume the V3 index."""
+        """Build or resume the baseline index for a task package."""
         if batch_size < 1:
             raise ValueError("batch_size must be positive")
-        baseline_dir = task_root / "merged260909-3"
-        if not baseline_dir.is_dir():
-            raise FileNotFoundError(f"missing V3 baseline directory: {baseline_dir}")
+        if output_path is None:
+            raise ValueError("output_path is required")
+        if baseline_dir is None and task_root is None:
+            raise ValueError("task_root or baseline_dir is required")
+        authority = _coerce_authority(authority_manifest)
+        if baseline_dir is not None:
+            baseline_dir = Path(baseline_dir)
+        elif authority is not None and task_root is not None:
+            authority_dir = Path(task_root) / authority.baseline_id
+            baseline_dir = (
+                authority_dir
+                if authority_dir.is_dir()
+                else find_baseline_dir(Path(task_root))
+            )
+        else:
+            baseline_dir = find_baseline_dir(Path(task_root))
+        if authority is not None:
+            authority.verify_baseline_dir(baseline_dir)
+            expected_metadata = _authority_metadata(authority)
+        else:
+            expected_metadata = _baseline_metadata_from_dir(baseline_dir)
 
+        output_path = Path(output_path)
+        if not resume and output_path.exists() and output_path.stat().st_size > 0:
+            raise ValueError(
+                "non-resume rebuild refuses to mutate an existing index; "
+                "choose a new output path or remove it after readers are quiesced"
+            )
         output_path.parent.mkdir(parents=True, exist_ok=True)
         connection = sqlite3.connect(output_path)
         connection.execute("PRAGMA journal_mode=WAL")
@@ -77,13 +257,45 @@ class BaselineIndex:
                 line_offset INTEGER NOT NULL DEFAULT 0,
                 completed INTEGER NOT NULL DEFAULT 0
             ) WITHOUT ROWID;
+            CREATE TABLE IF NOT EXISTS authority_metadata (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            ) WITHOUT ROWID;
             """
         )
-        if not resume:
-            connection.execute("DELETE FROM annual_hostnames")
-            connection.execute("DELETE FROM candidate_hostnames")
-            connection.execute("DELETE FROM import_state")
-            connection.commit()
+        existing_metadata = {
+            str(row[0]): str(row[1])
+            for row in connection.execute(
+                "SELECT key, value FROM authority_metadata"
+            )
+        }
+        has_work = any(
+            connection.execute(f"SELECT 1 FROM {table} LIMIT 1").fetchone()
+            is not None
+            for table in ("annual_hostnames", "candidate_hostnames", "import_state")
+        )
+        if existing_metadata:
+            if existing_metadata != expected_metadata:
+                mismatches = sorted(
+                    key
+                    for key in set(existing_metadata) | set(expected_metadata)
+                    if existing_metadata.get(key) != expected_metadata.get(key)
+                )
+                connection.close()
+                raise ValueError(
+                    "baseline index authority mismatch; refusing to resume: "
+                    + ", ".join(mismatches)
+                )
+        elif has_work:
+            connection.close()
+            raise ValueError(
+                "baseline index has unbound data/import_state; refusing to resume"
+            )
+        connection.executemany(
+            "INSERT INTO authority_metadata(key, value) VALUES (?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            sorted(expected_metadata.items()),
+        )
         connection.commit()
 
         def get_state(stage: str) -> tuple[int, bool]:
@@ -149,7 +361,7 @@ class BaselineIndex:
         connection.execute("PRAGMA journal_mode=DELETE")
         connection.commit()
         connection.close()
-        return cls(output_path)
+        return cls(output_path, authority=authority)
 
     def year_mask(self, hostname: str) -> int:
         value = normalize_official(hostname)

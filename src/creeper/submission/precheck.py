@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 import re
 
+from creeper.authority.identity import authority_digest
 from creeper.authority.normalizer import normalize_official
 from creeper.submission.snapshot import SubmissionSnapshot
 
@@ -40,6 +41,40 @@ def precheck_submission(snapshot: SubmissionSnapshot) -> PrecheckReport:
         reasons.append("all six annual baseline hashes are required")
     elif any(not re.fullmatch(r"[0-9a-f]{64}", value) for value in snapshot.baseline_hashes.values()):
         reasons.append("annual baseline hashes must be SHA-256 values")
+    sha256 = re.compile(r"[0-9a-f]{64}")
+    if not sha256.fullmatch(snapshot.candidate_file_hash):
+        reasons.append("candidate_file_hash must be a SHA-256 value")
+    if not sha256.fullmatch(snapshot.model_hash):
+        reasons.append("model_hash must be a SHA-256 value")
+    baseline_eed = _decimal(snapshot.baseline_eed, "baseline_eed", reasons)
+    if baseline_eed is not None and baseline_eed < 0:
+        reasons.append("baseline_eed cannot be negative")
+    if not sha256.fullmatch(snapshot.authority_digest):
+        reasons.append("authority_digest must be a SHA-256 value")
+    elif (
+        set(snapshot.baseline_hashes) == expected_years
+        and all(sha256.fullmatch(value) for value in snapshot.baseline_hashes.values())
+        and sha256.fullmatch(snapshot.candidate_file_hash)
+        and sha256.fullmatch(snapshot.model_hash)
+        and baseline_eed is not None
+        and baseline_eed >= 0
+        and snapshot.baseline_id
+    ):
+        expected_digest = authority_digest(
+            baseline_id=snapshot.baseline_id,
+            annual_file_hashes={
+                f"{year}.txt": digest
+                for year, digest in snapshot.baseline_hashes.items()
+            },
+            candidate_file_hash=snapshot.candidate_file_hash,
+            model_hash=snapshot.model_hash,
+            baseline_eed=format(baseline_eed, "f"),
+        )
+        if snapshot.authority_digest != expected_digest:
+            reasons.append(
+                "authority_digest does not match submission authority fields"
+            )
+
     if not snapshot.normalizer_version or not snapshot.evidence_policy_version:
         reasons.append("normalizer and evidence policy versions are required")
     if not snapshot.eed_policy_version:

@@ -1,12 +1,42 @@
+import hashlib
 import tempfile
 import unittest
 from pathlib import Path
 
 from creeper.authority.baseline_index import BaselineIndex
+from creeper.authority.identity import authority_digest
+
+
+def _authority_manifest(baseline: Path) -> dict[str, object]:
+    annual = {
+        f"{year}.txt": hashlib.sha256(
+            (baseline / f"{year}.txt").read_bytes()
+        ).hexdigest()
+        for year in range(1996, 2002)
+    }
+    candidate = hashlib.sha256(
+        (baseline / "candidate_pool.txt").read_bytes()
+    ).hexdigest()
+    model = "0" * 64
+    baseline_eed = "0"
+    return {
+        "baseline_id": baseline.name,
+        "annual_file_hashes": annual,
+        "candidate_file_hash": candidate,
+        "model_hash": model,
+        "baseline_eed": baseline_eed,
+        "authority_digest": authority_digest(
+            baseline_id=baseline.name,
+            annual_file_hashes=annual,
+            candidate_file_hash=candidate,
+            model_hash=model,
+            baseline_eed=baseline_eed,
+        ),
+    }
 
 
 def build_test_index(root: Path) -> BaselineIndex:
-    baseline = root / "merged260909-3"
+    baseline = root / "merged260912-3"
     baseline.mkdir()
     for year in range(1996, 2002):
         (baseline / f"{year}.txt").write_text(
@@ -15,7 +45,11 @@ def build_test_index(root: Path) -> BaselineIndex:
     (baseline / "candidate_pool.txt").write_text(
         "candidate.example\n", encoding="utf-8"
     )
-    return BaselineIndex.build(root, root / "index.sqlite3")
+    return BaselineIndex.build(
+        baseline_dir=baseline,
+        output_path=root / "index.sqlite3",
+        authority_manifest=_authority_manifest(baseline),
+    )
 
 
 class BaselineStreamingTests(unittest.TestCase):

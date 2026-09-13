@@ -77,6 +77,7 @@ class ProductionSourceAdapterTests(unittest.TestCase):
                 enumeration_kind="structured_records",
                 capacity_lower=1,
                 state=ReservoirState.READY,
+                evidence_mode="direct_year",
             )
             adapter = ProductionAdapterFactory.open(reservoir)
             lease = WorkLease.create(

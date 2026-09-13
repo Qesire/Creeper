@@ -20,6 +20,10 @@ class SourceRecord:
     artifact_ref: str = ""
     direct_year_mask: int = 0
     year_hint_mask: int = 0
+    evidence_type: str = ""
+    temporal_semantics: str = ""
+    evidence_contract_id: str = ""
+    evidence_contract_version: str = ""
 
 
 @dataclass(frozen=True)
@@ -35,6 +39,10 @@ class HostObservation:
     direct_year_mask: int = 0
     year_hint_mask: int = 0
     original_url: str = ""
+    evidence_type: str = ""
+    temporal_semantics: str = ""
+    evidence_contract_id: str = ""
+    evidence_contract_version: str = ""
 
 
 @dataclass(frozen=True)

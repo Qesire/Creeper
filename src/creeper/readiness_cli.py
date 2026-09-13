@@ -39,6 +39,14 @@ def _publish(
         report,
         root / "readiness.json",
     )
+    IncrementalReadinessRuntime.write_payload_atomic(
+        report.baseline_reconciliation or {},
+        root / "baseline_reconciliation.json",
+    )
+    IncrementalReadinessRuntime.write_payload_atomic(
+        report.source_contribution or {},
+        root / "source_contribution.json",
+    )
     _write_marker(
         report,
         root / "prewarm-ready.json",
@@ -49,6 +57,11 @@ def _publish(
         root / "formal-gate-ready.json",
         active=report.formal_gate_reached,
     )
+    _write_marker(
+        report,
+        root / "submission-dispatch-ready.json",
+        active=report.submission_dispatch_ready,
+    )
 
 
 def run_service(
@@ -56,7 +69,9 @@ def run_service(
     *,
     baseline_index: Path,
     eed_model: Path,
-    baseline_eed: str,
+    baseline_eed: str | None = None,
+    authority_manifest: Path | None = None,
+    dispatch_threshold: str = "0.0525",
     once: bool,
     batch_size: int = 50_000,
     max_batches_per_cycle: int = 20,
@@ -88,6 +103,8 @@ def run_service(
             baseline_index=baseline_index,
             eed_model=eed_model,
             baseline_eed=baseline_eed,
+            authority_manifest=authority_manifest,
+            dispatch_threshold=dispatch_threshold,
             batch_size=batch_size,
         ) as runtime:
             last_emitted: tuple[object, ...] | None = None
@@ -134,7 +151,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("runtime_data_root", type=Path)
     parser.add_argument("--baseline-index", type=Path, required=True)
     parser.add_argument("--eed-model", type=Path, required=True)
-    parser.add_argument("--baseline-eed", required=True)
+    parser.add_argument("--authority-manifest", type=Path)
+    parser.add_argument("--baseline-eed")
+    parser.add_argument("--dispatch-threshold", default="0.0525")
     parser.add_argument("--once", action="store_true")
     parser.add_argument("--batch-size", type=int, default=50_000)
     parser.add_argument("--max-batches-per-cycle", type=int, default=20)
@@ -156,6 +175,8 @@ def main(argv: list[str] | None = None) -> int:
             baseline_index=args.baseline_index,
             eed_model=args.eed_model,
             baseline_eed=args.baseline_eed,
+            authority_manifest=args.authority_manifest,
+            dispatch_threshold=args.dispatch_threshold,
             once=args.once,
             batch_size=args.batch_size,
             max_batches_per_cycle=args.max_batches_per_cycle,

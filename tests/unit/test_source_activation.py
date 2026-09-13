@@ -5,6 +5,11 @@ import unittest
 from dataclasses import replace
 from pathlib import Path
 
+from creeper.evidence.contracts import (
+    EvidenceAuthority,
+    SourceEvidenceContract,
+    contract_from_adapter_id,
+)
 from creeper.source_discovery.activation import (
     SourceActivationCompiler,
     SourceActivationError,
@@ -209,6 +214,126 @@ class SourceActivationCompilerTests(unittest.TestCase):
                     control.connection.execute("SELECT COUNT(*) FROM reservoirs").fetchone()[0],
                     1,
                 )
+            finally:
+                control.close()
+
+
+    def test_explicit_reviewed_csv_contract_activates_direct_year(self) -> None:
+        contract = SourceEvidenceContract(
+            contract_id="reviewed-linkgraph-csv-v1",
+            authority=EvidenceAuthority.DIRECT_WEB_YEAR,
+            parser_kind="delimited",
+            temporal_semantics="reviewed_web_observation_timestamp",
+            evidence_type="reviewed_historical_web_record",
+            hostname_field="column:0",
+            timestamp_field="column:1",
+            policy_version="reviewed-linkgraph-policy-v1",
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            control = ControlStore(Path(tmp) / "control.sqlite3")
+            try:
+                candidate = _candidate(
+                    "https://trusted.example/history/links.csv"
+                )
+                registry = self._registry(control, candidate)
+                spec = SourceActivationCompiler(
+                    control,
+                    registry=registry,
+                    evidence_contracts={
+                        candidate.canonical_entrypoint: contract,
+                    },
+                ).compile(candidate)
+
+                self.assertEqual(spec.evidence_mode, "direct_year")
+                bound = contract_from_adapter_id(spec.adapter_id)
+                self.assertEqual(bound, contract)
+                row = control.connection.execute(
+                    """
+                    SELECT direct_evidence_authority
+                    FROM source_indexes_v1
+                    WHERE source_key = ?
+                    """,
+                    (candidate.source_key,),
+                ).fetchone()
+                self.assertEqual(row["direct_evidence_authority"], 1)
+            finally:
+                control.close()
+
+    def test_agent_prior_cannot_grant_csv_direct_authority(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            control = ControlStore(Path(tmp) / "control.sqlite3")
+            try:
+                candidate = replace(
+                    _candidate("https://untrusted.example/random.csv"),
+                    direct_evidence_prior=1.0,
+                    temporal_semantics_prior=1.0,
+                )
+                registry = self._registry(control, candidate)
+                spec = SourceActivationCompiler(
+                    control,
+                    registry=registry,
+                ).compile(candidate)
+
+                self.assertEqual(spec.evidence_mode, "discovery_only")
+                bound = contract_from_adapter_id(spec.adapter_id)
+                self.assertIsNotNone(bound)
+                self.assertEqual(
+                    bound.authority,
+                    EvidenceAuthority.DISCOVERY_ONLY,
+                )
+                row = control.connection.execute(
+                    """
+                    SELECT direct_evidence_authority
+                    FROM source_indexes_v1
+                    WHERE source_key = ?
+                    """,
+                    (candidate.source_key,),
+                ).fetchone()
+                self.assertEqual(row["direct_evidence_authority"], 0)
+            finally:
+                control.close()
+
+    def test_existing_activation_keeps_frozen_contract_across_restart(self) -> None:
+        direct = SourceEvidenceContract(
+            contract_id="restart-stable-jsonl-v1",
+            authority=EvidenceAuthority.DIRECT_WEB_YEAR,
+            parser_kind="jsonl",
+            temporal_semantics="capture_timestamp",
+            evidence_type="reviewed_historical_web_record",
+            hostname_field="url",
+            timestamp_field="year",
+            policy_version="restart-stable-v1",
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            control = ControlStore(Path(tmp) / "control.sqlite3")
+            try:
+                candidate = _candidate(
+                    "https://trusted.example/history/records.jsonl"
+                )
+                registry = self._registry(control, candidate)
+                first = SourceActivationCompiler(
+                    control,
+                    registry=registry,
+                    evidence_contracts={
+                        candidate.canonical_entrypoint: direct,
+                    },
+                ).compile(candidate)
+                before = control.connection.total_changes
+
+                # Simulate restart with no explicit allowlist loaded. The
+                # durable adapter binding is authoritative for this activation.
+                second = SourceActivationCompiler(
+                    control,
+                    registry=registry,
+                ).compile(candidate)
+
+                self.assertEqual(first.adapter_id, second.adapter_id)
+                self.assertEqual(second.evidence_mode, "direct_year")
+                self.assertEqual(
+                    contract_from_adapter_id(second.adapter_id),
+                    direct,
+                )
+                self.assertEqual(control.connection.total_changes, before)
             finally:
                 control.close()
 

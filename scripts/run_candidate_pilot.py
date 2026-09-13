@@ -9,6 +9,7 @@ import time
 from pathlib import Path
 
 from creeper.authority.baseline_index import BaselineIndex
+from creeper.authority.paths import find_baseline_dir
 from creeper.records.candidates import (
     CandidateRecord,
     CandidateSourceScope,
@@ -29,7 +30,7 @@ def main() -> int:
     if args.limit < 1:
         raise SystemExit("--limit must be positive")
     started = time.perf_counter()
-    path = args.task_root / "merged260909-3" / "candidate_pool.txt"
+    path = find_baseline_dir(args.task_root) / "candidate_pool.txt"
     sampling_started = time.perf_counter()
     sampled = (
         stratified_hostnames(path, args.limit, cache_path=args.cache)

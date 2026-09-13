@@ -1,8 +1,39 @@
+import hashlib
 import tempfile
 import unittest
 from pathlib import Path
 
 from creeper.authority.baseline_index import BaselineIndex, novel_year_mask
+from creeper.authority.identity import authority_digest
+
+
+
+def _authority_manifest(baseline: Path) -> dict[str, object]:
+    annual = {
+        f"{year}.txt": hashlib.sha256(
+            (baseline / f"{year}.txt").read_bytes()
+        ).hexdigest()
+        for year in range(1996, 2002)
+    }
+    candidate = hashlib.sha256(
+        (baseline / "candidate_pool.txt").read_bytes()
+    ).hexdigest()
+    model = "0" * 64
+    baseline_eed = "0"
+    return {
+        "baseline_id": baseline.name,
+        "annual_file_hashes": annual,
+        "candidate_file_hash": candidate,
+        "model_hash": model,
+        "baseline_eed": baseline_eed,
+        "authority_digest": authority_digest(
+            baseline_id=baseline.name,
+            annual_file_hashes=annual,
+            candidate_file_hash=candidate,
+            model_hash=model,
+            baseline_eed=baseline_eed,
+        ),
+    }
 
 
 class BaselineIndexTests(unittest.TestCase):
@@ -24,7 +55,11 @@ class BaselineIndexTests(unittest.TestCase):
             (annual / "candidate_pool_unparsed_format.txt").write_text("raw\n", encoding="utf-8")
             (annual / "deduplicated_urls_1996-1997.txt").write_text("auxiliary.example\n", encoding="utf-8")
 
-            index = BaselineIndex.build(root, root / "index.sqlite3")
+            index = BaselineIndex.build(
+                baseline_dir=annual,
+                output_path=root / "index.sqlite3",
+                authority_manifest=_authority_manifest(annual),
+            )
 
             self.assertEqual(index.year_mask("shared.example"), 0b111111)
             self.assertEqual(index.year_mask("only96.example"), 0b000001)

@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from creeper.authority.baseline_index import BaselineIndex, YEAR_BITS
+from creeper.authority.identity import AuthoritySnapshot
 from creeper.authority.normalizer import normalize_official
 from creeper.evidence.policies import EvidenceCapsule
 from creeper.submission.precheck import precheck_submission
@@ -27,14 +28,17 @@ def build_snapshot(
     unparsed: tuple[str, ...] = (),
     novel_eed: str = "0",
     growth_rate: str = "0",
+    source_contribution: dict[str, object] | None = None,
 ) -> SubmissionSnapshot:
+    authority = AuthoritySnapshot.from_manifest(baseline_manifest)
+    index.assert_authority(authority)
     baseline_hashes = {
         name.removesuffix(".txt"): value
-        for name, value in baseline_manifest.get("annual_file_hashes", {}).items()
+        for name, value in authority.annual_file_hashes.items()
     }
     novel: list[EvidenceCapsule] = []
     seen: set[tuple[str, int]] = set()
-    invalid_count = overlap_count = 0
+    invalid_count = overlap_count = duplicate_count = 0
     for capsule in capsules:
         hostname = normalize_official(capsule.hostname)
         if hostname is None or capsule.year not in YEAR_BITS:
@@ -42,6 +46,7 @@ def build_snapshot(
             continue
         key = (hostname, capsule.year)
         if key in seen:
+            duplicate_count += 1
             continue
         seen.add(key)
         if index.year_mask(hostname) & YEAR_BITS[capsule.year]:
@@ -68,7 +73,7 @@ def build_snapshot(
     snapshot = SubmissionSnapshot(
         submission_snapshot_id=snapshot_id,
         created_at=datetime.now(timezone.utc).isoformat(),
-        baseline_id=baseline_manifest.get("baseline_id", ""),
+        baseline_id=authority.baseline_id,
         baseline_hashes=baseline_hashes,
         normalizer_version="official-calculator-regex-v1",
         evidence_policy_version="evidence-v1",
@@ -87,5 +92,11 @@ def build_snapshot(
         isc_reference=isc_reference,
         unparsed=unparsed,
         eed_report=eed_report,
+        candidate_file_hash=authority.candidate_file_hash,
+        model_hash=authority.model_hash,
+        baseline_eed=authority.baseline_eed,
+        authority_digest=authority.authority_digest,
+        source_contribution=source_contribution,
+        within_year_duplicates=duplicate_count,
     )
     return SubmissionSnapshot(**{**snapshot.__dict__, "ready": precheck_submission(snapshot).ready})

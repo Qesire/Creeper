@@ -3,6 +3,7 @@ import unittest
 from pathlib import Path
 
 from creeper.authority.baseline_index import BaselineIndex
+from creeper.authority.identity import authority_digest, sha256_file
 from creeper.evidence.policies import EvidenceCapsule
 from creeper.records.candidates import CandidateSourceScope
 from creeper.records.models import HostObservation, SourceRecord
@@ -18,17 +19,54 @@ from creeper.storage.control_store import ControlStore
 from creeper.storage.evidence_store import EvidenceStore
 
 
+
+def _authority_manifest(
+    baseline_dir: Path,
+    *,
+    model_path: Path | None = None,
+    baseline_eed: str,
+) -> dict[str, object]:
+    annual = {
+        f"{year}.txt": sha256_file(baseline_dir / f"{year}.txt")
+        for year in range(1996, 2002)
+    }
+    candidate = sha256_file(baseline_dir / "candidate_pool.txt")
+    model = sha256_file(model_path) if model_path is not None else "0" * 64
+    return {
+        "baseline_id": baseline_dir.name,
+        "annual_file_hashes": annual,
+        "candidate_file_hash": candidate,
+        "model_hash": model,
+        "baseline_eed": baseline_eed,
+        "authority_digest": authority_digest(
+            baseline_id=baseline_dir.name,
+            annual_file_hashes=annual,
+            candidate_file_hash=candidate,
+            model_hash=model,
+            baseline_eed=baseline_eed,
+        ),
+    }
+
+
 class RuntimeSubmissionIntegrationTests(unittest.TestCase):
     def test_runtime_snapshot_without_eed_model_cannot_use_caller_values(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             task_root = root / "task"
-            baseline_dir = task_root / "merged260909-3"
+            baseline_dir = task_root / "merged260912-3"
             baseline_dir.mkdir(parents=True)
             for year in range(1996, 2002):
                 (baseline_dir / f"{year}.txt").write_text("", encoding="utf-8")
             (baseline_dir / "candidate_pool.txt").write_text("", encoding="utf-8")
-            baseline = BaselineIndex.build(task_root, root / "baseline.sqlite3")
+            authority = _authority_manifest(
+                baseline_dir,
+                baseline_eed="40",
+            )
+            baseline = BaselineIndex.build(
+                baseline_dir=baseline_dir,
+                output_path=root / "baseline.sqlite3",
+                authority_manifest=authority,
+            )
             evidence = EvidenceStore(root / "evidence.sqlite3")
             evidence.put(
                 EvidenceCapsule(
@@ -37,10 +75,7 @@ class RuntimeSubmissionIntegrationTests(unittest.TestCase):
                 )
             )
             context = RuntimeSubmissionContext(
-                baseline_manifest={
-                    "baseline_id": "merged260909-3",
-                    "annual_file_hashes": {f"{year}.txt": "b" * 64 for year in range(1996, 2002)},
-                },
+                baseline_manifest=authority,
                 code_revision="c" * 64,
                 source_report_set=("source.json",),
                 cdx_audit_set=("audit.json",),
@@ -70,7 +105,7 @@ class RuntimeSubmissionIntegrationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             task_root = root / "task"
-            baseline_dir = task_root / "merged260909-3"
+            baseline_dir = task_root / "merged260912-3"
             baseline_dir.mkdir(parents=True)
             for year in range(1996, 2002):
                 (baseline_dir / f"{year}.txt").write_text(
@@ -83,7 +118,16 @@ class RuntimeSubmissionIntegrationTests(unittest.TestCase):
                 '{"tld": ["example"], "lang": ["eng"], "perc_of_tld": ["100"]}\n',
                 encoding="utf-8",
             )
-            baseline = BaselineIndex.build(task_root, root / "baseline.sqlite3")
+            authority = _authority_manifest(
+                baseline_dir,
+                model_path=model,
+                baseline_eed="40",
+            )
+            baseline = BaselineIndex.build(
+                baseline_dir=baseline_dir,
+                output_path=root / "baseline.sqlite3",
+                authority_manifest=authority,
+            )
             evidence = EvidenceStore(root / "evidence.sqlite3")
             evidence.put_many([
                 EvidenceCapsule(
@@ -100,10 +144,7 @@ class RuntimeSubmissionIntegrationTests(unittest.TestCase):
                 ),
             ])
             context = RuntimeSubmissionContext(
-                baseline_manifest={
-                    "baseline_id": "merged260909-3",
-                    "annual_file_hashes": {f"{year}.txt": "b" * 64 for year in range(1996, 2002)},
-                },
+                baseline_manifest=authority,
                 code_revision="c" * 64,
                 source_report_set=("source-report.json",),
                 cdx_audit_set=("cdx-audit.json",),
@@ -134,7 +175,7 @@ class RuntimeSubmissionIntegrationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             task_root = root / "task"
-            baseline_dir = task_root / "merged260909-3"
+            baseline_dir = task_root / "merged260912-3"
             baseline_dir.mkdir(parents=True)
             for year in range(1996, 2002):
                 (baseline_dir / f"{year}.txt").write_text("", encoding="utf-8")
@@ -144,7 +185,16 @@ class RuntimeSubmissionIntegrationTests(unittest.TestCase):
                 '{"tld": ["com"], "lang": ["eng"], "perc_of_tld": ["100"]}\n',
                 encoding="utf-8",
             )
-            baseline = BaselineIndex.build(task_root, root / "baseline.sqlite3")
+            authority = _authority_manifest(
+                baseline_dir,
+                model_path=model,
+                baseline_eed="40",
+            )
+            baseline = BaselineIndex.build(
+                baseline_dir=baseline_dir,
+                output_path=root / "baseline.sqlite3",
+                authority_manifest=authority,
+            )
             evidence = EvidenceStore(root / "evidence.sqlite3")
             evidence.put_many([
                 EvidenceCapsule(
@@ -157,12 +207,7 @@ class RuntimeSubmissionIntegrationTests(unittest.TestCase):
                 ),
             ])
             context = RuntimeSubmissionContext(
-                baseline_manifest={
-                    "baseline_id": "merged260909-3",
-                    "annual_file_hashes": {
-                        f"{year}.txt": "c" * 64 for year in range(1996, 2002)
-                    },
-                },
+                baseline_manifest=authority,
                 code_revision="d" * 64,
                 source_report_set=("source.json",),
                 cdx_audit_set=("audit.json",),
@@ -196,7 +241,7 @@ class RuntimeSubmissionIntegrationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             task_root = root / "task"
-            baseline_dir = task_root / "merged260909-3"
+            baseline_dir = task_root / "merged260912-3"
             baseline_dir.mkdir(parents=True)
             for year in range(1996, 2002):
                 (baseline_dir / f"{year}.txt").write_text("", encoding="utf-8")
@@ -206,7 +251,16 @@ class RuntimeSubmissionIntegrationTests(unittest.TestCase):
                 '{"tld": ["example"], "lang": ["eng"], "perc_of_tld": ["100"]}\n',
                 encoding="utf-8",
             )
-            baseline = BaselineIndex.build(task_root, root / "baseline.sqlite3")
+            authority = _authority_manifest(
+                baseline_dir,
+                model_path=model,
+                baseline_eed="20",
+            )
+            baseline = BaselineIndex.build(
+                baseline_dir=baseline_dir,
+                output_path=root / "baseline.sqlite3",
+                authority_manifest=authority,
+            )
             control = ControlStore(root / "control.sqlite3")
             evidence = EvidenceStore(root / "evidence.sqlite3")
 
@@ -279,12 +333,7 @@ class RuntimeSubmissionIntegrationTests(unittest.TestCase):
             control.save_domain(domain)
             control.save_reservoir(reservoir)
             context = RuntimeSubmissionContext(
-                baseline_manifest={
-                    "baseline_id": "merged260909-3",
-                    "annual_file_hashes": {
-                        f"{year}.txt": "a" * 64 for year in range(1996, 2002)
-                    },
-                },
+                baseline_manifest=authority,
                 code_revision="c" * 64,
                 source_report_set=("source-report.json",),
                 cdx_audit_set=("cdx-audit.json",),
@@ -334,12 +383,20 @@ class RuntimeSubmissionIntegrationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             task_root = root / "task"
-            baseline_dir = task_root / "merged260909-3"
+            baseline_dir = task_root / "merged260912-3"
             baseline_dir.mkdir(parents=True)
             for year in range(1996, 2002):
                 (baseline_dir / f"{year}.txt").write_text("", encoding="utf-8")
             (baseline_dir / "candidate_pool.txt").write_text("", encoding="utf-8")
-            baseline = BaselineIndex.build(task_root, root / "baseline.sqlite3")
+            authority = _authority_manifest(
+                baseline_dir,
+                baseline_eed="20",
+            )
+            baseline = BaselineIndex.build(
+                baseline_dir=baseline_dir,
+                output_path=root / "baseline.sqlite3",
+                authority_manifest=authority,
+            )
             evidence = EvidenceStore(root / "evidence.sqlite3")
             evidence.put(
                 EvidenceCapsule(
@@ -348,10 +405,7 @@ class RuntimeSubmissionIntegrationTests(unittest.TestCase):
                 )
             )
             context = RuntimeSubmissionContext(
-                baseline_manifest={
-                    "baseline_id": "next-baseline",
-                    "annual_file_hashes": {f"{year}.txt": "b" * 64 for year in range(1996, 2002)},
-                },
+                baseline_manifest=authority,
                 code_revision="c" * 64,
                 source_report_set=("source-report.json",),
                 cdx_audit_set=("cdx-audit.json",),
@@ -375,7 +429,7 @@ class RuntimeSubmissionIntegrationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             task_root = root / "task"
-            baseline_dir = task_root / "merged260909-3"
+            baseline_dir = task_root / "merged260912-3"
             baseline_dir.mkdir(parents=True)
             for year in range(1996, 2002):
                 (baseline_dir / f"{year}.txt").write_text("", encoding="utf-8")
@@ -385,7 +439,16 @@ class RuntimeSubmissionIntegrationTests(unittest.TestCase):
                 '{"tld": ["com"], "lang": ["eng"], "perc_of_tld": ["100"]}\n',
                 encoding="utf-8",
             )
-            baseline = BaselineIndex.build(task_root, root / "baseline.sqlite3")
+            authority = _authority_manifest(
+                baseline_dir,
+                model_path=model,
+                baseline_eed="1",
+            )
+            baseline = BaselineIndex.build(
+                baseline_dir=baseline_dir,
+                output_path=root / "baseline.sqlite3",
+                authority_manifest=authority,
+            )
             evidence = EvidenceStore(root / "evidence.sqlite3")
             evidence.put(
                 EvidenceCapsule(
@@ -394,10 +457,7 @@ class RuntimeSubmissionIntegrationTests(unittest.TestCase):
                 )
             )
             context = RuntimeSubmissionContext(
-                baseline_manifest={
-                    "baseline_id": "merged260909-3",
-                    "annual_file_hashes": {f"{year}.txt": "b" * 64 for year in range(1996, 2002)},
-                },
+                baseline_manifest=authority,
                 code_revision="c" * 64,
                 source_report_set=("source.json",),
                 cdx_audit_set=("audit.json",),

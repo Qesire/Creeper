@@ -1,4 +1,5 @@
 import contextlib
+import hashlib
 import io
 import json
 import tempfile
@@ -6,6 +7,7 @@ import unittest
 from pathlib import Path
 
 from creeper.authority.baseline_index import BaselineIndex
+from creeper.authority.identity import authority_digest
 from creeper.cli import main
 from creeper.sources.reservoirs import ReservoirState
 from creeper.storage.control_store import ControlStore
@@ -15,7 +17,7 @@ class RunOnceCliTests(unittest.TestCase):
     def _workspace(self):
         root = Path(tempfile.mkdtemp())
         task_root = root / "task"
-        baseline_dir = task_root / "merged260909-3"
+        baseline_dir = task_root / "merged260912-3"
         baseline_dir.mkdir(parents=True)
         for year in range(1996, 2002):
             (baseline_dir / f"{year}.txt").write_text("", encoding="utf-8")
@@ -93,12 +95,32 @@ evidence_capacity = 1
 
     def test_run_once_loads_optional_submission_context_but_zero_growth_is_not_ready(self):
         root, config = self._workspace()
+        baseline_dir = root / "task" / "merged260912-3"
+        annual_hashes = {
+            f"{year}.txt": hashlib.sha256(
+                (baseline_dir / f"{year}.txt").read_bytes()
+            ).hexdigest()
+            for year in range(1996, 2002)
+        }
+        candidate_hash = hashlib.sha256(
+            (baseline_dir / "candidate_pool.txt").read_bytes()
+        ).hexdigest()
+        model_hash = "d" * 64
+        baseline_eed = "1"
         (root / "baseline-manifest.json").write_text(
             json.dumps({
-                "baseline_id": "merged260909-3",
-                "annual_file_hashes": {
-                    f"{year}.txt": "a" * 64 for year in range(1996, 2002)
-                },
+                "baseline_id": baseline_dir.name,
+                "annual_file_hashes": annual_hashes,
+                "candidate_file_hash": candidate_hash,
+                "model_hash": model_hash,
+                "baseline_eed": baseline_eed,
+                "authority_digest": authority_digest(
+                    baseline_id=baseline_dir.name,
+                    annual_file_hashes=annual_hashes,
+                    candidate_file_hash=candidate_hash,
+                    model_hash=model_hash,
+                    baseline_eed=baseline_eed,
+                ),
             }),
             encoding="utf-8",
         )

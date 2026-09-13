@@ -13,6 +13,7 @@ from typing import Callable
 from creeper.authority.baseline_index import BaselineIndex, YEAR_BITS
 from creeper.authority.eed import load_english_weights
 from creeper.authority.identity import (
+    AuthoritySnapshot,
     baseline_authority_signature,
     eed_model_authority_signature,
 )
@@ -23,6 +24,19 @@ from creeper.storage.evidence_store import EvidenceHostYear, EvidenceStore
 
 FORMAL_GROWTH_RATE = Decimal("0.05")
 PREWARM_GATE_FRACTION = Decimal("0.90")
+DEFAULT_DISPATCH_THRESHOLD = Decimal("0.0525")
+
+
+def _coerce_authority(
+    value: Path | dict[str, object] | AuthoritySnapshot | None,
+) -> AuthoritySnapshot | None:
+    if value is None:
+        return None
+    if isinstance(value, AuthoritySnapshot):
+        return value
+    if isinstance(value, Path):
+        return AuthoritySnapshot.from_manifest_path(value)
+    return AuthoritySnapshot.from_manifest(value)
 
 
 @dataclass(frozen=True)
@@ -43,10 +57,18 @@ class IncrementalReadinessReport:
     annual: dict[str, dict[str, object]]
     source_attribution: dict[str, dict[str, object]]
     task_kind_attribution: dict[str, dict[str, object]]
+    baseline_id: str = ""
+    authority_digest: str = ""
+    dispatch_threshold: str = format(DEFAULT_DISPATCH_THRESHOLD, "f")
+    submission_dispatch_ready: bool = False
+    baseline_reconciliation: dict[str, object] | None = None
+    source_contribution: dict[str, object] | None = None
 
     def as_dict(self) -> dict[str, object]:
         return {
             "report_version": "incremental-readiness-v2",
+            "baseline_id": self.baseline_id,
+            "authority_digest": self.authority_digest,
             "baseline_signature": self.baseline_signature,
             "model_signature": self.model_signature,
             "evidence_cursor": self.evidence_cursor,
@@ -62,9 +84,13 @@ class IncrementalReadinessReport:
             ),
             "prewarm_reached": self.prewarm_reached,
             "formal_gate_reached": self.formal_gate_reached,
+            "dispatch_threshold": self.dispatch_threshold,
+            "submission_dispatch_ready": self.submission_dispatch_ready,
             "annual": self.annual,
             "source_attribution": self.source_attribution,
             "task_kind_attribution": self.task_kind_attribution,
+            "baseline_reconciliation": self.baseline_reconciliation or {},
+            "source_contribution": self.source_contribution or {},
         }
 
 
@@ -371,6 +397,9 @@ class IncrementalReadinessLedger:
         *,
         latest_evidence_sequence: int,
         baseline_eed: Decimal,
+        baseline_id: str = "",
+        authority_digest: str = "",
+        dispatch_threshold: Decimal = DEFAULT_DISPATCH_THRESHOLD,
     ) -> IncrementalReadinessReport:
         state = self.connection.execute(
             "SELECT * FROM readiness_state WHERE singleton = 1"
@@ -417,6 +446,32 @@ class IncrementalReadinessLedger:
             if five_percent > 0
             else Decimal("0")
         )
+        direct = task_kind_attribution.get("direct", {
+            "novel_host_years": 0,
+            "novel_eed": "0",
+        })
+        candidate_host_years = sum(
+            int(payload["novel_host_years"])
+            for kind, payload in task_kind_attribution.items()
+            if kind != "direct"
+        )
+        candidate_eed = sum(
+            (Decimal(str(payload["novel_eed"]))
+             for kind, payload in task_kind_attribution.items()
+             if kind != "direct"),
+            Decimal("0"),
+        )
+        reconciliation = {
+            "baseline_id": baseline_id,
+            "baseline_eed": format(baseline_eed, "f"),
+            "input_records": int(state["processed_host_years"]),
+            "within_year_duplicates": 0,
+            "invalid_records": 0,
+            "baseline_overlap": int(state["processed_host_years"]) - int(state["novel_host_years"]),
+            "novel_host_years": int(state["novel_host_years"]),
+            "novel_eed": format(novel_eed, "f"),
+            "growth_rate": format(growth_rate, "f"),
+        }
         return IncrementalReadinessReport(
             baseline_signature=str(state["baseline_signature"]),
             model_signature=str(state["model_signature"]),
@@ -434,6 +489,22 @@ class IncrementalReadinessLedger:
             annual=annual,
             source_attribution=source_attribution,
             task_kind_attribution=task_kind_attribution,
+            baseline_id=baseline_id,
+            authority_digest=authority_digest,
+            dispatch_threshold=format(dispatch_threshold, "f"),
+            submission_dispatch_ready=(
+                growth_rate >= dispatch_threshold
+                and growth_rate >= FORMAL_GROWTH_RATE
+            ),
+            baseline_reconciliation=reconciliation,
+            source_contribution={
+                "by_source": source_attribution,
+                "direct_annual": direct,
+                "candidate": {
+                    "novel_host_years": candidate_host_years,
+                    "novel_eed": format(candidate_eed, "f"),
+                },
+            },
         )
 
     def close(self) -> None:
@@ -449,7 +520,9 @@ class IncrementalReadinessRuntime:
         *,
         baseline_index: Path,
         eed_model: Path,
-        baseline_eed: Decimal | str | int,
+        baseline_eed: Decimal | str | int | None = None,
+        authority_manifest: Path | dict[str, object] | AuthoritySnapshot | None = None,
+        dispatch_threshold: Decimal | str | int = DEFAULT_DISPATCH_THRESHOLD,
         batch_size: int = 50_000,
     ) -> None:
         if batch_size < 1:
@@ -457,9 +530,25 @@ class IncrementalReadinessRuntime:
         self.runtime_data_root = Path(runtime_data_root)
         self.baseline_path = Path(baseline_index)
         self.model_path = Path(eed_model)
-        self.baseline_eed = Decimal(str(baseline_eed))
+        self.authority = _coerce_authority(authority_manifest)
+        if self.authority is not None:
+            actual_model_hash = eed_model_authority_signature(self.model_path)
+            if actual_model_hash != self.authority.model_hash:
+                raise ValueError("EED model does not match supplied authority manifest")
+            self.baseline_eed = Decimal(self.authority.baseline_eed)
+            if baseline_eed is not None and Decimal(str(baseline_eed)) != self.baseline_eed:
+                raise ValueError("baseline_eed conflicts with supplied authority manifest")
+        elif baseline_eed is not None:
+            self.baseline_eed = Decimal(str(baseline_eed))
+        else:
+            raise ValueError("authority_manifest is required when baseline_eed is omitted")
         if not self.baseline_eed.is_finite() or self.baseline_eed < 0:
             raise ValueError("baseline_eed must be a finite non-negative decimal")
+        self.dispatch_threshold = Decimal(str(dispatch_threshold))
+        if not self.dispatch_threshold.is_finite() or not (
+            FORMAL_GROWTH_RATE <= self.dispatch_threshold <= Decimal("1")
+        ):
+            raise ValueError("dispatch_threshold must be between 0.05 and 1")
         self.batch_size = int(batch_size)
         self.evidence = EvidenceStore(
             self.runtime_data_root / "evidence.sqlite3"
@@ -479,7 +568,10 @@ class IncrementalReadinessRuntime:
         self._control_store()
 
     def _refresh_authority(self, *, force: bool = False) -> bool:
-        baseline_signature = baseline_authority_signature(self.baseline_path)
+        if self.authority is not None:
+            baseline_signature = self.authority.authority_digest
+        else:
+            baseline_signature = baseline_authority_signature(self.baseline_path)
         model_signature = eed_model_authority_signature(self.model_path)
         changed = (
             force
@@ -491,7 +583,7 @@ class IncrementalReadinessRuntime:
 
         if self.baseline is not None:
             self.baseline.close()
-        self.baseline = BaselineIndex(self.baseline_path)
+        self.baseline = BaselineIndex(self.baseline_path, authority=self.authority)
         self.weights = load_english_weights(self.model_path)
         self._baseline_signature = baseline_signature
         self._model_signature = model_signature
@@ -681,6 +773,9 @@ class IncrementalReadinessRuntime:
         report = self.ledger.report(
             latest_evidence_sequence=self.evidence.max_host_year_sequence(),
             baseline_eed=self.baseline_eed,
+            baseline_id=(self.authority.baseline_id if self.authority else ""),
+            authority_digest=(self.authority.authority_digest if self.authority else ""),
+            dispatch_threshold=self.dispatch_threshold,
         )
         if report.evidence_cursor >= report.latest_evidence_sequence:
             # Only a complete snapshot may train source/action allocation. On
@@ -714,10 +809,17 @@ class IncrementalReadinessRuntime:
         report: IncrementalReadinessReport,
         path: Path,
     ) -> None:
+        IncrementalReadinessRuntime.write_payload_atomic(report.as_dict(), path)
+
+    @staticmethod
+    def write_payload_atomic(
+        payload: dict[str, object],
+        path: Path,
+    ) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         temporary = path.with_suffix(path.suffix + ".tmp")
         temporary.write_text(
-            json.dumps(report.as_dict(), ensure_ascii=False, indent=2) + "\n",
+            json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
             encoding="utf-8",
         )
         os.replace(temporary, path)

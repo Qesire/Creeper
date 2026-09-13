@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build the local V3 baseline index and print basic measurements."""
+"""Build an authority-bound baseline index and print basic measurements."""
 
 from __future__ import annotations
 
@@ -14,11 +14,22 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("task_root", type=Path)
     parser.add_argument("output", type=Path)
+    parser.add_argument("--baseline-dir", type=Path)
+    parser.add_argument(
+        "--authority-manifest",
+        type=Path,
+        required=True,
+        help="immutable authority manifest matching the selected baseline",
+    )
     parser.add_argument("--batch-size", type=int, default=50_000)
     args = parser.parse_args()
     started = time.perf_counter()
     index = BaselineIndex.build(
-        args.task_root, args.output, batch_size=args.batch_size
+        args.task_root,
+        args.output,
+        baseline_dir=args.baseline_dir,
+        authority_manifest=args.authority_manifest,
+        batch_size=args.batch_size,
     )
     elapsed = time.perf_counter() - started
     counts = index.counts()

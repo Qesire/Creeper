@@ -10,6 +10,7 @@ from creeper.authority.normalizer import normalize_official
 
 
 ANNUAL_YEARS = tuple(range(1996, 2002))
+DEFAULT_DISPATCH_THRESHOLD = Decimal("0.0525")
 
 
 def _read_normalized(path: Path) -> set[str]:
@@ -38,6 +39,7 @@ def build_readiness_report(
     run_id: str,
     source_partition_seed: int = 0,
     code_revision: str | None = None,
+    dispatch_threshold: Decimal | int | str = DEFAULT_DISPATCH_THRESHOLD,
 ) -> dict[str, object]:
     """Calculate annual novel EED from accepted annual files.
 
@@ -53,6 +55,9 @@ def build_readiness_report(
     baseline_total = Decimal(str(baseline_eed))
     if baseline_total < 0:
         raise ValueError("baseline_eed must be non-negative")
+    dispatch = Decimal(str(dispatch_threshold))
+    if not dispatch.is_finite() or not Decimal("0.05") <= dispatch <= Decimal("1"):
+        raise ValueError("dispatch_threshold must be between 0.05 and 1")
 
     annual: dict[str, object] = {}
     total = Decimal("0")
@@ -100,6 +105,11 @@ def build_readiness_report(
         "confirmed_fraction_of_five_percent": (
             "0" if fraction == 0 else _fixed(fraction)
         ),
+        "formal_gate_reached": total / baseline_total >= Decimal("0.05")
+        if baseline_total > 0 else False,
+        "dispatch_threshold": format(dispatch, "f"),
+        "submission_dispatch_ready": total / baseline_total >= dispatch
+        if baseline_total > 0 else False,
         "eta_to_five_percent_days": None if eta is None else _fixed(eta),
         "annual": annual,
     }

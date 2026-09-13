@@ -240,6 +240,7 @@ class RegionHarvestExecutor:
         owner: str = "region-harvester",
         policy: RegionHarvestPolicy | None = None,
         http_client: httpx.Client | None = None,
+        assert_source_ownership: Callable[[str], None] | None = None,
     ) -> None:
         if not owner.strip():
             raise ValueError("harvest owner is required")
@@ -249,6 +250,7 @@ class RegionHarvestExecutor:
         self.owner = owner
         self.policy = policy or RegionHarvestPolicy()
         self.http_client = http_client
+        self.assert_source_ownership = assert_source_ownership
         self.planner = EvidencePlanner()
 
     @staticmethod
@@ -280,6 +282,7 @@ class RegionHarvestExecutor:
         reservoir_id: str | None = None,
         origin_unit_id: str | None = None,
         assert_object_identity: Callable[[], None] | None = None,
+        assert_source_owned: Callable[[], None] | None = None,
         assert_claim_owned: Callable[[], None] | None = None,
     ) -> None:
         if not groups:
@@ -343,6 +346,8 @@ class RegionHarvestExecutor:
             # response so this does not add a request per batch.
             if assert_object_identity is not None:
                 assert_object_identity()
+            if assert_source_owned is not None:
+                assert_source_owned()
             if assert_claim_owned is not None:
                 assert_claim_owned()
             # Evidence is the stronger authority. Commit proof first; readiness
@@ -867,6 +872,8 @@ class RegionHarvestExecutor:
 
         try:
             self._validate_region(claimed, index)
+            if self.assert_source_ownership is not None:
+                self.assert_source_ownership(index.source_key)
         except BaseException:
             self.registry.release_region_harvest(
                 region_key,
@@ -881,6 +888,8 @@ class RegionHarvestExecutor:
         assert claimed.byte_end is not None
         end_exclusive = claimed.byte_end + 1
         if start >= end_exclusive:
+            if self.assert_source_ownership is not None:
+                self.assert_source_ownership(index.source_key)
             self.registry.complete_region_harvest(
                 region_key,
                 owner=self.owner,
@@ -963,6 +972,11 @@ class RegionHarvestExecutor:
                 assert_object_identity=(
                     lambda: self._assert_current_local_object_identity(index)
                 ),
+                assert_source_owned=(
+                    None
+                    if self.assert_source_ownership is None
+                    else lambda: self.assert_source_ownership(index.source_key)
+                ),
                 assert_claim_owned=heartbeat.assert_owned,
             )
 
@@ -1009,6 +1023,8 @@ class RegionHarvestExecutor:
             heartbeat.assert_owned()
             heartbeat.stop()
             heartbeat.assert_owned()
+            if self.assert_source_ownership is not None:
+                self.assert_source_ownership(index.source_key)
 
             resume_cursor = _cursor_value(result.next_cursor)
             completed = resume_cursor is None

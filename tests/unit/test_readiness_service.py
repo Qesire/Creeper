@@ -21,7 +21,7 @@ class ReadinessServiceTests(unittest.TestCase):
         output_name: str = "baseline.sqlite3",
     ) -> Path:
         task = root / ("task-" + output_name.replace(".", "-"))
-        baseline_dir = task / "merged260909-3"
+        baseline_dir = task / "merged260912-3"
         baseline_dir.mkdir(parents=True)
         annual = annual or {}
         for year in range(1996, 2002):
