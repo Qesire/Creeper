@@ -1,4 +1,5 @@
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 
@@ -144,6 +145,91 @@ class SourceProducerTests(unittest.TestCase):
             range_first_fraction=range_first_fraction,
         )
         return runtime, adapter
+
+    def build_direct_runtime(
+        self,
+        *,
+        backlog_capacities: dict[str, int],
+        include_fallback_hint: bool = False,
+        owner: str = "direct-producer",
+        control_store: ControlStore | None = None,
+    ):
+        control = self.control if control_store is None else control_store
+        direct_bit = 1 << (1997 - 1996)
+        hint_bit = (1 << (1998 - 1996)) if include_fallback_hint else 0
+        record = SourceRecord(
+            source_id="direct-fixture",
+            locator="fixture://direct/1",
+            payload="direct-novel.example",
+            scope=CandidateSourceScope.LOCAL_DISCOVERY,
+            source_year=1997,
+            source_time="19970101000000",
+            record_type="CDX_CAPTURE",
+            artifact_ref="fixture://direct/1",
+            direct_year_mask=direct_bit,
+            year_hint_mask=hint_bit,
+        )
+        adapter = FakeSource([record])
+        domain = SourceDomain(
+            domain_id="direct-isolation-domain",
+            family="DIRECT_FIXTURE",
+            discovery_mechanism="test",
+            temporal_scope=(1996, 2001),
+            state=DomainState.EXPLORING,
+        )
+        reservoir = Reservoir(
+            reservoir_id="direct-isolation-reservoir",
+            domain_id=domain.domain_id,
+            adapter_id=adapter.adapter_id,
+            root_locator="fixture://direct-isolation",
+            enumeration_kind="finite_list",
+            capacity_lower=1,
+            capacity_upper=1,
+            evidence_mode="direct_year",
+            state=ReservoirState.READY,
+        )
+        control.save_domain(domain)
+        control.save_reservoir(reservoir)
+        template = WorkLease.create(
+            reservoir_id=reservoir.reservoir_id,
+            cursor_start="0",
+            max_records=1,
+            max_requests=1,
+            max_bytes=1024,
+            max_seconds=30,
+            # Deliberately stale/overstated: direct production must ignore
+            # provider reservation estimates from compatibility callers.
+            expected_evidence_tasks=100,
+            expected_novel_eed=1.0,
+        )
+        candidate = LeaseCandidate(
+            reservoir_id=reservoir.reservoir_id,
+            expected_novel_eed=1.0,
+            costs=ResourceCost(0, 100, 1, 1),
+            reservoir=reservoir,
+            lease=template,
+            evidence_mode="direct_year",
+            evidence_provider="wayback",
+            expected_evidence_tasks=100,
+            reservation_evidence_tasks=100,
+        )
+        runtime = SourceProducer(
+            baseline=self.baseline,
+            control_store=control,
+            evidence_store=self.evidence,
+            scheduler=GlobalScheduler(CreditLedger({"wayback": 0})),
+            candidates=[candidate],
+            adapters={adapter.adapter_id: adapter},
+            backlog_capacities=backlog_capacities,
+            queue_capacities={
+                "source_records": 2,
+                "observations": 2,
+                "evidence_tasks": 2,
+                "commits": 2,
+            },
+            owner=owner,
+        )
+        return runtime, adapter, candidate
 
     def test_source_producer_only_enqueues_durable_work(self):
         runtime, adapter = self.build_runtime(backlog_capacity=1)
@@ -582,6 +668,105 @@ class SourceProducerTests(unittest.TestCase):
             ).fetchone()[0],
             0,
         )
+
+    def test_wayback_full_does_not_block_direct_proof_or_lose_fallback(self):
+        occupied = EvidenceQueryKey(
+            "occupied.example", TemporalScope(1997, 1997), "wayback", "cdx-v1"
+        )
+        self.control.enqueue_evidence_tasks([occupied])
+        runtime, adapter, _candidate = self.build_direct_runtime(
+            backlog_capacities={"wayback": 1},
+            include_fallback_hint=True,
+        )
+
+        report = runtime.run_once()
+
+        fallback = EvidenceQueryKey(
+            "direct-novel.example",
+            TemporalScope(1998, 1998),
+            "wayback",
+            "cdx-v1",
+        )
+        self.assertEqual(report.leases_succeeded, 1)
+        self.assertEqual(report.direct_capsules_committed, 1)
+        self.assertEqual(report.evidence_tasks_enqueued, 0)
+        self.assertEqual(adapter.executions, 1)
+        self.assertEqual(self.evidence.count(), 1)
+        self.assertIsNone(self.control.get_evidence_task(fallback))
+        self.assertEqual(
+            runtime.evidence_router.pending_count(provider="wayback"),
+            1,
+        )
+        self.assertEqual(runtime.admission.reserved("wayback"), 0)
+        stored = self.control.get_reservoir("direct-isolation-reservoir")
+        self.assertEqual(stored.state, ReservoirState.EXHAUSTED)
+
+    def test_direct_proof_runs_without_any_wayback_capacity_config(self):
+        runtime, adapter, _candidate = self.build_direct_runtime(
+            backlog_capacities={},
+        )
+
+        report = runtime.run_once()
+
+        self.assertEqual(report.leases_succeeded, 1)
+        self.assertEqual(report.direct_capsules_committed, 1)
+        self.assertEqual(report.evidence_tasks_enqueued, 0)
+        self.assertEqual(adapter.executions, 1)
+        self.assertEqual(self.evidence.count(), 1)
+
+    def test_two_producers_cannot_claim_same_direct_reservoir(self):
+        runtime, _adapter, candidate = self.build_direct_runtime(
+            backlog_capacities={},
+            owner="seed-owner",
+        )
+        barrier = threading.Barrier(2)
+        results: list[bool] = []
+        errors: list[BaseException] = []
+        lock = threading.Lock()
+
+        def compete(owner: str) -> None:
+            control = ControlStore(self.root / "control.sqlite3")
+            try:
+                producer = SourceProducer(
+                    baseline=self.baseline,
+                    control_store=control,
+                    evidence_store=self.evidence,
+                    scheduler=GlobalScheduler(CreditLedger({"wayback": 0})),
+                    candidates=[candidate],
+                    adapters=runtime.adapters,
+                    backlog_capacities={},
+                    queue_capacities={
+                        "source_records": 2,
+                        "observations": 2,
+                        "evidence_tasks": 2,
+                        "commits": 2,
+                    },
+                    owner=owner,
+                )
+                barrier.wait(timeout=2.0)
+                granted = producer._grant_fresh_lease()
+                with lock:
+                    results.append(granted is not None)
+            except BaseException as exc:
+                with lock:
+                    errors.append(exc)
+            finally:
+                control.close()
+
+        workers = [
+            threading.Thread(target=compete, args=(f"worker-{index}",))
+            for index in (1, 2)
+        ]
+        for worker in workers:
+            worker.start()
+        for worker in workers:
+            worker.join(timeout=5.0)
+
+        self.assertTrue(all(not worker.is_alive() for worker in workers))
+        self.assertEqual(errors, [])
+        self.assertEqual(sorted(results), [False, True])
+        stored = self.control.get_reservoir(candidate.reservoir_id)
+        self.assertEqual(stored.state, ReservoirState.LEASED)
 
     def test_full_backlog_blocks_source_before_adapter_execution(self):
         occupied = EvidenceQueryKey(

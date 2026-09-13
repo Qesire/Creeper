@@ -14,7 +14,15 @@ from urllib.parse import urlsplit
 
 import fsspec
 
+from creeper.authority.baseline_index import YEAR_BITS
 from creeper.authority.normalizer import normalize_official
+from creeper.evidence.contracts import (
+    EvidenceAuthority,
+    SourceEvidenceContract,
+    contract_from_adapter_id,
+    parser_kind_from_locator,
+    resolve_source_evidence_contract,
+)
 from creeper.records.candidates import CandidateSourceScope
 from creeper.records.models import HostObservation, SourceRecord
 from creeper.scheduler.leases import LeaseResult, WorkLease
@@ -122,12 +130,40 @@ class StructuredProductionAdapter:
         reservoir: Reservoir,
         *,
         temporal_scope: tuple[int, int] | None = None,
+        evidence_contract: SourceEvidenceContract | None = None,
     ) -> None:
         self.adapter_id = reservoir.adapter_id
         self.source_id = reservoir.reservoir_id
         self.source = reservoir.root_locator
         self.kind = self._kind_from_locator(self.source)
         self.temporal_scope = temporal_scope
+
+        bound_contract = contract_from_adapter_id(reservoir.adapter_id)
+        if (
+            evidence_contract is not None
+            and bound_contract is not None
+            and evidence_contract != bound_contract
+        ):
+            raise ProductionAdapterError(
+                "explicit evidence contract conflicts with durable adapter binding"
+            )
+        self.evidence_contract = (
+            evidence_contract
+            or bound_contract
+            or resolve_source_evidence_contract(
+                self.source,
+                parser_kind=self.kind,
+            )
+        )
+        if self.evidence_contract.parser_kind != self.kind:
+            raise ProductionAdapterError(
+                "evidence contract parser_kind does not match structured source"
+            )
+        if reservoir.evidence_mode != self.evidence_contract.evidence_mode:
+            raise ProductionAdapterError(
+                "reservoir evidence_mode disagrees with frozen evidence contract"
+            )
+
         path = urlsplit(self.source).path.lower()
         self.compressed = path.endswith(".gz")
         self._stream = None
@@ -135,16 +171,12 @@ class StructuredProductionAdapter:
 
     @staticmethod
     def _kind_from_locator(locator: str) -> str:
-        path = urlsplit(locator).path.lower()
-        if path.endswith((".cdxj", ".cdxj.gz")):
-            return "cdxj"
-        if path.endswith((".cdx", ".cdx.gz")):
-            return "cdx"
-        if path.endswith((".jsonl", ".jsonl.gz")):
-            return "jsonl"
-        if path.endswith((".csv", ".csv.gz", ".tsv", ".tsv.gz")):
-            return "delimited"
-        return "lines"
+        kind = parser_kind_from_locator(locator)
+        if kind == "warc_arc":
+            raise ProductionAdapterError(
+                "WARC/ARC requires WarcProductionAdapter"
+            )
+        return kind
 
     @staticmethod
     def _cursor_value(cursor: str | None) -> int:
@@ -195,6 +227,80 @@ class StructuredProductionAdapter:
         year_from, year_to = self.temporal_scope
         return year_from if year_from == year_to and 1996 <= year_from <= 2001 else None
 
+    @staticmethod
+    def _delimited_contract_cell(
+        row: list[str],
+        field: str | None,
+    ) -> str | None:
+        if field is None:
+            return None
+        text = field.strip().lower()
+        if text.startswith("column:"):
+            text = text.removeprefix("column:")
+        if not text.isdigit():
+            return None
+        index = int(text)
+        if index < 0 or index >= len(row):
+            return None
+        return row[index]
+
+    def _contract_timestamp_year(
+        self,
+        raw_timestamp: object | None,
+    ) -> tuple[int | None, str | None]:
+        if self.evidence_contract.timestamp_field is None:
+            year = self._default_source_year()
+            return year, (None if year is None else str(year))
+        year = self._year_from_scalar(raw_timestamp)
+        if year is None:
+            return None, None
+        return year, str(raw_timestamp).strip()
+
+    def _direct_contract_provenance(
+        self,
+        record: SourceRecord,
+    ) -> SourceRecord:
+        contract = self.evidence_contract
+        return replace(
+            record,
+            evidence_type=contract.evidence_type,
+            temporal_semantics=contract.temporal_semantics,
+            evidence_contract_id=contract.contract_id,
+            evidence_contract_version=contract.policy_version,
+        )
+
+    def _apply_contract_authority(
+        self,
+        record: SourceRecord,
+    ) -> SourceRecord:
+        year = record.source_year
+        bit = YEAR_BITS.get(year, 0)
+        direct_contract = (
+            self.evidence_contract.authority
+            is EvidenceAuthority.DIRECT_WEB_YEAR
+        )
+        if direct_contract and record.direct_year_mask:
+            return self._direct_contract_provenance(
+                replace(
+                    record,
+                    direct_year_mask=record.direct_year_mask & bit,
+                    year_hint_mask=record.year_hint_mask & ~bit,
+                )
+            )
+
+        hint_mask = record.year_hint_mask | record.direct_year_mask
+        if bit:
+            hint_mask |= bit
+        return replace(
+            record,
+            direct_year_mask=0,
+            year_hint_mask=hint_mask,
+            evidence_type="",
+            temporal_semantics="",
+            evidence_contract_id="",
+            evidence_contract_version="",
+        )
+
     def _open_stream(self):
         options = {
             "block_size": 4 * 1024 * 1024,
@@ -236,6 +342,7 @@ class StructuredProductionAdapter:
         source_year = self._default_source_year()
         source_time: str | None = None
         record_type = "STRUCTURED_LINE"
+        contract_direct_year: int | None = None
 
         if self.kind == "jsonl":
             try:
@@ -267,6 +374,30 @@ class StructuredProductionAdapter:
                     break
             record_type = "STRUCTURED_JSONL"
 
+            contract = self.evidence_contract
+            if (
+                contract.grants_direct_web_year
+                and contract.hostname_field is not None
+            ):
+                raw_host = lowered.get(contract.hostname_field.lower())
+                raw_time = (
+                    None
+                    if contract.timestamp_field is None
+                    else lowered.get(contract.timestamp_field.lower())
+                )
+                contract_year, contract_time = self._contract_timestamp_year(
+                    raw_time
+                )
+                if (
+                    isinstance(raw_host, str)
+                    and self._hostname_from_scalar(raw_host) is not None
+                    and contract_year in YEAR_BITS
+                ):
+                    payload = raw_host.strip()
+                    source_year = contract_year
+                    source_time = contract_time
+                    contract_direct_year = contract_year
+
         elif self.kind == "delimited":
             path = urlsplit(self.source).path.lower()
             delimiter = "\t" if path.endswith((".tsv", ".tsv.gz")) else ","
@@ -293,6 +424,46 @@ class StructuredProductionAdapter:
             payload = selected
             record_type = "STRUCTURED_DELIMITED"
 
+            contract = self.evidence_contract
+            if (
+                contract.grants_direct_web_year
+                and contract.hostname_field is not None
+            ):
+                raw_host = self._delimited_contract_cell(
+                    row,
+                    contract.hostname_field,
+                )
+                raw_time = self._delimited_contract_cell(
+                    row,
+                    contract.timestamp_field,
+                )
+                contract_year, contract_time = self._contract_timestamp_year(
+                    raw_time
+                )
+                if (
+                    raw_host is not None
+                    and self._hostname_from_scalar(raw_host) is not None
+                    and contract_year in YEAR_BITS
+                ):
+                    payload = raw_host.strip()
+                    source_year = contract_year
+                    source_time = contract_time
+                    contract_direct_year = contract_year
+
+        elif (
+            self.evidence_contract.grants_direct_web_year
+            and self.evidence_contract.hostname_field is not None
+            and self.evidence_contract.hostname_field.strip().lower()
+            in {"record", "line", "0", "column:0"}
+            and self.evidence_contract.timestamp_field is None
+            and self._hostname_from_scalar(payload) is not None
+        ):
+            contract_year, contract_time = self._contract_timestamp_year(None)
+            if contract_year in YEAR_BITS:
+                source_year = contract_year
+                source_time = contract_time
+                contract_direct_year = contract_year
+
         return SourceRecord(
             source_id=self.source_id,
             locator=locator,
@@ -302,6 +473,11 @@ class StructuredProductionAdapter:
             source_time=source_time,
             record_type=record_type,
             artifact_ref=self.source,
+            direct_year_mask=(
+                YEAR_BITS.get(contract_direct_year, 0)
+                if self.evidence_contract.grants_direct_web_year
+                else 0
+            ),
         )
 
     def execute_stream(
@@ -427,16 +603,8 @@ class StructuredProductionAdapter:
                     if self.kind == "cdx"
                     else self._generic_record(line, locator=locator)
                 )
-                if (
-                    record is not None
-                    and record.source_year in range(1996, 2002)
-                    and record.direct_year_mask == 0
-                ):
-                    record = replace(
-                        record,
-                        year_hint_mask=1 << (record.source_year - 1996),
-                    )
                 if record is not None:
+                    record = self._apply_contract_authority(record)
                     emit_started = time.monotonic()
                     emit_record(record)
                     downstream_wait_seconds += time.monotonic() - emit_started
@@ -487,6 +655,10 @@ class StructuredProductionAdapter:
                 direct_year_mask=record.direct_year_mask,
                 year_hint_mask=record.year_hint_mask,
                 original_url=record.payload,
+                evidence_type=record.evidence_type,
+                temporal_semantics=record.temporal_semantics,
+                evidence_contract_id=record.evidence_contract_id,
+                evidence_contract_version=record.evidence_contract_version,
             ),
         )
 
@@ -499,6 +671,7 @@ class ProductionAdapterFactory:
         reservoir: Reservoir,
         *,
         temporal_scope: tuple[int, int] | None = None,
+        evidence_contract: SourceEvidenceContract | None = None,
     ) -> object:
         if reservoir.adapter_id.startswith("warc_arc:"):
             return WarcProductionAdapter(reservoir)
@@ -506,6 +679,7 @@ class ProductionAdapterFactory:
             return StructuredProductionAdapter(
                 reservoir,
                 temporal_scope=temporal_scope,
+                evidence_contract=evidence_contract,
             )
         if reservoir.adapter_id.startswith("static:"):
             from creeper.sources.local.static_dataset import StaticDatasetAdapter

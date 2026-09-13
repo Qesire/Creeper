@@ -61,6 +61,35 @@ class SchedulerEEDTests(unittest.TestCase):
 
         self.assertEqual(scheduler.rank([cdx_heavy, direct])[0].reservoir_id, "direct")
 
+    def test_direct_score_ignores_fictitious_evidence_network_cost(self):
+        scheduler = GlobalScheduler(
+            CreditLedger({"wayback": 1}),
+            resource_capacities={
+                "general_network": 1,
+                "evidence_network": 1,
+                "cpu": 1,
+                "ssd": 1,
+            },
+        )
+        clean = LeaseCandidate(
+            reservoir_id="direct-clean",
+            reservoir=make_reservoir("direct-clean", evidence_mode="direct_year"),
+            lease=make_lease("direct-clean"),
+            expected_novel_eed=10,
+            costs=ResourceCost(1, 0, 1, 1),
+            evidence_mode="direct_year",
+        )
+        stale = LeaseCandidate(
+            reservoir_id="direct-stale",
+            reservoir=make_reservoir("direct-stale", evidence_mode="direct_year"),
+            lease=make_lease("direct-stale"),
+            expected_novel_eed=10,
+            costs=ResourceCost(1, 1000, 1, 1),
+            evidence_mode="direct_year",
+        )
+
+        self.assertEqual(scheduler.score(clean), scheduler.score(stale))
+
     def test_rank_breaks_equal_scores_by_reservoir_id(self):
         scheduler = GlobalScheduler(CreditLedger({"wayback": 10}))
         candidates = [

@@ -148,18 +148,31 @@ class EvidencePlanner:
                 observation.record_type,
             )
         ).encode("utf-8")
+        extraction_method = observation.record_type or "source_record"
+        if observation.evidence_contract_id:
+            contract_version = (
+                observation.evidence_contract_version or "unknown"
+            )
+            extraction_method = (
+                f"{extraction_method};contract="
+                f"{observation.evidence_contract_id}@{contract_version}"
+            )
         return EvidenceCapsule(
             hostname=hostname,
             year=year,
             provider=f"direct:{observation.source_id}",
-            temporal_semantics="source_direct_year",
+            temporal_semantics=(
+                observation.temporal_semantics or "source_direct_year"
+            ),
             evidence_timestamp=observation.source_time or f"{year}0101000000",
             source_locator=observation.locator,
             payload_hash=hashlib.sha256(identity).hexdigest(),
             policy_version=policy_version,
-            evidence_type="dated_archive_index",
+            evidence_type=(
+                observation.evidence_type or "dated_archive_index"
+            ),
             source_id=observation.source_id,
             original_url=observation.original_url or observation.locator,
             record_locator=observation.locator,
-            extraction_method=observation.record_type or "source_record",
+            extraction_method=extraction_method,
         )
