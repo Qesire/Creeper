@@ -15,7 +15,7 @@ from enum import StrEnum
 from typing import Any, Mapping
 from urllib.parse import SplitResult, urlsplit, urlunsplit
 
-RESEARCH_SCHEMA_VERSION = 1
+RESEARCH_SCHEMA_VERSION = 2
 
 
 class RootKind(StrEnum):
@@ -70,6 +70,7 @@ class RewardScope(StrEnum):
     PROGRAM = "PROGRAM"
     ROOT = "ROOT"
     PIVOT = "PIVOT"
+    DECISION = "DECISION"
 
 
 class RuleState(StrEnum):
@@ -603,6 +604,31 @@ class DecisionRecord:
             raise ValueError("decision propensity must be in (0, 1]")
         object.__setattr__(self, "metadata", dict(self.metadata))
 
+    @property
+    def parent_decision_ids(self) -> tuple[str, ...]:
+        """Return ordered hierarchical parents recorded by L7.
+
+        Current L7 persists the ancestry inside
+        metadata["context_features"]["parent_decision_ids"].  Accept a direct
+        top-level key as well so the L3 retrieval contract remains stable if the
+        writer is later simplified.
+        """
+        raw = self.metadata.get("parent_decision_ids")
+        if raw is None:
+            context = self.metadata.get("context_features", {})
+            raw = context.get("parent_decision_ids", ()) if isinstance(context, Mapping) else ()
+        if not isinstance(raw, (list, tuple)):
+            raise ValueError("parent_decision_ids must be an ordered array")
+        result: list[str] = []
+        seen: set[str] = set()
+        for value in raw:
+            decision_id = str(value).strip()
+            if not decision_id or decision_id == self.decision_id or decision_id in seen:
+                continue
+            seen.add(decision_id)
+            result.append(decision_id)
+        return tuple(result)
+
 
 @dataclass(frozen=True)
 class PolicySnapshot:
@@ -624,6 +650,15 @@ class ArmStats:
     decayed_reward: float
     schema_version: int
     updated_at: float
+    final_observation_count: int = 0
+
+    @property
+    def has_final(self) -> bool:
+        return self.final_observation_count > 0
+
+    @property
+    def authoritative_reward(self) -> float:
+        return self.final_reward if self.has_final else self.proxy_reward
 
 
 @dataclass(frozen=True)
