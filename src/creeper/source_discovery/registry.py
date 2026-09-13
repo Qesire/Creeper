@@ -1307,39 +1307,62 @@ class SourceDiscoveryRegistry:
         *,
         final_accepted_eed: float,
         cost_seconds: float = 0.0,
+        baseline_signature: str | None = None,
+        model_signature: str | None = None,
     ) -> None:
-        """Close proxy reward with final accepted competition value.
+        """Publish a source-level FINAL projection.
 
-        Until this method is called, measured scout EED is an explicit proxy.
-        Once a final value exists it becomes the reward attributed to the
-        originating search strategy and Codex hypothesis.
+        V5 source-run accounting should normally call close_source_run().
+        This compatibility API remains for existing callers and tests. When a
+        current authority exists it is attached to the projection so stale
+        values cannot train scheduling after an authority cutover.
         """
         if final_accepted_eed < 0 or cost_seconds < 0:
             raise ValueError("final reward and cost must be non-negative")
         if self.get_candidate(source_key) is None:
             raise KeyError(f"unknown source: {source_key}")
+        if (baseline_signature is None) != (model_signature is None):
+            raise ValueError(
+                "baseline_signature and model_signature must be provided together"
+            )
+        if baseline_signature is None:
+            authority = self.current_scout_authority
+            if authority is not None:
+                baseline_signature, model_signature = authority
         now = float(self.clock())
         with self.connection:
             self.connection.execute(
                 """
                 INSERT INTO source_final_rewards(
-                    source_key, final_accepted_eed, cost_seconds, updated_at
-                ) VALUES (?, ?, ?, ?)
+                    source_key, final_accepted_eed, cost_seconds,
+                    baseline_signature, model_signature,
+                    closed_runs, zero_runs, updated_at
+                ) VALUES (?, ?, ?, ?, ?, 1, ?, ?)
                 ON CONFLICT(source_key) DO UPDATE SET
                     final_accepted_eed = excluded.final_accepted_eed,
                     cost_seconds = excluded.cost_seconds,
+                    baseline_signature = excluded.baseline_signature,
+                    model_signature = excluded.model_signature,
+                    closed_runs = excluded.closed_runs,
+                    zero_runs = excluded.zero_runs,
                     updated_at = excluded.updated_at
                 """,
                 (
                     source_key,
                     float(final_accepted_eed),
                     float(cost_seconds),
+                    baseline_signature,
+                    model_signature,
+                    int(float(final_accepted_eed) == 0.0),
                     now,
                 ),
             )
             self._attribute_search_reward_locked(
                 source_key,
                 accepted_novel_eed=float(final_accepted_eed),
+                reward_kind="final",
+                baseline_signature=baseline_signature,
+                model_signature=model_signature,
             )
             self.connection.execute(
                 """
@@ -1351,16 +1374,51 @@ class SourceDiscoveryRegistry:
             )
 
     def reset_final_rewards(self) -> None:
-        """Zero final rewards after baseline/EED authority identity changes."""
-        rows = self.connection.execute(
-            "SELECT source_key FROM source_final_rewards"
-        ).fetchall()
-        for row in rows:
-            self.record_final_reward(
-                str(row["source_key"]),
-                final_accepted_eed=0.0,
-                cost_seconds=0.0,
+        """Invalidate current FINAL projection without erasing run audit rows."""
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            rows = self.connection.execute(
+                """
+                SELECT episode_id, credited_eed
+                FROM source_search_reward_attribution
+                WHERE reward_kind = 'final'
+                """
+            ).fetchall()
+            for row in rows:
+                credit = float(row["credited_eed"] or 0.0)
+                if credit:
+                    self.connection.execute(
+                        """
+                        UPDATE source_search_episodes
+                        SET accepted_novel_eed = MAX(0, accepted_novel_eed - ?)
+                        WHERE episode_id = ?
+                        """,
+                        (credit, str(row["episode_id"])),
+                    )
+            self.connection.execute(
+                """
+                UPDATE source_search_reward_attribution
+                SET credited_eed = 0,
+                    reward_kind = 'invalidated_final',
+                    baseline_signature = NULL,
+                    model_signature = NULL
+                WHERE reward_kind = 'final'
+                """
             )
+            self.connection.execute(
+                """
+                UPDATE source_llm_source_attribution
+                SET credited_eed = 0
+                WHERE source_key IN (
+                    SELECT source_key FROM source_final_rewards
+                )
+                """
+            )
+            self.connection.execute("DELETE FROM source_final_rewards")
+            self.connection.commit()
+        except BaseException:
+            self.connection.rollback()
+            raise
 
     def llm_task_rewards(self) -> list[dict[str, object]]:
         rows = self.connection.execute(
@@ -1693,17 +1751,27 @@ class SourceDiscoveryRegistry:
         """
         final_row = self.connection.execute(
             """
-            SELECT final_accepted_eed
-            FROM source_final_rewards
-            WHERE source_key = ?
+            SELECT f.final_accepted_eed,
+                   f.baseline_signature,
+                   f.model_signature
+            FROM source_final_rewards f
+            LEFT JOIN source_scout_authority a ON a.singleton = 1
+            WHERE f.source_key = ?
+              AND (
+                  a.singleton IS NULL
+                  OR (
+                      f.baseline_signature = a.baseline_signature
+                      AND f.model_signature = a.model_signature
+                  )
+              )
             """,
             (source_key,),
         ).fetchone()
         if final_row is not None:
             accepted_novel_eed = float(final_row["final_accepted_eed"])
             reward_kind = "final"
-            baseline_signature = None
-            model_signature = None
+            baseline_signature = final_row["baseline_signature"]
+            model_signature = final_row["model_signature"]
         attribution = self.connection.execute(
             """
             SELECT episode_id, credited_eed
