@@ -15,6 +15,7 @@ import time
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from threading import Event, Lock, Thread
+from typing import TYPE_CHECKING
 
 from creeper.authority.baseline_index import BaselineIndex, YEAR_BITS
 from creeper.evidence.planner import EvidencePlanner
@@ -33,7 +34,8 @@ from creeper.storage.candidate_store import CandidateStore
 from creeper.storage.control_store import ControlStore
 from creeper.storage.evidence_store import EvidenceStore
 
-
+if TYPE_CHECKING:
+    from creeper.source_discovery.registry import SourceDiscoveryRegistry
 
 
 @dataclass(frozen=True)
@@ -102,6 +104,7 @@ class SourceProducer:
         evidence_store: EvidenceStore,
         scheduler: GlobalScheduler,
         candidate_store: CandidateStore | None = None,
+        source_registry: "SourceDiscoveryRegistry | None" = None,
         candidates: Iterable[LeaseCandidate],
         adapters: Mapping[str, object],
         backlog_capacities: Mapping[str, int],
@@ -150,6 +153,7 @@ class SourceProducer:
         self.control_store = control_store
         self.evidence_store = evidence_store
         self.candidate_store = candidate_store
+        self.source_registry = source_registry
         self.scheduler = scheduler
         self.candidates = tuple(candidates)
         self.adapters = dict(adapters)
@@ -299,6 +303,17 @@ class SourceProducer:
         origin_source_key = candidate.source_key or candidate.reservoir_id
         running = lease.start()
         self.control_store.save_lease(running)
+        run_authority: tuple[str, str] | None = None
+        if self.source_registry is not None and candidate.source_key is not None:
+            run_authority = self.source_registry.current_scout_authority
+            if run_authority is not None:
+                self.source_registry.begin_source_run(
+                    candidate.source_key,
+                    reservoir_id=candidate.reservoir_id,
+                    lease_id=running.lease_id,
+                    baseline_signature=run_authority[0],
+                    model_signature=run_authority[1],
+                )
         source_records = observations = planning_observations = 0
         enqueued = direct_committed = 0
         max_source = max_observations = 0
@@ -747,6 +762,22 @@ class SourceProducer:
                 and result.next_cursor is not None
             ):
                 raise RuntimeError("lease made no cursor progress")
+            if (
+                self.source_registry is not None
+                and candidate.source_key is not None
+                and run_authority is not None
+            ):
+                self.source_registry.record_source_run_read(
+                    candidate.source_key,
+                    reservoir_id=candidate.reservoir_id,
+                    lease_id=running.lease_id,
+                    baseline_signature=run_authority[0],
+                    model_signature=run_authority[1],
+                    source_records=source_records,
+                    bytes_read=result.bytes_read,
+                    source_requests=result.requests,
+                    read_complete=True,
+                )
             self.control_store.finalize_lease(
                 running,
                 next_cursor=result.next_cursor,
