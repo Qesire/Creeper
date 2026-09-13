@@ -577,13 +577,15 @@ def _research_snapshot(
         SourceState.SCOUTING,
     )
     deterministic_backlog = len(registry.list_candidates_in_states(live_states))
+    ready_candidates = registry.list_candidates_in_states(
+        (SourceState.WARM, SourceState.ACTIVE)
+    )
     productive_direct = sum(
         1
-        for candidate in registry.list_candidates_in_states(
-            (SourceState.WARM, SourceState.ACTIVE)
-        )
+        for candidate in ready_candidates
         if candidate.direct_evidence_prior >= 0.5
     )
+    ready_minutes = production_value.ready_inventory_minutes(ready_candidates)
 
     executable_regions = 0
     pending_regions = 0
@@ -629,6 +631,7 @@ def _research_snapshot(
         "executable_regions": executable_regions,
         "pending_regions": pending_regions,
         "productive_direct": productive_direct,
+        "ready_minutes": ready_minutes,
         "unknown_contract_blockers": len(contract_blockers),
         "unknown_structure_blockers": len(structure_blockers),
         "closed_source_runs": final.closed_source_runs,
@@ -645,6 +648,7 @@ def _research_snapshot(
         pending_region_count=pending_regions,
         deterministic_candidate_backlog=deterministic_backlog,
         productive_direct_inventory=productive_direct,
+        ready_minutes=ready_minutes,
         final_eed_per_hour_15m=final.final_eed_per_hour_15m,
         final_eed_per_hour_60m=final.final_eed_per_hour_60m,
         recent_zero_reward_tail=final.recent_zero_reward_tail,
