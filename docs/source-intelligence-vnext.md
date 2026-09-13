@@ -18,7 +18,11 @@ SourceDiscoveryService creates SourceReservoirManager and CommandAgentSearchExec
 <agent.command...> --request REQUEST.json --response RESPONSE.json
 ~~~
 
-The default example uses scripts/creeper_opencode_subagent.py. That wrapper runs opencode run non-interactively in an isolated temporary working directory with a proposal-only prompt policy and live web access. The wrapper enforces the JSON schema by parsing the final assistant message from the opencode JSON event stream and validating/normalizing it before writing response.json.
+The default example uses scripts/creeper_opencode_subagent.py. That wrapper is backend-agnostic and supports two interchangeable child backends selected with `--backend {opencode,codex}` (default `opencode`). Both backends share the identical request/response contract and emit the same response.json shape.
+
+With the `opencode` backend, the wrapper runs opencode run non-interactively in an isolated temporary working directory with a proposal-only prompt policy and live web access. It enforces the JSON schema through the prompt plus parent-side validation, parsing the final assistant message from the opencode JSON event stream and validating/normalizing it before writing response.json.
+
+With the `codex` backend, the wrapper runs codex exec in a read-only sandbox with web search enabled and the schema passed via --output-schema, then reads the structured final message from the --output-last-message file. This reproduces the removed scripts/creeper_codex_subagent.py path: Codex is not removed but unified into the single wrapper alongside opencode.
 
 The child cannot access the registry connection, baseline index, EvidenceStore, or submission authority through the Creeper protocol.
 
@@ -250,7 +254,7 @@ max_motif_expansions = 256
 
 Path-like command arguments are resolved relative to the TOML file, so daemon behavior does not depend on shell working directory.
 
-The opencode wrapper also accepts OPENCODE_BIN, CREEPER_OPENCODE_MODEL, and optional --model, --variant, and --agent arguments when used directly.
+The wrapper also accepts OPENCODE_BIN, CODEX_BIN, CREEPER_OPENCODE_MODEL, CREEPER_OPENCODE_TIMEOUT, and CREEPER_SOURCE_INTELLIGENCE_BACKEND, plus optional --model, --agent, --variant (opencode only), --effort (codex only), and --backend arguments when used directly.
 
 ## Validation
 

@@ -97,12 +97,17 @@ require_year_bounds = true
 [agent]
 # Parent -> child contract:
 #   <command...> --request REQUEST.json --response RESPONSE.json
-# The Creeper parent process explicitly launches a fresh opencode child agent
-# for DISCOVER_NEW_SOURCE / EXPLOIT_SUCCESS_PATTERN / INTERPRET_STRUCTURE /
-# RECOVER_STAGNATION. The child receives only a bounded state snapshot and has
-# proposal-only authority; SQLite, baseline authority and submission stay hidden.
-# The wrapper defaults to model ustc-107/deepseek-flash; override with
-# CREEPER_OPENCODE_MODEL or the wrapper's --model argument.
+# The Creeper parent process explicitly launches a fresh source-intelligence
+# child agent for DISCOVER_NEW_SOURCE / EXPLOIT_SUCCESS_PATTERN /
+# INTERPRET_STRUCTURE / RECOVER_STAGNATION. The child receives only a bounded
+# state snapshot and has proposal-only authority; SQLite, baseline authority and
+# submission stay hidden.
+#
+# The wrapper supports two interchangeable backends, selected with --backend:
+#   opencode (default): --model ustc-107/deepseek-flash
+#   codex:              --backend codex --model <codex-model> [--effort low]
+# The model id must stay a bare provider/model token; only genuine relative
+# filesystem paths in the command array are made absolute against this file.
 command = ["python", "../scripts/creeper_opencode_subagent.py"]
 backend = "opencode-cli-subagent"
 actor = "opencode:source-intelligence"

@@ -1,21 +1,28 @@
 #!/usr/bin/env python3
-"""Run one bounded opencode source-intelligence child agent.
+"""Run one bounded source-intelligence child agent.
 
 Creeper remains the parent authority. This adapter invokes a fresh
-non-interactive opencode process, gives it only request.json, constrains its
-final response to the JSON object required by the source-intelligence schema,
+non-interactive child process, gives it only request.json, constrains its final
+response to the JSON object required by the source-intelligence schema,
 normalizes nullable schema fields, and writes response.json.
 
-Design notes:
-- The opencode CLI has no ``--output-schema`` equivalent, so the schema is
-  enforced in two places: the system policy asks the model to emit only the
-  required JSON object, and this wrapper independently validates/normalizes the
-  parsed payload against the repository schema before writing response.json.
-- opencode is launched in an isolated temporary working directory with the
-  prompt-level read-only policy. Creeper still treats the child as untrusted:
-  only the bounded response file crosses the authority boundary.
-- The final assistant text is recovered from ``opencode run --format json``
-  events (the last ``text`` part of the ``text`` event stream).
+Two interchangeable backends are supported and selected with ``--backend``:
+
+- ``opencode`` (default): runs ``opencode run --model <model> --format json`` in
+  an isolated temporary working directory. The opencode CLI has no
+  ``--output-schema`` equivalent, so the schema is enforced in two places: the
+  system policy asks the model to emit only the required JSON object, and this
+  wrapper independently validates/normalizes the parsed payload against the
+  repository schema before writing response.json. The final assistant text is
+  recovered from the ``--format json`` event stream.
+
+- ``codex``: runs ``codex exec --sandbox read-only ... --output-schema ...`` with
+  the schema handed to the CLI directly; the structured final message is read
+  from the ``--output-last-message`` file.
+
+Creeper treats either child as untrusted: only the bounded response file crosses
+the authority boundary. Both backends share the same request/response contract
+and produce identical response.json shapes.
 """
 
 from __future__ import annotations
@@ -31,6 +38,12 @@ from typing import Any
 
 
 DEFAULT_MODEL = "ustc-107/deepseek-flash"
+DEFAULT_BACKEND = "opencode"
+DEFAULT_CODEX_MODEL = ""
+
+
+def _default_backend() -> str:
+    return os.environ.get("CREEPER_SOURCE_INTELLIGENCE_BACKEND", DEFAULT_BACKEND)
 
 _SYSTEM_POLICY = """You are a source-intelligence child agent of Creeper.
 
@@ -243,6 +256,18 @@ def _build_command(
     args: argparse.Namespace,
     *,
     workdir: Path,
+    schema: Path,
+    output: Path,
+) -> list[str]:
+    if args.backend == "codex":
+        return _build_codex_command(args, schema=schema, output=output)
+    return _build_opencode_command(args, workdir=workdir)
+
+
+def _build_opencode_command(
+    args: argparse.Namespace,
+    *,
+    workdir: Path,
 ) -> list[str]:
     command = [
         args.opencode_bin,
@@ -260,25 +285,82 @@ def _build_command(
     return command
 
 
+def _build_codex_command(
+    args: argparse.Namespace,
+    *,
+    schema: Path,
+    output: Path,
+) -> list[str]:
+    command = [
+        args.codex_bin,
+        "exec",
+        "--sandbox",
+        "read-only",
+        "--skip-git-repo-check",
+        "--ephemeral",
+        "--config",
+        'approval_policy="never"',
+        "--config",
+        'web_search="live"',
+        "--output-schema",
+        str(schema),
+        "--output-last-message",
+        str(output),
+    ]
+    if args.model:
+        command.extend(["--model", args.model])
+    if args.effort:
+        command.extend(["--config", f'model_reasoning_effort="{args.effort}"'])
+    command.append("-")
+    return command
+
+
+def _read_codex_output(output: Path) -> dict[str, Any]:
+    if not output.is_file():
+        raise SystemExit("codex completed without structured final output")
+    return _select_payload(
+        output.read_text(encoding="utf-8"),
+        episode_id="source-intelligence episode",
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--request", required=True, type=Path)
     parser.add_argument("--response", required=True, type=Path)
     parser.add_argument(
+        "--backend",
+        choices=("opencode", "codex"),
+        default=_default_backend(),
+    )
+    parser.add_argument(
         "--opencode-bin",
         default=os.environ.get("OPENCODE_BIN", "opencode"),
     )
+    parser.add_argument(
+        "--codex-bin",
+        default=os.environ.get("CODEX_BIN", "codex"),
+    )
     parser.add_argument("--schema", type=Path)
-    parser.add_argument("--model", default=os.environ.get("CREEPER_OPENCODE_MODEL", DEFAULT_MODEL))
+    parser.add_argument(
+        "--model",
+        default=os.environ.get("CREEPER_OPENCODE_MODEL", DEFAULT_MODEL),
+    )
     parser.add_argument("--agent")
     parser.add_argument("--variant")
+    parser.add_argument("--effort")
     # Keep the child deadline slightly below Creeper's agent.timeout_seconds so
     # the wrapper can write diagnostics and exit cleanly instead of being
     # SIGKILLed by the parent with no captured stderr.
     parser.add_argument(
         "--timeout",
         type=float,
-        default=float(os.environ.get("CREEPER_OPENCODE_TIMEOUT", "240")),
+        default=float(
+            os.environ.get(
+                "CREEPER_OPENCODE_TIMEOUT",
+                os.environ.get("CREEPER_CODEX_TIMEOUT", "240"),
+            )
+        ),
     )
     args = parser.parse_args(argv)
 
@@ -308,18 +390,25 @@ def main(argv: list[str] | None = None) -> int:
 
     response_path.parent.mkdir(parents=True, exist_ok=True)
     stderr_path = response_path.with_suffix(
-        response_path.suffix + ".opencode-stderr.log"
+        response_path.suffix + f".{args.backend}-stderr.log"
     )
 
-    # Isolate opencode from the Creeper checkout: it runs in a throwaway
+    # Isolate the child from the Creeper checkout: it runs in a throwaway
     # working directory so repository project files are never discovered or
     # mutated, while still receiving the full request through stdin.
     workdir = Path(
-        tempfile.mkdtemp(prefix="creeper-opencode-", dir=response_path.parent)
+        tempfile.mkdtemp(prefix=f"creeper-{args.backend}-", dir=response_path.parent)
     )
+    episode_id = str(request.get("episode_id", "source-intelligence episode"))
     try:
-        command = _build_command(args, workdir=workdir)
-        if args.variant:
+        codex_output = workdir / "codex-final.json"
+        command = _build_command(
+            args,
+            workdir=workdir,
+            schema=schema,
+            output=codex_output,
+        )
+        if args.variant and args.backend == "opencode":
             insert_at = command.index("--format")
             command[insert_at:insert_at] = ["--variant", args.variant]
         try:
@@ -334,23 +423,26 @@ def main(argv: list[str] | None = None) -> int:
             )
         except subprocess.TimeoutExpired:
             raise SystemExit(
-                f"opencode child exceeded timeout of {args.timeout:g}s"
+                f"{args.backend} child exceeded timeout of {args.timeout:g}s"
             ) from None
 
         stderr_path.write_text(completed.stderr or "", encoding="utf-8")
         if completed.returncode != 0:
             raise SystemExit(completed.returncode)
 
-        payload = _select_payload(
-            _extract_final_text(completed.stdout),
-            episode_id=str(request.get("episode_id", "source-intelligence episode")),
-        )
+        if args.backend == "codex":
+            payload = _read_codex_output(codex_output)
+        else:
+            payload = _select_payload(
+                _extract_final_text(completed.stdout),
+                episode_id=episode_id,
+            )
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
 
     hypotheses = payload.get("hypotheses")
     if not isinstance(hypotheses, list):
-        raise SystemExit("opencode response hypotheses must be an array")
+        raise SystemExit(f"{args.backend} response hypotheses must be an array")
     query = payload.get("query")
     if not isinstance(query, str) or not query.strip():
         query = "source-intelligence episode"

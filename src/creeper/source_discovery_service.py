@@ -136,17 +136,23 @@ def _resolve_agent_command(
     """Resolve path-like command arguments relative to the config file.
 
     Executable names such as python or codex remain PATH-resolved. Relative
-    script/config paths containing a path separator are made absolute against
-    the TOML directory, so daemon startup does not depend on shell cwd.
+    script/config paths are made absolute against the TOML directory, so daemon
+    startup does not depend on shell cwd.
+
+    Only genuine filesystem paths are rewritten. Bare option values that merely
+    contain a separator (for example an opencode model id like
+    ``ustc-107/deepseek-flash``) must be preserved verbatim. A token is treated
+    as a relative path when it starts with an explicit ``./`` or ``../`` prefix,
+    or when it resolves to an existing file/directory next to the config.
     """
     resolved: list[str] = []
     for value in values:
         path = Path(value)
-        if (
-            not path.is_absolute()
-            and ("/" in value or "\\" in value)
-        ):
-            value = str((config_path.parent / path).resolve())
+        if not path.is_absolute():
+            explicit_relative = value.startswith(("./", "../", ".\\", "..\\"))
+            exists_relative = (config_path.parent / path).exists()
+            if explicit_relative or exists_relative:
+                value = str((config_path.parent / path).resolve())
         resolved.append(value)
     return tuple(resolved)
 

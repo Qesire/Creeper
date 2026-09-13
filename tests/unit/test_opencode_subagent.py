@@ -199,17 +199,31 @@ class NormalizeHypothesisTests(unittest.TestCase):
 
 
 class BuildCommandTests(unittest.TestCase):
-    def _args(self, *, agent=None) -> argparse.Namespace:
-        return argparse.Namespace(
+    def _args(self, *, agent=None, backend="opencode", **overrides) -> argparse.Namespace:
+        values = dict(
+            backend=backend,
             opencode_bin="opencode",
+            codex_bin="codex",
             model="ustc-107/deepseek-flash",
             agent=agent,
+            effort=None,
+        )
+        values.update(overrides)
+        return argparse.Namespace(**values)
+
+    def _build(self, args, *, workdir=None):
+        workdir = workdir or Path("/tmp/creeper-opencode-test")
+        return subagent._build_command(
+            args,
+            workdir=workdir,
+            schema=Path("/tmp/creeper-schema.json"),
+            output=Path("/tmp/creeper-codex-final.json"),
         )
 
     def test_command_prefix_and_trailing_stdin_marker(self) -> None:
         workdir = Path("/tmp/creeper-opencode-test")
 
-        command = subagent._build_command(self._args(), workdir=workdir)
+        command = self._build(self._args(), workdir=workdir)
 
         self.assertEqual(
             command,
@@ -243,7 +257,7 @@ class BuildCommandTests(unittest.TestCase):
     def test_agent_appended_before_trailing_stdin_marker(self) -> None:
         workdir = Path("/tmp/creeper-opencode-test")
 
-        command = subagent._build_command(
+        command = self._build(
             self._args(agent="source-scout"), workdir=workdir
         )
 
@@ -263,6 +277,36 @@ class BuildCommandTests(unittest.TestCase):
                 "-",
             ],
         )
+        self.assertEqual(command[-1], "-")
+
+    def test_codex_backend_builds_exec_sandbox_command(self) -> None:
+        schema = Path("/tmp/creeper-schema.json")
+        output = Path("/tmp/creeper-codex-final.json")
+
+        command = self._build(
+            self._args(backend="codex", model="gpt-5.6-luna"),
+            workdir=Path("/tmp/ignored"),
+        )
+
+        self.assertEqual(command[0], "codex")
+        self.assertEqual(command[1], "exec")
+        self.assertIn("--sandbox", command)
+        self.assertEqual(command[command.index("--sandbox") + 1], "read-only")
+        self.assertIn("--output-schema", command)
+        self.assertEqual(command[command.index("--output-schema") + 1], str(schema))
+        self.assertIn("--output-last-message", command)
+        self.assertEqual(
+            command[command.index("--output-last-message") + 1], str(output)
+        )
+        self.assertEqual(command[command.index("--model") + 1], "gpt-5.6-luna")
+        self.assertEqual(command[-1], "-")
+
+    def test_codex_backend_appends_effort_config(self) -> None:
+        command = self._build(
+            self._args(backend="codex", effort="low"),
+            workdir=Path("/tmp/ignored"),
+        )
+        self.assertIn("model_reasoning_effort=\"low\"", command)
         self.assertEqual(command[-1], "-")
 
 
