@@ -32,11 +32,12 @@ class SearchDirectiveKind(StrEnum):
 
 
 class SourceIntelligenceTask(StrEnum):
-    """Finite Codex subagent roles requested by the deterministic parent."""
+    """Finite bounded child-agent roles requested by the deterministic parent."""
 
     DISCOVER_NEW_SOURCE = "DISCOVER_NEW_SOURCE"
     EXPLOIT_SUCCESS_PATTERN = "EXPLOIT_SUCCESS_PATTERN"
     INTERPRET_STRUCTURE = "INTERPRET_STRUCTURE"
+    INTERPRET_EVIDENCE_CONTRACT = "INTERPRET_EVIDENCE_CONTRACT"
     RECOVER_STAGNATION = "RECOVER_STAGNATION"
 
 
