@@ -3084,22 +3084,23 @@ class SourceDiscoveryRegistry:
         if any(value < 0 for key, value in fields.items() if key != "cursor_json"):
             raise ValueError("checkpoint counters must be non-negative")
         now = float(self.clock())
-        changed = self.connection.execute(
-            """
-            UPDATE source_region_progress SET
-                query_index = ?, cursor_json = ?, page = ?, requests = ?,
-                bytes_read = ?, results_seen = ?, new_candidates = ?,
-                duplicate_candidates = ?, checkpoint_json = ?, updated_at = ?
-            WHERE region_id = ? AND execution_generation = ?
-            """,
-            (
-                fields["query_index"], fields["cursor_json"], fields["page"],
-                fields["requests"], fields["bytes_read"], fields["results_seen"],
-                fields["new_candidates"], fields["duplicate_candidates"],
-                json.dumps(checkpoint, sort_keys=True, separators=(",", ":")),
-                now, region_id, generation,
-            ),
-        ).rowcount
+        with self.connection:
+            changed = self.connection.execute(
+                """
+                UPDATE source_region_progress SET
+                    query_index = ?, cursor_json = ?, page = ?, requests = ?,
+                    bytes_read = ?, results_seen = ?, new_candidates = ?,
+                    duplicate_candidates = ?, checkpoint_json = ?, updated_at = ?
+                WHERE region_id = ? AND execution_generation = ?
+                """,
+                (
+                    fields["query_index"], fields["cursor_json"], fields["page"],
+                    fields["requests"], fields["bytes_read"], fields["results_seen"],
+                    fields["new_candidates"], fields["duplicate_candidates"],
+                    json.dumps(checkpoint, sort_keys=True, separators=(",", ":")),
+                    now, region_id, generation,
+                ),
+            ).rowcount
         if changed != 1:
             raise RuntimeError("stale or unknown region execution generation")
         return True
