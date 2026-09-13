@@ -10,7 +10,7 @@ import json
 from dataclasses import dataclass, field
 from typing import Any, Mapping
 
-from .protocol import ProposalPlane, UnifiedLLMTask
+from .protocol import ProposalPlane, UnifiedLLMTask, stable_identity
 
 
 _MAX_CONTEXT_ITEMS = 64
@@ -194,6 +194,20 @@ class UnifiedCompilerRequest:
             for key, value in self.hard_limits.items()
         ):
             raise ValueError("hard_limits must be positive integer bounds")
+
+    @property
+    def call_identity(self) -> str:
+        """Deterministic dedupe key for one task under one learning/search context."""
+
+        return stable_identity(
+            "llm-call",
+            {
+                "task_type": self.task_type.value,
+                "plane": self.plane.value,
+                "context_hash": self.context_hash,
+                "prompt_version": self.prompt_version,
+            },
+        )
 
     def as_payload(self) -> dict[str, object]:
         return {
