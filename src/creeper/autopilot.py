@@ -69,7 +69,7 @@ class EvidenceServicePolicy:
     poll_max_seconds: float = 10.0
     # Complete platform-year enumeration is an independent lane and therefore
     # has its own claim/network budget rather than borrowing exact/range CDX.
-    platform_harvest_enabled: bool = True
+    platform_harvest_enabled: bool = False
     platform_claim_batch_size: int = 1
     platform_requests_per_second: float = 0.1
     platform_max_connections: int = 2
