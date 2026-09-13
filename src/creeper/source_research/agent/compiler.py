@@ -212,6 +212,14 @@ class UnifiedResearchCompiler:
                 )
             if not context.cooldown_satisfied:
                 raise CompilerGateError("LLM cooldown is not satisfied")
+            if not context.deterministic_seed_search_available:
+                raise CompilerGateError(
+                    "deterministic seed/root search is not production-ready"
+                )
+            if not context.metrics_available:
+                raise CompilerGateError(
+                    "research metrics are not production-ready"
+                )
             if (
                 task is UnifiedLLMTask.COMPILE_ROOT_QUERY_PROGRAM
                 and not context.seed_current_program_exhausted
@@ -237,6 +245,10 @@ class UnifiedResearchCompiler:
                 raise CompilerGateError("historical replay is unavailable")
             if not context.final_reward_available:
                 raise CompilerGateError("FINAL delayed reward is unavailable")
+            if not context.lineage_available:
+                raise CompilerGateError("reward lineage is unavailable")
+            if not context.rule_persistence_available:
+                raise CompilerGateError("rule persistence is unavailable")
 
     def _compile_proposal(
         self,
