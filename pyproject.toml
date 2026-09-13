@@ -25,6 +25,7 @@ creeper-evidence-worker = "creeper.evidence_cli:main"
 creeper-platform-harvest = "creeper.platform_harvest_cli:main"
 creeper-autopilot = "creeper.autopilot:main"
 creeper-readiness-worker = "creeper.readiness_cli:main"
+creeper-submission-export = "creeper.submission_cli:main"
 creeper-historical-index = "creeper.historical_index_service:main"
 creeper-validation = "creeper.validation_cli:main"
 
