@@ -32,6 +32,12 @@ suppression_ttl_seconds = 21600.0
 triage_parallelism = 8
 scout_parallelism = 4
 search_parallelism = 3
+# Deterministic region execution has its own budget.  This never increases
+# LLM concurrency.
+region_parallelism = 2
+# Merge-safe default: enable only after the L6 proposal compiler and parent-side
+# validators are present in the integrated runtime.
+nonblocking_research = false
 # Transient executor failures are retried after this process-local backoff.
 failure_retry_seconds = 30.0
 # Completed strategies, including valid empty-result searches, are durably cooled down.
@@ -123,3 +129,8 @@ max_response_bytes = 2097152
 max_returned_candidates = 2000
 max_returned_hypotheses = 128
 max_motif_expansions = 256
+# L8 slow-child lifecycle.  max_active_calls is intentionally fixed at one;
+# region/search parallelism must not be reused as LLM concurrency.
+max_active_calls = 1
+min_seconds_between_starts = 120.0
+same_context_failure_cooldown_seconds = 600.0
