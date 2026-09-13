@@ -69,6 +69,10 @@ class LeaseCandidate:
     # near one task/record.
     reservation_evidence_tasks: int | None = None
     source_key: str | None = None
+    # Optional FINAL-first value supplied by the production-value model.
+    # When present, GlobalScheduler uses this authority-scoped score directly
+    # instead of reconstructing value from the scout-era EED/cost proxy.
+    production_value_score: float | None = None
 
     def __post_init__(self) -> None:
         if not self.reservoir_id.strip():
@@ -94,6 +98,15 @@ class LeaseCandidate:
             raise ValueError("evidence_provider is required")
         if self.source_key is not None and not self.source_key.strip():
             raise ValueError("source_key must be non-empty when provided")
+        if self.production_value_score is not None and (
+            not isinstance(self.production_value_score, Real)
+            or isinstance(self.production_value_score, bool)
+            or self.production_value_score < 0
+            or not isfinite(self.production_value_score)
+        ):
+            raise ValueError(
+                "production_value_score must be finite and non-negative when provided"
+            )
 
 
 @dataclass(frozen=True)
