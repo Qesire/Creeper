@@ -116,7 +116,7 @@ class ExplorationExecutor:
                 candidates.extend(batch_candidates)
                 cp = next_cp
                 if (
-                    pages_this_run >= stop_after_pages
+                    (stop_after_pages is not None and pages_this_run >= stop_after_pages)
                     or cp.requests >= plan.hard_bounds.max_requests
                     or self.clock() - started >= plan.hard_bounds.max_wall_seconds
                 ):
