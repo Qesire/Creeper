@@ -71,3 +71,15 @@ class CompiledScoutPlan:
             raise ValueError("at least one stop condition is required")
         if self.query_family is not None and self.query_family.cardinality > self.hard_bounds.max_queries:
             raise ValueError("query-family expansion exceeds max_queries")
+
+
+def compile_query_family(
+    template: str,
+    dimensions: Mapping[str, Any],
+    *,
+    max_queries: int,
+) -> QueryFamily:
+    """Materialize and validate a finite query family before any I/O."""
+    family = QueryFamily.from_mapping(template, dimensions)
+    family.expand(max_queries=max_queries)
+    return family
