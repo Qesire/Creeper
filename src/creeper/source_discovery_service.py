@@ -76,9 +76,6 @@ class CoordinatorConfig:
     region_parallelism: int = 2
     research_poll_seconds: float = 0.0
     nonblocking_research: bool = False
-    region_parallelism: int = 2
-    research_poll_seconds: float = 0.0
-    nonblocking_research: bool = False
 
 
 @dataclass(frozen=True)
@@ -89,13 +86,6 @@ class AgentConfig:
     cwd: Path | None
     policy: CommandAgentSearchPolicy
     admission: SearchAdmissionPolicy
-    max_active_calls: int = 1
-    min_seconds_between_starts: float = 120.0
-    same_context_failure_cooldown_seconds: float = 600.0
-    max_regions_per_response: int = 8
-    min_expected_fanout: int = 100
-    max_query_expansion: int = 512
-    max_template_expansion: int = 4096
     max_active_calls: int = 1
     min_seconds_between_starts: float = 120.0
     same_context_failure_cooldown_seconds: float = 600.0
