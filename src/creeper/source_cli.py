@@ -252,7 +252,7 @@ class StaticSourceRuntime:
             limits.get("lease_max_seconds"), "lease_max_seconds"
         )
         self.range_first_fraction = _fraction(
-            config.get("range_first_fraction", 0.10),
+            config.get("range_first_fraction", 0.0),
             "range_first_fraction",
         )
 
@@ -495,7 +495,7 @@ class ActivatedSourceRuntime:
             limits.get("lease_max_seconds"), "lease_max_seconds"
         )
         self.range_first_fraction = _fraction(
-            config.get("range_first_fraction", 0.10),
+            config.get("range_first_fraction", 0.0),
             "range_first_fraction",
         )
         historical_raw = config.get("historical_index", {})
