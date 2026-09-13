@@ -257,11 +257,11 @@ class ResearchCompiler:
         return min(declared, computed) if computed < declared else computed
 
     def _small_region_exception(self, raw: dict[str, Any], surface: RegionSurfaceKind) -> bool:
-        return (
-            surface in {RegionSurfaceKind.HTML_CATALOG, RegionSurfaceKind.MANIFEST, RegionSurfaceKind.REPOSITORY}
-            or raw["expected_contract_family"] not in {"", "UNKNOWN"}
-            or raw["expected_source_family"] not in {"", "UNKNOWN"}
-        )
+        return surface in {
+            RegionSurfaceKind.HTML_CATALOG,
+            RegionSurfaceKind.MANIFEST,
+            RegionSurfaceKind.REPOSITORY,
+        }
 
     @staticmethod
     def _region_key(root: str, query_family: dict[str, Any], enumerator: str) -> str:
