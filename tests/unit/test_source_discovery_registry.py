@@ -960,5 +960,75 @@ class SourceDiscoveryRegistryTests(unittest.TestCase):
         self.assertEqual(float(row["novel_eed"]), 5.0)
 
 
+
+    def test_stale_measurement_blocks_warm_promotion(self) -> None:
+        self.registry.set_scout_authority(
+            baseline_signature="baseline-a",
+            model_signature="model-a",
+        )
+        candidate = self._to_scout_ready(self.candidate("stale-promotion/"))
+        self.registry.transition(candidate.source_key, SourceState.SCOUTING)
+        self.registry.record_scout_measurement(
+            candidate.source_key,
+            ScoutMeasurement(
+                sampled_records=10,
+                unique_hosts=8,
+                novel_hosts=4,
+                direct_host_years=0,
+                requests=1,
+                bytes_read=256,
+                elapsed_seconds=1.0,
+                novel_eed=4.0,
+            ),
+        )
+        self.registry.set_scout_authority(
+            baseline_signature="baseline-b",
+            model_signature="model-a",
+        )
+
+        with self.assertRaisesRegex(
+            StateTransitionError,
+            "current-authority measured scout evidence",
+        ):
+            self.registry.transition(
+                candidate.source_key,
+                SourceState.WARM,
+            )
+
+    def test_stale_measurement_does_not_block_active_to_warm_demotion(self) -> None:
+        self.registry.set_scout_authority(
+            baseline_signature="baseline-a",
+            model_signature="model-a",
+        )
+        candidate = self._to_scout_ready(self.candidate("stale-demotion/"))
+        self.registry.transition(candidate.source_key, SourceState.SCOUTING)
+        self.registry.record_scout_measurement(
+            candidate.source_key,
+            ScoutMeasurement(
+                sampled_records=10,
+                unique_hosts=8,
+                novel_hosts=4,
+                direct_host_years=0,
+                requests=1,
+                bytes_read=256,
+                elapsed_seconds=1.0,
+                novel_eed=4.0,
+            ),
+        )
+        self.registry.transition(candidate.source_key, SourceState.WARM)
+        self.registry.transition(candidate.source_key, SourceState.ACTIVE)
+        self.registry.set_scout_authority(
+            baseline_signature="baseline-b",
+            model_signature="model-a",
+        )
+
+        demoted = self.registry.transition(
+            candidate.source_key,
+            SourceState.WARM,
+        )
+
+        self.assertEqual(demoted.state, SourceState.WARM)
+
+
 if __name__ == "__main__":
     unittest.main()
