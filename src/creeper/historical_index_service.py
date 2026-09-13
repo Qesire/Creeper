@@ -31,6 +31,7 @@ from creeper.source_discovery.activation import (
     SourceActivationError,
 )
 from creeper.source_discovery.harvest import (
+    RegionHarvestError,
     RegionHarvestExecutor,
     RegionHarvestPolicy,
 )
@@ -482,12 +483,14 @@ class HistoricalIndexOptimizerRuntime:
             self.index_registry,
             policy=config.portfolio,
         )
+        self._harvest_source_leases: dict[str, object] = {}
         self.harvest_executor = RegionHarvestExecutor(
             registry=self.index_registry,
             baseline=self.baseline,
             evidence_store=self.evidence,
             owner=owner,
             policy=config.harvest,
+            assert_source_ownership=self._assert_harvest_source_ownership,
         )
         self.harvest_service = RegionHarvestService(
             self.index_registry,
@@ -574,6 +577,69 @@ class HistoricalIndexOptimizerRuntime:
             )
         return selected
 
+    def _harvest_source_lease_ttl_seconds(self) -> float:
+        # Region ownership has its own heartbeat. This outer lease excludes the
+        # ordinary source-producer cursor path for the same reservoir. Renew it
+        # at every proof/finalization fence; expiry remains finite so a crashed
+        # optimizer can be recovered by the normal source worker.
+        return max(
+            60.0,
+            self.config.harvest.max_seconds
+            + self.config.harvest.claim_grace_seconds
+            + 60.0,
+        )
+
+    def _claim_harvest_reservoirs(self, pairs):
+        claimed = []
+        ttl = self._harvest_source_lease_ttl_seconds()
+        owner = f"{self.owner}:region-reservoir"
+        for index, reservoir in pairs:
+            lease = self.control.grant_fresh_lease(
+                reservoir.reservoir_id,
+                owner=owner,
+                max_records=1,
+                max_requests=1,
+                max_bytes=1,
+                max_seconds=self.config.harvest.max_seconds,
+                resource_class="historical-index",
+                expected_evidence_tasks=0,
+                expected_novel_eed=0.0,
+                now=float(self.control.clock()),
+                lease_ttl_seconds=ttl,
+            )
+            if lease is None:
+                continue
+            self._harvest_source_leases[index.source_key] = lease
+            claimed.append((index, reservoir, lease))
+        return claimed
+
+    def _assert_harvest_source_ownership(self, source_key: str) -> None:
+        lease = self._harvest_source_leases.get(source_key)
+        if lease is None:
+            raise RegionHarvestError(
+                "historical index source reservoir is not owned by optimizer"
+            )
+        try:
+            self.control.renew_lease(
+                lease,
+                ttl_seconds=self._harvest_source_lease_ttl_seconds(),
+                now=float(self.control.clock()),
+            )
+        except (KeyError, ValueError, RuntimeError) as exc:
+            raise RegionHarvestError(
+                "historical index source reservoir ownership was lost"
+            ) from exc
+
+    def _release_harvest_reservoirs(self, claimed) -> None:
+        for index, _reservoir, lease in reversed(claimed):
+            self._harvest_source_leases.pop(index.source_key, None)
+            try:
+                self.control.abort_lease(lease)
+            except (KeyError, ValueError):
+                # An expired lease may already have been recovered by another
+                # source worker. The proof fence above prevents stale commits.
+                pass
+
     def _finish_terminal_indexes(self, pairs) -> int:
         exhausted = 0
         for index, reservoir in pairs:
@@ -618,17 +684,27 @@ class HistoricalIndexOptimizerRuntime:
             probe_requests += report.requests
             errors.extend(report.errors)
 
-        # Re-evaluate READY ownership after probes. A legacy worker could have
-        # claimed a reservoir between the initial snapshot and this point.
+        # Re-evaluate and atomically claim reservoir ownership after probes.
+        # Region claims alone are insufficient because the ordinary producer
+        # owns work at the reservoir cursor layer.
         harvest_pairs = self._eligible_ready_indexes()
-        allowed = {index.index_key for index, _ in harvest_pairs}
-        harvest = self.harvest_service.run_once(
-            max_regions=self.config.max_harvest_regions_per_cycle,
-            byte_budget=self.config.harvest_byte_budget,
-            index_keys=allowed,
-            continue_on_error=True,
+        claimed_harvest_sources = self._claim_harvest_reservoirs(
+            harvest_pairs
         )
-        errors.extend(harvest.errors)
+        allowed = {
+            index.index_key
+            for index, _reservoir, _lease in claimed_harvest_sources
+        }
+        try:
+            harvest = self.harvest_service.run_once(
+                max_regions=self.config.max_harvest_regions_per_cycle,
+                byte_budget=self.config.harvest_byte_budget,
+                index_keys=allowed,
+                continue_on_error=True,
+            )
+            errors.extend(harvest.errors)
+        finally:
+            self._release_harvest_reservoirs(claimed_harvest_sources)
         exhausted = self._finish_terminal_indexes(
             self._eligible_ready_indexes()
         )

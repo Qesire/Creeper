@@ -352,6 +352,73 @@ class HistoricalIndexOptimizerTests(unittest.IsolatedAsyncioTestCase):
             second_pick[0][0].index_key,
         )
 
+    async def test_optimizer_reservoir_claim_excludes_ordinary_source_lease(
+        self,
+    ) -> None:
+        path = self.root / "ownership.cdxj"
+        path.write_text(
+            'com,novel)/ 19980101000000 {"url":"http://novel.com/"}\n',
+            encoding="utf-8",
+        )
+        candidate = self._register_active(
+            f"{self.base_url}/{path.name}",
+            content_length=path.stat().st_size,
+        )
+        config = self._config()
+
+        async with HistoricalIndexOptimizerRuntime(
+            config,
+            owner="optimizer-ownership-test",
+        ) as runtime:
+            compiled, errors = runtime._compile_active_sources()
+            self.assertEqual(compiled, 1)
+            self.assertEqual(errors, [])
+            eligible = runtime._eligible_ready_indexes()
+            self.assertEqual(len(eligible), 1)
+            claimed = runtime._claim_harvest_reservoirs(eligible)
+            self.assertEqual(len(claimed), 1)
+            runtime._assert_harvest_source_ownership(candidate.source_key)
+
+            peer = ControlStore(self.runtime / "control.sqlite3")
+            try:
+                reservoir_id = claimed[0][1].reservoir_id
+                competing = peer.grant_fresh_lease(
+                    reservoir_id,
+                    owner="ordinary-source-producer",
+                    max_records=1,
+                    max_requests=1,
+                    max_bytes=1,
+                    max_seconds=30.0,
+                    resource_class="default",
+                    expected_evidence_tasks=0,
+                    expected_novel_eed=0.0,
+                    now=float(peer.clock()),
+                    lease_ttl_seconds=60.0,
+                )
+                self.assertIsNone(competing)
+
+                runtime._release_harvest_reservoirs(claimed)
+                claimed = []
+                competing = peer.grant_fresh_lease(
+                    reservoir_id,
+                    owner="ordinary-source-producer",
+                    max_records=1,
+                    max_requests=1,
+                    max_bytes=1,
+                    max_seconds=30.0,
+                    resource_class="default",
+                    expected_evidence_tasks=0,
+                    expected_novel_eed=0.0,
+                    now=float(peer.clock()),
+                    lease_ttl_seconds=60.0,
+                )
+                self.assertIsNotNone(competing)
+                peer.abort_lease(competing)
+            finally:
+                peer.close()
+                if claimed:
+                    runtime._release_harvest_reservoirs(claimed)
+
     async def test_compressed_direct_index_is_not_optimizer_eligible(self) -> None:
         path = self.root / "compressed.cdxj.gz"
         path.write_bytes(b"fixture")
