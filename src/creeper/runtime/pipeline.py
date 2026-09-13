@@ -14,7 +14,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 import time
 
-from creeper.authority.baseline_index import BaselineIndex
+from creeper.authority.baseline_index import ALL_YEAR_MASK, BaselineIndex, YEAR_BITS
 from creeper.evidence.planner import EvidencePlanner
 from creeper.evidence.policies import EvidenceQueryKey
 from creeper.evidence.providers.cdx import Transport, query_year
@@ -247,8 +247,45 @@ class SyncRuntime:
                     candidate.reservoir is not None
                     and candidate.reservoir.evidence_mode == "direct_year"
                 )
+
+                # Preserve the production ordering used by SourceProducer:
+                # exact CDX/CDXJ years become direct proof before any remote
+                # fallback is scheduled. Observation ordering must not decide
+                # whether Wayback receives an already-covered year.
+                if allow_direct:
+                    planned_local_masks = dict(local_masks)
+                    for item in pending:
+                        annual_mask, _candidate = resolved.get(
+                            item.hostname, (0, False)
+                        )
+                        direct_plan = self.evidence_planner.plan(
+                            item,
+                            official_mask=annual_mask,
+                            local_mask=planned_local_masks.get(
+                                item.hostname, 0
+                            ),
+                            provider=provider,
+                            policy_version=self.evidence_policy_version,
+                            allow_direct=True,
+                            external_covered_mask=ALL_YEAR_MASK,
+                        )
+                        for capsule in direct_plan.direct_capsules:
+                            bit = YEAR_BITS.get(capsule.year, 0)
+                            if planned_local_masks.get(
+                                capsule.hostname, 0
+                            ) & bit:
+                                continue
+                            direct_capsules.append(capsule)
+                            planned_local_masks[capsule.hostname] = (
+                                planned_local_masks.get(capsule.hostname, 0)
+                                | bit
+                            )
+                    local_masks = planned_local_masks
+
                 for item in pending:
-                    annual_mask, _candidate = resolved.get(item.hostname, (0, False))
+                    annual_mask, _candidate = resolved.get(
+                        item.hostname, (0, False)
+                    )
                     plan = self.evidence_planner.plan(
                         item,
                         official_mask=annual_mask,
@@ -257,7 +294,10 @@ class SyncRuntime:
                         policy_version=self.evidence_policy_version,
                         allow_direct=allow_direct,
                     )
-                    direct_capsules.extend(plan.direct_capsules)
+                    if plan.direct_capsules:
+                        raise RuntimeError(
+                            "direct-first planning left an uncommitted direct year"
+                        )
                     enqueue_external_keys(plan.external_keys)
                 pending.clear()
 
