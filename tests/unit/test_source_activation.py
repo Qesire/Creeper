@@ -360,6 +360,33 @@ class SourceActivationCompilerTests(unittest.TestCase):
                 parser_kind="delimited",
             )
 
+    def test_reviewed_registry_is_exact_locator_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            control = ControlStore(Path(tmp) / "control.sqlite3")
+            try:
+                reviewed_locator = (
+                    "https://trusted.example/history/reviewed.jsonl"
+                )
+                candidate = _candidate(
+                    "https://trusted.example/history/sibling.jsonl"
+                )
+                registry = self._registry(control, candidate)
+                reviewed = _reviewed_binding(reviewed_locator)
+                spec = SourceActivationCompiler(
+                    control,
+                    registry=registry,
+                    reviewed_contracts=ReviewedContractRegistry(
+                        {reviewed_locator: reviewed}
+                    ),
+                ).compile(candidate)
+
+                self.assertEqual(spec.evidence_mode, "discovery_only")
+                self.assertIsNone(
+                    reviewed_artifact_from_adapter_id(spec.adapter_id)
+                )
+            finally:
+                control.close()
+
     def test_reviewed_immutable_locator_mismatch_fails(self) -> None:
         with self.assertRaisesRegex(
             ReviewedContractRegistryError,
