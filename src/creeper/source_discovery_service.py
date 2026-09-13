@@ -45,6 +45,7 @@ from creeper.source_discovery.measured_scout import (
     MeasuredYieldScoutPolicy,
 )
 from creeper.source_discovery.models import SourceState
+from creeper.source_discovery.models import is_direct_evidence_entrypoint
 from creeper.source_discovery.registry import SourceDiscoveryRegistry
 from creeper.source_discovery.saturation import (
     SaturationPolicy,
@@ -58,6 +59,7 @@ from creeper.source_discovery.scrapy_scout import (
 from creeper.source_discovery.scrapy_sidecar import ScrapyScoutLauncher
 from creeper.source_discovery.triage import HttpSourceTriageExecutor, HttpTriagePolicy
 from creeper.storage.control_store import ControlStore
+from creeper.storage.telemetry_store import RuntimeTelemetryStore
 from creeper.runtime.http import configured_http_proxy
 
 
@@ -622,6 +624,148 @@ def _report_has_progress(report: dict[str, object]) -> bool:
     return any(int(report.get(name, 0)) > 0 for name in progress_fields)
 
 
+_DISCOVERY_COUNTER_FIELDS = {
+    "search_episodes": "discovery_search_episodes",
+    "search_failures": "discovery_search_failures",
+    "search_backoff_skipped": "discovery_search_backoff_skipped",
+    "search_candidates_registered": "discovery_search_candidates_registered",
+    "search_candidates_dropped": "discovery_search_candidates_dropped",
+    "triaged_to_scout": "discovery_triaged_to_scout",
+    "triaged_hold": "discovery_triaged_hold",
+    "triaged_rejected": "discovery_triaged_rejected",
+    "triage_failures": "discovery_triage_failures",
+    "scouted_warm": "discovery_scouted_warm",
+    "scouted_hold": "discovery_scouted_hold",
+    "scouted_rejected": "discovery_scouted_rejected",
+    "scout_failures": "discovery_scout_failures",
+    "scout_children_registered": "discovery_scout_children_registered",
+    "scout_edges_added": "discovery_scout_edges_added",
+    "production_exhausted": "discovery_production_exhausted",
+    "activated": "discovery_activations_started",
+}
+
+
+def _table_exists(registry: SourceDiscoveryRegistry, table: str) -> bool:
+    row = registry.connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+        (table,),
+    ).fetchone()
+    return row is not None
+
+
+def _runtime_telemetry_path(registry: SourceDiscoveryRegistry) -> Path:
+    """Resolve the shared telemetry path without widening ControlStore API."""
+    row = registry.connection.execute("PRAGMA database_list").fetchone()
+    if row is None or not str(row["file"]).strip():
+        raise RuntimeError("source discovery requires a file-backed control database")
+    return Path(str(row["file"])).resolve().parent / "telemetry.sqlite3"
+
+
+def _durable_state_counts(
+    registry: SourceDiscoveryRegistry,
+    *,
+    table: str,
+    column: str,
+    states: tuple[str, ...],
+) -> dict[str, int]:
+    """Read bounded state counts without materializing durable work rows."""
+    counts = {state: 0 for state in states}
+    if not _table_exists(registry, table):
+        return counts
+    rows = registry.connection.execute(
+        f"SELECT {column} AS state, COUNT(*) AS n FROM {table} GROUP BY {column}"
+    )
+    for row in rows:
+        state = str(row["state"])
+        if state in counts:
+            counts[state] = int(row["n"])
+    return counts
+
+
+def _publish_discovery_telemetry(
+    registry: SourceDiscoveryRegistry,
+    report: dict[str, object],
+) -> None:
+    """Persist discovery outcomes and live inventory gauges.
+
+    ``report`` is a per-cycle observation. The telemetry database is the
+    durable operational sink, so counters are added once for this completed
+    cycle while gauges are recomputed from the SQLite authorities after all
+    cycle mutations have committed.
+    """
+    inventory = registry.inventory()
+    active = registry.list_candidates(state=SourceState.ACTIVE)
+    source_gauges = {
+        f"source_candidates_{state.value.lower()}": int(inventory[state])
+        for state in SourceState
+    }
+    source_gauges.update(
+        {
+            "active_candidates": len(active),
+            "active_direct_sources": sum(
+                int(is_direct_evidence_entrypoint(item.canonical_entrypoint))
+                for item in active
+            ),
+            "discovery_search_episodes_inflight": int(
+                registry.connection.execute(
+                    """
+                    SELECT COUNT(*) AS n
+                    FROM source_search_episodes
+                    WHERE finished_at IS NULL
+                    """
+                ).fetchone()["n"]
+            ),
+        }
+    )
+
+    historical_states = _durable_state_counts(
+        registry,
+        table="source_regions_v1",
+        column="state",
+        states=("DISCOVERED", "PROBED", "HARVEST_READY", "HARVESTING", "HARVESTED", "DROPPED"),
+    )
+    source_gauges.update(
+        {
+            "historical_index_total": int(
+                registry.connection.execute(
+                    "SELECT COUNT(*) AS n FROM source_indexes_v1"
+                    if _table_exists(registry, "source_indexes_v1")
+                    else "SELECT 0 AS n"
+                ).fetchone()["n"]
+            ),
+            **{
+                f"historical_region_{state.lower()}": count
+                for state, count in historical_states.items()
+            },
+        }
+    )
+
+    platform_states = {
+        str(state): int(count)
+        for state, count in registry.control_store.platform_year_harvest_state_counts().items()
+    }
+    source_gauges["platform_year_total"] = sum(platform_states.values())
+    source_gauges.update(
+        {
+            f"platform_year_{state.lower()}": count
+            for state, count in platform_states.items()
+        }
+    )
+
+    counters = {"discovery_cycles": 1}
+    for report_field, telemetry_name in _DISCOVERY_COUNTER_FIELDS.items():
+        value = report.get(report_field, 0)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ValueError(f"discovery report field {report_field} must be a non-negative integer")
+        counters[telemetry_name] = value
+    elapsed_ms = max(0, int(round(float(report.get("elapsed_seconds", 0.0)) * 1000.0)))
+    counters["discovery_wall_milliseconds"] = elapsed_ms
+
+    with RuntimeTelemetryStore(_runtime_telemetry_path(registry)) as telemetry:
+        telemetry.add_counters(counters)
+        telemetry.set_gauges(source_gauges)
+
+
 async def _run_cycle(
     registry: SourceDiscoveryRegistry,
     coordinator: SourceDiscoveryCoordinator,
@@ -633,6 +777,7 @@ async def _run_cycle(
     report["cycle"] = cycle
     report["elapsed_seconds"] = max(0.0, time.perf_counter() - started)
     report["inventory"] = {state.value: count for state, count in registry.inventory().items()}
+    _publish_discovery_telemetry(registry, report)
     return report
 
 

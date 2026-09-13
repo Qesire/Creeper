@@ -7,7 +7,11 @@ from pathlib import Path
 
 from creeper.source_discovery.admission import SearchAdmissionPolicy
 from creeper.source_discovery.agent_search import CommandAgentSearchPolicy
+from creeper.source_discovery.index_registry import IndexSpaceRegistry
+from creeper.source_discovery.index_space import RegionState, compile_candidate_index_space
 from creeper.source_discovery.manager import SourcePoolTargets
+from creeper.source_discovery.models import SourceCandidate, SourceLevel
+from creeper.source_discovery.registry import SourceDiscoveryRegistry
 from creeper.source_discovery.scrapy_scout import ScrapyStructuralScoutPolicy
 from creeper.source_discovery.triage import HttpTriagePolicy
 from creeper.source_discovery_service import (
@@ -17,6 +21,9 @@ from creeper.source_discovery_service import (
     load_source_discovery_config,
     run_source_discovery_cycles,
 )
+from creeper.storage.telemetry_store import RuntimeTelemetryStore
+from creeper.storage.control_store import ControlStore
+from creeper.source_discovery_service import _publish_discovery_telemetry
 
 
 class SourceDiscoveryServiceConfigTests(unittest.TestCase):
@@ -255,6 +262,85 @@ Path(a.response).write_text(json.dumps(payload), encoding="utf-8")
                 )
                 self.assertEqual(audit["accepted_count"], 1)
                 self.assertEqual(audit["rejected_count"], 0)
+
+            with RuntimeTelemetryStore(
+                root / "runtime" / "telemetry.sqlite3"
+            ) as telemetry:
+                snapshot = telemetry.snapshot()
+
+            self.assertEqual(snapshot.counters["discovery_cycles"], 1)
+            self.assertEqual(snapshot.counters["discovery_search_episodes"], 3)
+            self.assertEqual(
+                snapshot.counters["discovery_search_candidates_registered"],
+                3,
+            )
+            self.assertEqual(snapshot.gauges["active_candidates"], 0.0)
+            self.assertEqual(snapshot.gauges["active_direct_sources"], 0.0)
+            self.assertEqual(
+                snapshot.gauges["source_candidates_discovered"],
+                3.0,
+            )
+            self.assertEqual(
+                snapshot.gauges["discovery_search_episodes_inflight"],
+                0.0,
+            )
+            self.assertEqual(snapshot.gauges["historical_index_total"], 0.0)
+            self.assertEqual(snapshot.gauges["platform_year_total"], 0.0)
+
+
+class DiscoveryTelemetryStateTests(unittest.TestCase):
+    def test_historical_and_platform_state_gauges_are_durable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            control = ControlStore(root / "control.sqlite3")
+            try:
+                registry = SourceDiscoveryRegistry(control)
+                index_registry = IndexSpaceRegistry(control)
+                candidate = SourceCandidate(
+                    canonical_entrypoint="https://archive.example/index.cdxj",
+                    source_family="BULK_ARTIFACT",
+                    level=SourceLevel.SOURCE,
+                    discovered_by="test",
+                    discovery_strategy="DIRECT_EVIDENCE_BULK",
+                    expected_year_from=1996,
+                    expected_year_to=2001,
+                    expected_volume=100,
+                    direct_evidence_prior=1.0,
+                    enumerability_prior=1.0,
+                    confidence=1.0,
+                )
+                compiled = compile_candidate_index_space(
+                    candidate,
+                    direct_evidence_authority=True,
+                )
+                index_registry.register_index_space(compiled)
+                index_registry.mark_region_state(
+                    compiled.root_region.region_key,
+                    RegionState.HARVEST_READY,
+                )
+                index_registry.claim_region_for_harvest(
+                    compiled.root_region.region_key,
+                    owner="telemetry-test",
+                    ttl_seconds=60.0,
+                )
+                control.enqueue_platform_year_harvest(
+                    provider="wayback",
+                    subject="example.org",
+                    target_year=1997,
+                    request_template_hash="template-v1",
+                    policy_version="platform-v1",
+                )
+
+                _publish_discovery_telemetry(registry, {})
+
+                with RuntimeTelemetryStore(root / "telemetry.sqlite3") as telemetry:
+                    snapshot = telemetry.snapshot()
+                self.assertEqual(snapshot.gauges["historical_index_total"], 1.0)
+                self.assertEqual(snapshot.gauges["historical_region_harvesting"], 1.0)
+                self.assertEqual(snapshot.gauges["platform_year_total"], 1.0)
+                self.assertEqual(snapshot.gauges["platform_year_ready"], 1.0)
+            finally:
+                control.close()
 
 
 if __name__ == "__main__":
