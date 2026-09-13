@@ -363,6 +363,8 @@ class SourceActivationCompiler:
             adapter_kind=adapter_kind,
             config_hash=config_hash,
         )
+        if reviewed_binding is not None:
+            self._verified_reviewed_adapters.add(adapter_id)
         return ProductionSourceSpec(
             source_key=source_key,
             domain_id=domain_id,
