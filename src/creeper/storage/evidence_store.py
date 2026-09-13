@@ -137,6 +137,7 @@ class EvidenceStore:
                 value TEXT NOT NULL
             ) WITHOUT ROWID;
             CREATE TABLE IF NOT EXISTS evidence_capsule_task_provenance (
+                sequence INTEGER PRIMARY KEY AUTOINCREMENT,
                 hostname TEXT NOT NULL,
                 year INTEGER NOT NULL,
                 provider TEXT NOT NULL,
@@ -152,7 +153,7 @@ class EvidenceStore:
                 reservoir_id TEXT NOT NULL DEFAULT '',
                 lease_id TEXT NOT NULL DEFAULT '',
                 committed_at REAL NOT NULL,
-                PRIMARY KEY(
+                UNIQUE(
                     hostname, year, provider, payload_hash, policy_version,
                     task_kind, task_hostname, task_year_from, task_year_to,
                     task_provider, task_policy_version,
@@ -163,11 +164,9 @@ class EvidenceStore:
                 ) REFERENCES evidence_capsules(
                     hostname, year, provider, payload_hash, policy_version
                 )
-            ) WITHOUT ROWID;
+            );
             CREATE INDEX IF NOT EXISTS idx_evidence_capsule_task_provenance_host_year
-                ON evidence_capsule_task_provenance(
-                    hostname, year, committed_at, task_kind
-                );
+                ON evidence_capsule_task_provenance(hostname, year, sequence);
             """
         )
         # Serialize the one-time backfill across independently started
@@ -406,10 +405,7 @@ class EvidenceStore:
                            reservoir_id, lease_id, committed_at,
                            ROW_NUMBER() OVER (
                                PARTITION BY hostname, year
-                               ORDER BY committed_at, task_kind, task_provider,
-                                        task_policy_version, source_key,
-                                        reservoir_id, lease_id, provider,
-                                        payload_hash, policy_version
+                               ORDER BY sequence
                            ) AS rn
                     FROM evidence_capsule_task_provenance
                     WHERE {predicates}

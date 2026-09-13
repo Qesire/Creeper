@@ -19,7 +19,7 @@ from creeper.source_discovery import (
 from creeper.sources.domains import SourceDomain
 from creeper.sources.reservoirs import Reservoir
 from creeper.storage.control_store import ControlStore
-from creeper.storage.evidence_store import EvidenceStore
+from creeper.storage.evidence_store import EvidenceStore, EvidenceTaskProvenance
 
 
 class IncrementalReadinessTests(unittest.TestCase):
@@ -76,6 +76,30 @@ class IncrementalReadinessTests(unittest.TestCase):
             f"http://{hostname}/",
             payload * 64,
             "evidence-v1",
+        )
+
+    @staticmethod
+    def _direct_capsule(
+        hostname: str,
+        year: int,
+        *,
+        source_id: str,
+        payload: str = "a",
+    ) -> EvidenceCapsule:
+        return EvidenceCapsule(
+            hostname=hostname,
+            year=year,
+            provider=f"direct:{source_id}",
+            temporal_semantics="source_direct_year",
+            evidence_timestamp=f"{year}0101000000",
+            source_locator=f"fixture://{source_id}/{hostname}/{year}",
+            payload_hash=payload * 64,
+            policy_version="historical-region-v1",
+            evidence_type="source_direct_year",
+            source_id=source_id,
+            original_url=f"http://{hostname}/",
+            record_locator=f"fixture://{source_id}/{hostname}/{year}",
+            extraction_method="fixture",
         )
 
     def test_incremental_readiness_deduplicates_host_year_and_processes_only_new_rows(self):
@@ -199,11 +223,25 @@ class IncrementalReadinessTests(unittest.TestCase):
             control.close()
 
             evidence = EvidenceStore(runtime_root / "evidence.sqlite3")
-            evidence.put_many(
+            capsules = [
+                self._capsule("exact.org", 1997),
+                self._capsule("range.com", 1996),
+                self._capsule("range.com", 1998),
+            ]
+            evidence.put_many_with_task_provenance(
                 [
-                    self._capsule("exact.org", 1997),
-                    self._capsule("range.com", 1996),
-                    self._capsule("range.com", 1998),
+                    (
+                        capsules[0],
+                        EvidenceTaskProvenance(exact, committed_at=1.0),
+                    ),
+                    (
+                        capsules[1],
+                        EvidenceTaskProvenance(ranged, committed_at=2.0),
+                    ),
+                    (
+                        capsules[2],
+                        EvidenceTaskProvenance(ranged, committed_at=2.0),
+                    ),
                 ]
             )
             evidence.close()
@@ -355,7 +393,7 @@ class IncrementalReadinessTests(unittest.TestCase):
             )
             control.save_lease(lease)
             control.attribute_direct_host_years(
-                [("final.org", 1997, "arquivo")],
+                [("final.org", 1997, f"direct:{candidate.source_key}")],
                 source_key=candidate.source_key,
                 reservoir_id=reservoir.reservoir_id,
                 lease_id=lease.lease_id,
@@ -364,10 +402,10 @@ class IncrementalReadinessTests(unittest.TestCase):
 
             evidence = EvidenceStore(runtime_root / "evidence.sqlite3")
             evidence.put(
-                self._capsule(
+                self._direct_capsule(
                     "final.org",
                     1997,
-                    provider="arquivo",
+                    source_id=candidate.source_key,
                 )
             )
             evidence.close()
@@ -492,6 +530,86 @@ class IncrementalReadinessTests(unittest.TestCase):
                 },
             )
 
+    def test_provider_proof_provenance_rejects_orphan_control_credit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            runtime_root = root / "runtime"
+            runtime_root.mkdir()
+            baseline = self._build_baseline(root)
+            model = self._model(root)
+
+            # Establish the migration cutover before the new proof exists.
+            evidence = EvidenceStore(runtime_root / "evidence.sqlite3")
+            self.assertEqual(
+                evidence.provider_task_provenance_cutover_sequence(),
+                0,
+            )
+            evidence.close()
+
+            control = ControlStore(runtime_root / "control.sqlite3")
+            stale = EvidenceQueryKey(
+                "recover.org",
+                TemporalScope(1997, 1997),
+                "wayback",
+                "evidence-v1",
+            )
+            actual = EvidenceQueryKey(
+                "recover.org",
+                TemporalScope(1996, 1998),
+                "wayback",
+                "evidence-v1",
+            )
+            control.enqueue_evidence_tasks([stale, actual])
+            # Simulate the old attribution-first crash: exact credit survives,
+            # but no exact proof capsule was ever committed.
+            control.attribute_task_host_years(stale, [1997])
+            control.close()
+
+            evidence = EvidenceStore(runtime_root / "evidence.sqlite3")
+            capsule = self._capsule("recover.org", 1997)
+            evidence.put_many_with_task_provenance(
+                [
+                    (
+                        capsule,
+                        EvidenceTaskProvenance(
+                            actual,
+                            source_key="source-new",
+                            reservoir_id="reservoir-new",
+                            lease_id="lease-new",
+                            committed_at=200.0,
+                        ),
+                    )
+                ]
+            )
+            evidence.close()
+
+            with IncrementalReadinessRuntime(
+                runtime_root,
+                baseline_index=baseline,
+                eed_model=model,
+                baseline_eed="20",
+            ) as runtime:
+                report = runtime.sync_until_current()
+
+            self.assertEqual(
+                report.task_kind_attribution,
+                {
+                    "range": {
+                        "novel_host_years": 1,
+                        "novel_eed": "1",
+                    }
+                },
+            )
+            self.assertEqual(
+                report.source_attribution,
+                {
+                    "source-new": {
+                        "novel_host_years": 1,
+                        "novel_eed": "1",
+                    }
+                },
+            )
+
     def test_gate_report_uses_exact_decimal_thresholds(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -557,7 +675,7 @@ class IncrementalReadinessTests(unittest.TestCase):
             )
             control.save_lease(lease)
             control.attribute_direct_host_years(
-                [("new.org", 1997, "arquivo")],
+                [("new.org", 1997, "direct:source-a")],
                 source_key="source-a",
                 reservoir_id=reservoir.reservoir_id,
                 lease_id=lease.lease_id,
@@ -565,7 +683,13 @@ class IncrementalReadinessTests(unittest.TestCase):
             control.close()
 
             evidence = EvidenceStore(runtime_root / "evidence.sqlite3")
-            evidence.put(self._capsule("new.org", 1997, provider="arquivo"))
+            evidence.put(
+                self._direct_capsule(
+                    "new.org",
+                    1997,
+                    source_id="source-a",
+                )
+            )
             evidence.close()
 
             with IncrementalReadinessRuntime(
