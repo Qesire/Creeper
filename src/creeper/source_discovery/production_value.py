@@ -117,6 +117,19 @@ class ProductionValueModel:
             max(1e-3, float(measurement.elapsed_seconds)),
         )
 
+    def ready_inventory_minutes(
+        self,
+        candidates: list[SourceCandidate] | tuple[SourceCandidate, ...],
+    ) -> float | None:
+        """Estimate queued production capacity without treating it as reward."""
+        if not candidates:
+            return None
+        total_seconds = sum(
+            max(0.0, self.estimate(candidate).expected_cost)
+            for candidate in candidates
+        )
+        return total_seconds / 60.0
+
     def research_signals(
         self,
         *,
