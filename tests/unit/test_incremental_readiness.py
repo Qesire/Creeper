@@ -46,7 +46,7 @@ class IncrementalReadinessTests(unittest.TestCase):
         output_name: str = "baseline.sqlite3",
     ) -> Path:
         task = root / ("task-" + output_name.replace(".", "-"))
-        baseline_dir = task / "merged260909-3"
+        baseline_dir = task / "merged260912-3"
         baseline_dir.mkdir(parents=True)
         annual = annual or {}
         for year in range(1996, 2002):
@@ -55,8 +55,37 @@ class IncrementalReadinessTests(unittest.TestCase):
                 encoding="utf-8",
             )
         (baseline_dir / "candidate_pool.txt").write_text("", encoding="utf-8")
+        annual_hashes = {
+            f"{year}.txt": hashlib.sha256(
+                (baseline_dir / f"{year}.txt").read_bytes()
+            ).hexdigest()
+            for year in range(1996, 2002)
+        }
+        candidate_hash = hashlib.sha256(
+            (baseline_dir / "candidate_pool.txt").read_bytes()
+        ).hexdigest()
+        model_hash = "0" * 64
+        baseline_eed = "0"
+        authority = {
+            "baseline_id": baseline_dir.name,
+            "annual_file_hashes": annual_hashes,
+            "candidate_file_hash": candidate_hash,
+            "model_hash": model_hash,
+            "baseline_eed": baseline_eed,
+            "authority_digest": authority_digest(
+                baseline_id=baseline_dir.name,
+                annual_file_hashes=annual_hashes,
+                candidate_file_hash=candidate_hash,
+                model_hash=model_hash,
+                baseline_eed=baseline_eed,
+            ),
+        }
         output = root / output_name
-        BaselineIndex.build(task, output).close()
+        BaselineIndex.build(
+            baseline_dir=baseline_dir,
+            output_path=output,
+            authority_manifest=authority,
+        ).close()
         return output
 
     @staticmethod
