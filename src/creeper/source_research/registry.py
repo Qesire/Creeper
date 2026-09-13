@@ -294,6 +294,10 @@ class ResearchRegistry:
                 CHECK(final_observation_count >= 0)
                 """
             )
+            # Arm stats are derived policy state.  Old rows encode the former
+            # "FINAL=0 means missing" semantics and must not survive a schema
+            # migration as if they were authoritative facts.
+            self.connection.execute("DELETE FROM research_arm_stats")
         self.connection.commit()
 
     # roots / programs / queries -------------------------------------------------
