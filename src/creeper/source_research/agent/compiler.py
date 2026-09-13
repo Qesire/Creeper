@@ -66,6 +66,31 @@ _FORBIDDEN_FILTERS = {
     "artifact",
 }
 
+_FORBIDDEN_AUTHORITY_FIELDS = {
+    "accepted_eed",
+    "direct_year_mask",
+    "evidence",
+    "evidence_authority",
+    "evidence_store",
+    "evidencestore",
+    "gold_policy",
+    "policy_action",
+    "scheduler_action",
+    "submission",
+    "submission_authority",
+}
+
+_FORBIDDEN_NESTED_RUNTIME_FIELDS = {
+    "artifact",
+    "artifacts",
+    "cursor",
+    "hit",
+    "hits",
+    "next",
+    "page",
+    "resumptiontoken",
+}
+
 _EXECUTION_TYPES = {
     ProposalType.EXPLORATION_REGION,
     ProposalType.CONTRACT_FAMILY,
@@ -102,6 +127,7 @@ class UnifiedResearchCompiler:
         task = self._task(task_type)
         value = self._mapping(payload, "model response")
         self._reject_forbidden_keys(value, "model response")
+        self._scan_nested_content(value)
         allowed_top = {"query", "proposals", "contract", "context_hash"}
         if set(value) - allowed_top:
             raise UnifiedCompilerError("model response contains unknown fields")
@@ -192,6 +218,66 @@ class UnifiedResearchCompiler:
                 + ", ".join(sorted(forbidden))
             )
 
+    @classmethod
+    def _scan_nested_content(
+        cls,
+        value: Any,
+        *,
+        path: str = "model response",
+        in_filters: bool = False,
+    ) -> None:
+        if isinstance(value, Mapping):
+            for key, child in value.items():
+                if not isinstance(key, str):
+                    raise UnifiedCompilerError(
+                        f"{path} contains non-string fields"
+                    )
+                folded = key.casefold()
+                if folded in _FORBIDDEN_AUTHORITY_FIELDS:
+                    raise UnifiedCompilerError(
+                        f"{path}.{key} attempts to cross an authority boundary"
+                    )
+                if (
+                    not in_filters
+                    and folded in _FORBIDDEN_NESTED_RUNTIME_FIELDS
+                ):
+                    raise UnifiedCompilerError(
+                        f"{path}.{key} contains child-owned runtime state"
+                    )
+                cls._scan_nested_content(
+                    child,
+                    path=f"{path}.{key}",
+                    in_filters=folded == "filters",
+                )
+            return
+        if isinstance(value, list):
+            if (
+                len(value) > 1
+                and all(
+                    isinstance(item, str)
+                    and urlparse(item).scheme in {"http", "https"}
+                    and bool(urlparse(item).netloc)
+                    for item in value
+                )
+            ):
+                raise UnifiedCompilerError(
+                    f"{path} is a URL list; compile a reusable bounded rule instead"
+                )
+            for index, child in enumerate(value):
+                cls._scan_nested_content(
+                    child,
+                    path=f"{path}[{index}]",
+                    in_filters=in_filters,
+                )
+
+    @staticmethod
+    def _reject_common_crawl_identity(*values: str) -> None:
+        normalized = " ".join(values).casefold().replace("_", "")
+        if "commoncrawl" in normalized:
+            raise UnifiedCompilerError(
+                "Common Crawl active-corpus discovery is excluded"
+            )
+
     @staticmethod
     def _check_gate(
         task: UnifiedLLMTask,
@@ -206,6 +292,9 @@ class UnifiedResearchCompiler:
         }:
             if not isinstance(context, ResearchCompilerContext):
                 raise CompilerGateError("research task requires ResearchCompilerContext")
+            self._reject_common_crawl_identity(
+                context.root_id, *context.root_capabilities
+            )
             if context.equivalent_unexecuted_program:
                 raise CompilerGateError(
                     "equivalent deterministic program is unexecuted"
@@ -563,6 +652,24 @@ class UnifiedResearchCompiler:
                 "root capabilities must be non-empty strings"
             )
         entrypoint = self._text(raw["entrypoint"], "entrypoint")
+        kind = self._text(raw["kind"], "kind")
+        self._reject_common_crawl_identity(entrypoint, kind, *caps)
+        reusable_capabilities = {
+            "api",
+            "catalog",
+            "enumerate",
+            "manifest",
+            "oai",
+            "repository",
+            "search",
+        }
+        if not any(
+            any(token in capability.casefold() for token in reusable_capabilities)
+            for capability in caps
+        ):
+            raise UnifiedCompilerError(
+                "root surface lacks a reusable search/enumeration capability"
+            )
         parsed = urlparse(entrypoint)
         if parsed.scheme in {"http", "https"} and parsed.path in {"", "/"} and len(caps) < 2:
             raise UnifiedCompilerError(
@@ -570,7 +677,7 @@ class UnifiedResearchCompiler:
             )
         return RootSurfaceProposal(
             proposal_id=self._text(raw["proposal_id"], "proposal_id"),
-            kind=self._text(raw["kind"], "kind"),
+            kind=kind,
             entrypoint=entrypoint,
             capabilities=tuple(item.strip() for item in caps),
             rationale=self._text(raw["rationale"], "rationale"),
@@ -682,6 +789,7 @@ class RootQueryCompiler:
             UnifiedResearchCompiler._reject_forbidden_keys(
                 payload, "model response"
             )
+            UnifiedResearchCompiler._scan_nested_content(payload)
         except UnifiedCompilerError as exc:
             raise RootQueryCompilerError(str(exc)) from exc
         return payload
