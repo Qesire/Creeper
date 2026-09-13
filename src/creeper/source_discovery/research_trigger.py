@@ -247,7 +247,7 @@ class ResearchTriggerGate:
             )
 
         frontier_exhausted = (
-            snapshot.ready_minutes in (None, 0.0)
+            snapshot.ready_minutes == 0.0
             and snapshot.executable_regions == 0
             and snapshot.pending_region_count == 0
             and snapshot.deterministic_candidate_backlog == 0
