@@ -2284,7 +2284,13 @@ class SourceDiscoveryRegistry:
             changed += 1
         return changed
 
-    def transition(self, source_key: str, target: SourceState) -> SourceCandidate:
+    def transition(
+        self,
+        source_key: str,
+        target: SourceState,
+        *,
+        reason: str | None = None,
+    ) -> SourceCandidate:
         target = SourceState(target)
         now = float(self.clock())
         self.connection.execute("BEGIN IMMEDIATE")
@@ -2338,8 +2344,16 @@ class SourceDiscoveryRegistry:
                         "before warm/active promotion"
                     )
             self.connection.execute(
-                "UPDATE source_candidates SET state = ?, updated_at = ? WHERE source_key = ?",
-                (target.value, now, source_key),
+                """
+                UPDATE source_candidates
+                SET state = ?,
+                    state_reason = CASE
+                        WHEN ? IS NULL THEN state_reason ELSE ?
+                    END,
+                    updated_at = ?
+                WHERE source_key = ?
+                """,
+                (target.value, reason, reason, now, source_key),
             )
             self.connection.commit()
         except BaseException:
