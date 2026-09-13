@@ -17,7 +17,9 @@ stable_reset_seconds = 300.0
 shutdown_grace_seconds = 10.0
 
 [evidence]
-# Conservative public Wayback profile. Increase only after bounded A/B tests.
+# Conservative public Wayback fallback profile. Direct-year source production
+# is intentionally independent from this worker's availability/backlog.
+# Increase only after bounded A/B tests.
 endpoint = "https://web.archive.org/cdx/search/cdx"
 claim_batch_size = 64
 lease_seconds = 300.0
