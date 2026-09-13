@@ -148,6 +148,19 @@ same_context_failure_cooldown_seconds = 90.0
         self.assertEqual(config.agent.admission.direct_min_expected_volume, 12345)
         self.assertEqual(config.agent.admission.min_enumerability_prior, 0.6)
 
+    def test_stagnation_thresholds_fail_closed_below_two(self) -> None:
+        path = self.write_config()
+        text = path.read_text(encoding="utf-8").replace(
+            "research_stagnation_zero_tail = 4",
+            "research_stagnation_zero_tail = 1",
+        )
+        path.write_text(text, encoding="utf-8")
+        with self.assertRaisesRegex(
+            ValueError,
+            "coordinator.research_stagnation_zero_tail must be at least 2",
+        ):
+            load_source_discovery_config(path)
+
     def test_multiple_active_llm_calls_fail_closed(self) -> None:
         path = self.write_config()
         text = path.read_text(encoding="utf-8").replace(
