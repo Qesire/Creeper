@@ -23,6 +23,13 @@ from creeper.records.candidates import CandidateSourceScope
 from creeper.records.models import HostObservation, SourceRecord
 from creeper.runtime.http import configured_http_proxy
 from creeper.scheduler.leases import LeaseResult, WorkLease
+from creeper.source_discovery.index_identity import (
+    HistoricalIndexIdentityError,
+    HistoricalIndexObjectIdentity,
+    capture_local_identity,
+    ensure_same_historical_index_object,
+    remote_identity_from_headers,
+)
 from creeper.source_discovery.index_registry import IndexSpaceRegistry
 from creeper.source_discovery.index_space import HarvestRegion, RegionState
 from creeper.sources.archive.cdx import parse_cdx_line
@@ -232,6 +239,30 @@ class RegionHarvestExecutor:
             return int(roots[0].byte_end) + 1
         return None
 
+    def _verify_or_bind_object_identity(
+        self,
+        index,
+        observed: HistoricalIndexObjectIdentity,
+    ) -> HistoricalIndexObjectIdentity:
+        if (
+            index.content_length is not None
+            and observed.content_length != index.content_length
+        ):
+            raise RegionHarvestError(
+                "historical index object identity changed after tomography"
+            )
+        expected = self.registry.get_object_identity(index.index_key)
+        try:
+            if expected is None:
+                return self.registry.bind_object_identity(
+                    index.index_key,
+                    observed,
+                )
+            ensure_same_historical_index_object(expected, observed)
+        except (HistoricalIndexIdentityError, ValueError) as exc:
+            raise RegionHarvestError(str(exc)) from exc
+        return expected
+
     @staticmethod
     def _parse_region_record(index, raw: bytes, *, line_start: int) -> SourceRecord | None:
         line = raw.decode("utf-8", errors="replace").rstrip("\r\n")
@@ -292,6 +323,11 @@ class RegionHarvestExecutor:
             raise RegionHarvestError(
                 "local source is shorter than the selected region"
             )
+        try:
+            observed_identity = capture_local_identity(path)
+        except HistoricalIndexIdentityError as exc:
+            raise RegionHarvestError(str(exc)) from exc
+        self._verify_or_bind_object_identity(index, observed_identity)
 
         emitted = 0
         bytes_read = 0
@@ -418,10 +454,15 @@ class RegionHarvestExecutor:
         )
         if expected_size is not None:
             request_end = min(request_end, expected_size - 1)
+        expected_identity = self.registry.get_object_identity(index.index_key)
         headers = {
             "Range": f"bytes={request_start}-{request_end}",
             "Accept-Encoding": "identity",
         }
+        if expected_identity is not None:
+            validator = expected_identity.if_range_validator
+            if validator is not None:
+                headers["If-Range"] = validator
         timeout = httpx.Timeout(self.policy.max_seconds)
         own_client = self.http_client is None
         context = (
@@ -476,6 +517,14 @@ class RegionHarvestExecutor:
                 timeout=timeout,
             ) as response:
                 if response.status_code != 206:
+                    if (
+                        response.status_code == 200
+                        and expected_identity is not None
+                        and expected_identity.if_range_validator is not None
+                    ):
+                        raise RegionHarvestError(
+                            "historical index object identity changed after tomography"
+                        )
                     raise RegionHarvestError(
                         "remote exact harvest requires HTTP 206 Range response"
                     )
@@ -520,6 +569,14 @@ class RegionHarvestExecutor:
                     raise RegionHarvestError(
                         "remote source size changed after region bounds were established"
                     )
+                observed_identity = remote_identity_from_headers(
+                    response.headers,
+                    content_length=total_size,
+                )
+                self._verify_or_bind_object_identity(
+                    index,
+                    observed_identity,
+                )
 
                 for chunk in response.iter_raw(chunk_size=64 * 1024):
                     if not chunk:
