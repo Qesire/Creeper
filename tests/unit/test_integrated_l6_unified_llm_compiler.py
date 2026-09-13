@@ -343,6 +343,9 @@ class UnifiedCompilerTests(unittest.TestCase):
             context_hash=context.context_hash,
         )
         self.assertEqual(first.call_identity, second.call_identity)
+        self.assertEqual(
+            first.as_payload()["call_identity"], first.call_identity
+        )
 
     def test_context_hash_is_deterministic(self):
         first = research_context()
