@@ -29,6 +29,8 @@ from creeper.source_discovery.admission import SearchAdmissionPolicy
 from creeper.source_discovery.agent_search import (
     CommandAgentSearchExecutor,
     CommandAgentSearchPolicy,
+    UnifiedCommandResearchExecutor,
+    UnifiedCommandResearchPolicy,
 )
 from creeper.source_discovery.arquivo_catalog_scout import (
     ArquivoCatalogScoutExecutor,
@@ -71,6 +73,8 @@ from creeper.source_discovery.scrapy_scout import (
 )
 from creeper.source_discovery.scrapy_sidecar import ScrapyScoutLauncher
 from creeper.source_discovery.triage import HttpSourceTriageExecutor, HttpTriagePolicy
+from creeper.source_research.integration import ResearchIntegrationBridge
+from creeper.source_research.registry import ResearchRegistry
 from creeper.storage.control_store import ControlStore
 from creeper.storage.telemetry_store import RuntimeTelemetryStore
 from creeper.runtime.http import configured_http_proxy
@@ -971,6 +975,11 @@ async def _open_runtime(config: SourceDiscoveryServiceConfig):
         coordinator: SourceDiscoveryCoordinator | None = None
         try:
             registry = SourceDiscoveryRegistry(control)
+            research_registry = ResearchRegistry(control)
+            research_bridge = ResearchIntegrationBridge(
+                research_registry,
+                registry,
+            )
             if config.measurement is not None:
                 authority = (
                     AuthoritySnapshot.from_manifest_path(config.measurement.authority_manifest)
@@ -1081,11 +1090,29 @@ async def _open_runtime(config: SourceDiscoveryServiceConfig):
                     admission_policy=config.agent.admission,
                     context_builder=intelligence_context,
                 )
-                background_research = (
-                    _legacy_background_research_executor(
-                        search,
-                        desired_candidates=config.agent.policy.max_returned_candidates,
+                unified_research = UnifiedCommandResearchExecutor(
+                    config.agent.command,
+                    discovery_root / "unified-research-invocations",
+                    cwd=config.agent.cwd,
+                    policy=UnifiedCommandResearchPolicy(
+                        timeout_seconds=config.agent.policy.timeout_seconds,
+                        termination_grace_seconds=(
+                            config.agent.policy.termination_grace_seconds
+                        ),
+                        max_response_bytes=config.agent.policy.max_response_bytes,
+                    ),
+                )
+
+                async def execute_background_research(
+                    directive: ResearchDirective,
+                ) -> object:
+                    return await research_bridge.execute_unified(
+                        directive,
+                        unified_research,
                     )
+
+                background_research = (
+                    execute_background_research
                     if config.coordinator.nonblocking_research
                     else None
                 )
@@ -1115,6 +1142,16 @@ async def _open_runtime(config: SourceDiscoveryServiceConfig):
                         else None
                     ),
                     research_executor=background_research,
+                    research_result_committer=(
+                        research_bridge.commit_execution_result
+                        if background_research is not None
+                        else None
+                    ),
+                    final_reward_synchronizer=(
+                        lambda: research_bridge.sync_closed_final_rewards(
+                            limit=100
+                        )
+                    ),
                 )
                 yield registry, coordinator
         finally:
