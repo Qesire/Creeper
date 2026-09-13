@@ -59,6 +59,7 @@ class RegionTomographyService:
         index = self.registry.get_index(index_key)
         if index is None:
             raise KeyError(f"unknown source index: {index_key}")
+        expected_identity = self.registry.get_object_identity(index_key)
         semaphore = asyncio.Semaphore(self.probe_parallelism)
 
         async def one(
@@ -66,7 +67,11 @@ class RegionTomographyService:
         ) -> tuple[TomographyAction, RegionProbeResult | BaseException]:
             async with semaphore:
                 try:
-                    result = await self.probe_executor.probe(index, action.region)
+                    result = await self.probe_executor.probe(
+                        index,
+                        action.region,
+                        expected_identity=expected_identity,
+                    )
                 except BaseException as exc:
                     return action, exc
                 return action, result
@@ -122,6 +127,21 @@ class RegionTomographyService:
                     errors.append(
                         f"{action.region.region_key}: "
                         f"{type(result).__name__}: {result}"
+                    )
+                    continue
+                # Bind immutable object identity before any synopsis can
+                # become durable authority. A crash after this bind is safe;
+                # the inverse ordering could leave a synopsis detached from the
+                # object it measured.
+                try:
+                    self.registry.bind_object_identity(
+                        index_key,
+                        result.object_identity,
+                    )
+                except (KeyError, ValueError) as exc:
+                    errors.append(
+                        f"{action.region.region_key}: "
+                        f"{type(exc).__name__}: {exc}"
                     )
                     continue
                 # A probe may learn the root bounds from metadata. Preserve the

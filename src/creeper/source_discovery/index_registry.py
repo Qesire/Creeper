@@ -6,6 +6,10 @@ import json
 import time
 from collections.abc import Iterable
 
+from creeper.source_discovery.index_identity import (
+    HistoricalIndexObjectIdentity,
+    ensure_same_historical_index_object,
+)
 from creeper.source_discovery.index_space import (
     CompiledIndexSpace,
     HarvestRegion,
@@ -16,6 +20,47 @@ from creeper.source_discovery.index_space import (
     SourceIndexSpec,
 )
 from creeper.storage.control_store import ControlStore
+
+
+def _renew_region_harvest_on_connection(
+    connection,
+    *,
+    region_key: str,
+    owner: str,
+    ttl_seconds: float,
+    now: float,
+) -> float:
+    """Extend one live region claim without reviving an expired owner."""
+
+    if not owner.strip():
+        raise ValueError("harvest owner is required")
+    if ttl_seconds <= 0:
+        raise ValueError("harvest ttl_seconds must be positive")
+    expires_at = float(now) + float(ttl_seconds)
+    with connection:
+        changed = connection.execute(
+            """
+            UPDATE source_regions_v1
+            SET harvest_expires_at = ?,
+                updated_at = ?
+            WHERE region_key = ?
+              AND state = ?
+              AND harvest_owner = ?
+              AND harvest_expires_at IS NOT NULL
+              AND harvest_expires_at > ?
+            """,
+            (
+                expires_at,
+                float(now),
+                region_key,
+                RegionState.HARVESTING.value,
+                owner,
+                float(now),
+            ),
+        ).rowcount
+    if changed != 1:
+        raise ValueError("region harvest claim is expired or not owned by caller")
+    return expires_at
 
 
 class IndexSpaceRegistry:
@@ -71,6 +116,21 @@ class IndexSpaceRegistry:
             ) WITHOUT ROWID;
             CREATE INDEX IF NOT EXISTS idx_source_indexes_factory_v1
                 ON source_indexes_v1(factory_key, index_key);
+
+            CREATE TABLE IF NOT EXISTS source_index_object_identity_v1 (
+                index_key TEXT PRIMARY KEY,
+                kind TEXT NOT NULL,
+                content_length INTEGER,
+                etag TEXT,
+                last_modified TEXT,
+                local_device TEXT,
+                local_inode TEXT,
+                local_mtime_ns INTEGER,
+                sampled_fingerprint TEXT,
+                captured_at REAL NOT NULL,
+                FOREIGN KEY(index_key)
+                    REFERENCES source_indexes_v1(index_key)
+            ) WITHOUT ROWID;
 
             CREATE TABLE IF NOT EXISTS source_regions_v1 (
                 region_key TEXT PRIMARY KEY,
@@ -271,6 +331,123 @@ class IndexSpaceRegistry:
             content_length=row["content_length"],
         )
 
+    def get_object_identity(
+        self,
+        index_key: str,
+    ) -> HistoricalIndexObjectIdentity | None:
+        row = self.connection.execute(
+            """
+            SELECT *
+            FROM source_index_object_identity_v1
+            WHERE index_key = ?
+            """,
+            (index_key,),
+        ).fetchone()
+        if row is None:
+            return None
+        return HistoricalIndexObjectIdentity(
+            kind=str(row["kind"]),
+            content_length=row["content_length"],
+            etag=row["etag"],
+            last_modified=row["last_modified"],
+            local_device=(
+                None
+                if row["local_device"] is None
+                else int(row["local_device"])
+            ),
+            local_inode=(
+                None
+                if row["local_inode"] is None
+                else int(row["local_inode"])
+            ),
+            local_mtime_ns=row["local_mtime_ns"],
+            sampled_fingerprint=row["sampled_fingerprint"],
+        )
+
+    def bind_object_identity(
+        self,
+        index_key: str,
+        identity: HistoricalIndexObjectIdentity,
+    ) -> HistoricalIndexObjectIdentity:
+        """Durably bind one index key to one immutable source object.
+
+        Legacy databases intentionally have no eager backfill. The first
+        successful probe/harvest inserts the identity. Concurrent first-touch
+        binders converge through INSERT OR IGNORE, then every caller verifies
+        the persisted authority before proceeding.
+        """
+
+        if not identity.is_verifiable:
+            raise ValueError(
+                "historical index object identity cannot be verified"
+            )
+        now = float(self.clock())
+        with self.connection:
+            exists = self.connection.execute(
+                "SELECT 1 FROM source_indexes_v1 WHERE index_key = ?",
+                (index_key,),
+            ).fetchone()
+            if exists is None:
+                raise KeyError(f"unknown source index: {index_key}")
+            self.connection.execute(
+                """
+                INSERT OR IGNORE INTO source_index_object_identity_v1(
+                    index_key, kind, content_length, etag, last_modified,
+                    local_device, local_inode, local_mtime_ns,
+                    sampled_fingerprint, captured_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    index_key,
+                    identity.kind,
+                    identity.content_length,
+                    identity.etag,
+                    identity.last_modified,
+                    (
+                        None
+                        if identity.local_device is None
+                        else str(identity.local_device)
+                    ),
+                    (
+                        None
+                        if identity.local_inode is None
+                        else str(identity.local_inode)
+                    ),
+                    identity.local_mtime_ns,
+                    identity.sampled_fingerprint,
+                    now,
+                ),
+            )
+            row = self.connection.execute(
+                """
+                SELECT *
+                FROM source_index_object_identity_v1
+                WHERE index_key = ?
+                """,
+                (index_key,),
+            ).fetchone()
+            assert row is not None
+            persisted = HistoricalIndexObjectIdentity(
+                kind=str(row["kind"]),
+                content_length=row["content_length"],
+                etag=row["etag"],
+                last_modified=row["last_modified"],
+                local_device=(
+                    None
+                    if row["local_device"] is None
+                    else int(row["local_device"])
+                ),
+                local_inode=(
+                    None
+                    if row["local_inode"] is None
+                    else int(row["local_inode"])
+                ),
+                local_mtime_ns=row["local_mtime_ns"],
+                sampled_fingerprint=row["sampled_fingerprint"],
+            )
+            ensure_same_historical_index_object(persisted, identity)
+        return persisted
+
     def get_index_for_source(self, source_key: str) -> SourceIndexSpec | None:
         row = self.connection.execute(
             "SELECT index_key FROM source_indexes_v1 WHERE source_key = ?",
@@ -467,6 +644,59 @@ class IndexSpaceRegistry:
             return None
         return self.get_region(region_key)
 
+    def renew_region_harvest(
+        self,
+        region_key: str,
+        *,
+        owner: str,
+        ttl_seconds: float,
+    ) -> float:
+        """Extend a still-live owned harvest claim.
+
+        Renewal is deliberately not reclaim: an expired claim, a recovered
+        region, or a region already claimed by another worker all fail closed.
+        """
+
+        return _renew_region_harvest_on_connection(
+            self.connection,
+            region_key=region_key,
+            owner=owner,
+            ttl_seconds=ttl_seconds,
+            now=float(self.clock()),
+        )
+
+    def assert_region_harvest_owned(
+        self,
+        region_key: str,
+        *,
+        owner: str,
+    ) -> float:
+        """Return the live claim expiry or fail if ownership is no longer valid."""
+
+        if not owner.strip():
+            raise ValueError("harvest owner is required")
+        now = float(self.clock())
+        row = self.connection.execute(
+            """
+            SELECT harvest_expires_at
+            FROM source_regions_v1
+            WHERE region_key = ?
+              AND state = ?
+              AND harvest_owner = ?
+              AND harvest_expires_at IS NOT NULL
+              AND harvest_expires_at > ?
+            """,
+            (
+                region_key,
+                RegionState.HARVESTING.value,
+                owner,
+                now,
+            ),
+        ).fetchone()
+        if row is None:
+            raise ValueError("region harvest claim is expired or not owned by caller")
+        return float(row["harvest_expires_at"])
+
     def complete_region_harvest(
         self,
         region_key: str,
@@ -475,6 +705,7 @@ class IndexSpaceRegistry:
     ) -> None:
         if not owner.strip():
             raise ValueError("harvest owner is required")
+        now = float(self.clock())
         with self.connection:
             changed = self.connection.execute(
                 """
@@ -487,17 +718,20 @@ class IndexSpaceRegistry:
                 WHERE region_key = ?
                   AND state = ?
                   AND harvest_owner = ?
+                  AND harvest_expires_at IS NOT NULL
+                  AND harvest_expires_at > ?
                 """,
                 (
                     RegionState.HARVESTED.value,
-                    float(self.clock()),
+                    now,
                     region_key,
                     RegionState.HARVESTING.value,
                     owner,
+                    now,
                 ),
             ).rowcount
         if changed != 1:
-            raise ValueError("region harvest is not owned by caller")
+            raise ValueError("region harvest is expired or not owned by caller")
 
     def release_region_harvest(
         self,
@@ -510,6 +744,7 @@ class IndexSpaceRegistry:
             raise ValueError("harvest owner is required")
         if resume_cursor is not None and resume_cursor < 0:
             raise ValueError("resume_cursor must be non-negative")
+        now = float(self.clock())
         with self.connection:
             row = self.connection.execute(
                 """
@@ -518,15 +753,18 @@ class IndexSpaceRegistry:
                 WHERE region_key = ?
                   AND state = ?
                   AND harvest_owner = ?
+                  AND harvest_expires_at IS NOT NULL
+                  AND harvest_expires_at > ?
                 """,
                 (
                     region_key,
                     RegionState.HARVESTING.value,
                     owner,
+                    now,
                 ),
             ).fetchone()
             if row is None:
-                raise ValueError("region harvest is not owned by caller")
+                raise ValueError("region harvest is expired or not owned by caller")
             if resume_cursor is not None:
                 start = row["byte_start"]
                 end = row["byte_end"]
@@ -545,14 +783,17 @@ class IndexSpaceRegistry:
                 WHERE region_key = ?
                   AND state = ?
                   AND harvest_owner = ?
+                  AND harvest_expires_at IS NOT NULL
+                  AND harvest_expires_at > ?
                 """,
                 (
                     RegionState.HARVEST_READY.value,
                     resume_cursor,
-                    float(self.clock()),
+                    now,
                     region_key,
                     RegionState.HARVESTING.value,
                     owner,
+                    now,
                 ),
             ).rowcount
         if changed != 1:

@@ -68,6 +68,7 @@ class HistoricalIndexOptimizerTests(unittest.IsolatedAsyncioTestCase):
                 self.send_header("Accept-Ranges", "bytes")
                 self.send_header("Content-Type", "application/octet-stream")
                 self.send_header("Content-Length", str(size))
+                self.send_header("ETag", '"test-object-v1"')
                 if start is not None and end is not None:
                     total = self._path().stat().st_size
                     self.send_header(

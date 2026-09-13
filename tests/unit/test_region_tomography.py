@@ -194,6 +194,45 @@ class RegionTomographyTests(unittest.IsolatedAsyncioTestCase):
             self.registry.get_region(compiled.root_region.region_key).state,
             RegionState.HARVEST_READY,
         )
+        identity = self.registry.get_object_identity(compiled.index.index_key)
+        self.assertIsNotNone(identity)
+        assert identity is not None
+        self.assertEqual(identity.kind, "local")
+        self.assertEqual(identity.content_length, path.stat().st_size)
+        self.assertIsNotNone(identity.sampled_fingerprint)
+
+    async def test_same_size_drift_after_probe_identity_fails_closed(self) -> None:
+        path = self.root / "probe-drift.cdxj"
+        original = 'com,alpha)/ 19980101000000 {"url":"http://alpha.com/"}\n'
+        changed = 'com,bravo)/ 19980101000000 {"url":"http://bravo.com/"}\n'
+        self.assertEqual(len(original.encode("utf-8")), len(changed.encode("utf-8")))
+        path.write_text(original, encoding="utf-8")
+        compiled = self._compiled_local(path)
+        self.registry.register_index_space(compiled)
+        executor = RegionProbeExecutor(
+            self.baseline,
+            {"com": Decimal("1")},
+            policy=RegionProbePolicy(max_sample_bytes=4096, minhash_width=8),
+        )
+
+        first = await executor.probe(compiled.index, compiled.root_region)
+        self.registry.bind_object_identity(
+            compiled.index.index_key,
+            first.object_identity,
+        )
+        expected = self.registry.get_object_identity(compiled.index.index_key)
+        self.assertIsNotNone(expected)
+        path.write_text(changed, encoding="utf-8")
+
+        with self.assertRaisesRegex(
+            RegionProbeError,
+            "historical index object identity changed after tomography",
+        ):
+            await executor.probe(
+                compiled.index,
+                compiled.root_region,
+                expected_identity=expected,
+            )
 
     async def test_compressed_cdx_fails_closed_for_byte_tomography(self) -> None:
         path = self.root / "index.cdxj.gz"

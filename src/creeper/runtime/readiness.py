@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import sqlite3
@@ -13,6 +12,10 @@ from typing import Callable
 
 from creeper.authority.baseline_index import BaselineIndex, YEAR_BITS
 from creeper.authority.eed import load_english_weights
+from creeper.authority.identity import (
+    baseline_authority_signature,
+    eed_model_authority_signature,
+)
 from creeper.source_discovery.registry import SourceDiscoveryRegistry
 from creeper.storage.control_store import ControlStore
 from creeper.storage.evidence_store import EvidenceHostYear, EvidenceStore
@@ -20,28 +23,6 @@ from creeper.storage.evidence_store import EvidenceHostYear, EvidenceStore
 
 FORMAL_GROWTH_RATE = Decimal("0.05")
 PREWARM_GATE_FRACTION = Decimal("0.90")
-
-
-def _metadata_signature(path: Path) -> str:
-    """Cheap cache-invalidation signature for an immutable authority file."""
-    resolved = Path(path).resolve()
-    stat = resolved.stat()
-    payload = (
-        f"{resolved}\0{stat.st_size}\0{stat.st_mtime_ns}"
-    ).encode("utf-8")
-    return hashlib.sha256(payload).hexdigest()
-
-
-def _model_signature(path: Path) -> str:
-    """Hash the small EED model exactly; final submission also records its path."""
-    digest = hashlib.sha256()
-    with Path(path).open("rb") as source:
-        while True:
-            chunk = source.read(1024 * 1024)
-            if not chunk:
-                break
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 @dataclass(frozen=True)
@@ -498,8 +479,8 @@ class IncrementalReadinessRuntime:
         self._control_store()
 
     def _refresh_authority(self, *, force: bool = False) -> bool:
-        baseline_signature = _metadata_signature(self.baseline_path)
-        model_signature = _model_signature(self.model_path)
+        baseline_signature = baseline_authority_signature(self.baseline_path)
+        model_signature = eed_model_authority_signature(self.model_path)
         changed = (
             force
             or baseline_signature != self._baseline_signature
@@ -530,6 +511,10 @@ class IncrementalReadinessRuntime:
             # durable evidence queue can prioritize higher score value without
             # implementing a second weighting model.
             self.control.set_eed_tld_weights(self.weights)
+            SourceDiscoveryRegistry(self.control).set_scout_authority(
+                baseline_signature=self._baseline_signature,
+                model_signature=self._model_signature,
+            )
         return self.control
 
     def _resolved_attribution(

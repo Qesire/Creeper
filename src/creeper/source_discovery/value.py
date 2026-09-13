@@ -85,7 +85,15 @@ class InterpretableSourceValueModel:
             FROM source_candidates c
             JOIN source_scout_metrics m ON m.source_key = c.source_key
             JOIN source_final_rewards f ON f.source_key = c.source_key
+            LEFT JOIN source_scout_authority a ON a.singleton = 1
             WHERE c.source_family = ?
+              AND (
+                  a.singleton IS NULL
+                  OR (
+                      m.baseline_signature = a.baseline_signature
+                      AND m.model_signature = a.model_signature
+                  )
+              )
             """,
             (family,),
         ).fetchone()

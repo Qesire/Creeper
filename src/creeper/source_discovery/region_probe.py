@@ -19,6 +19,13 @@ from urllib.request import url2pathname
 import httpx
 
 from creeper.authority.baseline_index import BaselineIndex
+from creeper.source_discovery.index_identity import (
+    HistoricalIndexIdentityError,
+    HistoricalIndexObjectIdentity,
+    capture_local_identity,
+    ensure_same_historical_index_object,
+    remote_identity_from_headers,
+)
 from creeper.source_discovery.index_space import HarvestRegion, RegionSynopsis, SourceIndexSpec
 from creeper.sources.archive.host_year import (
     HostYearMask,
@@ -68,6 +75,7 @@ class RegionProbeResult:
     region: HarvestRegion
     synopsis: RegionSynopsis
     sampled_ranges: tuple[SampledByteRange, ...]
+    object_identity: HistoricalIndexObjectIdentity
 
 
 def _is_compressed(locator: str) -> bool:
@@ -180,7 +188,42 @@ class RegionProbeExecutor:
                 f"unsupported region-probe scheme: {parsed.scheme!r}"
             )
 
-    async def _remote_size(self, locator: str) -> tuple[int, int]:
+    @staticmethod
+    def _parse_content_range(response: httpx.Response) -> tuple[int, int, int]:
+        content_range = response.headers.get("content-range", "")
+        if (
+            not content_range.lower().startswith("bytes ")
+            or "/" not in content_range
+        ):
+            raise RegionProbeError("Range response omitted valid Content-Range")
+        try:
+            range_part, total_part = content_range.split(" ", 1)[1].split("/", 1)
+            start_text, end_text = range_part.split("-", 1)
+            start = int(start_text)
+            end = int(end_text)
+            total = int(total_part)
+        except (ValueError, IndexError) as exc:
+            raise RegionProbeError(
+                "Range response has invalid Content-Range"
+            ) from exc
+        if start < 0 or end < start or total <= end:
+            raise RegionProbeError("Range response has invalid Content-Range")
+        return start, end, total
+
+    @staticmethod
+    def _ensure_identity(
+        expected: HistoricalIndexObjectIdentity,
+        observed: HistoricalIndexObjectIdentity,
+    ) -> None:
+        try:
+            ensure_same_historical_index_object(expected, observed)
+        except HistoricalIndexIdentityError as exc:
+            raise RegionProbeError(str(exc)) from exc
+
+    async def _remote_metadata(
+        self,
+        locator: str,
+    ) -> tuple[int, int, HistoricalIndexObjectIdentity]:
         if self.client is None:
             raise RegionProbeError("remote region probe requires an HTTP client")
         timeout = httpx.Timeout(self.policy.timeout_seconds)
@@ -193,11 +236,17 @@ class RegionProbeExecutor:
         if response.status_code < 400:
             raw = response.headers.get("content-length")
             if raw is not None and raw.isdigit():
-                return int(raw), requests
+                size = int(raw)
+                identity = remote_identity_from_headers(
+                    response.headers,
+                    content_length=size,
+                )
+                if identity.is_verifiable:
+                    return size, requests, identity
 
-        # Some archive hosts do not implement HEAD correctly. A one-byte Range
-        # request still discovers the object size from Content-Range without
-        # downloading the object.
+        # Some archive hosts either do not implement HEAD correctly or omit
+        # validators there. A one-byte Range request can recover both total
+        # object size and response validators without downloading the object.
         response = await self.client.get(
             locator,
             headers={
@@ -209,26 +258,61 @@ class RegionProbeExecutor:
         requests += 1
         if response.status_code != 206:
             raise RegionProbeError(
-                "unable to determine remote object size with bounded Range access"
+                "unable to determine remote object identity with bounded Range access"
             )
-        content_range = response.headers.get("content-range", "")
-        if "/" not in content_range:
-            raise RegionProbeError("Range response omitted total object size")
-        raw_total = content_range.rsplit("/", 1)[-1].strip()
-        if not raw_total.isdigit():
-            raise RegionProbeError("Range response has invalid total object size")
-        return int(raw_total), requests
+        returned_start, returned_end, total = self._parse_content_range(response)
+        if returned_start != 0 or returned_end != 0:
+            raise RegionProbeError(
+                "metadata Range response returned an unexpected byte interval"
+            )
+        identity = remote_identity_from_headers(
+            response.headers,
+            content_length=total,
+        )
+        if not identity.is_verifiable:
+            raise RegionProbeError(
+                "historical index object identity cannot be verified"
+            )
+        return total, requests, identity
 
-    async def _object_size(self, index: SourceIndexSpec) -> tuple[int, int]:
-        if index.content_length is not None:
-            return index.content_length, 0
+    async def _object_size(
+        self,
+        index: SourceIndexSpec,
+        *,
+        expected_identity: HistoricalIndexObjectIdentity | None,
+    ) -> tuple[int, int, HistoricalIndexObjectIdentity | None]:
         path = _local_path(index.locator)
         if path is not None:
             try:
-                return path.stat().st_size, 0
-            except OSError as exc:
-                raise RegionProbeError(f"unable to stat local index: {exc}") from exc
-        return await self._remote_size(index.locator)
+                observed = capture_local_identity(path)
+            except HistoricalIndexIdentityError as exc:
+                raise RegionProbeError(str(exc)) from exc
+            if (
+                index.content_length is not None
+                and observed.content_length != index.content_length
+            ):
+                raise RegionProbeError(
+                    "historical index object identity changed after tomography"
+                )
+            if expected_identity is not None:
+                self._ensure_identity(expected_identity, observed)
+            assert observed.content_length is not None
+            return observed.content_length, 0, observed
+
+        if expected_identity is not None:
+            if expected_identity.kind != "remote":
+                raise RegionProbeError(
+                    "historical index object identity changed after tomography"
+                )
+            if expected_identity.content_length is not None:
+                return expected_identity.content_length, 0, expected_identity
+
+        if index.content_length is not None:
+            return index.content_length, 0, None
+        size, requests, observed = await self._remote_metadata(index.locator)
+        if expected_identity is not None:
+            self._ensure_identity(expected_identity, observed)
+        return size, requests, observed
 
     async def _read_range(
         self,
@@ -237,13 +321,21 @@ class RegionProbeExecutor:
         start: int,
         end: int,
         object_end: int,
-    ) -> tuple[bytes, int]:
+        expected_identity: HistoricalIndexObjectIdentity | None,
+    ) -> tuple[bytes, int, HistoricalIndexObjectIdentity]:
         path = _local_path(locator)
         if path is not None:
             try:
+                observed = capture_local_identity(path)
+                if expected_identity is not None:
+                    self._ensure_identity(expected_identity, observed)
                 with path.open("rb") as source:
                     source.seek(start)
                     payload = source.read(end - start + 1)
+                after = capture_local_identity(path)
+                self._ensure_identity(observed, after)
+            except HistoricalIndexIdentityError as exc:
+                raise RegionProbeError(str(exc)) from exc
             except OSError as exc:
                 raise RegionProbeError(f"unable to read local index range: {exc}") from exc
             return (
@@ -254,6 +346,7 @@ class RegionProbeExecutor:
                     object_end=object_end,
                 ),
                 0,
+                observed,
             )
 
         if self.client is None:
@@ -272,17 +365,39 @@ class RegionProbeExecutor:
                 f"remote source ignored/failed bounded Range request: "
                 f"HTTP {response.status_code}"
             )
+        returned_start, returned_end, total = self._parse_content_range(response)
+        if returned_start != start or returned_end != end:
+            raise RegionProbeError(
+                "remote Range response returned an unexpected byte interval"
+            )
+        if total != object_end + 1:
+            raise RegionProbeError(
+                "historical index object identity changed after tomography"
+            )
+        observed = remote_identity_from_headers(
+            response.headers,
+            content_length=total,
+        )
+        if not observed.is_verifiable:
+            raise RegionProbeError(
+                "historical index object identity cannot be verified"
+            )
+        if expected_identity is not None:
+            self._ensure_identity(expected_identity, observed)
         payload = response.content
-        if len(payload) > end - start + 1:
-            raise RegionProbeError("Range response exceeded requested byte budget")
+        if len(payload) != end - start + 1:
+            raise RegionProbeError(
+                "Range response length did not match requested byte interval"
+            )
         return (
             _trim_complete_lines(
                 payload,
                 start=start,
-                end=start + max(0, len(payload) - 1),
+                end=end,
                 object_end=object_end,
             ),
             1,
+            observed,
         )
 
     @staticmethod
@@ -318,12 +433,17 @@ class RegionProbeExecutor:
         self,
         index: SourceIndexSpec,
         region: HarvestRegion,
+        *,
+        expected_identity: HistoricalIndexObjectIdentity | None = None,
     ) -> RegionProbeResult:
         self._validate_index(index)
         if region.index_key != index.index_key:
             raise RegionProbeError("region does not belong to supplied index")
 
-        object_size, metadata_requests = await self._object_size(index)
+        object_size, metadata_requests, bound_identity = await self._object_size(
+            index,
+            expected_identity=expected_identity,
+        )
         if object_size < 1:
             raise RegionProbeError("cannot probe an empty historical index")
         object_end = object_size - 1
@@ -352,12 +472,17 @@ class RegionProbeExecutor:
         source_format = index.capabilities.format
 
         for start, end in ranges:
-            payload, requests = await self._read_range(
+            payload, requests, observed_identity = await self._read_range(
                 index.locator,
                 start=start,
                 end=end,
                 object_end=object_end,
+                expected_identity=bound_identity,
             )
+            if bound_identity is None:
+                bound_identity = observed_identity
+            else:
+                self._ensure_identity(bound_identity, observed_identity)
             source_requests += requests
             raw_bytes = end - start + 1
             bytes_read += raw_bytes
@@ -394,8 +519,13 @@ class RegionProbeExecutor:
             batch_size=self.policy.baseline_batch_size,
             minhash_width=self.policy.minhash_width,
         )
+        if bound_identity is None:
+            raise RegionProbeError(
+                "historical index object identity cannot be verified"
+            )
         return RegionProbeResult(
             region=normalized_region,
             synopsis=synopsis,
             sampled_ranges=tuple(sampled_ranges),
+            object_identity=bound_identity,
         )
