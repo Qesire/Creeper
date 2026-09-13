@@ -690,9 +690,17 @@ class SourceDiscoveryCoordinator:
                 self.research_failure_recorder(directive, outcome.error, elapsed)
             return
 
-        self._research_context_failures.pop(directive.context_key, None)
         if self.research_result_committer is not None and outcome.value is not None:
-            self.research_result_committer(directive, outcome.value, elapsed)
+            try:
+                self.research_result_committer(directive, outcome.value, elapsed)
+            except (KeyError, ValueError) as exc:
+                counts["research_failures"] += 1
+                self._research_context_failures[directive.context_key] = (
+                    self._research_context_failures.get(directive.context_key, 0) + 1
+                )
+                if self.research_failure_recorder is not None:
+                    self.research_failure_recorder(directive, exc, elapsed)
+                return
         elif isinstance(outcome.value, SearchBatch):
             # Transitional compatibility path for the pre-L6 command-agent
             # executor.  The integrated L6 adapter should instead provide a
@@ -728,6 +736,7 @@ class SourceDiscoveryCoordinator:
             except (KeyError, ValueError):
                 counts["research_failures"] += 1
                 return
+        self._research_context_failures.pop(directive.context_key, None)
         self._research_completed_contexts.add(directive.context_key)
         counts["research_completed"] += 1
 
