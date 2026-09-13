@@ -12,6 +12,7 @@ import argparse
 from datetime import datetime, timezone
 import json
 from pathlib import Path
+import tomllib
 
 from creeper.authority.identity import (
     AuthoritySnapshot,
@@ -39,6 +40,36 @@ def _required_text(payload: dict[str, object], key: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"readiness report requires non-empty {key}")
     return value
+
+
+def _declared_reviewed_contract_registry(
+    production_config: Path,
+) -> Path | None:
+    """Resolve the optional reviewed registry declared by production TOML."""
+    production_config = Path(production_config)
+    try:
+        with production_config.open("rb") as source:
+            config = tomllib.load(source)
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        raise ValueError(
+            f"cannot read production config: {production_config}"
+        ) from exc
+    value = config.get("evidence_contract_registry")
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(
+            "production config evidence_contract_registry must be a non-empty path"
+        )
+    registry = Path(value)
+    if not registry.is_absolute():
+        registry = production_config.parent / registry
+    registry = registry.resolve()
+    if not registry.is_file():
+        raise FileNotFoundError(
+            f"declared reviewed contract registry does not exist: {registry}"
+        )
+    return registry
 
 
 def _build_snapshot_from_readiness(
@@ -210,6 +241,21 @@ def run_export(
             allow_external=True,
         )
     ]
+    reviewed_registry = _declared_reviewed_contract_registry(
+        Path(production_config)
+    )
+    if reviewed_registry is not None:
+        specs.append(
+            ArtifactSpec(
+                logical_role="reviewed_contract_registry",
+                source_path=reviewed_registry,
+                archive_path="artifacts/runtime/reviewed_contract_registry.json",
+                allow_external=True,
+                license_or_access_note=(
+                    "Reviewed authority registry declared by production config"
+                ),
+            )
+        )
     specs.extend(
         ArtifactSpec(
             logical_role="source_report",
@@ -273,6 +319,7 @@ def run_export(
             documentation_path=Path(documentation),
             artifact_specs=tuple(specs),
             artifact_allowed_roots=(),
+            telemetry_path=runtime_data_root / "telemetry.sqlite3",
         )
     finally:
         candidates.close()

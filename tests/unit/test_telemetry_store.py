@@ -97,6 +97,27 @@ class RuntimeTelemetryStoreTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_submission_export_metrics_are_published_as_operational_telemetry(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = RuntimeTelemetryStore(Path(tmp) / "telemetry.sqlite3")
+            try:
+                store.record_submission_export(
+                    {"submission_stream_peak_buffer_bytes": 4096}
+                )
+                store.record_submission_export(
+                    {"submission_stream_peak_buffer_bytes": 2048}
+                )
+
+                snapshot = store.snapshot()
+
+                self.assertEqual(
+                    snapshot.gauges["submission_stream_peak_buffer_bytes"],
+                    4096.0,
+                )
+                self.assertEqual(snapshot.counters["submission_exports"], 2)
+            finally:
+                store.close()
+
 
 if __name__ == "__main__":
     unittest.main()

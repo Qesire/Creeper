@@ -147,6 +147,20 @@ class RuntimeTelemetryStore:
                 rows,
             )
 
+    def record_submission_export(
+        self,
+        metrics: Mapping[str, int | float],
+    ) -> None:
+        """Publish one independently verified submission's stream metrics.
+
+        Export metrics describe the observed peak/value of a successful
+        export, so they are retained as monotonic operational gauges. The
+        completion counter is incremented only by callers after independent
+        verification has passed.
+        """
+        self.set_max_gauges(metrics)
+        self.add_counters({"submission_exports": 1})
+
     def append_resource_sample(
         self,
         *,

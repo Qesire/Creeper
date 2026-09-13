@@ -10,6 +10,7 @@ from creeper.evidence.policies import EvidenceCapsule
 from creeper.runtime.submission import export_runtime_submission
 from creeper.storage.candidate_store import CandidateStore
 from creeper.storage.evidence_store import EvidenceStore
+from creeper.storage.telemetry_store import RuntimeTelemetryStore
 from creeper.submission.artifact_manifest import ArtifactSpec
 from creeper.submission.snapshot import SubmissionSnapshot
 
@@ -169,12 +170,20 @@ class V5FullLoopIntegrationTests(unittest.TestCase):
                 documentation_path=documentation,
                 artifact_specs=(artifact,),
                 artifact_allowed_roots=(source_root,),
+                telemetry_path=runtime / "telemetry.sqlite3",
             )
 
             self.assertTrue(archive.is_file())
             self.assertTrue(report.ready, report.errors)
             self.assertEqual(report.recomputed_novel_eed, "1")
             self.assertEqual(report.recomputed_growth_rate, "0.1")
+            with RuntimeTelemetryStore(runtime / "telemetry.sqlite3") as telemetry:
+                metrics = telemetry.snapshot()
+                self.assertGreater(
+                    metrics.gauges["submission_stream_peak_buffer_bytes"],
+                    0,
+                )
+                self.assertEqual(metrics.counters["submission_exports"], 1)
             evidence.close()
             candidates.close()
 

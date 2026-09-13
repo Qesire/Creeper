@@ -15,6 +15,7 @@ from creeper.evidence.classification import (
 )
 from creeper.storage.candidate_store import CandidateStore
 from creeper.storage.evidence_store import EvidenceStore
+from creeper.storage.telemetry_store import RuntimeTelemetryStore
 from creeper.submission.artifact_manifest import ArtifactSpec
 from creeper.submission.builder import build_snapshot
 from creeper.submission.precheck import format_growth_rate
@@ -252,6 +253,7 @@ def export_runtime_submission(
     documentation_path: Path,
     artifact_specs: tuple[ArtifactSpec, ...],
     artifact_allowed_roots: tuple[Path, ...] = (),
+    telemetry_path: Path | None = None,
 ) -> tuple[Path, VerificationReport]:
     """Stream the formal runtime package and independently verify it.
 
@@ -283,6 +285,7 @@ def export_runtime_submission(
                     continue
                 yield capsule
 
+        stream_metrics: dict[str, int] = {}
         archive = build_streaming_submission_zip(
             snapshot,
             name,
@@ -294,6 +297,7 @@ def export_runtime_submission(
             artifact_specs=artifact_specs,
             artifact_allowed_roots=artifact_allowed_roots,
             require_production_config=True,
+            metrics_out=stream_metrics,
         )
     finally:
         baseline.close()
@@ -310,4 +314,7 @@ def export_runtime_submission(
             "independent submission verification failed: "
             + "; ".join(verification.errors)
         )
+    if telemetry_path is not None:
+        with RuntimeTelemetryStore(Path(telemetry_path)) as telemetry:
+            telemetry.record_submission_export(stream_metrics)
     return archive, verification
