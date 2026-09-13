@@ -20,8 +20,8 @@ def make_region(**overrides):
         expected_source_family="catalog",
         expected_contract_family="cdx",
         context_hash="ctx",
-        **overrides,
     )
+    values.update(overrides)
     return ExplorationRegion(**values)
 
 
