@@ -120,6 +120,7 @@ def parse_cdxj_catalog(html: str, *, base_url: str) -> list[CdxjCatalogEntry]:
     base_directory = base.path.rstrip("/")
     tree = LexborHTMLParser(html)
     entries: list[CdxjCatalogEntry] = []
+    seen_urls: set[str] = set()
 
     for anchor in tree.css("a[href]"):
         href = anchor.attributes.get("href")
@@ -134,12 +135,19 @@ def parse_cdxj_catalog(html: str, *, base_url: str) -> list[CdxjCatalogEntry]:
         if parsed.path.rsplit("/", 1)[0] != base_directory:
             continue
 
+        # The same resource may appear multiple times in repaired/mirrored
+        # directory markup. Keep the first catalog occurrence so retries are
+        # deterministic and coordinator registration remains idempotent.
+        if url in seen_urls:
+            continue
+
         parsed_size = _parse_size(_size_context(anchor))
         if parsed_size is None:
             continue
         size_bytes, size_text = parsed_size
         name = anchor.text(deep=True, separator=" ", strip=True) or parsed.path.rsplit("/", 1)[-1]
         entries.append(CdxjCatalogEntry(name, url, size_bytes, size_text))
+        seen_urls.add(url)
     return entries
 
 

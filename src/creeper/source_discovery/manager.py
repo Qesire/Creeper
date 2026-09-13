@@ -42,6 +42,7 @@ class SourcePoolTargets:
     warm_target: int = 20
     cold_min: int = 50
     cold_target: int = 100
+    max_cold_credit_per_origin: int = 12
     triage_batch: int = 16
     scout_parallelism: int = 4
     max_search_directives: int = 3
@@ -54,6 +55,7 @@ class SourcePoolTargets:
             self.warm_target,
             self.cold_min,
             self.cold_target,
+            self.max_cold_credit_per_origin,
             self.triage_batch,
             self.scout_parallelism,
             self.max_search_directives,
@@ -66,6 +68,8 @@ class SourcePoolTargets:
             raise ValueError("warm_min cannot exceed warm_target")
         if self.cold_min > self.cold_target:
             raise ValueError("cold_min cannot exceed cold_target")
+        if self.max_cold_credit_per_origin < 1:
+            raise ValueError("max_cold_credit_per_origin must be positive")
         if self.triage_batch < 1 or self.scout_parallelism < 1:
             raise ValueError("triage and scout capacities must be positive")
         if self.max_search_directives < 1:
@@ -91,6 +95,7 @@ class ReservoirPlan:
     active_count: int
     warm_count: int
     cold_count: int
+    effective_cold_count: int
     triage_source_keys: tuple[str, ...]
     scout_source_keys: tuple[str, ...]
     activate_source_keys: tuple[str, ...]
@@ -104,10 +109,11 @@ class ReservoirPlan:
 class SourceReservoirManager:
     """Plan finite source work before requesting more agent/search supply.
 
-    Search is consumption-driven: existing DISCOVERED/TRIAGED/SCOUT_READY work
-    is drained before the manager asks agents for additional candidates. This
-    keeps expensive search roughly coupled to source consumption rather than to
-    wall-clock uptime.
+    Search is consumption-driven, but cold inventory receives bounded credit
+    per origin so thousands of sibling shards cannot masquerade as independent
+    discovery opportunities. Direct-inventory starvation and structural HOLD
+    metasources may bypass the ordinary cold refill gate while retaining the
+    existing bounded search concurrency and cooldown controls.
     """
 
     _COLD_STATES = frozenset(
@@ -147,6 +153,51 @@ class SourceReservoirManager:
             for candidate in candidates
             if self.registry.suppression_reason(candidate) is None
         ]
+
+    def _effective_cold_count(
+        self,
+        candidates: list[SourceCandidate],
+    ) -> int:
+        """Return diversity-bounded cold scheduling credit.
+
+        Raw inventory remains available for reporting through cold_count.
+        Suppressed candidates are excluded by the caller before this method is
+        reached, so a suppressed source/family/origin contributes no credit.
+        """
+        per_origin: dict[str, int] = {}
+        for candidate in candidates:
+            if candidate.state not in self._COLD_STATES:
+                continue
+            per_origin[candidate.origin] = per_origin.get(candidate.origin, 0) + 1
+        cap = self.targets.max_cold_credit_per_origin
+        return sum(min(count, cap) for count in per_origin.values())
+
+    @staticmethod
+    def _is_productive_direct_inventory(
+        candidate: SourceCandidate,
+    ) -> bool:
+        """Scheduling-only direct-source predicate; never evidence authority."""
+        return (
+            candidate.state in {SourceState.WARM, SourceState.ACTIVE}
+            and candidate.direct_evidence_prior >= 0.5
+        )
+
+    def _structural_holds(self) -> list[SourceCandidate]:
+        holds = [
+            candidate
+            for candidate in self.registry.list_candidates(
+                state=SourceState.HOLD
+            )
+            if (
+                candidate.source_family
+                in {"RESOURCE_CATALOG", "RESOURCE_DIRECTORY"}
+                or candidate.level
+                in {SourceLevel.COLLECTION, SourceLevel.METASOURCE}
+            )
+            and self.registry.suppression_reason(candidate) is None
+        ]
+        holds.sort(key=lambda item: (-item.scout_priority, item.source_key))
+        return holds
 
     def _overlap_penalty(
         self,
@@ -353,19 +404,27 @@ class SourceReservoirManager:
     def _search_directives(
         self,
         *,
-        cold_count: int,
+        effective_cold_count: int,
         projected_warm: int,
         candidates: list[SourceCandidate],
     ) -> tuple[SearchDirective, ...]:
-        if cold_count >= self.targets.cold_min:
+        ordinary_refill = effective_cold_count < self.targets.cold_min
+        direct_starved = not any(
+            self._is_productive_direct_inventory(candidate)
+            for candidate in candidates
+        )
+        structural_holds = self._structural_holds()
+        if not ordinary_refill and not direct_starved and not structural_holds:
             return ()
 
-        # Every parallel search shares one finite refill budget. Building the
-        # strategy set first and allocating the deficit second prevents N
-        # concurrent search workers from each assuming they own the full gap.
-        gap = self.targets.cold_target - cold_count
-        if gap <= 0:
-            return ()
+        # Normal refill demand is measured against the diversity-bounded pool.
+        # Emergency direct/structural work can still request one bounded action
+        # even when the ordinary cold target is already satisfied.
+        gap = (
+            max(0, self.targets.cold_target - effective_cold_count)
+            if ordinary_refill
+            else 0
+        )
 
         specs: list[
             tuple[
@@ -392,33 +451,25 @@ class SourceReservoirManager:
             specs.append((kind, strategy, subject, reason, task_type))
 
         # Direct timestamp-bearing bulk indexes bypass the scarce per-host
-        # Wayback evidence lane entirely, so always reserve the first refill arm
-        # for them while the cold pool is below target.
-        add_spec(
-            SearchDirectiveKind.DIRECT_EVIDENCE,
-            "DIRECT_EVIDENCE_BULK",
-            "cdx/cdxj archive indexes and manifests",
-            "prioritize timestamp-bearing bulk indexes that can directly produce host-year evidence",
-            SourceIntelligenceTask.DISCOVER_NEW_SOURCE,
-        )
+        # Wayback evidence lane. Keep this arm for ordinary refill and reserve
+        # it as an emergency when no WARM/ACTIVE direct inventory exists.
+        if ordinary_refill or direct_starved:
+            direct_reason = (
+                "no WARM/ACTIVE direct-evidence source is available; reserve "
+                "one bounded direct-source discovery arm"
+                if direct_starved
+                else "prioritize timestamp-bearing bulk indexes that can "
+                "directly produce host-year evidence"
+            )
+            add_spec(
+                SearchDirectiveKind.DIRECT_EVIDENCE,
+                "DIRECT_EVIDENCE_BULK",
+                "cdx/cdxj archive indexes and manifests",
+                direct_reason,
+                SourceIntelligenceTask.DISCOVER_NEW_SOURCE,
+            )
 
-        structural_holds = [
-            candidate
-            for candidate in self.registry.list_candidates(
-                state=SourceState.HOLD
-            )
-            if (
-                candidate.source_family
-                in {"RESOURCE_CATALOG", "RESOURCE_DIRECTORY"}
-                or candidate.level
-                in {SourceLevel.COLLECTION, SourceLevel.METASOURCE}
-            )
-            and self.registry.suppression_reason(candidate) is None
-        ]
         if structural_holds:
-            structural_holds.sort(
-                key=lambda item: (-item.scout_priority, item.source_key)
-            )
             subject_candidate = structural_holds[0]
             add_spec(
                 SearchDirectiveKind.INTERPRET_STRUCTURE,
@@ -431,55 +482,59 @@ class SourceReservoirManager:
                 SourceIntelligenceTask.INTERPRET_STRUCTURE,
             )
 
-        best_direct_origin = self._best_measured_direct_origin(candidates)
-        if best_direct_origin is not None:
-            origin, value = best_direct_origin
-            add_spec(
-                SearchDirectiveKind.DIRECT_EVIDENCE,
-                "EXPLOIT_DIRECT_ORIGIN",
-                origin,
-                (
-                    "search the same archive origin for sibling CDX/CDXJ "
-                    f"resources; measured direct yield={value:.6g} novel EED/s"
-                ),
-                SourceIntelligenceTask.EXPLOIT_SUCCESS_PATTERN,
-            )
+        if ordinary_refill:
+            best_direct_origin = self._best_measured_direct_origin(candidates)
+            if best_direct_origin is not None:
+                origin, value = best_direct_origin
+                add_spec(
+                    SearchDirectiveKind.DIRECT_EVIDENCE,
+                    "EXPLOIT_DIRECT_ORIGIN",
+                    origin,
+                    (
+                        "search the same archive origin for sibling CDX/CDXJ "
+                        f"resources; measured direct yield={value:.6g} novel EED/s"
+                    ),
+                    SourceIntelligenceTask.EXPLOIT_SUCCESS_PATTERN,
+                )
 
-        best_family = self._best_measured_family(candidates)
-        if projected_warm < self.targets.warm_min and best_family is not None:
-            family, value = best_family
-            add_spec(
-                SearchDirectiveKind.EXPLOIT_SOURCE_FAMILY,
-                "EXPLOIT_SUCCESS",
-                family,
-                f"warm reserve low; measured family yield={value:.6g} novel EED/s",
-                SourceIntelligenceTask.EXPLOIT_SUCCESS_PATTERN,
-            )
+            best_family = self._best_measured_family(candidates)
+            if projected_warm < self.targets.warm_min and best_family is not None:
+                family, value = best_family
+                add_spec(
+                    SearchDirectiveKind.EXPLOIT_SOURCE_FAMILY,
+                    "EXPLOIT_SUCCESS",
+                    family,
+                    f"warm reserve low; measured family yield={value:.6g} novel EED/s",
+                    SourceIntelligenceTask.EXPLOIT_SUCCESS_PATTERN,
+                )
 
-        best_strategy = self._best_observed_search_strategy()
-        add_spec(
-            SearchDirectiveKind.REFILL_RESERVOIR,
-            best_strategy,
-            None,
-            f"usable cold reserve {cold_count} below minimum {self.targets.cold_min}",
-            SourceIntelligenceTask.DISCOVER_NEW_SOURCE,
-        )
-        add_spec(
-            SearchDirectiveKind.DISCOVER_NEW_FAMILY,
-            "EXPLORE_NEW_FAMILY",
-            None,
-            "retain explicit exploration while refilling the candidate reserve",
-            SourceIntelligenceTask.DISCOVER_NEW_SOURCE,
-        )
-
-        if self._is_stagnating():
+            best_strategy = self._best_observed_search_strategy()
             add_spec(
-                SearchDirectiveKind.RECOVER_STAGNATION,
-                "RECOVER_STAGNATION",
+                SearchDirectiveKind.REFILL_RESERVOIR,
+                best_strategy,
                 None,
-                "recent completed source-search episodes produced no credited EED",
-                SourceIntelligenceTask.RECOVER_STAGNATION,
+                (
+                    f"effective cold reserve {effective_cold_count} below "
+                    f"minimum {self.targets.cold_min}"
+                ),
+                SourceIntelligenceTask.DISCOVER_NEW_SOURCE,
             )
+            add_spec(
+                SearchDirectiveKind.DISCOVER_NEW_FAMILY,
+                "EXPLORE_NEW_FAMILY",
+                None,
+                "retain explicit exploration while refilling the candidate reserve",
+                SourceIntelligenceTask.DISCOVER_NEW_SOURCE,
+            )
+
+            if self._is_stagnating():
+                add_spec(
+                    SearchDirectiveKind.RECOVER_STAGNATION,
+                    "RECOVER_STAGNATION",
+                    None,
+                    "recent completed source-search episodes produced no credited EED",
+                    SourceIntelligenceTask.RECOVER_STAGNATION,
+                )
 
         # Keep the two operationally necessary arms stable:
         # (1) direct timestamp-bearing evidence, (2) generic reservoir refill.
@@ -513,7 +568,11 @@ class SourceReservoirManager:
             )
         )
 
-        capacity = min(gap, self.targets.max_search_directives)
+        capacity = (
+            min(gap, self.targets.max_search_directives)
+            if ordinary_refill
+            else min(len(specs), self.targets.max_search_directives)
+        )
         selected: list[
             tuple[
                 SearchDirectiveKind,
@@ -534,20 +593,34 @@ class SourceReservoirManager:
             selected.extend(refill)
         if not selected:
             return ()
-        base, remainder = divmod(gap, len(selected))
-        directives = [
+        if ordinary_refill:
+            base, remainder = divmod(gap, len(selected))
+            directives = [
+                SearchDirective(
+                    kind=kind,
+                    strategy=strategy,
+                    desired_candidates=base + (1 if index < remainder else 0),
+                    subject=subject,
+                    reason=reason,
+                    task_type=task_type,
+                )
+                for index, (kind, strategy, subject, reason, task_type)
+                in enumerate(selected)
+            ]
+            assert sum(item.desired_candidates for item in directives) == gap
+            return tuple(directives)
+
+        return tuple(
             SearchDirective(
                 kind=kind,
                 strategy=strategy,
-                desired_candidates=base + (1 if index < remainder else 0),
+                desired_candidates=1,
                 subject=subject,
                 reason=reason,
                 task_type=task_type,
             )
-            for index, (kind, strategy, subject, reason, task_type) in enumerate(selected)
-        ]
-        assert sum(item.desired_candidates for item in directives) == gap
-        return tuple(directives)
+            for kind, strategy, subject, reason, task_type in selected
+        )
 
     def plan(self) -> ReservoirPlan:
         # Terminal historical rows are audit state, not scheduling inventory.
@@ -572,6 +645,7 @@ class SourceReservoirManager:
         active = by_state[SourceState.ACTIVE]
         warm = by_state[SourceState.WARM]
         cold_count = sum(len(by_state[state]) for state in self._COLD_STATES)
+        effective_cold_count = self._effective_cold_count(candidates)
 
         warm_ranked = self._rank_warm(warm, active=active)
         activation_slots = max(0, self.targets.active_target - len(active))
@@ -601,7 +675,7 @@ class SourceReservoirManager:
         scout = scout_candidates[:scout_slots]
 
         directives = self._search_directives(
-            cold_count=cold_count,
+            effective_cold_count=effective_cold_count,
             projected_warm=projected_warm,
             candidates=candidates,
         )
@@ -609,6 +683,7 @@ class SourceReservoirManager:
             active_count=len(active),
             warm_count=len(warm),
             cold_count=cold_count,
+            effective_cold_count=effective_cold_count,
             triage_source_keys=tuple(item.source_key for item in triage),
             scout_source_keys=tuple(item.source_key for item in scout),
             activate_source_keys=tuple(item.source_key for item in activate),

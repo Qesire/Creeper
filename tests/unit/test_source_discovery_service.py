@@ -46,9 +46,16 @@ warm_min = 3
 warm_target = 4
 cold_min = 5
 cold_target = 7
+max_cold_credit_per_origin = 9
 triage_batch = 8
 scout_parallelism = 2
 max_search_directives = 3
+
+[saturation]
+min_measured_siblings = 11
+min_total_observations = 25
+max_total_novel_eed_for_zero_class = 0.25
+suppression_ttl_seconds = 1800.0
 
 [coordinator]
 triage_parallelism = 6
@@ -92,6 +99,14 @@ max_returned_candidates = 17
         self.assertEqual(config.runtime_data_root, (self.root / "runtime").resolve())
         self.assertEqual(config.scrapy_project_dir, self.scrapy.resolve())
         self.assertEqual(config.pool.cold_target, 7)
+        self.assertEqual(config.pool.max_cold_credit_per_origin, 9)
+        self.assertEqual(config.saturation.min_measured_siblings, 11)
+        self.assertEqual(config.saturation.min_total_observations, 25)
+        self.assertEqual(
+            config.saturation.max_total_novel_eed_for_zero_class,
+            0.25,
+        )
+        self.assertEqual(config.saturation.suppression_ttl_seconds, 1800.0)
         self.assertEqual(config.coordinator.triage_parallelism, 6)
         self.assertEqual(config.coordinator.scout_parallelism, 2)
         self.assertEqual(config.scrapy.max_pages, 20)

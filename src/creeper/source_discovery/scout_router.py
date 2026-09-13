@@ -11,6 +11,7 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 
+from creeper.source_discovery.arquivo_catalog_scout import is_audited_arquivo_catalog
 from creeper.source_discovery.coordinator import ScoutDisposition, ScoutResult
 from creeper.source_discovery.models import SourceCandidate, SourceLevel
 
@@ -60,13 +61,21 @@ class SourceScoutRouter:
         *,
         structural_executor: ScoutCallable,
         measured_executor: ScoutCallable | None = None,
+        arquivo_catalog_executor: ScoutCallable | None = None,
         policy: SourceScoutRouterPolicy | None = None,
     ) -> None:
         self.structural_executor = structural_executor
         self.measured_executor = measured_executor
+        self.arquivo_catalog_executor = arquivo_catalog_executor
         self.policy = policy or SourceScoutRouterPolicy()
 
     async def __call__(self, candidate: SourceCandidate) -> ScoutResult:
+        if (
+            self.arquivo_catalog_executor is not None
+            and is_audited_arquivo_catalog(candidate)
+        ):
+            return await self.arquivo_catalog_executor(candidate)
+
         if self.policy.requires_structural_scout(candidate):
             return await self.structural_executor(candidate)
 

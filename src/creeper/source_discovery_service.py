@@ -29,6 +29,10 @@ from creeper.source_discovery.agent_search import (
     CommandAgentSearchExecutor,
     CommandAgentSearchPolicy,
 )
+from creeper.source_discovery.arquivo_catalog_scout import (
+    ArquivoCatalogScoutExecutor,
+    is_audited_arquivo_catalog,
+)
 from creeper.source_discovery.coordinator import (
     CoordinatorBusyError,
     SourceDiscoveryCoordinator,
@@ -40,7 +44,12 @@ from creeper.source_discovery.measured_scout import (
     MeasuredYieldScoutExecutor,
     MeasuredYieldScoutPolicy,
 )
+from creeper.source_discovery.models import SourceState
 from creeper.source_discovery.registry import SourceDiscoveryRegistry
+from creeper.source_discovery.saturation import (
+    SaturationPolicy,
+    SourceSaturationController,
+)
 from creeper.source_discovery.scout_router import SourceScoutRouter
 from creeper.source_discovery.scrapy_scout import (
     ScrapyStructuralScoutExecutor,
@@ -89,6 +98,7 @@ class SourceDiscoveryServiceConfig:
     triage: HttpTriagePolicy
     scrapy: ScrapyStructuralScoutPolicy
     agent: AgentConfig
+    saturation: SaturationPolicy = SaturationPolicy()
     measurement: MeasurementConfig | None = None
 
 
@@ -199,6 +209,13 @@ def load_source_discovery_config(config_path: Path) -> SourceDiscoveryServiceCon
         warm_target=_nonnegative_int(pool_raw.get("warm_target", pool_defaults.warm_target), name="pool.warm_target"),
         cold_min=_nonnegative_int(pool_raw.get("cold_min", pool_defaults.cold_min), name="pool.cold_min"),
         cold_target=_nonnegative_int(pool_raw.get("cold_target", pool_defaults.cold_target), name="pool.cold_target"),
+        max_cold_credit_per_origin=_positive_int(
+            pool_raw.get(
+                "max_cold_credit_per_origin",
+                pool_defaults.max_cold_credit_per_origin,
+            ),
+            name="pool.max_cold_credit_per_origin",
+        ),
         triage_batch=_positive_int(pool_raw.get("triage_batch", pool_defaults.triage_batch), name="pool.triage_batch"),
         scout_parallelism=_positive_int(pool_raw.get("scout_parallelism", pool_defaults.scout_parallelism), name="pool.scout_parallelism"),
         max_search_directives=_positive_int(
@@ -227,6 +244,39 @@ def load_source_discovery_config(config_path: Path) -> SourceDiscoveryServiceCon
         stagnation_window=_positive_int(
             coordinator_raw.get("stagnation_window", 6),
             name="coordinator.stagnation_window",
+        ),
+    )
+
+    saturation_raw = _table(root, "saturation")
+    saturation_defaults = SaturationPolicy()
+    saturation = SaturationPolicy(
+        min_measured_siblings=_positive_int(
+            saturation_raw.get(
+                "min_measured_siblings",
+                saturation_defaults.min_measured_siblings,
+            ),
+            name="saturation.min_measured_siblings",
+        ),
+        min_total_observations=_nonnegative_int(
+            saturation_raw.get(
+                "min_total_observations",
+                saturation_defaults.min_total_observations,
+            ),
+            name="saturation.min_total_observations",
+        ),
+        max_total_novel_eed_for_zero_class=_nonnegative_float(
+            saturation_raw.get(
+                "max_total_novel_eed_for_zero_class",
+                saturation_defaults.max_total_novel_eed_for_zero_class,
+            ),
+            name="saturation.max_total_novel_eed_for_zero_class",
+        ),
+        suppression_ttl_seconds=_positive_float(
+            saturation_raw.get(
+                "suppression_ttl_seconds",
+                saturation_defaults.suppression_ttl_seconds,
+            ),
+            name="saturation.suppression_ttl_seconds",
         ),
     )
 
@@ -388,6 +438,7 @@ def load_source_discovery_config(config_path: Path) -> SourceDiscoveryServiceCon
         triage=triage,
         scrapy=scrapy,
         agent=agent,
+        saturation=saturation,
         measurement=measurement,
     )
 
@@ -408,6 +459,41 @@ def _service_lock(path: Path):
             fcntl.flock(fd, fcntl.LOCK_UN)
         finally:
             os.close(fd)
+
+
+def _requeue_unexpanded_audited_arquivo_catalog(
+    registry: SourceDiscoveryRegistry,
+) -> int:
+    """Re-arm a legacy HOLD Arquivo parent exactly until catalog expansion lands.
+
+    Pre-recovery production may already have structurally scouted the curated
+    parent and left it in HOLD. The dedicated deterministic executor can only
+    run from SCOUT_READY/SCOUTING, so restart performs one idempotent migration.
+    A durable catalog edge is the completion marker; unrelated generic/LLM
+    children do not suppress the audited catalog expansion.
+    """
+
+    requeued = 0
+    for candidate in registry.list_candidates(state=SourceState.HOLD):
+        if not is_audited_arquivo_catalog(candidate):
+            continue
+        if registry.suppression_reason(candidate) is not None:
+            continue
+        expanded = registry.connection.execute(
+            """
+            SELECT 1
+            FROM source_edges
+            WHERE parent_key = ?
+              AND relation = 'catalog_enumerates_cdxj'
+            LIMIT 1
+            """,
+            (candidate.source_key,),
+        ).fetchone()
+        if expanded is not None:
+            continue
+        registry.transition(candidate.source_key, SourceState.SCOUT_READY)
+        requeued += 1
+    return requeued
 
 
 @asynccontextmanager
@@ -439,6 +525,11 @@ async def _open_runtime(config: SourceDiscoveryServiceConfig):
                 # Curated direct-evidence catalogs are only useful when the
                 # deterministic baseline/EED scout authority is configured.
                 ensure_curated_direct_catalogs(registry)
+                _requeue_unexpanded_audited_arquivo_catalog(registry)
+            saturation = SourceSaturationController(
+                registry,
+                policy=config.saturation,
+            )
             manager = SourceReservoirManager(
                 registry,
                 targets=config.pool,
@@ -473,9 +564,11 @@ async def _open_runtime(config: SourceDiscoveryServiceConfig):
                         load_english_weights(config.measurement.eed_model),
                         policy=config.measurement.policy,
                     )
+                arquivo_catalog = ArquivoCatalogScoutExecutor()
                 scout = SourceScoutRouter(
                     structural_executor=structural,
                     measured_executor=measured,
+                    arquivo_catalog_executor=arquivo_catalog,
                 )
                 intelligence_context = SourceIntelligenceContextBuilder(registry)
                 search = CommandAgentSearchExecutor(
@@ -496,6 +589,7 @@ async def _open_runtime(config: SourceDiscoveryServiceConfig):
                     scout_executor=scout,
                     search_executor=search,
                     scout_authority=scout_authority,
+                    saturation_controller=saturation,
                     triage_parallelism=config.coordinator.triage_parallelism,
                     scout_parallelism=config.coordinator.scout_parallelism,
                     search_parallelism=config.coordinator.search_parallelism,

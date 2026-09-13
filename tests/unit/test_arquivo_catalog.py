@@ -67,6 +67,25 @@ class ArquivoCatalogTests(unittest.TestCase):
         self.assertEqual([entry.name for entry in entries], ["ok.cdxj"])
         self.assertEqual(entries[0].size_bytes, 4_000)
 
+    def test_duplicate_resource_links_keep_first_occurrence(self) -> None:
+        html = """
+        <pre>
+        <a href="same.cdxj">same-first.cdxj</a> 1M
+        <a href="./same.cdxj">same-second.cdxj</a> 9G
+        <a href="other.cdxj">other.cdxj</a> 2M
+        </pre>
+        """
+
+        entries = parse_cdxj_catalog(html, base_url="https://arquivo.pt/datasets/cdxj/")
+
+        self.assertEqual(
+            [(entry.name, entry.url, entry.size_bytes) for entry in entries],
+            [
+                ("same-first.cdxj", "https://arquivo.pt/datasets/cdxj/same.cdxj", 1_000_000),
+                ("other.cdxj", "https://arquivo.pt/datasets/cdxj/other.cdxj", 2_000_000),
+            ],
+        )
+
     def test_bounded_selection_is_deterministic_and_size_ordered(self) -> None:
         html = """
         <pre>

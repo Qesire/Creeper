@@ -39,11 +39,12 @@ class SourceReservoirManagerTests(unittest.TestCase):
         confidence: float = 0.5,
         direct_evidence_prior: float = 0.4,
         origin: str = "https://example.com",
+        level: SourceLevel = SourceLevel.SOURCE,
     ):
         return SourceCandidate(
             canonical_entrypoint=f"{origin}/{name}/",
             source_family=family,
-            level=SourceLevel.SOURCE,
+            level=level,
             discovered_by="agent:test",
             discovery_strategy="META_SOURCE_SEARCH",
             expected_volume=1_000,
@@ -85,7 +86,7 @@ class SourceReservoirManagerTests(unittest.TestCase):
         self.registry.transition(candidate.source_key, SourceState.WARM)
 
     def test_activation_prefers_measured_novel_eed_rate_and_plan_is_pure(self) -> None:
-        active = self.candidate("active")
+        active = self.candidate("active", direct_evidence_prior=1.0)
         fast = self.candidate("fast")
         slow = self.candidate("slow")
         self.to_warm(active, novel_eed=2.0, elapsed_seconds=1.0)
@@ -165,6 +166,12 @@ class SourceReservoirManagerTests(unittest.TestCase):
         second = self.candidate("cold-b", confidence=0.4)
         self.registry.register_proposal(first)
         self.registry.register_proposal(second)
+        direct = self.candidate(
+            "direct-ready",
+            direct_evidence_prior=1.0,
+            origin="https://direct.example",
+        )
+        self.to_warm(direct, novel_eed=1.0, elapsed_seconds=1.0)
         manager = SourceReservoirManager(
             self.registry,
             targets=SourcePoolTargets(
@@ -183,6 +190,255 @@ class SourceReservoirManagerTests(unittest.TestCase):
         self.assertFalse(plan.needs_search)
         self.assertEqual(plan.cold_count, 2)
         self.assertEqual(plan.triage_source_keys, (first.source_key,))
+
+    def test_same_origin_flood_has_bounded_effective_cold_credit(self) -> None:
+        manager = SourceReservoirManager(
+            self.registry,
+            targets=SourcePoolTargets(
+                active_min=0,
+                active_target=0,
+                warm_min=0,
+                warm_target=0,
+                cold_min=60,
+                cold_target=100,
+                max_cold_credit_per_origin=12,
+            ),
+        )
+        siblings = [
+            self.candidate(
+                f"shard-{index}",
+                origin="https://flood.example",
+            )
+            for index in range(2353)
+        ]
+
+        self.assertEqual(len(siblings), 2353)
+        self.assertEqual(manager._effective_cold_count(siblings), 12)
+
+    def test_same_origin_flood_with_no_direct_inventory_forces_direct_search(self) -> None:
+        for index in range(20):
+            self.to_scout_ready(
+                self.candidate(
+                    f"flood-{index}",
+                    origin="https://flood.example",
+                )
+            )
+        manager = SourceReservoirManager(
+            self.registry,
+            targets=SourcePoolTargets(
+                active_min=0,
+                active_target=0,
+                warm_min=0,
+                warm_target=0,
+                cold_min=10,
+                cold_target=10,
+                max_cold_credit_per_origin=12,
+                max_search_directives=3,
+            ),
+        )
+
+        plan = manager.plan()
+
+        self.assertEqual(plan.cold_count, 20)
+        self.assertEqual(plan.effective_cold_count, 12)
+        self.assertEqual(
+            [item.strategy for item in plan.search_directives],
+            ["DIRECT_EVIDENCE_BULK"],
+        )
+        self.assertEqual(plan.search_directives[0].desired_candidates, 1)
+
+    def test_hold_metasource_bypasses_leaf_cold_gate(self) -> None:
+        direct = self.candidate(
+            "healthy-direct",
+            direct_evidence_prior=1.0,
+            origin="https://direct.example",
+        )
+        self.to_warm(direct, novel_eed=1.0, elapsed_seconds=1.0)
+        for index in range(15):
+            self.registry.register_proposal(
+                self.candidate(
+                    f"diverse-{index}",
+                    origin=f"https://cold-{index}.example",
+                )
+            )
+        catalog = self.candidate(
+            "catalog",
+            family="RESOURCE_CATALOG",
+            origin="https://catalog.example",
+            level=SourceLevel.METASOURCE,
+        )
+        self.registry.register_proposal(catalog)
+        self.registry.transition(catalog.source_key, SourceState.HOLD)
+        manager = SourceReservoirManager(
+            self.registry,
+            targets=SourcePoolTargets(
+                active_min=0,
+                active_target=0,
+                warm_min=0,
+                warm_target=0,
+                cold_min=5,
+                cold_target=10,
+                max_search_directives=2,
+            ),
+        )
+
+        plan = manager.plan()
+
+        self.assertEqual(plan.cold_count, 15)
+        self.assertEqual(plan.effective_cold_count, 15)
+        self.assertEqual(len(plan.search_directives), 1)
+        self.assertEqual(
+            plan.search_directives[0].kind,
+            SearchDirectiveKind.INTERPRET_STRUCTURE,
+        )
+        self.assertEqual(
+            plan.search_directives[0].subject,
+            catalog.canonical_entrypoint,
+        )
+
+    def test_healthy_diverse_cold_pool_above_target_does_not_oversearch(self) -> None:
+        direct = self.candidate(
+            "healthy-direct",
+            direct_evidence_prior=1.0,
+            origin="https://direct.example",
+        )
+        self.to_warm(direct, novel_eed=1.0, elapsed_seconds=1.0)
+        for index in range(15):
+            self.registry.register_proposal(
+                self.candidate(
+                    f"diverse-{index}",
+                    origin=f"https://cold-{index}.example",
+                )
+            )
+        manager = SourceReservoirManager(
+            self.registry,
+            targets=SourcePoolTargets(
+                active_min=0,
+                active_target=0,
+                warm_min=0,
+                warm_target=0,
+                cold_min=5,
+                cold_target=10,
+            ),
+        )
+
+        plan = manager.plan()
+
+        self.assertEqual(plan.effective_cold_count, 15)
+        self.assertFalse(plan.needs_search)
+
+    def test_direct_emergency_respects_search_cooldown(self) -> None:
+        for index in range(15):
+            self.registry.register_proposal(
+                self.candidate(
+                    f"diverse-{index}",
+                    origin=f"https://cold-{index}.example",
+                )
+            )
+        episode = self.registry.begin_search_episode(
+            strategy="DIRECT_EVIDENCE_BULK",
+            backend="test",
+            query="direct indexes",
+            actor="test",
+            episode_id="search:direct-cooldown",
+        )
+        self.registry.finish_search_episode(
+            episode.episode_id,
+            search_cost_seconds=1.0,
+        )
+        manager = SourceReservoirManager(
+            self.registry,
+            targets=SourcePoolTargets(
+                active_min=0,
+                active_target=0,
+                warm_min=0,
+                warm_target=0,
+                cold_min=5,
+                cold_target=10,
+            ),
+            search_cooldown_seconds=3600.0,
+        )
+
+        plan = manager.plan()
+
+        self.assertEqual(plan.effective_cold_count, 15)
+        self.assertFalse(
+            any(
+                item.strategy == "DIRECT_EVIDENCE_BULK"
+                for item in plan.search_directives
+            )
+        )
+        self.assertFalse(plan.needs_search)
+
+    def test_search_recovery_still_respects_max_search_directives(self) -> None:
+        catalog = self.candidate(
+            "catalog",
+            family="RESOURCE_CATALOG",
+            origin="https://catalog.example",
+            level=SourceLevel.METASOURCE,
+        )
+        self.registry.register_proposal(catalog)
+        self.registry.transition(catalog.source_key, SourceState.HOLD)
+        manager = SourceReservoirManager(
+            self.registry,
+            targets=SourcePoolTargets(
+                active_min=0,
+                active_target=0,
+                warm_min=2,
+                warm_target=4,
+                cold_min=10,
+                cold_target=20,
+                max_search_directives=2,
+            ),
+        )
+
+        plan = manager.plan()
+
+        self.assertLessEqual(len(plan.search_directives), 2)
+        self.assertEqual(
+            plan.search_directives[0].strategy,
+            "DIRECT_EVIDENCE_BULK",
+        )
+
+    def test_suppressed_candidate_receives_no_effective_cold_credit(self) -> None:
+        kept = self.candidate(
+            "kept",
+            origin="https://shared.example",
+        )
+        suppressed = self.candidate(
+            "suppressed-credit",
+            origin="https://shared.example",
+        )
+        self.registry.register_proposal(kept)
+        self.registry.register_proposal(suppressed)
+        self.registry.suppress_candidate(
+            suppressed,
+            scope=SuppressionScope.SOURCE,
+            reason="measured exhausted leaf",
+        )
+        direct = self.candidate(
+            "healthy-direct",
+            direct_evidence_prior=1.0,
+            origin="https://direct.example",
+        )
+        self.to_warm(direct, novel_eed=1.0, elapsed_seconds=1.0)
+        manager = SourceReservoirManager(
+            self.registry,
+            targets=SourcePoolTargets(
+                active_min=0,
+                active_target=0,
+                warm_min=0,
+                warm_target=0,
+                cold_min=1,
+                cold_target=1,
+            ),
+        )
+
+        plan = manager.plan()
+
+        self.assertEqual(plan.cold_count, 1)
+        self.assertEqual(plan.effective_cold_count, 1)
+        self.assertFalse(plan.needs_search)
 
     def test_cold_deficit_emits_parallel_exploit_refill_and_exploration(self) -> None:
         proven = self.candidate("proven", family="HIGH_YIELD_FAMILY")

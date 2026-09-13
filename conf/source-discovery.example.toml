@@ -12,9 +12,20 @@ warm_min = 10
 warm_target = 20
 cold_min = 50
 cold_target = 100
+# Thousands of siblings from one origin count only this much toward refill.
+# Rows remain durable/auditable; this is scheduling credit only.
+max_cold_credit_per_origin = 12
 triage_batch = 16
 scout_parallelism = 4
 max_search_directives = 3
+
+[saturation]
+# Current-authority measured siblings with durable zero yield suppress only
+# their exact origin for scheduling. Never suppress BULK_ARTIFACT globally.
+min_measured_siblings = 32
+min_total_observations = 0
+max_total_novel_eed_for_zero_class = 0.0
+suppression_ttl_seconds = 21600.0
 
 [coordinator]
 # External I/O overlaps; SQLite authority commits remain serialized.
