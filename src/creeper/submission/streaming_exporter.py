@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import tempfile
 import zipfile
 from collections.abc import Iterable, Iterator
@@ -399,6 +400,8 @@ def build_streaming_submission_zip(
         snapshot.created_at.replace(":", "").replace("-", "").replace("+00:00", "Z")
     )
     archive = output_dir / f"DomainDataCollectionTask_{safe_time}_{name}.zip"
+    archive_tmp = output_dir / f".{archive.name}.partial"
+    archive_tmp.unlink(missing_ok=True)
 
     with tempfile.TemporaryDirectory(
         prefix=".creeper-export-",
@@ -411,7 +414,7 @@ def build_streaming_submission_zip(
         hashes: dict[str, str] = {}
         source_files: list[str] = []
         with zipfile.ZipFile(
-            archive,
+            archive_tmp,
             "w",
             compression=zipfile.ZIP_DEFLATED,
             allowZip64=True,
@@ -619,4 +622,7 @@ def build_streaming_submission_zip(
                 "w",
             ) as target:
                 target.write(manifest_payload)
+        # Only publish a final archive after every entry (including required
+        # external artifacts) has been copied and re-verified successfully.
+        os.replace(archive_tmp, archive)
     return archive
