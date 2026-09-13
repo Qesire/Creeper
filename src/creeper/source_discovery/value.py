@@ -57,46 +57,88 @@ class InterpretableSourceValueModel:
         self,
         family: str,
     ) -> tuple[float, float, int]:
-        """Return P(final>0), conditional final/scout conversion, sample count."""
-        row = self.registry.connection.execute(
-            """
-            SELECT
-                COUNT(*) AS n,
-                SUM(
-                    CASE WHEN f.final_accepted_eed > 0 THEN 1 ELSE 0 END
-                ) AS successes,
-                SUM(
-                    CASE
-                        WHEN f.final_accepted_eed > 0
-                             AND m.measurement_mode = 'HOST_YEAR'
-                            THEN m.novel_pair_eed
-                        WHEN f.final_accepted_eed > 0
-                            THEN m.novel_eed
-                        ELSE 0
-                    END
-                ) AS successful_scout_sum,
-                SUM(
-                    CASE
-                        WHEN f.final_accepted_eed > 0
-                            THEN f.final_accepted_eed
-                        ELSE 0
-                    END
-                ) AS positive_final_sum
-            FROM source_candidates c
-            JOIN source_scout_metrics m ON m.source_key = c.source_key
-            JOIN source_final_rewards f ON f.source_key = c.source_key
-            LEFT JOIN source_scout_authority a ON a.singleton = 1
-            WHERE c.source_family = ?
-              AND (
-                  a.singleton IS NULL
-                  OR (
-                      m.baseline_signature = a.baseline_signature
-                      AND m.model_signature = a.model_signature
-                  )
-              )
-            """,
-            (family,),
-        ).fetchone()
+        """Return P(final>0), conditional final/scout conversion, sample count.
+
+        Under V5 each closed source-run is one exposure sample. Explicit zero
+        runs therefore enter the denominator as failures instead of vanishing
+        from the family model.
+        """
+        authority = self.registry.current_scout_authority
+        if authority is None:
+            row = self.registry.connection.execute(
+                """
+                SELECT
+                    COUNT(*) AS n,
+                    SUM(
+                        CASE WHEN f.final_accepted_eed > 0 THEN 1 ELSE 0 END
+                    ) AS successes,
+                    SUM(
+                        CASE
+                            WHEN f.final_accepted_eed > 0
+                                 AND m.measurement_mode = 'HOST_YEAR'
+                                THEN m.novel_pair_eed
+                            WHEN f.final_accepted_eed > 0
+                                THEN m.novel_eed
+                            ELSE 0
+                        END
+                    ) AS successful_scout_sum,
+                    SUM(
+                        CASE
+                            WHEN f.final_accepted_eed > 0
+                                THEN f.final_accepted_eed
+                            ELSE 0
+                        END
+                    ) AS positive_final_sum
+                FROM source_candidates c
+                JOIN source_scout_metrics m ON m.source_key = c.source_key
+                JOIN source_final_rewards f ON f.source_key = c.source_key
+                WHERE c.source_family = ?
+                """,
+                (family,),
+            ).fetchone()
+        else:
+            row = self.registry.connection.execute(
+                """
+                SELECT
+                    COUNT(*) AS n,
+                    SUM(
+                        CASE WHEN r.final_accepted_eed > 0 THEN 1 ELSE 0 END
+                    ) AS successes,
+                    SUM(
+                        CASE
+                            WHEN r.final_accepted_eed > 0
+                                 AND m.measurement_mode = 'HOST_YEAR'
+                                THEN m.novel_pair_eed
+                            WHEN r.final_accepted_eed > 0
+                                THEN m.novel_eed
+                            ELSE 0
+                        END
+                    ) AS successful_scout_sum,
+                    SUM(
+                        CASE
+                            WHEN r.final_accepted_eed > 0
+                                THEN r.final_accepted_eed
+                            ELSE 0
+                        END
+                    ) AS positive_final_sum
+                FROM source_candidates c
+                JOIN source_scout_metrics m ON m.source_key = c.source_key
+                JOIN source_run_outcomes r ON r.source_key = c.source_key
+                WHERE c.source_family = ?
+                  AND r.closed = 1
+                  AND r.baseline_signature = ?
+                  AND r.model_signature = ?
+                  AND m.baseline_signature = ?
+                  AND m.model_signature = ?
+                """,
+                (
+                    family,
+                    authority[0],
+                    authority[1],
+                    authority[0],
+                    authority[1],
+                ),
+            ).fetchone()
         n = int(row["n"] or 0)
         if n == 0:
             return 1.0, 1.0, 0
@@ -113,24 +155,58 @@ class InterpretableSourceValueModel:
         return success_probability, positive_conversion, n
 
     def _descendant_reward(self, source_key: str) -> float:
-        rows = self.registry.connection.execute(
-            """
-            WITH RECURSIVE descendants(source_key, depth) AS (
-                SELECT child_key, 1
-                FROM source_edges
-                WHERE parent_key = ?
-                UNION
-                SELECT e.child_key, d.depth + 1
-                FROM source_edges e
-                JOIN descendants d ON e.parent_key = d.source_key
-                WHERE d.depth < ?
-            )
-            SELECT d.depth, COALESCE(f.final_accepted_eed, 0) AS reward
-            FROM descendants d
-            LEFT JOIN source_final_rewards f ON f.source_key = d.source_key
-            """,
-            (source_key, self.registry.max_graph_hops),
-        ).fetchall()
+        authority = self.registry.current_scout_authority
+        if authority is None:
+            rows = self.registry.connection.execute(
+                """
+                WITH RECURSIVE descendants(source_key, depth) AS (
+                    SELECT child_key, 1
+                    FROM source_edges
+                    WHERE parent_key = ?
+                    UNION
+                    SELECT e.child_key, d.depth + 1
+                    FROM source_edges e
+                    JOIN descendants d ON e.parent_key = d.source_key
+                    WHERE d.depth < ?
+                )
+                SELECT d.depth, COALESCE(f.final_accepted_eed, 0) AS reward
+                FROM descendants d
+                LEFT JOIN source_final_rewards f ON f.source_key = d.source_key
+                """,
+                (source_key, self.registry.max_graph_hops),
+            ).fetchall()
+        else:
+            rows = self.registry.connection.execute(
+                """
+                WITH RECURSIVE descendants(source_key, depth) AS (
+                    SELECT child_key, 1
+                    FROM source_edges
+                    WHERE parent_key = ?
+                    UNION
+                    SELECT e.child_key, d.depth + 1
+                    FROM source_edges e
+                    JOIN descendants d ON e.parent_key = d.source_key
+                    WHERE d.depth < ?
+                ),
+                rewards AS (
+                    SELECT source_key, SUM(final_accepted_eed) AS reward
+                    FROM source_run_outcomes
+                    WHERE closed = 1
+                      AND baseline_signature = ?
+                      AND model_signature = ?
+                    GROUP BY source_key
+                )
+                SELECT d.depth, COALESCE(r.reward, 0) AS reward
+                FROM descendants d
+                LEFT JOIN rewards r ON r.source_key = d.source_key
+                """,
+                (
+                    source_key,
+                    self.registry.max_graph_hops,
+                    authority[0],
+                    authority[1],
+                ),
+            ).fetchall()
         return sum(
             float(row["reward"])
             * (self.descendant_discount ** int(row["depth"]))
