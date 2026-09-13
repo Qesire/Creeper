@@ -605,9 +605,17 @@ class ResearchIntegrationBridge:
             model = str(row["model_signature"])
             final_eed = float(row["final_accepted_eed"])
 
-            # Fill the audit exposure when still empty. FINAL closure itself is
-            # keyed by source+exposure and remains replay-safe even if this
-            # process crashes before the projection marker is committed.
+            # Every production exposure is a distinct delayed-reward
+            # observation. Bind it additively to the complete causal source
+            # lineage; do not overwrite an earlier exposure on the artifact row.
+            self.research.bind_source_exposure_lineage(
+                source_key=source_key,
+                exposure_id=exposure_id,
+            )
+
+            # Preserve the legacy single exposure column as a first-observation
+            # audit hint only. The many-to-many table above is authoritative for
+            # repeated production observations.
             for lineage in self.research.artifact_lineage(source_key=source_key):
                 if not str(lineage["source_exposure_id"] or ""):
                     self.research.bind_artifact_source(
