@@ -39,6 +39,15 @@ retry_max_seconds = 3600.0
 poll_min_seconds = 0.25
 poll_max_seconds = 10.0
 
+# Complete platform/domain enumeration is a distinct resumable lane. It uses
+# its own HTTP client/rate budget and never turns a bounded domain probe into a
+# false completeness claim.
+platform_harvest_enabled = true
+platform_claim_batch_size = 1
+platform_requests_per_second = 0.1
+platform_max_connections = 2
+platform_poll_seconds = 2.0
+
 [readiness]
 # Optional fourth autopilot child. It consumes only newly proven unique
 # (hostname, year) evidence pairs and maintains annual Novel EED incrementally.
