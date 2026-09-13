@@ -917,6 +917,9 @@ def _report_has_progress(report: dict[str, object]) -> bool:
         "scout_edges_added",
         "search_episodes",
         "search_candidates_registered",
+        "regions_completed",
+        "region_candidates_registered",
+        "research_completed",
     )
     return any(int(report.get(name, 0)) > 0 for name in progress_fields)
 
@@ -939,6 +942,14 @@ _DISCOVERY_COUNTER_FIELDS = {
     "scout_edges_added": "discovery_scout_edges_added",
     "production_exhausted": "discovery_production_exhausted",
     "activated": "discovery_activations_started",
+    "regions_started": "discovery_regions_started",
+    "regions_completed": "discovery_regions_completed",
+    "regions_exhausted": "discovery_regions_exhausted",
+    "region_candidates_registered": "discovery_region_candidates_registered",
+    "research_started": "discovery_research_started",
+    "research_completed": "discovery_research_completed",
+    "research_failures": "discovery_research_failures",
+    "research_suppressed": "discovery_research_suppressed",
 }
 
 
@@ -1041,6 +1052,31 @@ def _publish_discovery_telemetry(
         str(state): int(count)
         for state, count in registry.control_store.platform_year_harvest_state_counts().items()
     }
+    source_gauges["research_child_active"] = int(
+        bool(report.get("research_active", False))
+    )
+    region_states = _durable_state_counts(
+        registry,
+        table="source_exploration_regions",
+        column="state",
+        states=(
+            "PROPOSED",
+            "VALIDATED",
+            "READY",
+            "RUNNING",
+            "EXHAUSTED",
+            "HOLD",
+            "FAILED_RETRYABLE",
+            "REJECTED",
+        ),
+    )
+    source_gauges.update(
+        {
+            f"exploration_region_{state.lower()}": count
+            for state, count in region_states.items()
+        }
+    )
+
     source_gauges["platform_year_total"] = sum(platform_states.values())
     source_gauges.update(
         {
@@ -1057,6 +1093,14 @@ def _publish_discovery_telemetry(
         counters[telemetry_name] = value
     elapsed_ms = max(0, int(round(float(report.get("elapsed_seconds", 0.0)) * 1000.0)))
     counters["discovery_wall_milliseconds"] = elapsed_ms
+    hot_path_block_seconds = float(
+        report.get("agent_hot_path_block_seconds", 0.0)
+    )
+    if hot_path_block_seconds < 0:
+        raise ValueError("agent_hot_path_block_seconds must be non-negative")
+    counters["agent_hot_path_block_milliseconds"] = int(
+        round(hot_path_block_seconds * 1000.0)
+    )
 
     with RuntimeTelemetryStore(_runtime_telemetry_path(registry)) as telemetry:
         telemetry.add_counters(counters)
