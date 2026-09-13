@@ -238,6 +238,11 @@ class ReviewedContractRegistry(Mapping[str, ReviewedSourceContractBinding]):
         bindings: Mapping[str, ReviewedSourceContractBinding] | None = None,
     ) -> None:
         copied = dict(bindings or {})
+        for locator, binding in copied.items():
+            if locator != binding.locator:
+                raise ReviewedContractRegistryError(
+                    "registry key must equal the binding locator"
+                )
         self._bindings = MappingProxyType(copied)
 
     def __getitem__(self, key: str) -> ReviewedSourceContractBinding:
@@ -256,12 +261,166 @@ class ReviewedContractRegistry(Mapping[str, ReviewedSourceContractBinding]):
             return None
         return self._bindings.get(canonical)
 
+    def to_manifest_payload(self) -> dict[str, object]:
+        """Return the deterministic, self-authenticating archive representation."""
+
+        entries = [
+            _manifest_entry(self._bindings[locator])
+            for locator in sorted(self._bindings)
+        ]
+        unsigned = {
+            "registry_version": REGISTRY_VERSION,
+            "entries": entries,
+        }
+        return {
+            **unsigned,
+            "registry_digest": _manifest_digest(unsigned),
+        }
+
+    @classmethod
+    def from_manifest_payload(cls, payload: object) -> "ReviewedContractRegistry":
+        """Rebuild a registry from a strict packaged authority declaration."""
+
+        if not isinstance(payload, dict):
+            raise ReviewedContractRegistryError(
+                "reviewed contract manifest root must be an object"
+            )
+        if set(payload) != {"registry_version", "entries", "registry_digest"}:
+            raise ReviewedContractRegistryError(
+                "reviewed contract manifest has unsupported fields"
+            )
+        if payload.get("registry_version") != REGISTRY_VERSION:
+            raise ReviewedContractRegistryError(
+                f"registry_version must be {REGISTRY_VERSION!r}"
+            )
+        entries = payload.get("entries")
+        if not isinstance(entries, list):
+            raise ReviewedContractRegistryError("registry entries must be a list")
+        digest = payload.get("registry_digest")
+        if not isinstance(digest, str) or not _SHA256_RE.fullmatch(digest):
+            raise ReviewedContractRegistryError(
+                "registry_digest must be a SHA-256 value"
+            )
+        unsigned = {
+            "registry_version": payload["registry_version"],
+            "entries": entries,
+        }
+        if digest != _manifest_digest(unsigned):
+            raise ReviewedContractRegistryError("reviewed contract registry digest mismatch")
+
+        bindings: dict[str, ReviewedSourceContractBinding] = {}
+        for raw in entries:
+            binding = _binding_from_manifest_entry(raw)
+            if binding.locator in bindings:
+                raise ReviewedContractRegistryError(
+                    f"duplicate reviewed contract locator: {binding.locator}"
+                )
+            bindings[binding.locator] = binding
+        if entries != [
+            _manifest_entry(bindings[locator]) for locator in sorted(bindings)
+        ]:
+            raise ReviewedContractRegistryError(
+                "reviewed contract entries must be canonical and locator-sorted"
+            )
+        return cls(bindings)
+
 
 def _required_text(entry: Mapping[str, object], name: str) -> str:
     value = entry.get(name)
     if not isinstance(value, str) or not value.strip():
         raise ReviewedContractRegistryError(f"{name} is required")
     return value.strip()
+
+
+def _contract_payload(contract: SourceEvidenceContract) -> dict[str, object]:
+    return {
+        "contract_id": contract.contract_id,
+        "authority": contract.authority.value,
+        "parser_kind": contract.parser_kind,
+        "temporal_semantics": contract.temporal_semantics,
+        "evidence_type": contract.evidence_type,
+        "hostname_field": contract.hostname_field,
+        "timestamp_field": contract.timestamp_field,
+        "policy_version": contract.policy_version,
+    }
+
+
+def _manifest_entry(binding: ReviewedSourceContractBinding) -> dict[str, object]:
+    entry = {
+        "locator": binding.artifact.locator,
+        "source_identity": {
+            "kind": binding.artifact.source_identity.kind,
+            "value": binding.artifact.source_identity.value,
+            "content_length": binding.artifact.source_identity.content_length,
+        },
+        "custodian": binding.artifact.custodian,
+        "edition": binding.artifact.edition,
+        "contract": _contract_payload(binding.contract),
+        "review_note": binding.review_note,
+    }
+    entry["binding_digest"] = binding.binding_digest
+    return entry
+
+
+def _manifest_digest(payload: Mapping[str, object]) -> str:
+    raw = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    ).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()
+
+
+def _binding_from_manifest_entry(raw: object) -> ReviewedSourceContractBinding:
+    if not isinstance(raw, dict):
+        raise ReviewedContractRegistryError("registry entry must be an object")
+    required = {
+        "locator",
+        "source_identity",
+        "custodian",
+        "edition",
+        "contract",
+        "review_note",
+        "binding_digest",
+    }
+    if set(raw) != required:
+        raise ReviewedContractRegistryError("reviewed contract entry has unsupported fields")
+    identity_raw = raw["source_identity"]
+    if not isinstance(identity_raw, dict) or set(identity_raw) != {
+        "kind",
+        "value",
+        "content_length",
+    }:
+        raise ReviewedContractRegistryError("reviewed source identity fields are invalid")
+    contract_raw = raw["contract"]
+    contract_fields = {
+        "contract_id",
+        "authority",
+        "parser_kind",
+        "temporal_semantics",
+        "evidence_type",
+        "hostname_field",
+        "timestamp_field",
+        "policy_version",
+    }
+    if not isinstance(contract_raw, dict) or set(contract_raw) != contract_fields:
+        raise ReviewedContractRegistryError("reviewed contract fields are invalid")
+    binding = ReviewedSourceContractBinding(
+        artifact=ReviewedArtifactBinding(
+            locator=_required_text(raw, "locator"),
+            source_identity=_parse_identity(identity_raw),
+            custodian=_required_text(raw, "custodian"),
+            edition=_required_text(raw, "edition"),
+        ),
+        contract=SourceEvidenceContract(**contract_raw),
+        review_note=_required_text(raw, "review_note"),
+    )
+    if raw["binding_digest"] != binding.binding_digest:
+        raise ReviewedContractRegistryError(
+            f"reviewed binding digest mismatch for {binding.locator}"
+        )
+    return binding
 
 
 def _parse_identity(raw: object) -> ReviewedArtifactIdentity:
@@ -294,6 +453,8 @@ def load_reviewed_contract_registry(path: Path) -> ReviewedContractRegistry:
         raise ReviewedContractRegistryError(
             "reviewed contract registry root must be an object"
         )
+    if "registry_digest" in payload:
+        return ReviewedContractRegistry.from_manifest_payload(payload)
     if payload.get("registry_version") != REGISTRY_VERSION:
         raise ReviewedContractRegistryError(
             f"registry_version must be {REGISTRY_VERSION!r}"

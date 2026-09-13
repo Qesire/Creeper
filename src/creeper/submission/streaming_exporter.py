@@ -18,6 +18,10 @@ from creeper.evidence.classification import (
     classify_acquisition_lane,
     contribution_bucket,
 )
+from creeper.evidence.contract_registry import (
+    ReviewedContractRegistry,
+    load_reviewed_contract_registry,
+)
 from creeper.evidence.policies import EvidenceCapsule
 from creeper.storage.candidate_store import CandidateStore
 from creeper.submission.artifact_manifest import (
@@ -258,6 +262,7 @@ def _stage_evidence(
     records: Iterable[EvidenceCapsule],
     *,
     metrics: dict[str, int] | None = None,
+    reviewed_contracts: ReviewedContractRegistry | None = None,
 ) -> dict[str, object]:
     evidence_path = directory / "evidence.jsonl"
     annual_paths = {
@@ -315,7 +320,12 @@ def _stage_evidence(
                 evidence.write(evidence_line)
                 annual_files[year].write(annual_line)
                 count += 1
-                bucket = contribution_bucket(classify_acquisition_lane(capsule))
+                bucket = contribution_bucket(
+                    classify_acquisition_lane(
+                        capsule,
+                        reviewed_contracts=reviewed_contracts,
+                    )
+                )
                 lane_counts[bucket] += 1
     finally:
         for output in annual_files.values():
@@ -401,6 +411,7 @@ def build_streaming_submission_zip(
     artifact_allowed_roots: Iterable[Path] = (),
     require_production_config: bool = True,
     metrics_out: dict[str, int] | None = None,
+    reviewed_contract_registry: ReviewedContractRegistry | None = None,
 ) -> Path:
     """Build a deterministic formal archive without O(total-evidence) memory.
 
@@ -418,6 +429,29 @@ def build_streaming_submission_zip(
     source_root = Path(source_root)
     documentation_path = Path(documentation_path)
     output_dir = Path(output_dir)
+    artifact_specs = tuple(artifact_specs)
+    registry_specs = tuple(
+        spec
+        for spec in artifact_specs
+        if spec.logical_role == "reviewed_contract_registry"
+    )
+    if len(registry_specs) > 1:
+        raise ValueError("only one reviewed contract registry artifact is allowed")
+    if registry_specs:
+        registry_spec = registry_specs[0]
+        if registry_spec.archive_path != (
+            "artifacts/runtime/reviewed_contract_registry.json"
+        ):
+            raise ValueError(
+                "reviewed contract registry must use the canonical archive path"
+            )
+        if reviewed_contract_registry is not None:
+            raise ValueError(
+                "reviewed contract registry was supplied both as an object and artifact"
+            )
+        reviewed_contract_registry = load_reviewed_contract_registry(
+            registry_spec.source_path
+        )
     if not source_root.is_dir():
         raise FileNotFoundError(f"source root does not exist: {source_root}")
     if (
@@ -463,6 +497,7 @@ def build_streaming_submission_zip(
                 staging,
                 evidence_records,
                 metrics=stream_metrics,
+                reviewed_contracts=reviewed_contract_registry,
             )
             candidate_stage = _stage_candidates(
                 staging,
@@ -470,6 +505,29 @@ def build_streaming_submission_zip(
                 candidate_store,
                 metrics=stream_metrics,
             )
+
+            registry_path: Path | None = None
+            registry_artifact: ResolvedArtifact | None = None
+            if reviewed_contract_registry is not None and not registry_specs:
+                registry_payload = json.dumps(
+                    reviewed_contract_registry.to_manifest_payload(),
+                    indent=2,
+                    sort_keys=True,
+                ).encode()
+                registry_path = staging / "reviewed_contract_registry.json"
+                registry_path.write_bytes(registry_payload)
+                registry_artifact = ResolvedArtifact(
+                    logical_role="reviewed_contract_registry",
+                    source_path=registry_path,
+                    archive_path="artifacts/runtime/reviewed_contract_registry.json",
+                    sha256=hashlib.sha256(registry_payload).hexdigest(),
+                    size=len(registry_payload),
+                    required=True,
+                    license_or_access_note=(
+                        "Packaged reviewed authority declaration used by the "
+                        "independent verifier."
+                    ),
+                )
 
             hashes: dict[str, str] = {}
             source_files: list[str] = []
@@ -626,6 +684,13 @@ def build_streaming_submission_zip(
                     source_files.append(relative)
 
                 artifact_rows = artifact_manifest_rows(resolved_artifacts)
+                if registry_artifact is not None:
+                    registry_row = artifact_manifest_rows((registry_artifact,))[0]
+                    registry_row["source_path"] = (
+                        "generated:reviewed_contract_registry"
+                    )
+                    artifact_rows.append(registry_row)
+                    artifact_rows.sort(key=lambda row: str(row["archive_path"]))
                 _write_bytes(
                     bundle,
                     "artifacts/manifest.json",
@@ -646,7 +711,17 @@ def build_streaming_submission_zip(
                         created_at=snapshot.created_at,
                         hashes=hashes,
                         expected=artifact,
-                                            metrics=stream_metrics,
+                        metrics=stream_metrics,
+                    )
+                if registry_artifact is not None and registry_path is not None:
+                    _write_file(
+                        bundle,
+                        registry_artifact.archive_path,
+                        registry_path,
+                        created_at=snapshot.created_at,
+                        hashes=hashes,
+                        expected=registry_artifact,
+                        metrics=stream_metrics,
                     )
 
                 manifest = {

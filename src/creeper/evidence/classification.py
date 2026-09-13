@@ -9,6 +9,7 @@ from urllib.parse import urlsplit
 
 from creeper.authority.normalizer import normalize_official
 from creeper.evidence.contracts import CDX_DIRECT_CONTRACT, CDXJ_DIRECT_CONTRACT
+from creeper.evidence.contract_registry import ReviewedContractRegistry
 from creeper.evidence.policies import EvidenceCapsule
 
 
@@ -46,13 +47,23 @@ _CAPTURE_SEMANTICS = frozenset(
 )
 
 
-def _bound_direct_contract(capsule: EvidenceCapsule):
+def _bound_direct_contract(
+    capsule: EvidenceCapsule,
+    reviewed_contracts: ReviewedContractRegistry | None = None,
+):
     match = _CONTRACT_RE.search(capsule.extraction_method or "")
     if match is None:
         return None
     contract = _DIRECT_CONTRACTS.get((match.group(1), match.group(2)))
     if contract is None:
-        return None
+        if reviewed_contracts is None:
+            return None
+        binding = reviewed_contracts.get_exact(capsule.source_locator)
+        if binding is None:
+            return None
+        contract = binding.contract
+        if (contract.contract_id, contract.policy_version) != match.groups():
+            return None
     if capsule.evidence_type != contract.evidence_type:
         return None
     if capsule.temporal_semantics != contract.temporal_semantics:
@@ -60,13 +71,17 @@ def _bound_direct_contract(capsule: EvidenceCapsule):
     return contract
 
 
-def classify_acquisition_lane(capsule: EvidenceCapsule) -> AcquisitionLane:
+def classify_acquisition_lane(
+    capsule: EvidenceCapsule,
+    *,
+    reviewed_contracts: ReviewedContractRegistry | None = None,
+) -> AcquisitionLane:
     """Classify how proof was acquired without deciding whether it is valid."""
 
     if capsule.provider.startswith("direct:"):
         return (
             AcquisitionLane.DIRECT_ANNUAL
-            if _bound_direct_contract(capsule) is not None
+            if _bound_direct_contract(capsule, reviewed_contracts) is not None
             else AcquisitionLane.UNKNOWN
         )
     if (
@@ -110,6 +125,8 @@ def _exact_original_hostname(capsule: EvidenceCapsule) -> bool:
 
 def validate_evidence_semantics(
     capsule: EvidenceCapsule,
+    *,
+    reviewed_contracts: ReviewedContractRegistry | None = None,
 ) -> EvidenceSemanticValidation:
     """Fail-closed formal semantic validation for one annual proof capsule."""
 
@@ -136,7 +153,10 @@ def validate_evidence_semantics(
         if not str(getattr(capsule, name, "")).strip():
             errors.append(f"missing evidence provenance: {name}")
 
-    lane = classify_acquisition_lane(capsule)
+    lane = classify_acquisition_lane(
+        capsule,
+        reviewed_contracts=reviewed_contracts,
+    )
     timestamp_year = _timestamp_year(capsule.evidence_timestamp)
 
     if lane in {
@@ -164,7 +184,7 @@ def validate_evidence_semantics(
         expected_source_id = capsule.provider.removeprefix("direct:")
         if not expected_source_id or capsule.source_id != expected_source_id:
             errors.append("direct provider/source_id provenance mismatch")
-        if _bound_direct_contract(capsule) is None:
+        if _bound_direct_contract(capsule, reviewed_contracts) is None:
             errors.append("direct evidence is not bound to a supported reviewed contract")
     elif lane is AcquisitionLane.VERIFIED_CANDIDATE:
         if capsule.provider.startswith("direct:"):

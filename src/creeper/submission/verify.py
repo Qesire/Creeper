@@ -22,6 +22,10 @@ from creeper.evidence.classification import (
     contribution_bucket,
     validate_evidence_semantics,
 )
+from creeper.evidence.contract_registry import (
+    ReviewedContractRegistry,
+    ReviewedContractRegistryError,
+)
 from creeper.evidence.policies import EvidenceCapsule
 from creeper.submission.precheck import format_growth_rate
 
@@ -102,6 +106,8 @@ def _read_annual_hosts(
 def _read_evidence(
     bundle: zipfile.ZipFile,
     errors: list[str],
+    *,
+    reviewed_contracts: ReviewedContractRegistry | None = None,
 ) -> tuple[dict[tuple[str, int], EvidenceCapsule], int]:
     if "evidence.jsonl" not in set(bundle.namelist()):
         errors.append("missing required entry: evidence.jsonl")
@@ -134,7 +140,10 @@ def _read_evidence(
         except (ValueError, KeyError, TypeError, json.JSONDecodeError) as exc:
             errors.append(f"invalid evidence line {line_number}: {exc}")
             continue
-        validation = validate_evidence_semantics(capsule)
+        validation = validate_evidence_semantics(
+            capsule,
+            reviewed_contracts=reviewed_contracts,
+        )
         if not validation.accepted_for_annual:
             for error in validation.errors:
                 errors.append(
@@ -168,10 +177,15 @@ def _recompute_from_bundle(
     authority: AuthoritySnapshot,
     baseline_index_path: Path,
     eed_model_path: Path,
+    reviewed_contracts: ReviewedContractRegistry | None = None,
 ) -> RecomputedSubmission:
     errors: list[str] = []
     annual = _read_annual_hosts(bundle, errors)
-    evidence, evidence_records = _read_evidence(bundle, errors)
+    evidence, evidence_records = _read_evidence(
+        bundle,
+        errors,
+        reviewed_contracts=reviewed_contracts,
+    )
     annual_pairs = {
         (hostname, year)
         for year, hostnames in annual.items()
@@ -220,7 +234,10 @@ def _recompute_from_bundle(
             lane = (
                 AcquisitionLane.UNKNOWN
                 if capsule is None
-                else classify_acquisition_lane(capsule)
+                else classify_acquisition_lane(
+                    capsule,
+                    reviewed_contracts=reviewed_contracts,
+                )
             )
             lane_sets[contribution_bucket(lane)][year].add(hostname)
     except (OSError, ValueError, json.JSONDecodeError) as exc:
@@ -271,13 +288,27 @@ def recompute_submission_archive(
     try:
         authority = AuthoritySnapshot.from_manifest_path(baseline_manifest_path)
         with zipfile.ZipFile(archive) as bundle:
+            reviewed_contracts: ReviewedContractRegistry | None = None
+            registry_name = "artifacts/runtime/reviewed_contract_registry.json"
+            if registry_name in set(bundle.namelist()):
+                reviewed_contracts = ReviewedContractRegistry.from_manifest_payload(
+                    json.loads(bundle.read(registry_name))
+                )
             return _recompute_from_bundle(
                 bundle,
                 authority=authority,
                 baseline_index_path=Path(baseline_index_path),
                 eed_model_path=Path(eed_model_path),
+                reviewed_contracts=reviewed_contracts,
             )
-    except (OSError, ValueError, zipfile.BadZipFile) as exc:
+    except (
+        OSError,
+        ValueError,
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+        ReviewedContractRegistryError,
+        zipfile.BadZipFile,
+    ) as exc:
         return RecomputedSubmission(
             False,
             (f"cannot independently recompute submission: {exc}",),
@@ -326,6 +357,55 @@ def verify_submission_archive(
             manifest = json.loads(manifest_bytes)
         except json.JSONDecodeError as exc:
             return VerificationReport(False, tuple(errors + [f"invalid MANIFEST.json: {exc}"]))
+        if not isinstance(manifest, dict):
+            return VerificationReport(
+                False,
+                tuple(errors + ["MANIFEST.json root must be an object"]),
+            )
+
+        reviewed_contracts: ReviewedContractRegistry | None = None
+        registry_name = "artifacts/runtime/reviewed_contract_registry.json"
+        if registry_name in names:
+            try:
+                reviewed_contracts = ReviewedContractRegistry.from_manifest_payload(
+                    json.loads(bundle.read(registry_name))
+                )
+            except (
+                ReviewedContractRegistryError,
+                UnicodeDecodeError,
+                json.JSONDecodeError,
+            ) as exc:
+                errors.append(f"invalid packaged reviewed contract registry: {exc}")
+        artifact_rows = manifest.get("artifacts", [])
+        if not isinstance(artifact_rows, list):
+            errors.append("manifest artifacts must be a list")
+            artifact_rows = []
+        registry_rows = [
+            row
+            for row in artifact_rows
+            if isinstance(row, dict)
+            and row.get("logical_role") == "reviewed_contract_registry"
+        ]
+        if registry_name in names and not any(
+            row.get("archive_path") == registry_name for row in registry_rows
+        ):
+            errors.append("packaged reviewed contract registry artifact row is missing")
+        for row in registry_rows:
+            if row.get("archive_path") != registry_name:
+                errors.append("reviewed contract registry artifact path is invalid")
+                continue
+            if registry_name not in names:
+                errors.append("reviewed contract registry artifact is missing")
+                continue
+            expected_hash = row.get("sha256")
+            actual_hash = hashlib.sha256(bundle.read(registry_name)).hexdigest()
+            if expected_hash != actual_hash:
+                errors.append("reviewed contract registry artifact hash mismatch")
+            try:
+                if int(row.get("size", -1)) != len(bundle.read(registry_name)):
+                    errors.append("reviewed contract registry artifact size mismatch")
+            except (TypeError, ValueError):
+                errors.append("reviewed contract registry artifact size is invalid")
 
         if not str(manifest.get("baseline_id", "")).strip():
             errors.append("manifest baseline_id is missing")
@@ -401,6 +481,7 @@ def verify_submission_archive(
                 authority=authority,
                 baseline_index_path=Path(baseline_index_path),
                 eed_model_path=Path(eed_model_path),
+                reviewed_contracts=reviewed_contracts,
             )
             errors.extend(recomputed.errors)
 
