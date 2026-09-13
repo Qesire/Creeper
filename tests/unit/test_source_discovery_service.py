@@ -145,6 +145,7 @@ max_returned_candidates = 17
             "nonblocking_research = true\n",
         ):
             text = text.replace(line, "")
+        path.write_text(text, encoding="utf-8")
         config = load_source_discovery_config(path)
         self.assertEqual(config.coordinator.region_parallelism, 2)
         self.assertEqual(config.coordinator.research_poll_seconds, 0.0)
