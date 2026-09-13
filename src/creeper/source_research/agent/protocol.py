@@ -216,6 +216,7 @@ class ExplorationRegionProposal:
     reuse_key: str
     confidence: float
     validation: Mapping[str, Any]
+    enumerator_config: Mapping[str, Any] = field(default_factory=dict)
 
     proposal_type: ProposalType = field(
         default=ProposalType.EXPLORATION_REGION, init=False
@@ -234,6 +235,9 @@ class ExplorationRegionProposal:
             raise ValueError("expected_fanout must be a positive integer")
         if isinstance(self.confidence, bool) or not isinstance(self.confidence, (int, float)) or not 0 <= self.confidence <= 1:
             raise ValueError("confidence must be between 0 and 1")
+        if not isinstance(self.enumerator_config, Mapping):
+            raise ValueError("enumerator_config must be a mapping")
+        object.__setattr__(self, "enumerator_config", dict(self.enumerator_config))
 
 
 @dataclass(frozen=True)
