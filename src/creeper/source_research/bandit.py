@@ -16,6 +16,7 @@ class BanditStats:
     pulls: int = 0
     proxy_reward: float = 0.0
     final_reward: float = 0.0
+    final_observation_count: int = 0
     decayed_reward: float = 0.0
     updated_at: float = 0.0
 
@@ -26,14 +27,21 @@ class BanditStats:
             pulls=max(0, int(getattr(value, "pulls", 0))),
             proxy_reward=float(getattr(value, "proxy_reward", 0.0)),
             final_reward=float(getattr(value, "final_reward", 0.0)),
+            final_observation_count=max(
+                0, int(getattr(value, "final_observation_count", 0))
+            ),
             decayed_reward=float(getattr(value, "decayed_reward", 0.0)),
             updated_at=float(getattr(value, "updated_at", 0.0)),
         )
 
     @property
+    def has_final(self) -> bool:
+        return self.final_observation_count > 0
+
+    @property
     def authoritative_reward(self) -> float:
-        """Prefer FINAL reward; use proxy only while no FINAL exists."""
-        return self.final_reward if self.final_reward != 0.0 else self.proxy_reward
+        """Prefer FINAL reward; use proxy only while no FINAL observation exists."""
+        return self.final_reward if self.has_final else self.proxy_reward
 
 
 def decay_factor(*, age_seconds: float, half_life_seconds: float) -> float:
