@@ -16,6 +16,7 @@ from pathlib import Path
 import signal
 
 from creeper.evidence.platform_harvest import (
+    PlatformHarvestState,
     PlatformYearHarvestWorker,
     PlatformYearHarvestWorkerReport,
 )
@@ -122,6 +123,29 @@ async def run_service(
                         "platform_year_failed_invalid": report.failed_invalid,
                         "platform_year_inserted_capsules": report.inserted_capsules,
                         "platform_year_provider_requests": report.provider_requests,
+                    }
+                )
+                state_counts = control.platform_year_harvest_state_counts()
+                telemetry.set_gauges(
+                    {
+                        "platform_year_ready": state_counts[
+                            PlatformHarvestState.READY
+                        ],
+                        "platform_year_running": state_counts[
+                            PlatformHarvestState.RUNNING
+                        ],
+                        "platform_year_partial": state_counts[
+                            PlatformHarvestState.PARTIAL
+                        ],
+                        "platform_year_retryable": state_counts[
+                            PlatformHarvestState.RETRYABLE
+                        ],
+                        "platform_year_complete": state_counts[
+                            PlatformHarvestState.COMPLETE
+                        ],
+                        "platform_year_failed_invalid": state_counts[
+                            PlatformHarvestState.FAILED_INVALID
+                        ],
                     }
                 )
                 if once:
