@@ -40,6 +40,8 @@ class GlobalScheduler:
         self.resource_capacities = dict(resource_capacities or {})
 
     def score(self, candidate: LeaseCandidate) -> float:
+        if candidate.production_value_score is not None:
+            return float(candidate.production_value_score)
         costs = candidate.costs
         if self._is_direct(candidate):
             # Direct-year production does not consume per-host external
