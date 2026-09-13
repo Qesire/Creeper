@@ -248,6 +248,8 @@ class ResearchCompiler:
                 if not value or any(isinstance(item, (dict, list)) for item in value):
                     raise ResearchCompilerError("query family lists must be finite scalar arrays")
                 cardinality *= len(set(map(str, value)))
+        if cardinality > self.policy.max_query_expansion:
+            raise ResearchCompilerError("query family expansion exceeds policy")
         if enumerator == RegionEnumeratorKind.INTEGER_PAGINATION.value:
             cardinality *= bounds.get("max_pages", bounds.get("max_requests", 1))
         elif enumerator == RegionEnumeratorKind.FILENAME_PATTERN.value:
@@ -257,7 +259,9 @@ class ResearchCompiler:
         computed = max(1, cardinality)
         if declared > self.policy.max_template_expansion:
             raise ResearchCompilerError("declared fanout exceeds policy")
-        return min(declared, computed) if computed < declared else computed
+        if computed > self.policy.max_template_expansion:
+            raise ResearchCompilerError("compiled fanout exceeds policy")
+        return computed
 
     def _small_region_exception(self, raw: dict[str, Any], surface: RegionSurfaceKind) -> bool:
         return surface in {
