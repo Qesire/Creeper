@@ -2,342 +2,201 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
   "additionalProperties": false,
+  "required": [
+    "query",
+    "regions",
+    "contract_proposals"
+  ],
   "properties": {
     "query": {
-      "type": "string"
+      "type": "string",
+      "minLength": 1
     },
-    "hypotheses": {
+    "regions": {
       "type": "array",
-      "maxItems": 128,
+      "maxItems": 8,
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "properties": {
-          "hypothesis_id": {
-            "type": "string"
-          },
-          "action": {
-            "type": "string",
-            "enum": [
-              "PROBE_URL",
-              "SEARCH_WEB_RESULT",
-              "EXPAND_CATALOG",
-              "ENUMERATE_TEMPLATE"
-            ]
-          },
-          "candidate": {
-            "anyOf": [
-              {
-                "type": "null"
-              },
-              {
-                "type": "object",
-                "additionalProperties": false,
-                "properties": {
-                  "canonical_entrypoint": {
-                    "type": "string"
-                  },
-                  "source_family": {
-                    "type": "string"
-                  },
-                  "level": {
-                    "type": "string",
-                    "enum": [
-                      "SOURCE",
-                      "COLLECTION",
-                      "METASOURCE"
-                    ]
-                  },
-                  "expected_year_from": {
-                    "type": [
-                      "integer",
-                      "null"
-                    ]
-                  },
-                  "expected_year_to": {
-                    "type": [
-                      "integer",
-                      "null"
-                    ]
-                  },
-                  "expected_volume": {
-                    "type": [
-                      "integer",
-                      "null"
-                    ]
-                  },
-                  "temporal_semantics_prior": {
-                    "type": "number"
-                  },
-                  "enumerability_prior": {
-                    "type": "number"
-                  },
-                  "direct_evidence_prior": {
-                    "type": "number"
-                  },
-                  "baseline_overlap_prior": {
-                    "type": "number"
-                  },
-                  "access_cost_prior": {
-                    "type": "number"
-                  },
-                  "adapter_cost_prior": {
-                    "type": "number"
-                  },
-                  "confidence": {
-                    "type": "number"
-                  }
-                },
-                "required": [
-                  "canonical_entrypoint",
-                  "source_family",
-                  "level",
-                  "expected_year_from",
-                  "expected_year_to",
-                  "expected_volume",
-                  "temporal_semantics_prior",
-                  "enumerability_prior",
-                  "direct_evidence_prior",
-                  "baseline_overlap_prior",
-                  "access_cost_prior",
-                  "adapter_cost_prior",
-                  "confidence"
-                ]
-              }
-            ]
-          },
-          "template": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "variables": {
-            "anyOf": [
-              {
-                "type": "null"
-              },
-              {
-                "type": "object",
-                "additionalProperties": false,
-                "properties": {
-                  "YEAR": {
-                    "type": [
-                      "array",
-                      "null"
-                    ],
-                    "items": {
-                      "type": [
-                        "integer",
-                        "string"
-                      ]
-                    }
-                  },
-                  "SHARD": {
-                    "type": [
-                      "array",
-                      "null"
-                    ],
-                    "items": {
-                      "type": [
-                        "integer",
-                        "string"
-                      ]
-                    }
-                  },
-                  "PART": {
-                    "type": [
-                      "array",
-                      "null"
-                    ],
-                    "items": {
-                      "type": [
-                        "integer",
-                        "string"
-                      ]
-                    }
-                  },
-                  "INDEX": {
-                    "type": [
-                      "array",
-                      "null"
-                    ],
-                    "items": {
-                      "type": [
-                        "integer",
-                        "string"
-                      ]
-                    }
-                  },
-                  "FILE": {
-                    "type": [
-                      "array",
-                      "null"
-                    ],
-                    "items": {
-                      "type": [
-                        "integer",
-                        "string"
-                      ]
-                    }
-                  },
-                  "DATASET": {
-                    "type": [
-                      "array",
-                      "null"
-                    ],
-                    "items": {
-                      "type": [
-                        "integer",
-                        "string"
-                      ]
-                    }
-                  },
-                  "COLLECTION": {
-                    "type": [
-                      "array",
-                      "null"
-                    ],
-                    "items": {
-                      "type": [
-                        "integer",
-                        "string"
-                      ]
-                    }
-                  }
-                },
-                "required": [
-                  "YEAR",
-                  "SHARD",
-                  "PART",
-                  "INDEX",
-                  "FILE",
-                  "DATASET",
-                  "COLLECTION"
-                ]
-              }
-            ]
-          },
-          "candidate_defaults": {
-            "anyOf": [
-              {
-                "type": "null"
-              },
-              {
-                "type": "object",
-                "additionalProperties": false,
-                "properties": {
-                  "source_family": {
-                    "type": "string"
-                  },
-                  "level": {
-                    "type": "string",
-                    "enum": [
-                      "SOURCE",
-                      "COLLECTION",
-                      "METASOURCE"
-                    ]
-                  },
-                  "expected_year_from": {
-                    "type": [
-                      "integer",
-                      "null"
-                    ]
-                  },
-                  "expected_year_to": {
-                    "type": [
-                      "integer",
-                      "null"
-                    ]
-                  },
-                  "expected_volume": {
-                    "type": [
-                      "integer",
-                      "null"
-                    ]
-                  },
-                  "temporal_semantics_prior": {
-                    "type": "number"
-                  },
-                  "enumerability_prior": {
-                    "type": "number"
-                  },
-                  "direct_evidence_prior": {
-                    "type": "number"
-                  },
-                  "baseline_overlap_prior": {
-                    "type": "number"
-                  },
-                  "access_cost_prior": {
-                    "type": "number"
-                  },
-                  "adapter_cost_prior": {
-                    "type": "number"
-                  },
-                  "confidence": {
-                    "type": "number"
-                  }
-                },
-                "required": [
-                  "source_family",
-                  "level",
-                  "expected_year_from",
-                  "expected_year_to",
-                  "expected_volume",
-                  "temporal_semantics_prior",
-                  "enumerability_prior",
-                  "direct_evidence_prior",
-                  "baseline_overlap_prior",
-                  "access_cost_prior",
-                  "adapter_cost_prior",
-                  "confidence"
-                ]
-              }
-            ]
-          },
-          "expected_mechanism": {
-            "type": "string"
-          },
-          "confidence": {
-            "type": "number"
-          },
-          "validation": {
-            "type": "object",
-            "additionalProperties": false,
-            "properties": {
-              "method": {
-                "type": "string"
-              },
-              "max_requests": {
-                "type": "integer"
-              },
-              "max_bytes": {
-                "type": "integer"
-              }
-            },
-            "required": [
-              "method",
-              "max_requests",
-              "max_bytes"
-            ]
-          }
-        },
         "required": [
-          "hypothesis_id",
-          "action",
-          "candidate",
-          "template",
-          "variables",
-          "candidate_defaults",
+          "proposal_id",
+          "surface_kind",
+          "root",
+          "purpose",
+          "query_family",
+          "enumerator",
+          "artifact_predicate",
+          "hard_bounds",
+          "stop_conditions",
+          "expected_source_family",
+          "expected_contract_family",
           "expected_mechanism",
+          "expected_fanout",
           "confidence",
           "validation"
-        ]
+        ],
+        "properties": {
+          "proposal_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "surface_kind": {
+            "type": "string",
+            "enum": [
+              "WEB_SEARCH",
+              "HTML_CATALOG",
+              "HTTP_API",
+              "REPOSITORY",
+              "MANIFEST",
+              "FILENAME_FAMILY",
+              "LOCAL_HINT"
+            ]
+          },
+          "root": {
+            "type": "string",
+            "format": "uri",
+            "pattern": "^https?://"
+          },
+          "purpose": {
+            "type": "string",
+            "minLength": 1
+          },
+          "query_family": {
+            "type": "object",
+            "additionalProperties": false,
+            "patternProperties": {
+              "^[A-Z][A-Z0-9_]*$": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 512,
+                "items": {
+                  "type": [
+                    "string",
+                    "integer"
+                  ]
+                }
+              }
+            }
+          },
+          "enumerator": {
+            "type": "string",
+            "enum": [
+              "STATIC_LIST",
+              "HTML_CATALOG",
+              "INTEGER_PAGINATION",
+              "CURSOR_API",
+              "FILENAME_PATTERN",
+              "MANIFEST_FILE"
+            ]
+          },
+          "artifact_predicate": {
+            "type": "object"
+          },
+          "hard_bounds": {
+            "type": "object",
+            "minProperties": 1,
+            "additionalProperties": false,
+            "properties": {
+              "max_requests": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "max_pages": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "max_artifacts": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "max_bytes": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "max_seconds": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "max_items": {
+                "type": "integer",
+                "minimum": 1
+              }
+            }
+          },
+          "stop_conditions": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 16,
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "expected_source_family": {
+            "type": "string",
+            "minLength": 1
+          },
+          "expected_contract_family": {
+            "type": "string",
+            "minLength": 1
+          },
+          "expected_mechanism": {
+            "type": "string",
+            "minLength": 1
+          },
+          "expected_fanout": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 4096
+          },
+          "confidence": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "validation": {
+            "type": "object"
+          }
+        }
+      }
+    },
+    "contract_proposals": {
+      "type": "array",
+      "maxItems": 8,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "proposal_id",
+          "family",
+          "interpretation",
+          "required_fields",
+          "validation"
+        ],
+        "properties": {
+          "proposal_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "family": {
+            "type": "string",
+            "minLength": 1
+          },
+          "interpretation": {
+            "type": "string",
+            "minLength": 1
+          },
+          "required_fields": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "validation": {
+            "type": "object"
+          }
+        }
       }
     }
-  },
-  "required": [
-    "query",
-    "hypotheses"
-  ]
+  }
 }
