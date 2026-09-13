@@ -13,6 +13,7 @@ import json
 from pathlib import Path
 
 from creeper.authority.baseline_index import BaselineIndex
+from creeper.authority.paths import find_baseline_dir
 from creeper.evidence.providers.cdx import query_year
 from creeper.records.candidates import CandidateRecord, CandidateSourceScope, reconcile_active_candidates
 from creeper.submission.builder import build_snapshot
@@ -27,7 +28,7 @@ def main() -> int:
     parser.add_argument("--limit", type=int, default=25)
     parser.add_argument("--documentation", type=Path, required=True)
     args = parser.parse_args()
-    source_path = args.task_root / "merged260909-3" / "candidate_pool.txt"
+    source_path = find_baseline_dir(args.task_root) / "candidate_pool.txt"
     records = []
     with source_path.open("r", encoding="utf-8", errors="replace") as source:
         for line in source:

@@ -13,6 +13,7 @@ import time
 from pathlib import Path
 
 from creeper.authority.baseline_index import BaselineIndex
+from creeper.authority.paths import find_baseline_dir
 from creeper.evidence.batch import EvidenceBatchRunner
 from creeper.evidence.providers.cdx import WaybackCDXClient
 from creeper.records.candidates import (
@@ -43,7 +44,7 @@ def main() -> int:
         raise SystemExit("--requests-per-second cannot be negative")
 
     started = time.perf_counter()
-    candidate_path = args.task_root / "merged260909-3" / "candidate_pool.txt"
+    candidate_path = find_baseline_dir(args.task_root) / "candidate_pool.txt"
     records = []
     with candidate_path.open("r", encoding="utf-8", errors="replace") as source:
         for line in source:

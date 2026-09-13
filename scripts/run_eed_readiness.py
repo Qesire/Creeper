@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
 
+from creeper.authority.identity import AuthoritySnapshot
 from creeper.metrics.readiness import build_readiness_report
 
 
@@ -52,7 +53,11 @@ def main() -> int:
     parser.add_argument("--accepted-dir", type=Path, required=True)
     parser.add_argument("--baseline-dir", type=Path, required=True)
     parser.add_argument("--model", type=Path, required=True)
-    parser.add_argument("--baseline-eed", required=True)
+    parser.add_argument("--authority-manifest", type=Path)
+    parser.add_argument(
+        "--baseline-eed",
+        help="legacy compatibility only; prefer --authority-manifest",
+    )
     parser.add_argument("--elapsed-seconds", required=True)
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--source-partition-seed", type=int, default=0)
@@ -63,12 +68,25 @@ def main() -> int:
     parser.add_argument("--queue-metrics", type=Path)
     parser.add_argument("--resource-metrics", type=Path)
     args = parser.parse_args()
+    authority = (
+        AuthoritySnapshot.from_manifest_path(args.authority_manifest)
+        if args.authority_manifest is not None
+        else None
+    )
+    if authority is not None:
+        if args.baseline_eed is not None and args.baseline_eed != authority.baseline_eed:
+            parser.error("--baseline-eed conflicts with --authority-manifest")
+        baseline_eed = authority.baseline_eed
+    elif args.baseline_eed is not None:
+        baseline_eed = args.baseline_eed
+    else:
+        parser.error("--authority-manifest is required unless using legacy --baseline-eed")
 
     report = build_readiness_report(
         accepted_dir=args.accepted_dir,
         baseline_dir=args.baseline_dir,
         model_path=args.model,
-        baseline_eed=args.baseline_eed,
+        baseline_eed=baseline_eed,
         elapsed_seconds=args.elapsed_seconds,
         run_id=args.run_id,
         source_partition_seed=args.source_partition_seed,
@@ -99,6 +117,8 @@ def main() -> int:
         "source_partition_seed": args.source_partition_seed,
         "code_revision": args.code_revision,
         "baseline_eed": report["baseline_eed"],
+        "baseline_id": authority.baseline_id if authority else "legacy-unbound",
+        "authority_digest": authority.authority_digest if authority else "",
         "annual_novel_eed": report["annual_novel_eed"],
         "annual_eed_per_day": report["annual_eed_per_day"],
         "five_percent_delta": report["five_percent_delta"],

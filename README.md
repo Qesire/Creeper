@@ -1,14 +1,15 @@
 # Creeper V2.2 Runtime Foundation
 
-This tree is a local, reproducible implementation scaffold for the V3
-historical Web hostname competition package.
+This tree is a local, reproducible implementation scaffold for the historical
+Web hostname competition package. The current authority snapshot is V4; the
+V3 rules and audit documents remain as historical implementation records.
 
 The authority snapshot is external to the source tree. Configure its path
 with `CREEPER_HOME` or pass paths explicitly. The current implementation
 supports:
 
 - exact reproduction of the bundled hostname normalizer and EED calculator;
-- a year-aware SQLite baseline index with resumable imports;
+- an authority-bound, year-aware SQLite baseline index with resumable imports;
 - V3 candidate-source provenance and Common Crawl corpus exclusion;
 - exact-host, exact-year CDX evidence acceptance states; and
 - durable `SourceDomain → Reservoir → WorkLease` progress with byte cursors,
@@ -26,17 +27,24 @@ direct year-specific evidence when its timestamp and record provenance are
 preserved; undated discovery sources and metadata-only hints remain outside
 the annual master files.
 
-## Codex source intelligence
+## Current V4 authority snapshot
 
-The source-discovery parent process can explicitly launch bounded Codex child
-agents for new-source discovery, successful-pattern exploitation, structure
-interpretation, and stagnation recovery. Codex has proposal-only authority:
-baseline reconciliation, measured scouting, evidence acceptance, source state,
-and submission remain deterministic Creeper responsibilities.
+The extracted V4 package and generated runtime artifacts are kept outside this
+source tree at:
 
-The full request/response contract, bounded context contents, multi-fidelity
-scout, value model, reward attribution, and validation procedure are documented
-in [docs/source-intelligence-vnext.md](docs/source-intelligence-vnext.md).
+```text
+/home/knowingthesea/Creeper-data/v4-merged260912-3/
+```
+
+It contains `authority/baseline_manifest.json`, the 4.0 GB
+`indexes/baseline-fast.sqlite3`, and per-year official EED reports under
+`reports/eed-baseline-v4/`. The V4→V3 comparison is recorded in
+`reports/baseline_diff_v3_to_v4.md`. Baseline discovery now selects the single
+`merged*` directory that contains all six annual files, so future package IDs
+do not require another source-code path rewrite. The manifest binds
+`baseline_id=merged260912-3`, `baseline_eed=46483739.2890`, the six annual
+hashes, candidate/model hashes, and an authority digest; the SQLite index
+embeds the same identity.
 
 ## Autonomous runtime
 
@@ -64,7 +72,7 @@ EvidenceStore unique host-year stream
         ↓
 incremental annual EED readiness
         ↓
-prewarm-ready / formal-gate-ready markers
+prewarm-ready / formal-gate-ready / submission-dispatch-ready markers
 ```
 
 Production exhaustion is reconciled back into discovery state so an exhausted
@@ -113,7 +121,10 @@ The current governor state is written atomically to
 The readiness worker is an incremental trigger, not submission authority. It
 processes only new unique `(hostname, year)` evidence rows, resets and replays
 when the baseline or EED model changes, and retracts stale gate markers after a
-rebase. Final submission still performs a canonical host-year scan, annual
+rebase. It derives `baseline_eed` from the supplied AuthoritySnapshot and emits
+`baseline_reconciliation.json` and `source_contribution.json`. The formal 5%
+gate remains distinct from the configurable 5.25% dispatch buffer. Final
+submission still performs a canonical host-year scan, annual
 official-compatible EED recomputation, baseline diff, and full precheck.
 
 Automatic final submission packaging is not yet triggered by the supervisor;
@@ -177,14 +188,14 @@ hostname-year evidence and formal submission rules.
 PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_*.py' -v
 PYTHONPATH=src python3 scripts/authority_manifest.py <task-root> <manifest.json>
 PYTHONPATH=src python3 scripts/official_eed.py <annual.txt> <q2_tld_top_langs.json> <out-dir>
-PYTHONPATH=src python3 scripts/build_baseline.py <task-root> <index.sqlite3>
+PYTHONPATH=src python3 scripts/build_baseline.py <task-root> <index.sqlite3> --authority-manifest <baseline_manifest.json>
 PYTHONPATH=src python3 -m creeper.cli doctor <task-root> <data-root>
 PYTHONPATH=src python3 -m creeper.cli run --once conf/creeper.example.toml
 PYTHONPATH=src python3 scripts/run_evidence_pilot.py <task-root> <index.sqlite3> <report-dir> --limit 3 --year 1997 --requests-per-second 1
 PYTHONPATH=src python3 scripts/run_offline_dry_run.py <task-root> <index.sqlite3> <report-dir> --documentation <methods.docx>
 PYTHONPATH=src python3 scripts/run_lookup_bench.py <task-root> <index.sqlite3> <report.json> --limit 100000
 PYTHONPATH=src python3 scripts/evaluate_performance.py <performance-gate.json> --lookup-report <lookup.json> --efficiency-report <efficiency_v1.json>
-PYTHONPATH=src python3 scripts/run_eed_readiness.py <report-dir> --accepted-dir <annual-results> --baseline-dir <annual-baseline> --model <q2_tld_top_langs.json> --baseline-eed <value> --elapsed-seconds <seconds> --run-id <id>
+PYTHONPATH=src python3 scripts/run_eed_readiness.py <report-dir> --accepted-dir <annual-results> --baseline-dir <annual-baseline> --model <q2_tld_top_langs.json> --authority-manifest <baseline_manifest.json> --elapsed-seconds <seconds> --run-id <id>
 creeper-validation snapshot <runtime-data-root>
 ```
 

@@ -1,4 +1,4 @@
-"""Formal V3 submission archive exporter."""
+"""Formal submission archive exporter (the sole formal package entrypoint)."""
 
 from __future__ import annotations
 
@@ -53,6 +53,52 @@ def build_submission_zip(
     ).encode()
     entries["evidence.jsonl"] = "".join(evidence_lines).encode()
     entries["reports/eed.json"] = json.dumps(snapshot.eed_report, indent=2, sort_keys=True).encode()
+    entries["reports/baseline_reconciliation.json"] = json.dumps(
+        {
+            "baseline_id": snapshot.baseline_id,
+            "baseline_eed": snapshot.baseline_eed,
+            "input_records": len(snapshot.novel_records)
+            + snapshot.invalid_count
+            + snapshot.overlap_count
+            + snapshot.within_year_duplicates,
+            "within_year_duplicates": snapshot.within_year_duplicates,
+            "invalid_records": snapshot.invalid_count,
+            "baseline_overlap": snapshot.overlap_count,
+            "novel_host_years": len(snapshot.novel_records),
+            "novel_eed": snapshot.novel_eed,
+            "growth_rate": snapshot.growth_rate,
+        },
+        indent=2,
+        sort_keys=True,
+    ).encode()
+    contribution = snapshot.source_contribution
+    if contribution is None:
+        source_counts: dict[str, dict[str, object]] = {}
+        for record in snapshot.novel_records:
+            source = record.source_id or record.provider
+            bucket = source_counts.setdefault(
+                source,
+                {"novel_host_years": 0, "novel_eed": "0"},
+            )
+            bucket["novel_host_years"] = int(bucket["novel_host_years"]) + 1
+        direct_count = sum(
+            1 for record in snapshot.novel_records
+            if record.evidence_type == "source_direct_year"
+        )
+        contribution = {
+            "by_source": source_counts,
+            "direct_annual": {"novel_host_years": direct_count, "novel_eed": "0"},
+            "candidate": {
+                "novel_host_years": len(snapshot.novel_records) - direct_count,
+                "novel_eed": snapshot.novel_eed,
+            },
+            "note": "EED attribution was not supplied by the readiness ledger.",
+        }
+    entries["reports/source_contribution.json"] = json.dumps(
+        contribution,
+        indent=2,
+        sort_keys=True,
+    ).encode()
     entries["cdx_audit.json"] = json.dumps(list(snapshot.cdx_audit_set), indent=2).encode()
     entries["source_reports.json"] = json.dumps(list(snapshot.source_report_set), indent=2).encode()
     entries["method_failure_summary.json"] = json.dumps(
@@ -75,11 +121,15 @@ def build_submission_zip(
         entries[f"code/{relative.as_posix()}"] = path.read_bytes()
         source_files.append(relative.as_posix())
     manifest = {
-        "format_version": "submission-v1",
+        "format_version": "submission-v2",
         "submission_snapshot_id": snapshot.submission_snapshot_id,
         "created_at": snapshot.created_at,
         "baseline_id": snapshot.baseline_id,
         "baseline_hashes": snapshot.baseline_hashes,
+        "candidate_file_hash": snapshot.candidate_file_hash,
+        "model_hash": snapshot.model_hash,
+        "baseline_eed": snapshot.baseline_eed,
+        "authority_digest": snapshot.authority_digest,
         "policy_versions": {
             "normalizer": snapshot.normalizer_version,
             "evidence": snapshot.evidence_policy_version,

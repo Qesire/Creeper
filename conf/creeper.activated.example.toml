@@ -1,7 +1,7 @@
 # Production config for discovery-activated source reservoirs.
 source_mode = "activated"
-runtime_data_root = "/path/to/Creeper-data/v3-merged260909-3"
-baseline_index = "/path/to/Creeper-data/v3-merged260909-3/baseline.sqlite3"
+runtime_data_root = "/path/to/Creeper-data/v4-merged260912-3"
+baseline_index = "/path/to/Creeper-data/v4-merged260912-3/indexes/baseline-fast.sqlite3"
 
 [limits]
 # Independent source workers claim different durable reservoir leases. This is

@@ -42,10 +42,12 @@ poll_max_seconds = 10.0
 enabled = true
 # Omit eed_model to reuse [measurement].eed_model from source-discovery config.
 # eed_model = "/path/to/equivalent_english_domain_model.json"
-# This value is authority-specific. Update it together with baseline_index if
-# the competition baseline changes; a baseline file change automatically
-# resets/replays novelty, while this denominator remains explicit configuration.
-baseline_eed = "35266393.8852"
+# AuthoritySnapshot is the source of baseline identity and baseline_eed.
+# baseline_eed remains shown for backwards-compatible configurations, but is
+# checked against this manifest and must never be edited independently.
+authority_manifest = "/path/to/Creeper-data/v4-merged260912-3/authority/baseline_manifest.json"
+baseline_eed = "46483739.2890"
+dispatch_threshold = "0.0525"
 batch_size = 50000
 max_batches_per_cycle = 20
 poll_seconds = 30.0

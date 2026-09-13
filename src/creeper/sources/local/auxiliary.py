@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from creeper.authority.normalizer import normalize_official
+from creeper.authority.paths import find_baseline_dir
 from creeper.records.candidates import CandidateSourceScope
 from creeper.records.models import HostObservation, SourceRecord
 
@@ -21,7 +22,7 @@ class V3AuxiliaryURLAdapter:
 
     def __init__(self, task_root: Path):
         self.task_root = task_root
-        self.directory = task_root / "merged260909-3"
+        self.directory = find_baseline_dir(task_root, require_annual=False)
 
     def enumerate(self, *, limit_per_file: int | None = None, total_limit: int | None = None):
         if limit_per_file is not None and limit_per_file < 1:

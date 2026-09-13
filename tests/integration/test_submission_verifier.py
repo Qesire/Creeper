@@ -44,7 +44,7 @@ class SubmissionVerifierTests(unittest.TestCase):
             }
             manifest = {
                 "format_version": "submission-v1",
-                "baseline_id": "merged260909-3",
+                "baseline_id": "merged260912-3",
                 "baseline_hashes": {str(y): "b" * 64 for y in range(1996, 2002)},
                 "policy_versions": {"normalizer": "n", "evidence": "e", "eed": "eed"},
                 "entry_sha256": {k: hashlib.sha256(v).hexdigest() for k, v in entries.items()},

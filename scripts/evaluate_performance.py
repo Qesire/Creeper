@@ -21,7 +21,7 @@ def main() -> int:
     parser.add_argument("--lookup-report", type=Path)
     parser.add_argument("--efficiency-report", type=Path)
     parser.add_argument("--candidate-pilot", type=Path)
-    parser.add_argument("--baseline-eed", default="34887095.7393")
+    parser.add_argument("--baseline-eed", default="46483739.2890")
     args = parser.parse_args()
 
     reference = PerformanceReference(

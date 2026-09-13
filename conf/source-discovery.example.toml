@@ -1,7 +1,7 @@
 # Creeper source-discovery control-plane example.
 # Paths are resolved relative to this file unless absolute.
 
-runtime_data_root = "/path/to/Creeper-data/v3-merged260909-3"
+runtime_data_root = "/path/to/Creeper-data/v4-merged260912-3"
 scrapy_project_dir = "../tools/scrapy_acquisition"
 
 [pool]
@@ -45,7 +45,7 @@ follow_query = false
 [measurement]
 # Optional deterministic yield gate for concrete SOURCE/BULK_ARTIFACT nodes.
 # Remove this whole table to keep concrete sources in HOLD until a measured adapter exists.
-baseline_index = "/path/to/Creeper-data/v3-merged260909-3/baseline.sqlite3"
+baseline_index = "/path/to/Creeper-data/v4-merged260912-3/indexes/baseline-fast.sqlite3"
 eed_model = "/path/to/task-root/equivalent_english_domain/CC-MAIN-2024-10_primary_page_language_percentage.json"
 # Only a bounded prefix is fetched; WARC/ARC use warcio; unsupported formats remain HOLD.
 max_download_bytes = 8388608

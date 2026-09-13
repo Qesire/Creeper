@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from creeper.authority.normalizer import normalize_official
+from creeper.authority.paths import find_baseline_dir
 from creeper.records.candidates import CandidateSourceScope
 from creeper.records.models import HostObservation, SourceRecord, iter_source_records
 
@@ -16,7 +17,7 @@ class ISCAdapter:
         self.root = root
 
     def enumerate(self):
-        directory = self.root / "merged260909-3" / "isc_survey_hostnames"
+        directory = find_baseline_dir(self.root) / "isc_survey_hostnames"
         for path in sorted(directory.glob("*.txt")):
             year = int(path.name[:4]) if path.name[:4].isdigit() else None
             yield from iter_source_records(

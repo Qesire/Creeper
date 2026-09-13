@@ -10,10 +10,11 @@ import time
 from pathlib import Path
 
 from creeper.authority.baseline_index import BaselineIndex
+from creeper.authority.paths import find_baseline_dir
 
 
 def _sample_hosts(task_root: Path, limit: int) -> tuple[list[str], list[str]]:
-    annual = task_root / "merged260909-3"
+    annual = find_baseline_dir(task_root)
     present: list[str] = []
     with (annual / "1996.txt").open("r", encoding="utf-8", errors="replace") as source:
         for line in source:

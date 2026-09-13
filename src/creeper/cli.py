@@ -11,6 +11,7 @@ import tomllib
 
 from creeper.authority.baseline_index import BaselineIndex
 from creeper.authority.eed import calculate_eed
+from creeper.authority.identity import AuthoritySnapshot
 from creeper.authority.manifest import build_manifest
 from creeper.evidence.policies import EvidenceQueryKey, TemporalScope
 from creeper.evidence_cli import run_service as run_evidence_service
@@ -128,8 +129,21 @@ def _run_once(config_path: Path) -> dict[str, object]:
             config_path=config_path,
             name="eed_report",
         )
+        baseline_manifest = _json_object(manifest_path, "baseline_manifest")
+        authority = (
+            AuthoritySnapshot.from_manifest(baseline_manifest)
+            if baseline_manifest.get("baseline_eed") is not None
+            else None
+        )
+        configured_baseline_eed = _nonempty_string(
+            submission.get("baseline_eed", "0"), "baseline_eed"
+        )
+        if authority is not None and configured_baseline_eed != "0":
+            if configured_baseline_eed != authority.baseline_eed:
+                raise ValueError("submission baseline_eed conflicts with authority manifest")
+            configured_baseline_eed = authority.baseline_eed
         submission_context = RuntimeSubmissionContext(
-            baseline_manifest=_json_object(manifest_path, "baseline_manifest"),
+            baseline_manifest=baseline_manifest,
             code_revision=_nonempty_string(
                 submission.get("code_revision"), "code_revision"
             ),
@@ -151,9 +165,7 @@ def _run_once(config_path: Path) -> dict[str, object]:
                 if submission.get("eed_model") is not None
                 else None
             ),
-            baseline_eed=_nonempty_string(
-                submission.get("baseline_eed", "0"), "baseline_eed"
-            ),
+            baseline_eed=(authority.baseline_eed if authority is not None else configured_baseline_eed),
         )
 
     baseline = BaselineIndex(baseline_path)
@@ -297,6 +309,8 @@ def main(argv: list[str] | None = None) -> int:
     baseline = subparsers.add_parser("build-baseline")
     baseline.add_argument("task_root", type=Path)
     baseline.add_argument("output", type=Path)
+    baseline.add_argument("--baseline-dir", type=Path)
+    baseline.add_argument("--authority-manifest", type=Path)
     baseline.add_argument("--batch-size", type=int, default=50_000)
 
     evidence = subparsers.add_parser("evidence-query")
@@ -353,7 +367,13 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps({"summary": summary, "tld_breakdown": rows}, indent=2))
         return 0
     if args.command == "build-baseline":
-        index = BaselineIndex.build(args.task_root, args.output, batch_size=args.batch_size)
+        index = BaselineIndex.build(
+            args.task_root,
+            args.output,
+            baseline_dir=args.baseline_dir,
+            authority_manifest=args.authority_manifest,
+            batch_size=args.batch_size,
+        )
         print(json.dumps(index.counts(), indent=2))
         index.close()
         return 0

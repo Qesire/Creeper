@@ -8,6 +8,7 @@ from pathlib import Path
 
 from creeper.authority.baseline_index import YEAR_BITS, BaselineIndex
 from creeper.authority.eed import calculate_eed_values
+from creeper.authority.identity import AuthoritySnapshot, eed_model_authority_signature
 from creeper.storage.evidence_store import EvidenceStore
 from creeper.submission.builder import build_snapshot
 from creeper.submission.snapshot import SubmissionSnapshot
@@ -44,9 +45,17 @@ def _annual_eed_report(
     independently and the six annual EED values are summed.
     """
     by_year: dict[int, set[str]] = {year: set() for year in YEAR_BITS}
+    by_source: dict[str, dict[int, set[str]]] = {}
+    direct_by_year: dict[int, set[str]] = {year: set() for year in YEAR_BITS}
     for capsule in capsules:
         if capsule.year in by_year:
             by_year[capsule.year].add(capsule.hostname)
+            source = capsule.source_id or capsule.provider
+            by_source.setdefault(source, {year: set() for year in YEAR_BITS})[
+                capsule.year
+            ].add(capsule.hostname)
+            if capsule.evidence_type == "source_direct_year":
+                direct_by_year[capsule.year].add(capsule.hostname)
 
     total = Decimal("0")
     annual: dict[str, object] = {}
@@ -65,6 +74,44 @@ def _annual_eed_report(
             "tld_breakdown": rows,
         }
 
+    source_contribution: dict[str, dict[str, object]] = {}
+    for source, source_years in sorted(by_source.items()):
+        source_total = Decimal("0")
+        source_count = 0
+        for year in sorted(source_years):
+            summary, _ = calculate_eed_values(
+                source_years[year],
+                Path(model_path),
+                input_file=f"<runtime-source:{source}:{year}>",
+            )
+            source_total += Decimal(str(summary["equivalent_english_domains"]))
+            source_count += len(source_years[year])
+        source_contribution[source] = {
+            "novel_host_years": source_count,
+            "novel_eed": format(source_total, "f"),
+        }
+    direct_count = sum(len(values) for values in direct_by_year.values())
+    direct_total = Decimal("0")
+    for year, values in direct_by_year.items():
+        summary, _ = calculate_eed_values(values, Path(model_path))
+        direct_total += Decimal(str(summary["equivalent_english_domains"]))
+    candidate_count = len({
+        (capsule.hostname, capsule.year)
+        for capsule in capsules
+        if capsule.evidence_type != "source_direct_year"
+    })
+    total_eed = Decimal(str(total))
+    source_report = {
+        "by_source": source_contribution,
+        "direct_annual": {
+            "novel_host_years": direct_count,
+            "novel_eed": format(direct_total, "f"),
+        },
+        "candidate": {
+            "novel_host_years": candidate_count,
+            "novel_eed": format(total_eed - direct_total, "f"),
+        },
+    }
     return {
         "authority": "official-calculator-v1",
         "method": (
@@ -75,6 +122,7 @@ def _annual_eed_report(
         "model_path": str(Path(model_path).resolve()),
         "equivalent_english_domains": format(total, "f"),
         "annual": annual,
+        "source_contribution": source_report,
     }
 
 
@@ -86,6 +134,16 @@ def build_runtime_snapshot(
     snapshot_id: str,
 ) -> SubmissionSnapshot:
     """Build a snapshot from durable runtime stores using the canonical builder."""
+    authority = None
+    if context.baseline_manifest.get("baseline_eed") is not None:
+        authority = AuthoritySnapshot.from_manifest(context.baseline_manifest)
+        baseline.assert_authority(authority)
+        if context.baseline_eed != "0" and Decimal(str(context.baseline_eed)) != Decimal(authority.baseline_eed):
+            raise ValueError("submission baseline_eed conflicts with authority manifest")
+        if context.eed_model_path is not None and eed_model_authority_signature(
+            context.eed_model_path
+        ) != authority.model_hash:
+            raise ValueError("submission EED model does not match authority manifest")
     novel_capsules = [
         capsule
         for capsule in evidence_store.canonical_host_year_capsules()
@@ -106,7 +164,9 @@ def build_runtime_snapshot(
             Path(context.eed_model_path),
         )
         novel_eed = str(eed_report["equivalent_english_domains"])
-        baseline_eed = Decimal(str(context.baseline_eed))
+        baseline_eed = Decimal(
+            authority.baseline_eed if authority is not None else str(context.baseline_eed)
+        )
         growth_rate = (
             format(Decimal(novel_eed) / baseline_eed, "f")
             if baseline_eed > 0
@@ -127,4 +187,9 @@ def build_runtime_snapshot(
         unparsed=context.unparsed,
         novel_eed=novel_eed,
         growth_rate=growth_rate,
+        source_contribution=(
+            eed_report.get("source_contribution")
+            if isinstance(eed_report, dict)
+            else None
+        ),
     )

@@ -1,4 +1,4 @@
-"""Independent verifier for the V3 submission archive contract."""
+"""Independent verifier for the submission archive contract."""
 
 from __future__ import annotations
 
@@ -50,8 +50,8 @@ def verify_submission_archive(
         except json.JSONDecodeError as exc:
             return VerificationReport(False, tuple(errors + [f"invalid MANIFEST.json: {exc}"]))
 
-        if manifest.get("baseline_id") != "merged260909-3":
-            errors.append("manifest baseline_id is not merged260909-3")
+        if not str(manifest.get("baseline_id", "")).strip():
+            errors.append("manifest baseline_id is missing")
         expected_years = {str(year) for year in range(1996, 2002)}
         if set(manifest.get("baseline_hashes", {})) != expected_years:
             errors.append("manifest does not contain all six baseline hashes")
@@ -138,15 +138,35 @@ def verify_submission_archive(
             "isc_reference/manifest.json",
         ):
             require(required)
+        if manifest.get("format_version") == "submission-v2":
+            for required in (
+                "reports/baseline_reconciliation.json",
+                "reports/source_contribution.json",
+            ):
+                require(required)
         if baseline_manifest_path is not None:
             try:
                 external = json.loads(baseline_manifest_path.read_text(encoding="utf-8"))
+                if manifest.get("baseline_id") != external.get("baseline_id"):
+                    errors.append("manifest baseline_id does not match supplied authority manifest")
                 expected = {
                     name.removesuffix(".txt"): digest
                     for name, digest in external["annual_file_hashes"].items()
                 }
                 if manifest.get("baseline_hashes") != expected:
                     errors.append("manifest baseline hashes do not match supplied authority manifest")
+                expected_model_hash = str(external.get("model_hash", "")).strip()
+                if expected_model_hash and manifest.get("model_hash") != expected_model_hash:
+                    errors.append("manifest model hash does not match supplied authority manifest")
+                expected_candidate_hash = str(external.get("candidate_file_hash", "")).strip()
+                if expected_candidate_hash and manifest.get("candidate_file_hash") != expected_candidate_hash:
+                    errors.append("manifest candidate hash does not match supplied authority manifest")
+                expected_eed = str(external.get("baseline_eed", "")).strip()
+                if expected_eed and str(manifest.get("baseline_eed", "")) != expected_eed:
+                    errors.append("manifest baseline_eed does not match supplied authority manifest")
+                expected_digest = str(external.get("authority_digest", "")).strip()
+                if expected_digest and manifest.get("authority_digest") != expected_digest:
+                    errors.append("manifest authority_digest does not match supplied authority manifest")
             except (OSError, KeyError, json.JSONDecodeError) as exc:
                 errors.append(f"cannot compare authority manifest: {exc}")
     return VerificationReport(
