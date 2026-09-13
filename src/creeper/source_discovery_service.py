@@ -612,7 +612,8 @@ def _research_snapshot(
         SourceState.SCOUT_READY,
         SourceState.SCOUTING,
     )
-    deterministic_backlog = len(registry.list_candidates_in_states(live_states))
+    inventory = registry.inventory()
+    deterministic_backlog = sum(inventory[state] for state in live_states)
     ready_candidates = registry.list_candidates_in_states(
         (SourceState.WARM, SourceState.ACTIVE)
     )
@@ -630,10 +631,10 @@ def _research_snapshot(
         executable_regions = len(list_executable(limit=10_000))
     list_regions = getattr(registry, "list_regions", None)
     if callable(list_regions):
-        for region in list_regions():
-            state = getattr(region.state, "value", str(region.state))
-            if state in {"PROPOSED", "VALIDATED", "RUNNING"}:
-                pending_regions += 1
+        pending_regions = sum(
+            len(list_regions(state))
+            for state in ("PROPOSED", "VALIDATED", "RUNNING")
+        )
 
     contract_blockers: list[object] = []
     structure_blockers: list[object] = []
