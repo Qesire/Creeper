@@ -224,97 +224,145 @@ def _record_url(row: Mapping[str, Any], record_id: str) -> str:
     return f"https://zenodo.org/records/{record_id}"
 
 
-def _record_doi(row: Mapping[str, Any], metadata: Mapping[str, A[žWJHOˆÝˆ›Û™N‚ˆØ[™Y]\Îˆ\ÝÐ[žWHHÛY]Y]K™Ù]
-™ÚHŠK›ÝË™Ù]
-™ÚHŠWBˆYÈH›ÝË™Ù]
-œYÈŠHÜˆßBˆYˆ\Ú[œÝ[˜ÙJYËX\[™ÊN‚ˆÚHHYË™Ù]
-™ÚHŠHÜˆßBˆYˆ\Ú[œÝ[˜ÙJÚKX\[™ÊN‚ˆØ[™Y]\Ë˜\[™
-ÚK™Ù]
-šY[YšY\ˆŠJBˆ›Üˆ˜[YH[ˆØ[™Y]\Î‚ˆ›Ü›X[^™YH›Ü›X[^™WÙÚJ˜[YJBˆYˆ›Ü›X[^™Y‚ˆ™]\›ˆ›Ü›X[^™Yˆ™]\›ˆ›Û™B‚‚™YˆØÛÛ˜Ù\ÙÚJ›ÝÎˆX\[™ÖÜÝ‹[žWKY]Y]NˆX\[™ÖÜÝ‹[žWJHOˆÝˆ›Û™N‚ˆ›Üˆ˜[YH[ˆ
-›ÝË™Ù]
-˜ÛÛ˜Ù\ÚHŠKY]Y]K™Ù]
-˜ÛÛ˜Ù\ÚHŠJN‚ˆ›Ü›X[^™YH›Ü›X[^™WÙÚJ˜[YJBˆYˆ›Ü›X[^™Y‚ˆ™]\›ˆ›Ü›X[^™Yˆ™]\›ˆ›Û™B‚‚™YˆÚ]\—Ùš[\Ê›ÝÎˆX\[™ÖÜÝ‹[žWJHOˆ\VÙXÝÜÝ‹[žWK‹‹—N‚ˆ˜]ÈH›ÝË™Ù]
-™š[\ÈŠHÜˆ×Bˆ˜[Y\Îˆ\ÝÓX\[™ÖÜÝ‹[žWWHH×BˆYˆ\Ú[œÝ[˜ÙJ˜]Ë\Ý
-N‚ˆ˜[Y\ÈHÝ˜[YH›Üˆ˜[YH[ˆ˜]ÈYˆ\Ú[œÝ[˜ÙJ˜[YKX\[™ÊWBˆ[Yˆ\Ú[œÝ[˜ÙJ˜]ËX\[™ÊN‚ˆ[šY\ÈH˜]Ë™Ù]
-™[šY\ÈŠBˆYˆ\Ú[œÝ[˜ÙJ[šY\ËX\[™ÊN‚ˆ›ÜˆÙ^K˜[YH[ˆ[šY\Ëš][\Ê
-N‚ˆYˆ›Ý\Ú[œÝ[˜ÙJ˜[YKX\[™ÊN‚ˆÛÛ[YBˆ][HHXÝ
-˜[YJBˆ][KœÙ]Y˜][
-šÙ^H‹Ù^JBˆ˜[Y\Ë˜\[™
-][JBˆ[Yˆ\Ú[œÝ[˜ÙJ[šY\Ë\Ý
-N‚ˆ˜[Y\ÈHÝ˜[YH›Üˆ˜[YH[ˆ[šY\ÈYˆ\Ú[œÝ[˜ÙJ˜[YKX\[™ÊWBˆ›Ü›X[^™Yˆ\ÝÙXÝÜÝ‹[žWWHH×Bˆ›Üˆ˜[YH[ˆ˜[Y\Î‚ˆ[šÜÈH˜[YK™Ù]
-›[šÜÈŠHÜˆßBˆØØ]ÜˆHˆ‚ˆYˆ\Ú[œÝ[˜ÙJ[šÜËX\[™ÊN‚ˆ›ÜˆÙ^H[ˆ
-˜ÛÛ[‹™ÝÛ›ØY‹œÙ[ˆŠN‚ˆØØ]ÜˆHÝŠ[šÜË™Ù]
-Ù^JHÜˆˆŠKœÝš\
+def _record_doi(row: Mapping[str, Any], metadata: Mapping[str, Any]) -> str | None:
+    candidates: list[Any] = [metadata.get("doi"), row.get("doi")]
+    pids = row.get("pids") or {}
+    if isinstance(pids, Mapping):
+        doi = pids.get("doi") or {}
+        if isinstance(doi, Mapping):
+            candidates.append(doi.get("identifier"))
+    for value in candidates:
+        normalized = normalize_doi(value)
+        if normalized:
+            return normalized
+    return None
 
-BˆYˆØØ]ÜŽ‚ˆœ™XZÂˆYˆ›ÝØØ]ÜŽ‚ˆØØ]ÜˆHÝŠ˜[YK™Ù]
-›[šÈŠHÜˆˆŠKœÝš\
 
-BˆÙ^HHÝŠ˜[YK™Ù]
-šÙ^HŠHÜˆ˜[YK™Ù]
-™š[[˜[YHŠHÜˆ˜[YK™Ù]
-šYŠHÜˆˆŠKœÝš\
+def _concept_doi(row: Mapping[str, Any], metadata: Mapping[str, Any]) -> str | None:
+    for value in (row.get("conceptdoi"), metadata.get("conceptdoi")):
+        normalized = normalize_doi(value)
+        if normalized:
+            return normalized
+    return None
 
-Bˆ›Ü›X[^™Y˜\[™
-ˆÂˆšÙ^HŽˆÙ^Kˆ›ØØ]ÜˆŽˆØØ]Ü‹ˆœÚ^™HŽˆÚ[
-˜[YK™Ù]
-œÚ^™HŠHYˆ˜[YK™Ù]
-œÚ^™HŠH\È›Ý›Û™H[ÙH˜[YK™Ù]
-™š[\Ú^™HŠJKˆ˜ÚXÚÜÝ[HŽˆØÚXÚÜÝ[J˜[YK™Ù]
-˜ÚXÚÜÝ[HŠJKˆ˜ÛÛ[Ý\HŽˆÝŠ˜[YK™Ù]
-›Z[Y]\HŠHÜˆ˜[YK™Ù]
-\HŠHÜˆˆŠKˆBˆ
-Bˆ™]\›ˆ\J›Ü›X[^™Y
-B‚‚™YˆØÚXÚÜÝ[J˜[YNˆ[žJHOˆÝˆ›Û™N‚ˆYˆ\Ú[œÝ[˜ÙJ˜[YKX\[™ÊN‚ˆ[ÛÜš]HHÝŠ˜[YK™Ù]
-˜[ÛÜš]HŠHÜˆˆŠKœÝš\
 
-BˆYÙ\ÝHÝŠ˜[YK™Ù]
-˜[YHŠHÜˆ˜[YK™Ù]
-™YÙ\ÝŠHÜˆˆŠKœÝš\
+def _iter_files(row: Mapping[str, Any]) -> tuple[dict[str, Any], ...]:
+    raw = row.get("files") or []
+    values: list[Mapping[str, Any]] = []
+    if isinstance(raw, list):
+        values = [value for value in raw if isinstance(value, Mapping)]
+    elif isinstance(raw, Mapping):
+        entries = raw.get("entries")
+        if isinstance(entries, Mapping):
+            for key, value in entries.items():
+                if not isinstance(value, Mapping):
+                    continue
+                item = dict(value)
+                item.setdefault("key", key)
+                values.append(item)
+        elif isinstance(entries, list):
+            values = [value for value in entries if isinstance(value, Mapping)]
+    normalized: list[dict[str, Any]] = []
+    for value in values:
+        links = value.get("links") or {}
+        locator = ""
+        if isinstance(links, Mapping):
+            for key in ("content", "download", "self"):
+                locator = str(links.get(key) or "").strip()
+                if locator:
+                    break
+        if not locator:
+            locator = str(value.get("link") or "").strip()
+        key = str(value.get("key") or value.get("filename") or value.get("id") or "").strip()
+        normalized.append(
+            {
+                "key": key,
+                "locator": locator,
+                "size": _int(value.get("size") if value.get("size") is not None else value.get("filesize")),
+                "checksum": _checksum(value.get("checksum")),
+                "content_type": str(value.get("mimetype") or value.get("type") or ""),
+            }
+        )
+    return tuple(normalized)
 
-BˆYˆYÙ\Ý‚ˆ™]\›ˆˆžØ[ÛÜš]_NžÙYÙ\ÝHˆYˆ[ÛÜš]H[ÙHYÙ\Ýˆ™]\›ˆ›Û™Bˆ^HÝŠ˜[YHÜˆˆŠKœÝš\
 
-Bˆ™]\›ˆ^Üˆ›Û™B‚‚™YˆÜ™XÛÜ™ÛY]Y]J›ÝÎˆX\[™ÖÜÝ‹[žWJHOˆXÝÜÝ‹[žWN‚ˆY]Y]HH›ÝË™Ù]
-›Y]Y]HŠHÜˆßBˆYˆ›Ý\Ú[œÝ[˜ÙJY]Y]KX\[™ÊN‚ˆY]Y]HHßBˆš[\ÈHÚ]\—Ùš[\Ê›ÝÊBˆÚHHÜ™XÛÜ™ÙÚJ›ÝËY]Y]JBˆÛÛ˜Ù\ÙÚHHØÛÛ˜Ù\ÙÚJ›ÝËY]Y]JBˆÛÛ˜Ù\Ü™XÛÜ™ÚYHÝŠ›ÝË™Ù]
-˜ÛÛ˜Ù\™XÚYŠHÜˆ›ÝË™Ù]
-˜ÛÛ˜Ù\ÚYŠHÜˆˆŠKœÝš\
+def _checksum(value: Any) -> str | None:
+    if isinstance(value, Mapping):
+        algorithm = str(value.get("algorithm") or "").strip()
+        digest = str(value.get("value") or value.get("digest") or "").strip()
+        if digest:
+            return f"{algorithm}:{digest}" if algorithm else digest
+        return None
+    text = str(value or "").strip()
+    return text or None
 
-HÜˆ›Û™Bˆ]HHÝŠY]Y]K™Ù]
-]HŠHÜˆ›ÝË™Ù]
-]HŠHÜˆˆŠBˆ\ØÜš\[ÛˆHÝŠY]Y]K™Ù]
-™\ØÜš\[ÛˆŠHÜˆ›ÝË™Ù]
-™\ØÜš\[ÛˆŠHÜˆˆŠBˆš[ÜˆH™XÛÙÛš^™WØ\˜Ú]™\×Ý[›X\ÚY
-ˆ]KˆÜÝŠš[K™Ù]
-šÙ^HŠHÜˆˆŠH›Üˆš[H[ˆš[\×Kˆ\ØÜš\[Û‹ˆ
-Bˆ™]\›ˆÂˆœ™XÛÜ™ÚYŽˆÝŠ›ÝË™Ù]
-šYŠHÜˆˆŠKˆ˜ÛÛ˜Ù\Ü™XÛÜ™ÚYŽˆÛÛ˜Ù\Ü™XÛÜ™ÚYˆ™ÚHŽˆÚKˆ˜ÛÛ˜Ù\ÙÚHŽˆÛÛ˜Ù\ÙÚKˆ™\œÚ[ÛˆŽˆY]Y]K™Ù]
-™\œÚ[ÛˆŠHÜˆ›ÝË™Ù]
-™\œÚ[ÛˆŠKˆ]HŽˆ]Kˆ™\ØÜš\[ÛˆŽˆ\ØÜš\[Û‹ˆ˜Ü™X]ÜœÈŽˆY]Y]K™Ù]
-˜Ü™X]ÜœÈŠHÜˆ×Kˆ™š[\ÈŽˆš[\ËˆÈØÚY[[™ÈÛ›ÝÛYÙHÛ›NÈ™]™\ˆ]šY[˜ÙH]]Üš]K‚ˆ™˜[Z[WÜš[ÜˆŽˆš[Ü‹ˆœØÚY[[™×Üš[ÜˆŽˆÈ˜\˜Ú]™\×Ý[›X\ÚYŽˆš[ÜŸKˆB‚‚™YˆØ\Y˜XÝÛXYÊ›ÛÝÚYˆÝ‹›ÙNˆÙX\˜Ú]
-HOˆ\VÐ\Y˜XÝXY‹‹—N‚ˆš[\ÈH›ÙK›Y]Y]K™Ù]
-™š[\ÈŠHÜˆ
 
-Bˆ™XÛÜ™ÙÚHH›Ü›X[^™WÙÚJ›ÙK›Y]Y]K™Ù]
-™ÚHŠJHÜˆ›Û™BˆÛÛ˜Ù\ÙÚHH›Ü›X[^™WÙÚJ›ÙK›Y]Y]K™Ù]
-˜ÛÛ˜Ù\ÙÚHŠJHÜˆ›Û™BˆÝ]]ˆ\ÝÐ\Y˜XÝXYHH×BˆÙY[ŽˆÙ]Ý\VÜÝ‹Ý—WHHÙ]
+def _record_metadata(row: Mapping[str, Any]) -> dict[str, Any]:
+    metadata = row.get("metadata") or {}
+    if not isinstance(metadata, Mapping):
+        metadata = {}
+    files = _iter_files(row)
+    doi = _record_doi(row, metadata)
+    concept_doi = _concept_doi(row, metadata)
+    concept_record_id = str(row.get("conceptrecid") or row.get("concept_id") or "").strip() or None
+    title = str(metadata.get("title") or row.get("title") or "")
+    description = str(metadata.get("description") or row.get("description") or "")
+    prior = recognize_archives_unleashed(
+        title,
+        [str(file.get("key") or "") for file in files],
+        description,
+    )
+    return {
+        "record_id": str(row.get("id") or ""),
+        "concept_record_id": concept_record_id,
+        "doi": doi,
+        "concept_doi": concept_doi,
+        "version": metadata.get("version") or row.get("version"),
+        "title": title,
+        "description": description,
+        "creators": metadata.get("creators") or [],
+        "files": files,
+        # Scheduling knowledge only; never evidence authority.
+        "family_prior": prior,
+        "scheduling_prior": {"archives_unleashed": prior},
+    }
 
-Bˆ›Üˆ[™^š[H[ˆ[[Y\˜]Jš[\ÊN‚ˆYˆ›Ý\Ú[œÝ[˜ÙJš[KX\[™ÊN‚ˆÛÛ[YBˆØØ]ÜˆHÝŠš[K™Ù]
-›ØØ]ÜˆŠHÜˆˆŠKœÝš\
 
-Bˆ\œÙYH\›Ü]
-ØØ]ÜŠBˆYˆ\œÙYœØÚ[YH›Ý[ˆÈš‹šÈŸHÜˆ›Ý\œÙY›™]ØÎ‚ˆÛÛ[YBˆÙ^HHÝŠš[K™Ù]
-šÙ^HŠHÜˆ[™^
-BˆY[]HH
-Ù^KØØ]ÜŠBˆYˆY[]H[ˆÙY[Ž‚ˆÛÛ[YBˆÙY[‹˜Y
-Y[]JBˆÝ]]˜\[™
-ˆ\Y˜XÝXY
-ˆ›ÛÝÚY\›ÛÝÚYˆ›ÝšY\—Û˜]]™WÚYYˆžÛ›ÙKœ›ÝšY\—Û˜]]™WÚYNžÚÙ^_H‹ˆØØ]Ü[ØØ]Ü‹ˆÛÛ[Ý\O\ÝŠš[K™Ù]
-˜ÛÛ[Ý\HŠHÜˆˆŠKˆÚ^™OWÚ[
-š[K™Ù]
-œÚ^™HŠJKˆÚXÚÜÝ[OWØÚXÚÜÝ[Jš[K™Ù]
-˜ÚXÚÜÝ[HŠJKˆ\œÚ\Ý[ÚY\™XÛÜ™ÙÚKˆ\™[Ü\œÚ\Ý[ÚYXÛÛ˜Ù\ÙÚKˆ
-Bˆ
-Bˆ™]\›ˆ\JÝ]]
-B‚‚™YˆÚ[
-˜[YNˆ[žJHOˆ[›Û™N‚ˆžN‚ˆ™]\›ˆ[
-˜[YJHYˆ˜[YH\È›Ý›Û™H[ÙH›Û™Bˆ^Ù\
-\Q\œ›Ü‹˜[YQ\œ›ÜŠN‚ˆ™]\›ˆ›Û™B
+def _artifact_leads(root_id: str, node: SearchHit) -> tuple[ArtifactLead, ...]:
+    files = node.metadata.get("files") or ()
+    record_doi = normalize_doi(node.metadata.get("doi")) or None
+    concept_doi = normalize_doi(node.metadata.get("concept_doi")) or None
+    output: list[ArtifactLead] = []
+    seen: set[tuple[str, str]] = set()
+    for index, file in enumerate(files):
+        if not isinstance(file, Mapping):
+            continue
+        locator = str(file.get("locator") or "").strip()
+        parsed = urlsplit(locator)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            continue
+        key = str(file.get("key") or index)
+        identity = (key, locator)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        output.append(
+            ArtifactLead(
+                root_id=root_id,
+                provider_native_id=f"{node.provider_native_id}:{key}",
+                locator=locator,
+                content_type=str(file.get("content_type") or ""),
+                size=_int(file.get("size")),
+                checksum=_checksum(file.get("checksum")),
+                persistent_id=record_doi,
+                parent_persistent_id=concept_doi,
+            )
+        )
+    return tuple(output)
+
+
+def _int(value: Any) -> int | None:
+    try:
+        return int(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
