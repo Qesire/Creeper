@@ -2299,6 +2299,20 @@ class ControlStore:
             ).fetchall()
         return [self._platform_harvest_task(row) for row in rows]
 
+    def platform_year_harvest_state_counts(
+        self,
+    ) -> dict[PlatformHarvestState, int]:
+        counts = {state: 0 for state in PlatformHarvestState}
+        for row in self.connection.execute(
+            """
+            SELECT state, COUNT(*) AS n
+            FROM platform_year_harvests
+            GROUP BY state
+            """
+        ):
+            counts[PlatformHarvestState(str(row["state"]))] = int(row["n"])
+        return counts
+
     def claim_platform_year_harvests(
         self,
         *,
