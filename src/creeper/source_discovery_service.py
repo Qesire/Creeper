@@ -53,6 +53,7 @@ from creeper.source_discovery.measured_scout import (
 )
 from creeper.source_discovery.models import SourceState
 from creeper.source_discovery.models import is_direct_evidence_entrypoint
+from creeper.source_discovery.production_value import ProductionValueModel
 from creeper.source_discovery.registry import SourceDiscoveryRegistry
 from creeper.source_discovery.research_trigger import (
     ResearchDirective,
@@ -565,6 +566,7 @@ def _requeue_unexpanded_audited_arquivo_catalog(
 
 def _research_snapshot(
     registry: SourceDiscoveryRegistry,
+    production_value: ProductionValueModel,
 ) -> ResearchTriggerSnapshot:
     """Build a bounded scheduler snapshot without exposing authority handles."""
 
@@ -595,11 +597,45 @@ def _research_snapshot(
             if state in {"PROPOSED", "VALIDATED", "RUNNING"}:
                 pending_regions += 1
 
+    contract_blockers: list[object] = []
+    structure_blockers: list[object] = []
+    for candidate in registry.list_candidates(state=SourceState.HOLD):
+        reason = candidate.state_reason.upper()
+        if "UNKNOWN_CONTRACT" in reason or "UNKNOWN_EVIDENCE_CONTRACT" in reason:
+            contract_blockers.append(candidate)
+        elif "UNKNOWN_STRUCTURE" in reason:
+            structure_blockers.append(candidate)
+    contract_blockers.sort(
+        key=lambda item: (-item.scout_priority, item.source_key)
+    )
+    structure_blockers.sort(
+        key=lambda item: (-item.scout_priority, item.source_key)
+    )
+
+    final = production_value.research_signals()
+    subject_candidate = (
+        contract_blockers[0]
+        if contract_blockers
+        else structure_blockers[0] if structure_blockers else None
+    )
+    subject = (
+        None
+        if subject_candidate is None
+        else subject_candidate.canonical_entrypoint
+    )
+
     context_payload = {
         "deterministic_backlog": deterministic_backlog,
         "executable_regions": executable_regions,
         "pending_regions": pending_regions,
         "productive_direct": productive_direct,
+        "unknown_contract_blockers": len(contract_blockers),
+        "unknown_structure_blockers": len(structure_blockers),
+        "closed_source_runs": final.closed_source_runs,
+        "recent_zero_reward_tail": final.recent_zero_reward_tail,
+        "final_eed_per_hour_15m": final.final_eed_per_hour_15m,
+        "final_eed_per_hour_60m": final.final_eed_per_hour_60m,
+        "subject": subject,
     }
     context_hash = __import__("hashlib").sha256(
         json.dumps(context_payload, sort_keys=True).encode("utf-8")
@@ -609,7 +645,14 @@ def _research_snapshot(
         pending_region_count=pending_regions,
         deterministic_candidate_backlog=deterministic_backlog,
         productive_direct_inventory=productive_direct,
+        final_eed_per_hour_15m=final.final_eed_per_hour_15m,
+        final_eed_per_hour_60m=final.final_eed_per_hour_60m,
+        recent_zero_reward_tail=final.recent_zero_reward_tail,
+        closed_source_runs=final.closed_source_runs,
+        unknown_structure_blockers=len(structure_blockers),
+        unknown_contract_blockers=len(contract_blockers),
         context_hash=context_hash,
+        subject=subject,
     )
 
 
@@ -870,6 +913,7 @@ async def _open_runtime(config: SourceDiscoveryServiceConfig):
                 registry,
                 policy=config.saturation,
             )
+            production_value = ProductionValueModel(registry)
             manager = SourceReservoirManager(
                 registry,
                 targets=config.pool,
@@ -970,7 +1014,7 @@ async def _open_runtime(config: SourceDiscoveryServiceConfig):
                     region_parallelism=config.coordinator.region_parallelism,
                     failure_retry_seconds=config.coordinator.failure_retry_seconds,
                     research_snapshot_provider=(
-                        (lambda: _research_snapshot(registry))
+                        (lambda: _research_snapshot(registry, production_value))
                         if background_research is not None
                         else None
                     ),
