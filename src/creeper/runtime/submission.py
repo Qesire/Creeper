@@ -224,6 +224,10 @@ def export_runtime_submission(
     recomputes semantic validity, novelty, EED, and growth from the archive.
     A package that fails independent verification is removed.
     """
+    if snapshot.source_contribution is None:
+        raise ValueError(
+            "formal runtime submission requires authoritative source/lane contribution"
+        )
     authority = AuthoritySnapshot.from_manifest_path(Path(baseline_manifest_path))
     if eed_model_authority_signature(Path(eed_model_path)) != authority.model_hash:
         raise ValueError("submission EED model does not match authority manifest")
