@@ -291,6 +291,17 @@ class SourceDiscoveryCoordinator:
         self._research_started_at: float | None = None
         self._last_research_started_at: float | None = None
         self._research_context_failures: dict[str, int] = {}
+        self._operator_research_requested = False
+        self._operator_research_subject: str | None = None
+
+    def request_research_once(self, *, subject: str | None = None) -> None:
+        """Latch one operator request without bypassing the deterministic gate."""
+        if self.research_executor is None:
+            raise RuntimeError("background research is not enabled")
+        self._operator_research_requested = True
+        self._operator_research_subject = (
+            None if subject is None or not subject.strip() else subject.strip()
+        )
 
     @staticmethod
     def _failure_reason(stage: str, error: Exception) -> str:
@@ -767,6 +778,15 @@ class SourceDiscoveryCoordinator:
             ),
             last_llm_started_at=last_started,
             same_context_failures=max(snapshot.same_context_failures, local_failures),
+            operator_requested=(
+                snapshot.operator_requested or self._operator_research_requested
+            ),
+            subject=(
+                self._operator_research_subject
+                if self._operator_research_requested
+                and self._operator_research_subject is not None
+                else snapshot.subject
+            ),
             now=snapshot.now if snapshot.now is not None else float(self.retry_clock()),
         )
 
@@ -793,6 +813,8 @@ class SourceDiscoveryCoordinator:
         self._research_task = asyncio.create_task(
             _capture(self.research_executor(directive))
         )
+        self._operator_research_requested = False
+        self._operator_research_subject = None
         counts["research_started"] += 1
 
     async def shutdown(self, grace_seconds: float = 2.0) -> None:
