@@ -706,6 +706,13 @@ class RewardRecord:
         object.__setattr__(self, "scope", RewardScope(self.scope))
         if self.kind is RewardKind.FINAL and not self.validation_closed:
             raise ValueError("FINAL reward requires closed validation")
+        if self.scope is RewardScope.DECISION:
+            if not self.decision_id:
+                raise ValueError("DECISION reward requires decision_id")
+            if self.entity_id != self.decision_id:
+                raise ValueError(
+                    "DECISION reward entity_id must equal decision_id"
+                )
         if not self.idempotency_key:
             object.__setattr__(
                 self,
