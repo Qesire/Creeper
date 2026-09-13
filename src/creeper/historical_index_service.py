@@ -20,12 +20,18 @@ import signal
 import time
 import tomllib
 from typing import Any, Callable
+from uuid import NAMESPACE_URL, uuid5
 
 import httpx
 
 from creeper.authority.baseline_index import BaselineIndex
 from creeper.authority.eed import load_english_weights
+from creeper.authority.identity import (
+    baseline_authority_signature,
+    eed_model_authority_signature,
+)
 from creeper.runtime.http import configured_http_proxy
+from creeper.runtime.exposure import ProductionExposure
 from creeper.source_discovery.activation import (
     SourceActivationCompiler,
     SourceActivationError,
@@ -446,6 +452,7 @@ class HistoricalIndexOptimizerRuntime:
         )
         self.baseline = BaselineIndex(config.baseline_index)
         self.discovery = SourceDiscoveryRegistry(self.control)
+        self._recover_historical_exposures()
         self.compiler = SourceActivationCompiler(
             self.control,
             registry=self.discovery,
@@ -491,6 +498,13 @@ class HistoricalIndexOptimizerRuntime:
             owner=owner,
             policy=config.harvest,
             assert_source_ownership=self._assert_harvest_source_ownership,
+            begin_production_exposure=(
+                lambda source_key, region_key: self._begin_historical_exposure(
+                    source_key,
+                    region_key,
+                    self._harvest_source_leases[source_key],
+                ).exposure_id
+            ),
         )
         self.harvest_service = RegionHarvestService(
             self.index_registry,
@@ -589,6 +603,103 @@ class HistoricalIndexOptimizerRuntime:
             + 60.0,
         )
 
+    def _historical_authority(self) -> tuple[str, str]:
+        return (
+            baseline_authority_signature(self.config.baseline_index),
+            eed_model_authority_signature(self.config.eed_model),
+        )
+
+    def _begin_historical_exposure(
+        self,
+        source_key: str,
+        region_key: str,
+        ownership_lease,
+    ) -> ProductionExposure:
+        activation = self.control.get_activation(source_key)
+        if activation is None:
+            raise RegionHarvestError(
+                "historical exposure requires an activated source"
+            )
+        reservoir_id = str(activation["reservoir_id"])
+        baseline_signature, model_signature = self._historical_authority()
+        exposure_id = str(
+            uuid5(
+                NAMESPACE_URL,
+                "|".join(
+                    (
+                        "creeper:historical-region",
+                        source_key,
+                        reservoir_id,
+                        ownership_lease.lease_id,
+                        region_key,
+                        baseline_signature,
+                        model_signature,
+                    )
+                ),
+            )
+        )
+        exposure = self.control.begin_production_exposure(
+            source_key=source_key,
+            reservoir_id=reservoir_id,
+            lease_id=exposure_id,
+            task_id=ownership_lease.lease_id,
+            lane="historical_region",
+            baseline_signature=baseline_signature,
+            model_signature=model_signature,
+            exposure_id=exposure_id,
+        )
+        now = float(self.control.clock())
+        self.control.connection.execute(
+            """
+            INSERT OR IGNORE INTO source_run_outcomes(
+                source_key, reservoir_id, lease_id, exposure_id,
+                baseline_signature, model_signature, read_started,
+                created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                source_key,
+                reservoir_id,
+                exposure_id,
+                exposure_id,
+                baseline_signature,
+                model_signature,
+                now,
+                now,
+                now,
+            ),
+        )
+        self.control.connection.commit()
+        return exposure
+
+    def _recover_historical_exposures(self, *, now: float | None = None) -> int:
+        """Terminally reconcile exposures whose separate ownership fence died."""
+
+        if now is None:
+            now = float(self.control.clock())
+        self.control.recover_expired_leases(now=now)
+        rows = self.control.connection.execute(
+            """
+            SELECT pe.exposure_id, wl.state
+            FROM production_exposures AS pe
+            JOIN work_leases AS wl ON wl.lease_id = pe.task_id
+            WHERE pe.lane = 'historical_region'
+              AND pe.state IN ('RUNNING', 'VALIDATING')
+              AND wl.state IN ('ABORTED', 'EXPIRED')
+            """
+        ).fetchall()
+        recovered = 0
+        for row in rows:
+            state = "EXPIRED" if str(row["state"]) == "EXPIRED" else "ABORTED"
+            reason = "ownership lease expired" if state == "EXPIRED" else "ownership lease aborted"
+            if self.control.abort_production_exposure(
+                str(row["exposure_id"]),
+                state=state,
+                reason=reason,
+            ):
+                recovered += 1
+        return recovered
+
     def _claim_harvest_reservoirs(self, pairs):
         claimed = []
         ttl = self._harvest_source_lease_ttl_seconds()
@@ -609,8 +720,10 @@ class HistoricalIndexOptimizerRuntime:
             )
             if lease is None:
                 continue
-            self._harvest_source_leases[index.source_key] = lease
-            claimed.append((index, reservoir, lease))
+            running = lease.start()
+            self.control.save_lease(running)
+            self._harvest_source_leases[index.source_key] = running
+            claimed.append((index, reservoir, running))
         return claimed
 
     def _assert_harvest_source_ownership(self, source_key: str) -> None:

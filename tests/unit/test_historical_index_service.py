@@ -25,6 +25,7 @@ from creeper.source_discovery.registry import SourceDiscoveryRegistry
 from creeper.sources.reservoirs import ReservoirState
 from creeper.storage.control_store import ControlStore
 from creeper.storage.evidence_store import EvidenceStore
+from creeper.runtime.exposure import ProductionExposureState
 
 
 class HistoricalIndexOptimizerTests(unittest.IsolatedAsyncioTestCase):
@@ -418,6 +419,43 @@ class HistoricalIndexOptimizerTests(unittest.IsolatedAsyncioTestCase):
                 peer.close()
                 if claimed:
                     runtime._release_harvest_reservoirs(claimed)
+
+    async def test_historical_exposure_releases_outer_ownership_fence(self) -> None:
+        path = self.root / "pending-exposure.cdxj"
+        path.write_text(
+            'com,novel)/ 19980101000000 {"url":"http://novel.com/"}\n',
+            encoding="utf-8",
+        )
+        candidate = self._register_active(
+            f"{self.base_url}/{path.name}",
+            content_length=path.stat().st_size,
+        )
+        config = self._config()
+
+        async with HistoricalIndexOptimizerRuntime(
+            config,
+            owner="pending-exposure-test",
+        ) as runtime:
+            compiled, errors = runtime._compile_active_sources()
+            self.assertEqual(compiled, 1)
+            self.assertEqual(errors, [])
+            eligible = runtime._eligible_ready_indexes()
+            claimed = runtime._claim_harvest_reservoirs(eligible)
+            self.assertEqual(len(claimed), 1)
+            exposure = runtime._begin_historical_exposure(
+                candidate.source_key,
+                runtime.index_registry.list_regions(
+                    claimed[0][0].index_key
+                )[0].region_key,
+                claimed[0][2],
+            )
+            self.assertEqual(
+                exposure.state,
+                ProductionExposureState.RUNNING,
+            )
+            lease_id = claimed[0][2].lease_id
+            runtime._release_harvest_reservoirs(claimed)
+            self.assertEqual(runtime.control.get_lease(lease_id).state.value, "ABORTED")
 
     async def test_compressed_direct_index_is_not_optimizer_eligible(self) -> None:
         path = self.root / "compressed.cdxj.gz"

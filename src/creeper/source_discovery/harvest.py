@@ -22,6 +22,7 @@ import httpx
 
 from creeper.authority.baseline_index import YEAR_BITS, BaselineIndex
 from creeper.evidence.planner import EvidencePlanner
+from creeper.evidence.policies import EvidenceQueryKey, TemporalScope
 from creeper.records.candidates import CandidateSourceScope
 from creeper.records.models import HostObservation, SourceRecord
 from creeper.runtime.http import configured_http_proxy
@@ -44,7 +45,10 @@ from creeper.sources.archive.host_year import (
     ContiguousHostYearWitnessReducer,
     HostYearWitnessGroup,
 )
-from creeper.storage.evidence_store import EvidenceStore
+from creeper.storage.evidence_store import (
+    EvidenceStore,
+    EvidenceTaskProvenance,
+)
 
 
 class RegionHarvestError(ValueError):
@@ -241,6 +245,7 @@ class RegionHarvestExecutor:
         policy: RegionHarvestPolicy | None = None,
         http_client: httpx.Client | None = None,
         assert_source_ownership: Callable[[str], None] | None = None,
+        begin_production_exposure: Callable[[str, str], str] | None = None,
     ) -> None:
         if not owner.strip():
             raise ValueError("harvest owner is required")
@@ -251,6 +256,7 @@ class RegionHarvestExecutor:
         self.policy = policy or RegionHarvestPolicy()
         self.http_client = http_client
         self.assert_source_ownership = assert_source_ownership
+        self.begin_production_exposure = begin_production_exposure
         self.planner = EvidencePlanner()
 
     @staticmethod
@@ -281,6 +287,7 @@ class RegionHarvestExecutor:
         source_key: str | None = None,
         reservoir_id: str | None = None,
         origin_unit_id: str | None = None,
+        exposure_id: str | None = None,
         assert_object_identity: Callable[[], None] | None = None,
         assert_source_owned: Callable[[], None] | None = None,
         assert_claim_owned: Callable[[], None] | None = None,
@@ -350,10 +357,39 @@ class RegionHarvestExecutor:
                 assert_source_owned()
             if assert_claim_owned is not None:
                 assert_claim_owned()
-            # Evidence is the stronger authority. Commit proof first; readiness
-            # can reconstruct direct source provenance from the capsule itself
-            # if this process dies before ControlStore attribution is written.
-            counters["inserted"] += self.evidence_store.put_many(capsules)
+            # Evidence is the stronger authority. Commit proof and the
+            # exposure lineage in one EvidenceStore transaction; ControlStore
+            # attribution may lag if this process dies after this point.
+            if exposure_id is None:
+                counters["inserted"] += self.evidence_store.put_many(capsules)
+            else:
+                if source_key is None or reservoir_id is None:
+                    raise RegionHarvestError(
+                        "historical exposure requires source and reservoir identity"
+                    )
+                committed_at = time.time()
+                counters["inserted"] += (
+                    self.evidence_store.put_many_with_task_provenance(
+                        [
+                            (
+                                capsule,
+                                EvidenceTaskProvenance(
+                                    EvidenceQueryKey(
+                                        capsule.hostname,
+                                        TemporalScope(capsule.year, capsule.year),
+                                        capsule.provider,
+                                        capsule.policy_version,
+                                    ),
+                                    source_key=source_key,
+                                    reservoir_id=reservoir_id,
+                                    lease_id=exposure_id,
+                                    committed_at=committed_at,
+                                ),
+                            )
+                            for capsule in capsules
+                        ]
+                    )
+                )
             if source_key is not None:
                 if reservoir_id is None or origin_unit_id is None:
                     raise RegionHarvestError(
@@ -846,7 +882,105 @@ class RegionHarvestExecutor:
             ),
         )
 
-    def harvest(self, region_key: str) -> RegionHarvestReport | None:
+    def _exposure_evidence_frontier(self, exposure_id: str) -> int:
+        row = self.evidence_store.connection.execute(
+            """
+            SELECT COALESCE(MAX(h.sequence), 0)
+            FROM evidence_host_years AS h
+            JOIN evidence_capsule_task_provenance AS p
+              ON p.hostname = h.hostname AND p.year = h.year
+            WHERE p.lease_id = ?
+            """,
+            (exposure_id,),
+        ).fetchone()
+        return int(row[0] or 0)
+
+    def _record_exposure_progress(
+        self,
+        exposure_id: str,
+        *,
+        state: str,
+        source_records: int,
+        requests: int,
+        bytes_read: int,
+        elapsed_seconds: float,
+        accepted_host_years: int = 0,
+    ) -> None:
+        control = self.registry.control_store
+        frontier = self._exposure_evidence_frontier(exposure_id)
+        control.record_production_exposure_progress(
+            exposure_id,
+            state=state,
+            source_records=source_records,
+            source_requests=requests,
+            source_bytes=bytes_read,
+            source_elapsed_seconds=elapsed_seconds,
+            evidence_frontier=frontier,
+            accepted_host_years=accepted_host_years,
+        )
+        control.connection.execute(
+            """
+            UPDATE source_run_outcomes
+            SET source_records = ?, bytes_read = ?, source_requests = ?,
+                read_finished = CASE WHEN ? = 'READ_COMPLETE' THEN ? ELSE read_finished END,
+                read_complete = CASE WHEN ? = 'READ_COMPLETE' THEN 1 ELSE read_complete END,
+                updated_at = ?
+            WHERE exposure_id = ? AND closed = 0
+            """,
+            (
+                int(source_records),
+                int(bytes_read),
+                int(requests),
+                state,
+                float(time.time()),
+                state,
+                float(time.time()),
+                exposure_id,
+            ),
+        )
+        control.connection.commit()
+
+    def _abort_exposure_after_failure(
+        self,
+        exposure_id: str | None,
+        *,
+        counters: dict[str, int],
+        result: LeaseResult | None,
+        reason: str,
+    ) -> None:
+        if exposure_id is None:
+            return
+        control = self.registry.control_store
+        try:
+            current = control.get_production_exposure(exposure_id)
+            if current is None or current.terminal:
+                return
+            self._record_exposure_progress(
+                exposure_id,
+                state="RUNNING",
+                source_records=(0 if result is None else result.records),
+                requests=(0 if result is None else result.requests),
+                bytes_read=(0 if result is None else result.bytes_read),
+                elapsed_seconds=(
+                    0.0 if result is None else result.elapsed_seconds
+                ),
+            )
+            control.abort_production_exposure(
+                exposure_id,
+                state="ABORTED",
+                reason=reason,
+            )
+        except (KeyError, ValueError, RuntimeError):
+            # The durable terminal state wins if another recovery worker got
+            # there first; never mask the original harvest failure.
+            return
+
+    def harvest(
+        self,
+        region_key: str,
+        *,
+        exposure_id: str | None = None,
+    ) -> RegionHarvestReport | None:
         """Claim and advance one region; return None when another owner won."""
 
         harvest_started = time.monotonic()
@@ -874,6 +1008,11 @@ class RegionHarvestExecutor:
             self._validate_region(claimed, index)
             if self.assert_source_ownership is not None:
                 self.assert_source_ownership(index.source_key)
+            if exposure_id is None and self.begin_production_exposure is not None:
+                exposure_id = self.begin_production_exposure(
+                    index.source_key,
+                    region_key,
+                )
         except BaseException:
             self.registry.release_region_harvest(
                 region_key,
@@ -894,6 +1033,15 @@ class RegionHarvestExecutor:
                 region_key,
                 owner=self.owner,
             )
+            if exposure_id is not None:
+                self._record_exposure_progress(
+                    exposure_id,
+                    state="READ_COMPLETE",
+                    source_records=0,
+                    requests=0,
+                    bytes_read=0,
+                    elapsed_seconds=0.0,
+                )
             return RegionHarvestReport(
                 region_key=region_key,
                 index_key=index.index_key,
@@ -969,6 +1117,7 @@ class RegionHarvestExecutor:
                 ),
                 reservoir_id=origin_reservoir_id,
                 origin_unit_id=region_key,
+                exposure_id=exposure_id,
                 assert_object_identity=(
                     lambda: self._assert_current_local_object_identity(index)
                 ),
@@ -1033,6 +1182,15 @@ class RegionHarvestExecutor:
                     region_key,
                     owner=self.owner,
                 )
+                if exposure_id is not None:
+                    self._record_exposure_progress(
+                        exposure_id,
+                        state="READ_COMPLETE",
+                        source_records=result.records,
+                        requests=result.requests,
+                        bytes_read=result.bytes_read,
+                        elapsed_seconds=result.elapsed_seconds,
+                    )
             else:
                 if resume_cursor <= prior_cursor:
                     raise RegionHarvestError(
@@ -1042,6 +1200,12 @@ class RegionHarvestExecutor:
                     region_key,
                     owner=self.owner,
                     resume_cursor=resume_cursor,
+                )
+                self._abort_exposure_after_failure(
+                    exposure_id,
+                    counters=counters,
+                    result=result,
+                    reason="region harvest incomplete",
                 )
 
             return RegionHarvestReport(
@@ -1068,6 +1232,12 @@ class RegionHarvestExecutor:
         except BaseException:
             if heartbeat is not None:
                 heartbeat.stop()
+            self._abort_exposure_after_failure(
+                exposure_id,
+                counters=counters,
+                result=locals().get("result"),
+                reason="region harvest failed",
+            )
             # Keep any pre-existing resume cursor. Evidence writes are
             # idempotent, so replay after a hard failure is safe.
             try:

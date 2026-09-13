@@ -862,6 +862,21 @@ class IncrementalReadinessRuntime:
                         and cached_run[0] == selected_source
                     ):
                         run_origins[pair] = cached_run
+                    elif (
+                        provider is not None
+                        and provider.source_key == selected_source
+                        and provider.reservoir_id
+                        and provider.lease_id
+                    ):
+                        # Historical-region direct capsules carry their
+                        # exposure identity in proof-side provenance. This is
+                        # the crash-safe source-run edge when the companion
+                        # ControlStore origin row has not been published yet.
+                        run_origins[pair] = (
+                            provider.source_key,
+                            provider.reservoir_id,
+                            provider.lease_id,
+                        )
                 continue
 
             if not post_cutover:
@@ -1017,9 +1032,17 @@ class IncrementalReadinessRuntime:
         if control is None:
             return False, 0, 0, 0, 0, 0.0
 
+        lease_identity = run.lease_id
+        if run.exposure_id is not None:
+            exposure = control.get_production_exposure(run.exposure_id)
+            if exposure is not None and exposure.task_id:
+                # Historical-region exposures use exposure_id as the
+                # source-run proof identity, while task_id is the separate
+                # durable reservoir ownership fence.
+                lease_identity = exposure.task_id
         lease = control.connection.execute(
             "SELECT state FROM work_leases WHERE lease_id = ? AND reservoir_id = ?",
-            (run.lease_id, run.reservoir_id),
+            (lease_identity, run.reservoir_id),
         ).fetchone()
         lease_terminal = (
             lease is not None
@@ -1102,12 +1125,24 @@ class IncrementalReadinessRuntime:
             """,
             (run.source_key, run.reservoir_id, run.lease_id),
         ).fetchone()
+        if run.exposure_id is not None:
+            exposure_direct = self.evidence.connection.execute(
+                """
+                SELECT COUNT(DISTINCT hostname || '/' || year) AS n
+                FROM evidence_capsule_task_provenance
+                WHERE source_key = ? AND reservoir_id = ? AND lease_id = ?
+                """,
+                (run.source_key, run.reservoir_id, run.exposure_id),
+            ).fetchone()
+            direct_count = int(exposure_direct["n"] or 0)
+        else:
+            direct_count = int(direct["n"] or 0)
 
         return (
             lease_terminal,
             queued + staged,
             terminal,
-            int(direct["n"] or 0),
+            direct_count,
             int(provider["provider_requests"] or 0),
             float(provider["elapsed_ms"] or 0) / 1000.0,
         )
