@@ -291,14 +291,22 @@ class AsyncWaybackCDXClient:
             )
 
     async def _sleep_retry_backoff(self, seconds: float) -> None:
-        """Measure Tenacity retry sleep without changing retry semantics."""
+        """Measure Tenacity retry sleep without changing retry semantics.
+
+        Wait-state telemetry is integer milliseconds. A real positive
+        sub-millisecond retry must therefore quantize to one millisecond rather
+        than disappearing as zero; otherwise the randomized exponential wait
+        policy makes the operational counter nondeterministic.
+        """
+        delay = float(seconds)
         loop = asyncio.get_running_loop()
         started = loop.time()
-        await asyncio.sleep(float(seconds))
-        self.retry_backoff_wait_milliseconds += max(
-            0,
-            int(round((loop.time() - started) * 1000.0)),
-        )
+        await asyncio.sleep(delay)
+        elapsed = max(0.0, loop.time() - started)
+        elapsed_ms = int(round(elapsed * 1000.0))
+        if delay > 0.0 and elapsed > 0.0:
+            elapsed_ms = max(1, elapsed_ms)
+        self.retry_backoff_wait_milliseconds += elapsed_ms
 
     async def _register_throttle(self, response: httpx.Response) -> None:
         self.throttle_responses += 1
