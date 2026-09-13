@@ -6,6 +6,10 @@ import json
 import time
 from collections.abc import Iterable
 
+from creeper.source_discovery.index_identity import (
+    HistoricalIndexObjectIdentity,
+    ensure_same_historical_index_object,
+)
 from creeper.source_discovery.index_space import (
     CompiledIndexSpace,
     HarvestRegion,
@@ -71,6 +75,21 @@ class IndexSpaceRegistry:
             ) WITHOUT ROWID;
             CREATE INDEX IF NOT EXISTS idx_source_indexes_factory_v1
                 ON source_indexes_v1(factory_key, index_key);
+
+            CREATE TABLE IF NOT EXISTS source_index_object_identity_v1 (
+                index_key TEXT PRIMARY KEY,
+                kind TEXT NOT NULL,
+                content_length INTEGER,
+                etag TEXT,
+                last_modified TEXT,
+                local_device TEXT,
+                local_inode TEXT,
+                local_mtime_ns INTEGER,
+                sampled_fingerprint TEXT,
+                captured_at REAL NOT NULL,
+                FOREIGN KEY(index_key)
+                    REFERENCES source_indexes_v1(index_key)
+            ) WITHOUT ROWID;
 
             CREATE TABLE IF NOT EXISTS source_regions_v1 (
                 region_key TEXT PRIMARY KEY,
@@ -270,6 +289,123 @@ class IndexSpaceRegistry:
             expected_volume=row["expected_volume"],
             content_length=row["content_length"],
         )
+
+    def get_object_identity(
+        self,
+        index_key: str,
+    ) -> HistoricalIndexObjectIdentity | None:
+        row = self.connection.execute(
+            """
+            SELECT *
+            FROM source_index_object_identity_v1
+            WHERE index_key = ?
+            """,
+            (index_key,),
+        ).fetchone()
+        if row is None:
+            return None
+        return HistoricalIndexObjectIdentity(
+            kind=str(row["kind"]),
+            content_length=row["content_length"],
+            etag=row["etag"],
+            last_modified=row["last_modified"],
+            local_device=(
+                None
+                if row["local_device"] is None
+                else int(row["local_device"])
+            ),
+            local_inode=(
+                None
+                if row["local_inode"] is None
+                else int(row["local_inode"])
+            ),
+            local_mtime_ns=row["local_mtime_ns"],
+            sampled_fingerprint=row["sampled_fingerprint"],
+        )
+
+    def bind_object_identity(
+        self,
+        index_key: str,
+        identity: HistoricalIndexObjectIdentity,
+    ) -> HistoricalIndexObjectIdentity:
+        """Durably bind one index key to one immutable source object.
+
+        Legacy databases intentionally have no eager backfill. The first
+        successful probe/harvest inserts the identity. Concurrent first-touch
+        binders converge through INSERT OR IGNORE, then every caller verifies
+        the persisted authority before proceeding.
+        """
+
+        if not identity.is_verifiable:
+            raise ValueError(
+                "historical index object identity cannot be verified"
+            )
+        now = float(self.clock())
+        with self.connection:
+            exists = self.connection.execute(
+                "SELECT 1 FROM source_indexes_v1 WHERE index_key = ?",
+                (index_key,),
+            ).fetchone()
+            if exists is None:
+                raise KeyError(f"unknown source index: {index_key}")
+            self.connection.execute(
+                """
+                INSERT OR IGNORE INTO source_index_object_identity_v1(
+                    index_key, kind, content_length, etag, last_modified,
+                    local_device, local_inode, local_mtime_ns,
+                    sampled_fingerprint, captured_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    index_key,
+                    identity.kind,
+                    identity.content_length,
+                    identity.etag,
+                    identity.last_modified,
+                    (
+                        None
+                        if identity.local_device is None
+                        else str(identity.local_device)
+                    ),
+                    (
+                        None
+                        if identity.local_inode is None
+                        else str(identity.local_inode)
+                    ),
+                    identity.local_mtime_ns,
+                    identity.sampled_fingerprint,
+                    now,
+                ),
+            )
+            row = self.connection.execute(
+                """
+                SELECT *
+                FROM source_index_object_identity_v1
+                WHERE index_key = ?
+                """,
+                (index_key,),
+            ).fetchone()
+            assert row is not None
+            persisted = HistoricalIndexObjectIdentity(
+                kind=str(row["kind"]),
+                content_length=row["content_length"],
+                etag=row["etag"],
+                last_modified=row["last_modified"],
+                local_device=(
+                    None
+                    if row["local_device"] is None
+                    else int(row["local_device"])
+                ),
+                local_inode=(
+                    None
+                    if row["local_inode"] is None
+                    else int(row["local_inode"])
+                ),
+                local_mtime_ns=row["local_mtime_ns"],
+                sampled_fingerprint=row["sampled_fingerprint"],
+            )
+            ensure_same_historical_index_object(persisted, identity)
+        return persisted
 
     def get_index_for_source(self, source_key: str) -> SourceIndexSpec | None:
         row = self.connection.execute(
