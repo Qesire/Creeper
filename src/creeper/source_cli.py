@@ -39,7 +39,9 @@ from creeper.source_discovery.activation import SourceActivationCompiler
 from creeper.source_discovery.index_optimization import (
     index_region_optimizer_eligible,
 )
+from creeper.source_discovery.production_value import ProductionValueModel
 from creeper.source_discovery.registry import SourceDiscoveryRegistry
+from creeper.storage.candidate_store import CandidateStore
 from creeper.storage.control_store import ControlStore
 from creeper.storage.evidence_store import EvidenceStore
 from creeper.storage.telemetry_store import RuntimeTelemetryStore
@@ -292,6 +294,7 @@ class StaticSourceRuntime:
         self.baseline = BaselineIndex(baseline_path)
         self.control = ControlStore(runtime_root / "control.sqlite3")
         self.evidence = EvidenceStore(runtime_root / "evidence.sqlite3")
+        self.candidates = CandidateStore(runtime_root / "candidates.sqlite3")
         self.adapter = StaticDatasetAdapter(
             dataset_path,
             source_id=self.source_id,
@@ -324,6 +327,7 @@ class StaticSourceRuntime:
             baseline=self.baseline,
             control_store=self.control,
             evidence_store=self.evidence,
+            candidate_store=self.candidates,
             scheduler=GlobalScheduler(
                 CreditLedger({"wayback": self.backlog_capacity})
             ),
@@ -344,6 +348,7 @@ class StaticSourceRuntime:
         close = getattr(self.adapter, "close", None)
         if callable(close):
             close()
+        self.candidates.close()
         self.evidence.close()
         self.control.close()
         self.baseline.close()
@@ -514,7 +519,9 @@ class ActivatedSourceRuntime:
         self.baseline = BaselineIndex(baseline_path)
         self.control = ControlStore(runtime_root / "control.sqlite3")
         self.evidence = EvidenceStore(runtime_root / "evidence.sqlite3")
+        self.candidate_store = CandidateStore(runtime_root / "candidates.sqlite3")
         self.registry = SourceDiscoveryRegistry(self.control)
+        self.production_value = ProductionValueModel(self.registry)
         self.compiler = build_activation_compiler(
             self.control,
             self.registry,
@@ -526,6 +533,8 @@ class ActivatedSourceRuntime:
             baseline=self.baseline,
             control_store=self.control,
             evidence_store=self.evidence,
+            candidate_store=self.candidate_store,
+            source_registry=self.registry,
             scheduler=GlobalScheduler(
                 CreditLedger({"wayback": self.backlog_capacity})
             ),
@@ -548,6 +557,7 @@ class ActivatedSourceRuntime:
             if callable(close):
                 close()
         self.adapter_cache.clear()
+        self.candidate_store.close()
         self.evidence.close()
         self.control.close()
         self.baseline.close()
@@ -558,15 +568,33 @@ class ActivatedSourceRuntime:
     def __exit__(self, exc_type, exc, tb) -> None:
         self.close()
 
-    def _expected_lease_eed(self, source_key: str) -> float:
-        measurement = self.registry.get_scout_measurement(source_key)
-        if measurement is None or measurement.sampled_records <= 0:
-            return 0.0
-        return (
-            measurement.novel_eed_for_ranking
-            * float(self.max_records)
-            / float(measurement.sampled_records)
-        )
+    def _production_lease_value(
+        self,
+        source_key: str,
+        *,
+        lease_records: int,
+    ) -> tuple[float, float]:
+        """Return expected lease EED plus the FINAL-first scheduling score."""
+        candidate = self.registry.get_candidate(source_key)
+        if candidate is None:
+            raise KeyError(f"activated source disappeared from registry: {source_key}")
+        estimate = self.production_value.estimate(candidate)
+
+        if estimate.closed_runs > 0:
+            expected_eed = estimate.expected_final_eed
+            if self.max_records > 0:
+                expected_eed *= float(lease_records) / float(self.max_records)
+        else:
+            measurement = self.registry.get_scout_measurement(source_key)
+            if measurement is None or measurement.sampled_records <= 0:
+                expected_eed = 0.0
+            else:
+                expected_eed = (
+                    measurement.novel_eed_for_ranking
+                    * float(lease_records)
+                    / float(measurement.sampled_records)
+                )
+        return max(0.0, float(expected_eed)), max(0.0, float(estimate.score))
 
     def refresh_workset(self) -> int:
         candidates: list[LeaseCandidate] = []
@@ -624,9 +652,10 @@ class ActivatedSourceRuntime:
                 reservation_tasks = lease_records * capacity_per_record
                 if lease_records < 1:
                     continue
-            expected_eed = self._expected_lease_eed(spec.source_key)
-            if self.max_records > 0:
-                expected_eed *= lease_records / self.max_records
+            expected_eed, production_value_score = self._production_lease_value(
+                spec.source_key,
+                lease_records=lease_records,
+            )
             template = WorkLease.create(
                 reservoir_id=reservoir.reservoir_id,
                 cursor_start=reservoir.cursor,
@@ -662,6 +691,7 @@ class ActivatedSourceRuntime:
                     expected_evidence_tasks=expected_tasks,
                     reservation_evidence_tasks=reservation_tasks,
                     source_key=spec.source_key,
+                    production_value_score=production_value_score,
                 )
             )
         # Do not retain adapter objects for exhausted/deactivated sources
