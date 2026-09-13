@@ -1036,7 +1036,14 @@ class SourceDiscoveryRegistry:
                 raise StateTransitionError(
                     f"invalid source transition: {current} -> {target}"
                 )
-            if target in {SourceState.WARM, SourceState.ACTIVE}:
+            requires_current_measurement = (
+                target is SourceState.ACTIVE
+                or (
+                    current is SourceState.SCOUTING
+                    and target is SourceState.WARM
+                )
+            )
+            if requires_current_measurement:
                 measured = self.connection.execute(
                     """
                     SELECT
