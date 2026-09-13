@@ -44,7 +44,7 @@ class V5FullLoopIntegrationTests(unittest.TestCase):
             )
             baseline_eed = "10"
             authority = {
-                "baseline_id": "v4-fixture",
+                "baseline_id": baseline_dir.name,
                 "annual_file_hashes": annual_hashes,
                 "candidate_file_hash": _sha256(candidate_pool),
                 "model_hash": _sha256(model),
