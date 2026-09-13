@@ -67,6 +67,13 @@ class EvidenceServicePolicy:
     retry_max_seconds: float = 3600.0
     poll_min_seconds: float = 0.25
     poll_max_seconds: float = 10.0
+    # Complete platform-year enumeration is an independent lane and therefore
+    # has its own claim/network budget rather than borrowing exact/range CDX.
+    platform_harvest_enabled: bool = True
+    platform_claim_batch_size: int = 1
+    platform_requests_per_second: float = 0.1
+    platform_max_connections: int = 2
+    platform_poll_seconds: float = 2.0
 
 
 @dataclass(frozen=True)
@@ -373,6 +380,41 @@ def load_autopilot_config(config_path: Path) -> AutopilotConfig:
             ev_raw.get("poll_max_seconds", ev_default.poll_max_seconds),
             name="evidence.poll_max_seconds",
         ),
+        platform_harvest_enabled=_strict_bool(
+            ev_raw.get(
+                "platform_harvest_enabled",
+                ev_default.platform_harvest_enabled,
+            ),
+            name="evidence.platform_harvest_enabled",
+        ),
+        platform_claim_batch_size=_positive_int(
+            ev_raw.get(
+                "platform_claim_batch_size",
+                ev_default.platform_claim_batch_size,
+            ),
+            name="evidence.platform_claim_batch_size",
+        ),
+        platform_requests_per_second=_positive_float(
+            ev_raw.get(
+                "platform_requests_per_second",
+                ev_default.platform_requests_per_second,
+            ),
+            name="evidence.platform_requests_per_second",
+        ),
+        platform_max_connections=_positive_int(
+            ev_raw.get(
+                "platform_max_connections",
+                ev_default.platform_max_connections,
+            ),
+            name="evidence.platform_max_connections",
+        ),
+        platform_poll_seconds=_positive_float(
+            ev_raw.get(
+                "platform_poll_seconds",
+                ev_default.platform_poll_seconds,
+            ),
+            name="evidence.platform_poll_seconds",
+        ),
     )
     if evidence.max_keepalive_connections > evidence.max_connections:
         raise ValueError(
@@ -616,6 +658,47 @@ def build_child_specs(config: AutopilotConfig) -> tuple[ChildSpec, ...]:
             ),
         )
     )
+    if evidence.platform_harvest_enabled:
+        specs.append(
+            ChildSpec(
+                "platform-year-harvest",
+                (
+                    py,
+                    "-m",
+                    "creeper.platform_harvest_cli",
+                    str(config.runtime_data_root),
+                    "--watch",
+                    "--owner",
+                    "platform-year-harvest",
+                    "--endpoint",
+                    evidence.endpoint,
+                    "--claim-batch-size",
+                    str(evidence.platform_claim_batch_size),
+                    "--lease-seconds",
+                    str(evidence.lease_seconds),
+                    "--requests-per-second",
+                    str(evidence.platform_requests_per_second),
+                    "--max-connections",
+                    str(evidence.platform_max_connections),
+                    "--max-keepalive-connections",
+                    str(min(1, evidence.platform_max_connections)),
+                    "--keepalive-expiry-seconds",
+                    str(evidence.keepalive_expiry_seconds),
+                    "--throttle-floor-seconds",
+                    str(evidence.throttle_floor_seconds),
+                    "--timeout",
+                    str(evidence.timeout),
+                    "--max-retries",
+                    str(evidence.max_retries),
+                    "--retry-base-seconds",
+                    str(evidence.retry_base_seconds),
+                    "--retry-max-seconds",
+                    str(evidence.retry_max_seconds),
+                    "--poll-seconds",
+                    str(evidence.platform_poll_seconds),
+                ),
+            )
+        )
     if config.readiness is not None:
         if config.baseline_index is None:
             raise ValueError("readiness requires producer baseline_index")
@@ -689,7 +772,11 @@ def _desired_children(
     if state is GovernorState.NORMAL:
         return set(available)
     if state is GovernorState.THROTTLED:
-        return set(available) - {"source-discovery", "historical-index"}
+        return set(available) - {
+            "source-discovery",
+            "historical-index",
+            "platform-year-harvest",
+        }
     if state is GovernorState.DRAIN_ONLY:
         return set(available) & {"readiness-worker"}
     return set()
