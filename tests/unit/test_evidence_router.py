@@ -38,12 +38,15 @@ class EvidenceRouterTests(unittest.TestCase):
         )
         self.control.save_domain(domain)
         self.control.save_reservoir(reservoir)
+        now = float(self.control.clock())
         self.lease = WorkLease.create(
             reservoir_id=reservoir.reservoir_id,
             max_records=1,
             max_requests=1,
             max_bytes=1024,
             max_seconds=30,
+            now=now,
+            expires_at=now + 60.0,
         )
         self.control.save_lease(self.lease)
 
