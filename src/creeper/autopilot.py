@@ -24,6 +24,11 @@ import time
 import tomllib
 from typing import Any, Callable
 
+from creeper.source_cli import (
+    SourceProducerIntent,
+    SourceProducerMode,
+    parse_source_producer_intent,
+)
 from creeper.runtime.resource_governor import (
     GovernorState,
     LocalResourceSampler,
@@ -91,6 +96,8 @@ class AutopilotConfig:
     runtime_data_root: Path
     supervisor: SupervisorPolicy
     evidence: EvidenceServicePolicy
+    producer_mode: SourceProducerMode = SourceProducerMode.ACTIVATED
+    producer_mode_explicit: bool = False
     source_producer_workers: int = 1
     historical_index_enabled: bool = False
     historical_index_eed_model: Path | None = None
@@ -175,14 +182,11 @@ def _nonnegative_int(value: object, *, name: str) -> int:
 
 def _producer_runtime_config(
     config_path: Path,
-) -> tuple[Path, Path, int, bool]:
+) -> tuple[SourceProducerIntent, Path, Path, int, bool]:
     with config_path.open("rb") as stream:
         root = tomllib.load(stream)
-    source_mode = root.get("source_mode", "static")
-    if source_mode not in {"static", "activated"}:
-        raise ValueError(
-            "autopilot source producer source_mode must be 'static' or 'activated'"
-        )
+    intent = parse_source_producer_intent(root)
+    source_mode = intent.mode
     runtime_root = _resolve(
         root.get("runtime_data_root"),
         base=config_path.parent,
@@ -199,7 +203,7 @@ def _producer_runtime_config(
     workers = _positive_int(
         limits.get(
             "source_workers",
-            4 if source_mode == "activated" else 1,
+            4 if source_mode is SourceProducerMode.ACTIVATED else 1,
         ),
         name="source producer limits.source_workers",
     )
@@ -210,11 +214,11 @@ def _producer_runtime_config(
         historical_raw.get("enabled", False),
         name="source producer historical_index.enabled",
     )
-    if historical_enabled and source_mode != "activated":
+    if historical_enabled and source_mode is not SourceProducerMode.ACTIVATED:
         raise ValueError(
             "historical index optimizer requires source_mode='activated'"
         )
-    return runtime_root, baseline_index, workers, historical_enabled
+    return intent, runtime_root, baseline_index, workers, historical_enabled
 
 
 def load_autopilot_config(config_path: Path) -> AutopilotConfig:
@@ -233,11 +237,17 @@ def load_autopilot_config(config_path: Path) -> AutopilotConfig:
     )
     discovery = load_source_discovery_config(discovery_path)
     (
+        producer_intent,
         producer_root,
         baseline_index,
         source_producer_workers,
         historical_index_enabled,
     ) = _producer_runtime_config(producer_path)
+    if producer_intent.mode is SourceProducerMode.STATIC:
+        raise ValueError(
+            "autopilot always launches source discovery; static producer "
+            "topology is rejected. Run static production standalone instead."
+        )
     if discovery.runtime_data_root.resolve() != producer_root.resolve():
         raise ValueError(
             "source discovery and source producer must share one runtime_data_root"
@@ -496,6 +506,8 @@ def load_autopilot_config(config_path: Path) -> AutopilotConfig:
         runtime_data_root=producer_root,
         supervisor=supervisor,
         evidence=evidence,
+        producer_mode=producer_intent.mode,
+        producer_mode_explicit=producer_intent.explicitly_configured,
         source_producer_workers=source_producer_workers,
         historical_index_enabled=historical_index_enabled,
         historical_index_eed_model=historical_index_eed_model,
@@ -506,6 +518,10 @@ def load_autopilot_config(config_path: Path) -> AutopilotConfig:
 
 
 def build_child_specs(config: AutopilotConfig) -> tuple[ChildSpec, ...]:
+    if SourceProducerMode(config.producer_mode) is SourceProducerMode.STATIC:
+        raise ValueError(
+            "autopilot source discovery cannot run with a static producer"
+        )
     py = sys.executable
     evidence = config.evidence
     specs = [

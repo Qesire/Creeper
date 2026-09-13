@@ -10,6 +10,14 @@ from creeper.evidence.contracts import (
     SourceEvidenceContract,
     contract_from_adapter_id,
 )
+from creeper.evidence.contract_registry import (
+    ReviewedArtifactBinding,
+    ReviewedArtifactIdentity,
+    ReviewedContractRegistry,
+    ReviewedContractRegistryError,
+    ReviewedSourceContractBinding,
+    reviewed_artifact_from_adapter_id,
+)
 from creeper.source_discovery.activation import (
     SourceActivationCompiler,
     SourceActivationError,
@@ -37,6 +45,40 @@ def _candidate(url: str, *, state: SourceState = SourceState.ACTIVE) -> SourceCa
         enumerability_prior=0.95,
         confidence=0.9,
         state=state,
+    )
+
+
+def _reviewed_binding(
+    locator: str,
+    *,
+    contract_id: str = "reviewed-structured-v1",
+    parser_kind: str = "jsonl",
+    hostname_field: str = "url",
+    timestamp_field: str = "timestamp",
+    identity: ReviewedArtifactIdentity | None = None,
+) -> ReviewedSourceContractBinding:
+    contract = SourceEvidenceContract(
+        contract_id=contract_id,
+        authority=EvidenceAuthority.DIRECT_WEB_YEAR,
+        parser_kind=parser_kind,
+        temporal_semantics="reviewed_web_observation_timestamp",
+        evidence_type="reviewed_historical_web_record",
+        hostname_field=hostname_field,
+        timestamp_field=timestamp_field,
+        policy_version="reviewed-structured-policy-v1",
+    )
+    return ReviewedSourceContractBinding(
+        artifact=ReviewedArtifactBinding(
+            locator=locator,
+            source_identity=identity or ReviewedArtifactIdentity(
+                kind="immutable_locator",
+                value=locator,
+            ),
+            custodian="test-custodian",
+            edition="test-edition",
+        ),
+        contract=contract,
+        review_note="test reviewed source",
     )
 
 
@@ -218,17 +260,7 @@ class SourceActivationCompilerTests(unittest.TestCase):
                 control.close()
 
 
-    def test_explicit_reviewed_csv_contract_activates_direct_year(self) -> None:
-        contract = SourceEvidenceContract(
-            contract_id="reviewed-linkgraph-csv-v1",
-            authority=EvidenceAuthority.DIRECT_WEB_YEAR,
-            parser_kind="delimited",
-            temporal_semantics="reviewed_web_observation_timestamp",
-            evidence_type="reviewed_historical_web_record",
-            hostname_field="column:0",
-            timestamp_field="column:1",
-            policy_version="reviewed-linkgraph-policy-v1",
-        )
+    def test_exact_reviewed_csv_locator_activates_direct_year(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             control = ControlStore(Path(tmp) / "control.sqlite3")
             try:
@@ -236,17 +268,28 @@ class SourceActivationCompilerTests(unittest.TestCase):
                     "https://trusted.example/history/links.csv"
                 )
                 registry = self._registry(control, candidate)
+                reviewed = _reviewed_binding(
+                    candidate.canonical_entrypoint,
+                    contract_id="reviewed-linkgraph-csv-v1",
+                    parser_kind="delimited",
+                    hostname_field="column:0",
+                    timestamp_field="column:1",
+                )
                 spec = SourceActivationCompiler(
                     control,
                     registry=registry,
-                    evidence_contracts={
-                        candidate.canonical_entrypoint: contract,
-                    },
+                    reviewed_contracts=ReviewedContractRegistry(
+                        {candidate.canonical_entrypoint: reviewed}
+                    ),
                 ).compile(candidate)
 
                 self.assertEqual(spec.evidence_mode, "direct_year")
                 bound = contract_from_adapter_id(spec.adapter_id)
-                self.assertEqual(bound, contract)
+                self.assertEqual(bound, reviewed.contract)
+                frozen_artifact = reviewed_artifact_from_adapter_id(
+                    spec.adapter_id
+                )
+                self.assertEqual(frozen_artifact, reviewed.artifact)
                 row = control.connection.execute(
                     """
                     SELECT direct_evidence_authority
@@ -256,6 +299,207 @@ class SourceActivationCompilerTests(unittest.TestCase):
                     (candidate.source_key,),
                 ).fetchone()
                 self.assertEqual(row["direct_evidence_authority"], 1)
+            finally:
+                control.close()
+
+    def test_jsonl_without_reviewed_contract_remains_discovery_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            control = ControlStore(Path(tmp) / "control.sqlite3")
+            try:
+                candidate = _candidate(
+                    "https://untrusted.example/random.jsonl"
+                )
+                registry = self._registry(control, candidate)
+                spec = SourceActivationCompiler(
+                    control,
+                    registry=registry,
+                ).compile(candidate)
+                self.assertEqual(spec.evidence_mode, "discovery_only")
+            finally:
+                control.close()
+
+    def test_raw_direct_contract_cannot_bypass_reviewed_registry(self) -> None:
+        direct = SourceEvidenceContract(
+            contract_id="unsafe-jsonl-v1",
+            authority=EvidenceAuthority.DIRECT_WEB_YEAR,
+            parser_kind="jsonl",
+            temporal_semantics="claimed_timestamp",
+            evidence_type="claimed_web_record",
+            hostname_field="url",
+            timestamp_field="year",
+            policy_version="unsafe-v1",
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            control = ControlStore(Path(tmp) / "control.sqlite3")
+            try:
+                candidate = _candidate(
+                    "https://untrusted.example/random.jsonl"
+                )
+                registry = self._registry(control, candidate)
+                with self.assertRaisesRegex(
+                    SourceActivationError,
+                    "reviewed contract registry",
+                ):
+                    SourceActivationCompiler(
+                        control,
+                        registry=registry,
+                        evidence_contracts={
+                            candidate.canonical_entrypoint: direct,
+                        },
+                    ).compile(candidate)
+            finally:
+                control.close()
+
+    def test_reviewed_parser_kind_mismatch_fails(self) -> None:
+        with self.assertRaisesRegex(
+            ReviewedContractRegistryError,
+            "parser_kind",
+        ):
+            _reviewed_binding(
+                "https://trusted.example/history/records.jsonl",
+                parser_kind="delimited",
+            )
+
+    def test_reviewed_registry_is_exact_locator_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            control = ControlStore(Path(tmp) / "control.sqlite3")
+            try:
+                reviewed_locator = (
+                    "https://trusted.example/history/reviewed.jsonl"
+                )
+                candidate = _candidate(
+                    "https://trusted.example/history/sibling.jsonl"
+                )
+                registry = self._registry(control, candidate)
+                reviewed = _reviewed_binding(reviewed_locator)
+                spec = SourceActivationCompiler(
+                    control,
+                    registry=registry,
+                    reviewed_contracts=ReviewedContractRegistry(
+                        {reviewed_locator: reviewed}
+                    ),
+                ).compile(candidate)
+
+                self.assertEqual(spec.evidence_mode, "discovery_only")
+                self.assertIsNone(
+                    reviewed_artifact_from_adapter_id(spec.adapter_id)
+                )
+            finally:
+                control.close()
+
+    def test_reviewed_immutable_locator_mismatch_fails(self) -> None:
+        with self.assertRaisesRegex(
+            ReviewedContractRegistryError,
+            "does not match",
+        ):
+            _reviewed_binding(
+                "https://trusted.example/history/records.jsonl",
+                identity=ReviewedArtifactIdentity(
+                    kind="immutable_locator",
+                    value="https://trusted.example/history/other.jsonl",
+                ),
+            )
+
+    def test_reviewed_artifact_identity_mismatch_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            control = ControlStore(Path(tmp) / "control.sqlite3")
+            try:
+                candidate = _candidate(
+                    "https://trusted.example/history/records.jsonl"
+                )
+                registry = self._registry(control, candidate)
+                reviewed = _reviewed_binding(
+                    candidate.canonical_entrypoint,
+                    identity=ReviewedArtifactIdentity(
+                        kind="etag+length",
+                        value='"reviewed-etag"',
+                        content_length=100,
+                    ),
+                )
+
+                def changed_identity(_artifact):
+                    return ReviewedArtifactIdentity(
+                        kind="etag+length",
+                        value='"replacement-etag"',
+                        content_length=100,
+                    )
+
+                with self.assertRaisesRegex(
+                    SourceActivationError,
+                    "identity mismatch",
+                ):
+                    SourceActivationCompiler(
+                        control,
+                        registry=registry,
+                        reviewed_contracts=ReviewedContractRegistry(
+                            {candidate.canonical_entrypoint: reviewed}
+                        ),
+                        identity_observer=changed_identity,
+                    ).compile(candidate)
+                self.assertEqual(
+                    control.connection.execute(
+                        "SELECT COUNT(*) FROM reservoirs"
+                    ).fetchone()[0],
+                    0,
+                )
+            finally:
+                control.close()
+
+    def test_unverifiable_reviewed_identity_downgrades_to_discovery_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            control = ControlStore(Path(tmp) / "control.sqlite3")
+            try:
+                candidate = _candidate(
+                    "https://trusted.example/history/records.jsonl"
+                )
+                registry = self._registry(control, candidate)
+                reviewed = _reviewed_binding(
+                    candidate.canonical_entrypoint,
+                    identity=ReviewedArtifactIdentity(
+                        kind="etag+length",
+                        value='"reviewed-etag"',
+                        content_length=100,
+                    ),
+                )
+                spec = SourceActivationCompiler(
+                    control,
+                    registry=registry,
+                    reviewed_contracts=ReviewedContractRegistry(
+                        {candidate.canonical_entrypoint: reviewed}
+                    ),
+                    identity_observer=lambda _artifact: None,
+                ).compile(candidate)
+                self.assertEqual(spec.evidence_mode, "discovery_only")
+                self.assertNotIn(":rsi1:", spec.adapter_id)
+            finally:
+                control.close()
+
+    def test_changed_registry_cannot_silently_upgrade_existing_reservoir(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            control = ControlStore(Path(tmp) / "control.sqlite3")
+            try:
+                candidate = _candidate(
+                    "https://trusted.example/history/records.jsonl"
+                )
+                registry = self._registry(control, candidate)
+                first = SourceActivationCompiler(
+                    control,
+                    registry=registry,
+                ).compile(candidate)
+                self.assertEqual(first.evidence_mode, "discovery_only")
+
+                reviewed = _reviewed_binding(candidate.canonical_entrypoint)
+                second = SourceActivationCompiler(
+                    control,
+                    registry=registry,
+                    reviewed_contracts=ReviewedContractRegistry(
+                        {candidate.canonical_entrypoint: reviewed}
+                    ),
+                ).compile(candidate)
+
+                self.assertEqual(second.adapter_id, first.adapter_id)
+                self.assertEqual(second.evidence_mode, "discovery_only")
+                self.assertNotIn(":rsi1:", second.adapter_id)
             finally:
                 control.close()
 
@@ -294,16 +538,6 @@ class SourceActivationCompilerTests(unittest.TestCase):
                 control.close()
 
     def test_existing_activation_keeps_frozen_contract_across_restart(self) -> None:
-        direct = SourceEvidenceContract(
-            contract_id="restart-stable-jsonl-v1",
-            authority=EvidenceAuthority.DIRECT_WEB_YEAR,
-            parser_kind="jsonl",
-            temporal_semantics="capture_timestamp",
-            evidence_type="reviewed_historical_web_record",
-            hostname_field="url",
-            timestamp_field="year",
-            policy_version="restart-stable-v1",
-        )
         with tempfile.TemporaryDirectory() as tmp:
             control = ControlStore(Path(tmp) / "control.sqlite3")
             try:
@@ -311,17 +545,22 @@ class SourceActivationCompilerTests(unittest.TestCase):
                     "https://trusted.example/history/records.jsonl"
                 )
                 registry = self._registry(control, candidate)
+                reviewed = _reviewed_binding(
+                    candidate.canonical_entrypoint,
+                    contract_id="restart-stable-jsonl-v1",
+                    timestamp_field="year",
+                )
                 first = SourceActivationCompiler(
                     control,
                     registry=registry,
-                    evidence_contracts={
-                        candidate.canonical_entrypoint: direct,
-                    },
+                    reviewed_contracts=ReviewedContractRegistry(
+                        {candidate.canonical_entrypoint: reviewed}
+                    ),
                 ).compile(candidate)
                 before = control.connection.total_changes
 
-                # Simulate restart with no explicit allowlist loaded. The
-                # durable adapter binding is authoritative for this activation.
+                # Simulate restart with no registry loaded. The durable semantic
+                # contract and reviewed artifact identity remain authoritative.
                 second = SourceActivationCompiler(
                     control,
                     registry=registry,
@@ -331,7 +570,11 @@ class SourceActivationCompilerTests(unittest.TestCase):
                 self.assertEqual(second.evidence_mode, "direct_year")
                 self.assertEqual(
                     contract_from_adapter_id(second.adapter_id),
-                    direct,
+                    reviewed.contract,
+                )
+                self.assertEqual(
+                    reviewed_artifact_from_adapter_id(second.adapter_id),
+                    reviewed.artifact,
                 )
                 self.assertEqual(control.connection.total_changes, before)
             finally:
