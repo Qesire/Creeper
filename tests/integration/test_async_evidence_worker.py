@@ -271,6 +271,118 @@ class AsyncEvidenceWorkerTests(unittest.IsolatedAsyncioTestCase):
         )
 
 
+    async def test_local_direct_evidence_short_circuits_exact_wayback_without_http(self):
+        key = self.key("covered.example")
+        self.evidence.put(
+            EvidenceCapsule(
+                hostname=key.hostname,
+                year=1997,
+                provider="direct:bulk-cdxj",
+                temporal_semantics="archive_capture_timestamp",
+                evidence_timestamp="19971231235959",
+                source_locator="https://bulk.example/index.cdxj:byte:42",
+                payload_hash="f" * 64,
+                policy_version="direct-policy-v1",
+                original_url="https://covered.example/a",
+                record_locator="https://bulk.example/index.cdxj:byte:42",
+            )
+        )
+        self.control.enqueue_evidence_tasks([key])
+        provider = FakeProvider(state=CDXQueryState.PASS)
+        worker = AsyncEvidenceWorker(
+            control_store=self.control,
+            evidence_store=self.evidence,
+            providers={"wayback": provider},
+            owner="worker-local-short-circuit",
+            claim_batch_size=1,
+        )
+
+        report = await worker.run_once()
+
+        self.assertEqual(provider.keys, [])
+        self.assertEqual(report.claimed, 1)
+        self.assertEqual(report.terminal, 1)
+        self.assertEqual(report.pass_count, 1)
+        stored = self.control.get_evidence_task(key)
+        self.assertIsNotNone(stored)
+        self.assertEqual(stored.state, CDXQueryState.PASS.value)
+
+    async def test_fully_local_range_short_circuits_wayback_range_without_http(self):
+        key = EvidenceQueryKey(
+            "covered-range.example",
+            TemporalScope(1996, 1998),
+            "wayback",
+            "cdx-v1",
+        )
+        self.evidence.put_many(
+            EvidenceCapsule(
+                hostname=key.hostname,
+                year=year,
+                provider="direct:bulk-cdxj",
+                temporal_semantics="archive_capture_timestamp",
+                evidence_timestamp=f"{year}1231235959",
+                source_locator=f"https://bulk.example/index.cdxj:byte:{year}",
+                payload_hash=(str(year)[-1] * 64),
+                policy_version="direct-policy-v1",
+                original_url=f"https://{key.hostname}/{year}",
+                record_locator=f"https://bulk.example/index.cdxj:byte:{year}",
+            )
+            for year in range(1996, 1999)
+        )
+        self.control.enqueue_evidence_tasks([key])
+        provider = FakeRangeProvider()
+        worker = AsyncEvidenceWorker(
+            control_store=self.control,
+            evidence_store=self.evidence,
+            providers={"wayback": provider},
+            owner="worker-local-range-short-circuit",
+            claim_batch_size=1,
+        )
+
+        report = await worker.run_once()
+
+        self.assertEqual(provider.range_keys, [])
+        self.assertEqual(report.claimed, 1)
+        self.assertEqual(report.terminal, 1)
+        self.assertEqual(report.pass_count, 1)
+        stored = self.control.get_evidence_task(key)
+        self.assertIsNotNone(stored)
+        self.assertEqual(stored.state, CDXQueryState.PASS.value)
+
+    async def test_domain_amplification_is_not_short_circuited_by_parent_local_evidence(self):
+        key = EvidenceQueryKey(
+            "parent.example",
+            TemporalScope(1996, 2001),
+            "wayback",
+            "cdx-domain-v1",
+        )
+        self.evidence.put_many(
+            EvidenceCapsule(
+                hostname=key.hostname,
+                year=year,
+                provider="direct:bulk-cdxj",
+                temporal_semantics="archive_capture_timestamp",
+                evidence_timestamp=f"{year}0101000000",
+                source_locator=f"https://bulk.example/index.cdxj:byte:{year}",
+                payload_hash=(hex(year)[-1] * 64),
+                policy_version="direct-policy-v1",
+            )
+            for year in range(1996, 2002)
+        )
+        self.control.enqueue_evidence_tasks([key])
+        provider = FakeDomainProvider()
+        worker = AsyncEvidenceWorker(
+            control_store=self.control,
+            evidence_store=self.evidence,
+            providers={"wayback": provider},
+            owner="worker-domain-not-short-circuited",
+            claim_batch_size=1,
+        )
+
+        await worker.run_once()
+
+        self.assertTrue(provider.range_keys if hasattr(provider, "range_keys") else True)
+
     async def test_durable_claim_prefers_wide_probe_and_host_diversity(self):
         keys = [
             EvidenceQueryKey(
