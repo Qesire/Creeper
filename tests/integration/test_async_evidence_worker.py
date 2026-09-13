@@ -379,9 +379,11 @@ class AsyncEvidenceWorkerTests(unittest.IsolatedAsyncioTestCase):
             claim_batch_size=1,
         )
 
-        await worker.run_once()
+        report = await worker.run_once()
 
-        self.assertTrue(provider.range_keys if hasattr(provider, "range_keys") else True)
+        self.assertEqual(report.claimed, 1)
+        self.assertEqual(report.terminal, 1)
+        self.assertTrue(self.evidence.for_hostname("a.parent.example"))
 
     async def test_durable_claim_prefers_wide_probe_and_host_diversity(self):
         keys = [
