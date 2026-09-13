@@ -447,7 +447,12 @@ class UnifiedResearchCompiler:
             "confidence",
             "validation",
         }
-        self._strict(\n            raw,\n            allowed=fields,\n            required=fields - {"enumerator_config"},\n            name="region",\n        )
+        self._strict(
+            raw,
+            allowed=fields,
+            required=fields - {"enumerator_config"},
+            name="region",
+        )
         fanout = raw["expected_fanout"]
         if (
             isinstance(fanout, bool)
