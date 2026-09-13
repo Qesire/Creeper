@@ -16,9 +16,9 @@ class BanditStats:
     pulls: int = 0
     proxy_reward: float = 0.0
     final_reward: float = 0.0
-    final_observation_count: int = 0
     decayed_reward: float = 0.0
     updated_at: float = 0.0
+    final_observation_count: int = 0
 
     @classmethod
     def from_object(cls, value: object) -> "BanditStats":
