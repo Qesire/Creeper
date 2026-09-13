@@ -159,6 +159,46 @@ class RootQuery:
 
 
 @dataclass(frozen=True)
+class RootQueryProgram:
+    """Compatibility value object consumed by the V7.1 deterministic adapters."""
+
+    root_id: str
+    strategy: str
+    queries: tuple[RootQuery, ...]
+    hard_max_requests: int
+    stop_conditions: tuple[str, ...]
+    compiler_version: str = "integrated-l6-v1"
+    context_hash: str = ""
+    program_id: str = ""
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "root_id", _require_text(self.root_id, "root_id"))
+        object.__setattr__(self, "strategy", _require_text(self.strategy, "strategy"))
+        if not self.queries:
+            raise ValueError("queries must be non-empty")
+        if isinstance(self.hard_max_requests, bool) or not isinstance(self.hard_max_requests, int) or self.hard_max_requests < 1:
+            raise ValueError("hard_max_requests must be positive")
+        object.__setattr__(self, "stop_conditions", _require_stops(self.stop_conditions))
+        if not self.program_id:
+            object.__setattr__(
+                self,
+                "program_id",
+                stable_identity(
+                    "program",
+                    {
+                        "root_id": self.root_id,
+                        "strategy": self.strategy,
+                        "queries": [
+                            {"query": q.query, "filters": dict(q.filters)}
+                            for q in self.queries
+                        ],
+                        "context_hash": self.context_hash,
+                    },
+                ),
+            )
+
+
+@dataclass(frozen=True)
 class ExplorationRegionProposal:
     proposal_id: str
     surface_kind: str
