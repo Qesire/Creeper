@@ -17,6 +17,7 @@ from collections.abc import AsyncIterator, Callable, Iterable, Mapping
 from dataclasses import dataclass
 from typing import Protocol
 
+from creeper.authority.baseline_index import YEAR_BITS
 from creeper.evidence.policies import (
     CDXQueryState,
     DomainEvidenceQueryResult,
@@ -29,6 +30,9 @@ from creeper.storage.commit_writer import CommitWriter
 from creeper.storage.control_store import ControlStore, EvidenceTask
 from creeper.storage.evidence_queue import DurableEvidenceQueue
 from creeper.storage.evidence_store import EvidenceStore, EvidenceTaskProvenance
+
+
+_LOCAL_EVIDENCE_SATISFIED = "satisfied_by_local_evidence"
 
 
 class AsyncEvidenceProvider(Protocol):
@@ -269,6 +273,11 @@ class AsyncEvidenceWorker:
         task: EvidenceTask,
         result: EvidenceQueryResult | RangeEvidenceQueryResult | DomainEvidenceQueryResult,
     ) -> None:
+        # A durable task can become unnecessary after direct/bulk evidence
+        # lands. That is a local satisfaction event, not a provider attempt,
+        # and must not distort request-yield learning.
+        if result.error == _LOCAL_EVIDENCE_SATISFIED:
+            return
         self.control_store.record_evidence_task_attempt_metric(
             result.key or task.key,
             attempt=task.attempt,
@@ -280,7 +289,39 @@ class AsyncEvidenceWorker:
         )
 
     async def _execute(self, task: EvidenceTask) -> EvidenceQueryResult:
-        provider = self.providers[task.key.provider]
+        key = task.key
+        scope = key.temporal_scope
+        ordinary_archive_task = (
+            key.provider != "rdap"
+            and not key.policy_version.startswith("cdx-domain-")
+        )
+        if ordinary_archive_task:
+            local_mask = self.evidence_store.resolve_year_masks(
+                (key.hostname,)
+            ).get(key.hostname, 0)
+            scope_mask = 0
+            for year in range(scope.year_from, scope.year_to + 1):
+                scope_mask |= YEAR_BITS.get(year, 0)
+            if scope_mask and local_mask & scope_mask == scope_mask:
+                # Direct/bulk proof is already stronger than another remote
+                # lookup. Finish the durable fallback without consuming a
+                # provider slot or manufacturing provider cost/reward.
+                if scope.year_from != scope.year_to:
+                    return RangeEvidenceQueryResult(
+                        hostname=key.hostname,
+                        key=key,
+                        state=CDXQueryState.PASS,
+                        error=_LOCAL_EVIDENCE_SATISFIED,
+                    )
+                return EvidenceQueryResult(
+                    hostname=key.hostname,
+                    year=scope.year_from,
+                    state=CDXQueryState.PASS,
+                    error=_LOCAL_EVIDENCE_SATISFIED,
+                    key=key,
+                )
+
+        provider = self.providers[key.provider]
         semaphore = self._semaphores[task.key.provider]
         host_identity = (
             task.key.provider + "\0" + task.key.hostname
