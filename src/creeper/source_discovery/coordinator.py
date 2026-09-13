@@ -29,6 +29,7 @@ from creeper.source_discovery.models import (
     source_key,
 )
 from creeper.source_discovery.registry import SourceDiscoveryRegistry
+from creeper.source_discovery.saturation import SourceSaturationController
 
 
 class CoordinatorBusyError(RuntimeError):
@@ -123,6 +124,12 @@ class SearchBatch:
 class CoordinatorCycleReport:
     recovered_scouts: int = 0
     production_exhausted: int = 0
+    suppressions_pruned: int = 0
+    saturated_origins: int = 0
+    saturation_updates: int = 0
+    raw_cold_count: int = 0
+    effective_cold_count: int = 0
+    search_directives_planned: int = 0
     activated: int = 0
     triaged_to_scout: int = 0
     triaged_hold: int = 0
@@ -198,6 +205,7 @@ class SourceDiscoveryCoordinator:
         scout_executor: ScoutExecutor,
         search_executor: SearchExecutor,
         scout_authority: tuple[str, str] | None = None,
+        saturation_controller: SourceSaturationController | None = None,
         triage_parallelism: int = 4,
         scout_parallelism: int | None = None,
         search_parallelism: int = 3,
@@ -225,6 +233,14 @@ class SourceDiscoveryCoordinator:
         ):
             raise ValueError("scout_authority must contain two non-empty signatures")
         self.scout_authority = scout_authority
+        if (
+            saturation_controller is not None
+            and saturation_controller.registry is not registry
+        ):
+            raise ValueError(
+                "saturation controller and coordinator must share one registry"
+            )
+        self.saturation_controller = saturation_controller
         self.triage_parallelism = triage_parallelism
         self.scout_parallelism = min(scout_parallelism, manager.targets.scout_parallelism)
         self.search_parallelism = search_parallelism
@@ -589,6 +605,22 @@ class SourceDiscoveryCoordinator:
                 self._startup_recovered = True
 
             production_exhausted = self.registry.reconcile_exhausted_activations()
+
+            # Suppression authority is updated on the same serialized SQLite
+            # path as planning. A newly saturated origin must disappear from
+            # usable cold inventory before this cycle's manager.plan().
+            suppressions_pruned = self.registry.prune_expired_suppressions()
+            saturation_decisions = ()
+            saturation_updates = 0
+            if self.saturation_controller is not None:
+                saturation_decisions = (
+                    self.saturation_controller.evaluate_all()
+                )
+                saturation_updates = sum(
+                    int(self.saturation_controller.apply(decision))
+                    for decision in saturation_decisions
+                )
+
             plan = self.manager.plan()
             search_directives, search_backoff_skipped = self._eligible_search_directives(
                 plan.search_directives
@@ -596,6 +628,15 @@ class SourceDiscoveryCoordinator:
             counts = {
                 "recovered_scouts": recovered,
                 "production_exhausted": production_exhausted,
+                "suppressions_pruned": suppressions_pruned,
+                "saturated_origins": sum(
+                    int(decision.should_suppress)
+                    for decision in saturation_decisions
+                ),
+                "saturation_updates": saturation_updates,
+                "raw_cold_count": plan.cold_count,
+                "effective_cold_count": plan.effective_cold_count,
+                "search_directives_planned": len(plan.search_directives),
                 "activated": 0,
                 "triaged_to_scout": 0,
                 "triaged_hold": 0,
