@@ -10,7 +10,7 @@ import os
 import signal
 import time
 import tomllib
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -650,6 +650,7 @@ def _legacy_background_research_executor(
 
 def _region_runtime_adapters(
     registry: SourceDiscoveryRegistry,
+    client: httpx.AsyncClient,
 ):
     """Bind L1 through its public API when that lane is present.
 
@@ -680,7 +681,82 @@ def _region_runtime_adapters(
     if any(not hasattr(registry, name) for name in required):
         return None, None
 
-    executor = ExplorationExecutor()
+    async def bounded_get(
+        url: str,
+        *,
+        params: Mapping[str, object] | None = None,
+        max_bytes: int = 0,
+    ) -> tuple[int, bytes]:
+        limit = int(max_bytes) if int(max_bytes) > 0 else 1024 * 1024
+        body = bytearray()
+        async with client.stream("GET", url, params=params) as response:
+            async for chunk in response.aiter_bytes():
+                if len(body) + len(chunk) > limit:
+                    raise ValueError(
+                        f"region response exceeds per-request byte bound {limit}"
+                    )
+                body.extend(chunk)
+            return response.status_code, bytes(body)
+
+    async def html_fetcher(url: str, max_bytes: int = 0):
+        status, body = await bounded_get(url, max_bytes=max_bytes)
+        return {
+            "body": body,
+            "bytes": len(body),
+            "requests": 1,
+            "status": status,
+        }
+
+    async def api_fetcher(
+        endpoint: str,
+        page_or_params: object,
+        max_bytes: int = 0,
+    ):
+        params = page_or_params if isinstance(page_or_params, Mapping) else None
+        status, body = await bounded_get(
+            endpoint,
+            params=params,
+            max_bytes=max_bytes,
+        )
+        if status == 404:
+            payload: object = [] if params is None else {}
+        else:
+            try:
+                payload = json.loads(body.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise ValueError(
+                    f"region API response is not valid JSON: {exc}"
+                ) from exc
+
+        if params is not None:
+            # CURSOR_API performs its own record/cursor selectors.
+            return {
+                "payload": payload,
+                "bytes": len(body),
+                "requests": 1,
+                "status": status,
+            }
+        if isinstance(payload, Mapping):
+            normalized = dict(payload)
+            normalized.setdefault("bytes", len(body))
+            normalized.setdefault("requests", 1)
+            normalized.setdefault("status", status)
+            return normalized
+        if isinstance(payload, list):
+            return {
+                "items": payload,
+                "bytes": len(body),
+                "requests": 1,
+                "status": status,
+            }
+        raise ValueError(
+            "integer pagination response must be a JSON object or array"
+        )
+
+    executor = ExplorationExecutor(
+        html_fetcher=html_fetcher,
+        api_fetcher=api_fetcher,
+    )
 
     def plan_regions() -> tuple[object, ...]:
         scheduled: dict[str, object] = {}
@@ -809,7 +885,11 @@ async def _open_runtime(config: SourceDiscoveryServiceConfig):
                     ),
                 ),
             )
-            max_io = max(config.coordinator.triage_parallelism, config.coordinator.scout_parallelism)
+            max_io = max(
+                config.coordinator.triage_parallelism,
+                config.coordinator.scout_parallelism,
+                config.coordinator.region_parallelism,
+            )
             limits = httpx.Limits(
                 max_connections=max(4, max_io * 2),
                 max_keepalive_connections=max(2, max_io),
@@ -869,7 +949,10 @@ async def _open_runtime(config: SourceDiscoveryServiceConfig):
                     if config.coordinator.nonblocking_research
                     else None
                 )
-                region_planner, region_executor = _region_runtime_adapters(registry)
+                region_planner, region_executor = _region_runtime_adapters(
+                    registry,
+                    client,
+                )
                 coordinator = SourceDiscoveryCoordinator(
                     registry,
                     manager,
