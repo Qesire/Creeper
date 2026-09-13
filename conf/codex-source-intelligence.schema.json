@@ -1,343 +1,331 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://creeper.local/schema/llm-research-compiler-v1.json",
+  "title": "Creeper unified LLM research compiler response",
   "type": "object",
   "additionalProperties": false,
   "properties": {
-    "query": {
-      "type": "string"
+    "query": {"type": "string", "minLength": 1},
+    "contract": {"type": "string"},
+    "context_hash": {"type": "string"},
+    "proposals": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 8,
+      "items": {
+        "oneOf": [
+          {"$ref": "#/$defs/explorationRegion"},
+          {"$ref": "#/$defs/contractFamily"},
+          {"$ref": "#/$defs/queryProgram"},
+          {"$ref": "#/$defs/pivotProgram"},
+          {"$ref": "#/$defs/rootSurface"},
+          {"$ref": "#/$defs/queryFamilyRule"},
+          {"$ref": "#/$defs/pivotRule"},
+          {"$ref": "#/$defs/negativeRule"},
+          {"$ref": "#/$defs/familyRecognizer"}
+        ]
+      }
     },
     "hypotheses": {
       "type": "array",
       "maxItems": 128,
-      "items": {
-        "type": "object",
-        "additionalProperties": false,
-        "properties": {
-          "hypothesis_id": {
-            "type": "string"
-          },
-          "action": {
-            "type": "string",
-            "enum": [
-              "PROBE_URL",
-              "SEARCH_WEB_RESULT",
-              "EXPAND_CATALOG",
-              "ENUMERATE_TEMPLATE"
-            ]
-          },
-          "candidate": {
-            "anyOf": [
-              {
-                "type": "null"
-              },
-              {
-                "type": "object",
-                "additionalProperties": false,
-                "properties": {
-                  "canonical_entrypoint": {
-                    "type": "string"
-                  },
-                  "source_family": {
-                    "type": "string"
-                  },
-                  "level": {
-                    "type": "string",
-                    "enum": [
-                      "SOURCE",
-                      "COLLECTION",
-                      "METASOURCE"
-                    ]
-                  },
-                  "expected_year_from": {
-                    "type": [
-                      "integer",
-                      "null"
-                    ]
-                  },
-                  "expected_year_to": {
-                    "type": [
-                      "integer",
-                      "null"
-                    ]
-                  },
-                  "expected_volume": {
-                    "type": [
-                      "integer",
-                      "null"
-                    ]
-                  },
-                  "temporal_semantics_prior": {
-                    "type": "number"
-                  },
-                  "enumerability_prior": {
-                    "type": "number"
-                  },
-                  "direct_evidence_prior": {
-                    "type": "number"
-                  },
-                  "baseline_overlap_prior": {
-                    "type": "number"
-                  },
-                  "access_cost_prior": {
-                    "type": "number"
-                  },
-                  "adapter_cost_prior": {
-                    "type": "number"
-                  },
-                  "confidence": {
-                    "type": "number"
-                  }
-                },
-                "required": [
-                  "canonical_entrypoint",
-                  "source_family",
-                  "level",
-                  "expected_year_from",
-                  "expected_year_to",
-                  "expected_volume",
-                  "temporal_semantics_prior",
-                  "enumerability_prior",
-                  "direct_evidence_prior",
-                  "baseline_overlap_prior",
-                  "access_cost_prior",
-                  "adapter_cost_prior",
-                  "confidence"
-                ]
-              }
-            ]
-          },
-          "template": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "variables": {
-            "anyOf": [
-              {
-                "type": "null"
-              },
-              {
-                "type": "object",
-                "additionalProperties": false,
-                "properties": {
-                  "YEAR": {
-                    "type": [
-                      "array",
-                      "null"
-                    ],
-                    "items": {
-                      "type": [
-                        "integer",
-                        "string"
-                      ]
-                    }
-                  },
-                  "SHARD": {
-                    "type": [
-                      "array",
-                      "null"
-                    ],
-                    "items": {
-                      "type": [
-                        "integer",
-                        "string"
-                      ]
-                    }
-                  },
-                  "PART": {
-                    "type": [
-                      "array",
-                      "null"
-                    ],
-                    "items": {
-                      "type": [
-                        "integer",
-                        "string"
-                      ]
-                    }
-                  },
-                  "INDEX": {
-                    "type": [
-                      "array",
-                      "null"
-                    ],
-                    "items": {
-                      "type": [
-                        "integer",
-                        "string"
-                      ]
-                    }
-                  },
-                  "FILE": {
-                    "type": [
-                      "array",
-                      "null"
-                    ],
-                    "items": {
-                      "type": [
-                        "integer",
-                        "string"
-                      ]
-                    }
-                  },
-                  "DATASET": {
-                    "type": [
-                      "array",
-                      "null"
-                    ],
-                    "items": {
-                      "type": [
-                        "integer",
-                        "string"
-                      ]
-                    }
-                  },
-                  "COLLECTION": {
-                    "type": [
-                      "array",
-                      "null"
-                    ],
-                    "items": {
-                      "type": [
-                        "integer",
-                        "string"
-                      ]
-                    }
-                  }
-                },
-                "required": [
-                  "YEAR",
-                  "SHARD",
-                  "PART",
-                  "INDEX",
-                  "FILE",
-                  "DATASET",
-                  "COLLECTION"
-                ]
-              }
-            ]
-          },
-          "candidate_defaults": {
-            "anyOf": [
-              {
-                "type": "null"
-              },
-              {
-                "type": "object",
-                "additionalProperties": false,
-                "properties": {
-                  "source_family": {
-                    "type": "string"
-                  },
-                  "level": {
-                    "type": "string",
-                    "enum": [
-                      "SOURCE",
-                      "COLLECTION",
-                      "METASOURCE"
-                    ]
-                  },
-                  "expected_year_from": {
-                    "type": [
-                      "integer",
-                      "null"
-                    ]
-                  },
-                  "expected_year_to": {
-                    "type": [
-                      "integer",
-                      "null"
-                    ]
-                  },
-                  "expected_volume": {
-                    "type": [
-                      "integer",
-                      "null"
-                    ]
-                  },
-                  "temporal_semantics_prior": {
-                    "type": "number"
-                  },
-                  "enumerability_prior": {
-                    "type": "number"
-                  },
-                  "direct_evidence_prior": {
-                    "type": "number"
-                  },
-                  "baseline_overlap_prior": {
-                    "type": "number"
-                  },
-                  "access_cost_prior": {
-                    "type": "number"
-                  },
-                  "adapter_cost_prior": {
-                    "type": "number"
-                  },
-                  "confidence": {
-                    "type": "number"
-                  }
-                },
-                "required": [
-                  "source_family",
-                  "level",
-                  "expected_year_from",
-                  "expected_year_to",
-                  "expected_volume",
-                  "temporal_semantics_prior",
-                  "enumerability_prior",
-                  "direct_evidence_prior",
-                  "baseline_overlap_prior",
-                  "access_cost_prior",
-                  "adapter_cost_prior",
-                  "confidence"
-                ]
-              }
-            ]
-          },
-          "expected_mechanism": {
-            "type": "string"
-          },
-          "confidence": {
-            "type": "number"
-          },
-          "validation": {
-            "type": "object",
-            "additionalProperties": false,
-            "properties": {
-              "method": {
-                "type": "string"
-              },
-              "max_requests": {
-                "type": "integer"
-              },
-              "max_bytes": {
-                "type": "integer"
-              }
-            },
-            "required": [
-              "method",
-              "max_requests",
-              "max_bytes"
-            ]
-          }
-        },
-        "required": [
-          "hypothesis_id",
-          "action",
-          "candidate",
-          "template",
-          "variables",
-          "candidate_defaults",
-          "expected_mechanism",
-          "confidence",
-          "validation"
-        ]
-      }
+      "items": {"$ref": "#/$defs/legacyHypothesis"}
     }
   },
-  "required": [
-    "query",
-    "hypotheses"
-  ]
+  "required": ["query"],
+  "anyOf": [
+    {"required": ["proposals"]},
+    {"required": ["hypotheses"]}
+  ],
+  "$defs": {
+    "positiveBounds": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {
+        "type": "integer",
+        "minimum": 1
+      }
+    },
+    "stopConditions": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 16,
+      "items": {"type": "string", "minLength": 1}
+    },
+    "rootQuery": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "query": {"type": "string", "minLength": 1},
+        "filters": {"type": "object"},
+        "expected_signal": {"type": "string"},
+        "expected_family": {"type": "string"},
+        "max_pages": {"type": "integer", "minimum": 1, "maximum": 80}
+      },
+      "required": ["query", "filters", "expected_signal", "expected_family", "max_pages"]
+    },
+    "explorationRegion": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "type": {"const": "ExplorationRegionProposal"},
+        "proposal_id": {"type": "string", "minLength": 1},
+        "surface_kind": {
+          "enum": [
+            "WEB_SEARCH",
+            "HTML_CATALOG",
+            "HTTP_API",
+            "REPOSITORY",
+            "MANIFEST",
+            "FILENAME_FAMILY",
+            "LOCAL_HINT"
+          ]
+        },
+        "root": {"type": "string", "minLength": 1},
+        "purpose": {"type": "string", "minLength": 1},
+        "query_family": {"type": "object"},
+        "enumerator": {
+          "enum": [
+            "STATIC_LIST",
+            "HTML_CATALOG",
+            "INTEGER_PAGINATION",
+            "CURSOR_API",
+            "FILENAME_PATTERN",
+            "MANIFEST_FILE"
+          ]
+        },
+        "artifact_predicate": {"type": "object"},
+        "hard_bounds": {"$ref": "#/$defs/positiveBounds"},
+        "stop_conditions": {"$ref": "#/$defs/stopConditions"},
+        "expected_source_family": {"type": "string", "minLength": 1},
+        "expected_contract_family": {"type": "string", "minLength": 1},
+        "expected_mechanism": {"type": "string", "minLength": 1},
+        "expected_fanout": {"type": "integer", "minimum": 1, "maximum": 4096},
+        "reuse_key": {"type": "string", "minLength": 1},
+        "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+        "validation": {"type": "object"}
+      },
+      "required": [
+        "type",
+        "proposal_id",
+        "surface_kind",
+        "root",
+        "purpose",
+        "query_family",
+        "enumerator",
+        "artifact_predicate",
+        "hard_bounds",
+        "stop_conditions",
+        "expected_source_family",
+        "expected_contract_family",
+        "expected_mechanism",
+        "expected_fanout",
+        "reuse_key",
+        "confidence",
+        "validation"
+      ]
+    },
+    "contractFamily": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "type": {"const": "ContractFamilyProposal"},
+        "proposal_id": {"type": "string", "minLength": 1},
+        "contract_family": {"type": "string", "minLength": 1},
+        "recognition": {"type": "object"},
+        "extraction": {"type": "object"},
+        "hard_bounds": {"$ref": "#/$defs/positiveBounds"},
+        "stop_conditions": {"$ref": "#/$defs/stopConditions"},
+        "expected_mechanism": {"type": "string", "minLength": 1},
+        "reuse_key": {"type": "string", "minLength": 1},
+        "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+        "validation": {"type": "object"}
+      },
+      "required": [
+        "type",
+        "proposal_id",
+        "contract_family",
+        "recognition",
+        "extraction",
+        "hard_bounds",
+        "stop_conditions",
+        "expected_mechanism",
+        "reuse_key",
+        "confidence",
+        "validation"
+      ]
+    },
+    "queryProgramBase": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "type": {"type": "string"},
+        "proposal_id": {"type": "string", "minLength": 1},
+        "root_id": {"type": "string", "minLength": 1},
+        "strategy": {"type": "string", "minLength": 1},
+        "queries": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 80,
+          "items": {"$ref": "#/$defs/rootQuery"}
+        },
+        "hard_max_requests": {"type": "integer", "minimum": 1, "maximum": 80},
+        "stop_conditions": {"$ref": "#/$defs/stopConditions"},
+        "reuse_key": {"type": "string", "minLength": 1}
+      },
+      "required": [
+        "type",
+        "proposal_id",
+        "root_id",
+        "strategy",
+        "queries",
+        "hard_max_requests",
+        "stop_conditions",
+        "reuse_key"
+      ]
+    },
+    "queryProgram": {
+      "allOf": [
+        {"$ref": "#/$defs/queryProgramBase"},
+        {
+          "type": "object",
+          "properties": {"type": {"const": "QueryProgramProposal"}}
+        }
+      ]
+    },
+    "pivotProgram": {
+      "allOf": [
+        {"$ref": "#/$defs/queryProgramBase"},
+        {
+          "type": "object",
+          "properties": {"type": {"const": "PivotProgramProposal"}}
+        }
+      ]
+    },
+    "rootSurface": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "type": {"const": "RootSurfaceProposal"},
+        "proposal_id": {"type": "string", "minLength": 1},
+        "kind": {"type": "string", "minLength": 1},
+        "entrypoint": {"type": "string", "minLength": 1},
+        "capabilities": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 32,
+          "items": {"type": "string", "minLength": 1}
+        },
+        "rationale": {"type": "string", "minLength": 1},
+        "hard_bounds": {"$ref": "#/$defs/positiveBounds"},
+        "stop_conditions": {"$ref": "#/$defs/stopConditions"},
+        "reuse_key": {"type": "string", "minLength": 1},
+        "confidence": {"type": "number", "minimum": 0, "maximum": 1}
+      },
+      "required": [
+        "type",
+        "proposal_id",
+        "kind",
+        "entrypoint",
+        "capabilities",
+        "rationale",
+        "hard_bounds",
+        "stop_conditions",
+        "reuse_key",
+        "confidence"
+      ]
+    },
+    "learningRuleBase": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "type": {"type": "string"},
+        "proposal_id": {"type": "string", "minLength": 1},
+        "generalization_scope": {"type": "object"},
+        "preconditions": {"type": "object"},
+        "bounded_expansion": {"type": "object"},
+        "hard_bounds": {"$ref": "#/$defs/positiveBounds"},
+        "stop_conditions": {"$ref": "#/$defs/stopConditions"},
+        "expected_mechanism": {"type": "string", "minLength": 1},
+        "failure_modes": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 16,
+          "items": {"type": "string", "minLength": 1}
+        },
+        "reuse_key": {"type": "string", "minLength": 1},
+        "confidence": {"type": "number", "minimum": 0, "maximum": 1}
+      },
+      "required": [
+        "type",
+        "proposal_id",
+        "generalization_scope",
+        "preconditions",
+        "bounded_expansion",
+        "hard_bounds",
+        "stop_conditions",
+        "expected_mechanism",
+        "failure_modes",
+        "reuse_key",
+        "confidence"
+      ]
+    },
+    "queryFamilyRule": {
+      "allOf": [
+        {"$ref": "#/$defs/learningRuleBase"},
+        {"type": "object", "properties": {"type": {"const": "QueryFamilyProposal"}}}
+      ]
+    },
+    "pivotRule": {
+      "allOf": [
+        {"$ref": "#/$defs/learningRuleBase"},
+        {"type": "object", "properties": {"type": {"const": "PivotRuleProposal"}}}
+      ]
+    },
+    "negativeRule": {
+      "allOf": [
+        {"$ref": "#/$defs/learningRuleBase"},
+        {"type": "object", "properties": {"type": {"const": "NegativeRuleProposal"}}}
+      ]
+    },
+    "familyRecognizer": {
+      "allOf": [
+        {"$ref": "#/$defs/learningRuleBase"},
+        {"type": "object", "properties": {"type": {"const": "FamilyRecognizerProposal"}}}
+      ]
+    },
+    "legacyHypothesis": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "hypothesis_id": {"type": "string", "minLength": 1},
+        "action": {
+          "enum": [
+            "PROBE_URL",
+            "SEARCH_WEB_RESULT",
+            "EXPAND_CATALOG",
+            "ENUMERATE_TEMPLATE"
+          ]
+        },
+        "candidate": {"type": ["object", "null"]},
+        "template": {"type": ["string", "null"]},
+        "variables": {"type": ["object", "null"]},
+        "candidate_defaults": {"type": ["object", "null"]},
+        "expected_mechanism": {"type": "string"},
+        "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+        "validation": {"type": "object"}
+      },
+      "required": [
+        "hypothesis_id",
+        "action",
+        "candidate",
+        "template",
+        "variables",
+        "candidate_defaults",
+        "expected_mechanism",
+        "confidence",
+        "validation"
+      ]
+    }
+  }
 }
