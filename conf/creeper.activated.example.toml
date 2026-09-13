@@ -26,10 +26,12 @@ lease_max_requests = 16
 lease_max_bytes = 67108864
 lease_max_seconds = 300
 
-# Durable provider backlog high-water. Discovery/source acquisition pauses
-# before this queue is over-admitted.
+# Durable Wayback backlog high-water. discovery_only sources pause before this
+# lane is over-admitted. direct_year sources do not reserve or require Wayback
+# capacity; unresolved fallback work spills durably until this lane has room.
 evidence_backlog_capacity = 10000
-# RDAP registration-year evidence uses a separate provider/network budget.
+# RDAP registration-year evidence uses a separate provider/network budget and
+# remains independently admissible when the Wayback lane is saturated.
 rdap_backlog_capacity = 4096
 
 
