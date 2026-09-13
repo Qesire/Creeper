@@ -727,13 +727,14 @@ class IncrementalReadinessRuntime:
     ) -> tuple[
         dict[tuple[str, int], str],
         dict[tuple[str, int], str],
+        dict[tuple[str, int], tuple[str, str, str]],
     ]:
-        """Resolve final-reward lineage from proof first, cache second.
+        """Resolve proof-valid task, source and source-run attribution.
 
-        Existing host-years at the provenance migration cutover retain their
-        legacy ControlStore attribution. Every host-year first inserted after
-        the cutover must have proof-side provider provenance before provider
-        task/source credit is accepted.
+        Run attribution is deliberately stricter than source attribution: a
+        lease identity is accepted only when it is corroborated by proof-side
+        provenance (provider tasks) or by a direct capsule whose source id
+        matches the durable direct-origin row.
         """
 
         pairs = [(row.hostname, row.year) for row in rows]
@@ -753,9 +754,40 @@ class IncrementalReadinessRuntime:
             if control is None
             else control.resolve_primary_source_origins(pairs)
         )
+        control_runs: dict[
+            tuple[str, int], tuple[str, str, str]
+        ] = {}
+        if control is not None and pairs:
+            limit = 350
+            for offset in range(0, len(pairs), limit):
+                chunk = pairs[offset : offset + limit]
+                predicates = " OR ".join(
+                    "(hostname = ? AND year = ?)" for _ in chunk
+                )
+                params: list[object] = []
+                for hostname, year in chunk:
+                    params.extend((hostname, year))
+                for origin in control.connection.execute(
+                    f"""
+                    SELECT hostname, year, source_key, reservoir_id, lease_id
+                    FROM evidence_host_year_origins
+                    WHERE {predicates}
+                    """,
+                    params,
+                ):
+                    control_runs[
+                        (str(origin["hostname"]), int(origin["year"]))
+                    ] = (
+                        str(origin["source_key"]),
+                        str(origin["reservoir_id"]),
+                        str(origin["lease_id"]),
+                    )
 
         kinds: dict[tuple[str, int], str] = {}
         origins: dict[tuple[str, int], str] = {}
+        run_origins: dict[
+            tuple[str, int], tuple[str, str, str]
+        ] = {}
         for row in rows:
             pair = (row.hostname, row.year)
             direct = direct_sources.get(pair, ())
@@ -784,32 +816,56 @@ class IncrementalReadinessRuntime:
             kinds[pair] = selected_kind
 
             cached_origin = control_origins.get(pair)
+            cached_run = control_runs.get(pair)
             if selected_kind == "direct":
                 if direct:
-                    origins[pair] = (
+                    selected_source = (
                         cached_origin
                         if cached_origin in direct
                         else direct[0]
                     )
+                    origins[pair] = selected_source
+                    if (
+                        cached_run is not None
+                        and cached_run[0] == selected_source
+                    ):
+                        run_origins[pair] = cached_run
                 continue
 
             if not post_cutover:
                 if cached_origin is not None:
                     origins[pair] = cached_origin
+                    if (
+                        cached_run is not None
+                        and cached_run[0] == cached_origin
+                    ):
+                        run_origins[pair] = cached_run
                 elif provider is not None and provider.source_key:
                     origins[pair] = provider.source_key
+                    if provider.reservoir_id and provider.lease_id:
+                        run_origins[pair] = (
+                            provider.source_key,
+                            provider.reservoir_id,
+                            provider.lease_id,
+                        )
                 continue
 
-            # New provider evidence is credited only from the provenance row
-            # that shares its transaction with the proof capsule.
+            # New provider evidence is credited only from provenance persisted
+            # in the same EvidenceStore transaction as the proof capsule.
             if (
                 provider is not None
                 and provider.task_kind == selected_kind
                 and provider.source_key
             ):
                 origins[pair] = provider.source_key
+                if provider.reservoir_id and provider.lease_id:
+                    run_origins[pair] = (
+                        provider.source_key,
+                        provider.reservoir_id,
+                        provider.lease_id,
+                    )
 
-        return kinds, origins
+        return kinds, origins, run_origins
 
     def _publish_evidence_action_rewards(
         self,
@@ -874,13 +930,18 @@ class IncrementalReadinessRuntime:
         )
         if rows:
             assert self.baseline is not None
-            task_kinds, source_origins = self._resolved_attribution(rows)
+            (
+                task_kinds,
+                source_origins,
+                run_origins,
+            ) = self._resolved_attribution(rows)
             self.ledger.apply_batch(
                 rows,
                 baseline=self.baseline,
                 weights=self.weights,
                 source_origins=source_origins,
                 task_kinds=task_kinds,
+                run_origins=run_origins,
             )
         report = self.ledger.report(
             latest_evidence_sequence=self.evidence.max_host_year_sequence(),
