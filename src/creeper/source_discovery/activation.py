@@ -12,10 +12,21 @@ from creeper.evidence.contracts import (
     SourceEvidenceContract,
     bind_contract_to_adapter_id,
     contract_from_adapter_id,
+    discovery_only_contract,
     freeze_contract_bindings,
     parser_kind_from_locator,
     resolve_source_evidence_contract,
 )
+from creeper.evidence.contract_registry import (
+    IdentityObserver,
+    ReviewedArtifactIdentityError,
+    ReviewedArtifactIdentityUnverifiable,
+    ReviewedContractRegistry,
+    bind_reviewed_artifact_to_adapter_id,
+    reviewed_artifact_from_adapter_id,
+    verify_reviewed_artifact_identity,
+)
+from creeper.source_discovery.index_identity import HistoricalIndexObjectIdentity
 from creeper.source_discovery.index_registry import IndexSpaceRegistry
 from creeper.source_discovery.index_space import RegionSynopsis, compile_candidate_index_space
 from creeper.source_discovery.models import SourceCandidate, SourceState
@@ -74,11 +85,16 @@ class SourceActivationCompiler:
         *,
         registry: SourceDiscoveryRegistry,
         evidence_contracts: Mapping[str, SourceEvidenceContract] | None = None,
+        reviewed_contracts: ReviewedContractRegistry | None = None,
+        identity_observer: IdentityObserver | None = None,
     ) -> None:
         self.control_store = control_store
         self.registry = registry
         self.index_registry = IndexSpaceRegistry(control_store)
         self.evidence_contracts = freeze_contract_bindings(evidence_contracts)
+        self.reviewed_contracts = reviewed_contracts or ReviewedContractRegistry()
+        self.identity_observer = identity_observer
+        self._verified_reviewed_adapters: set[str] = set()
 
     def compile(self, candidate: SourceCandidate) -> ProductionSourceSpec:
         if candidate.state is not SourceState.ACTIVE:
@@ -108,6 +124,26 @@ class SourceActivationCompiler:
                 raise SourceActivationError(
                     "reservoir exists without source activation lineage"
                 )
+            frozen_artifact = reviewed_artifact_from_adapter_id(
+                existing.adapter_id
+            )
+            if (
+                frozen_artifact is not None
+                and existing.adapter_id not in self._verified_reviewed_adapters
+            ):
+                try:
+                    verify_reviewed_artifact_identity(
+                        frozen_artifact,
+                        observer=self.identity_observer,
+                    )
+                except (
+                    ReviewedArtifactIdentityError,
+                    ReviewedArtifactIdentityUnverifiable,
+                ) as exc:
+                    raise SourceActivationError(
+                        "frozen reviewed artifact identity is no longer verifiable"
+                    ) from exc
+                self._verified_reviewed_adapters.add(existing.adapter_id)
             if self.index_registry.get_index_for_source(source_key) is not None:
                 return ProductionSourceSpec(
                     source_key=source_key,
@@ -126,8 +162,10 @@ class SourceActivationCompiler:
                 )
 
         # Freeze authority at activation. Existing reservoirs keep their
-        # durable contract; newly supplied allowlists cannot upgrade authority
+        # durable contract; newly supplied registries cannot upgrade authority
         # in the middle of a lease or after a restart.
+        verified_reviewed_identity = None
+        reviewed_binding = None
         if existing is not None:
             contract = contract_from_adapter_id(existing.adapter_id)
             if contract is None:
@@ -137,13 +175,57 @@ class SourceActivationCompiler:
                 )
             adapter_id = existing.adapter_id
         else:
-            contract = resolve_source_evidence_contract(
-                stored.canonical_entrypoint,
-                explicit_contracts=self.evidence_contracts,
-                parser_kind=parser_kind_from_locator(
-                    stored.canonical_entrypoint
-                ),
+            actual_parser = parser_kind_from_locator(
+                stored.canonical_entrypoint
             )
+            reviewed_binding = self.reviewed_contracts.get_exact(
+                stored.canonical_entrypoint
+            )
+            if reviewed_binding is not None:
+                try:
+                    verified_reviewed_identity = (
+                        verify_reviewed_artifact_identity(
+                            reviewed_binding.artifact,
+                            observer=self.identity_observer,
+                        )
+                    )
+                except ReviewedArtifactIdentityUnverifiable:
+                    # A reviewed semantic contract without verifiable artifact
+                    # identity is scheduling information only. Freeze the new
+                    # activation as discovery-only; later registry changes must
+                    # not silently upgrade this reservoir.
+                    contract = discovery_only_contract(actual_parser)
+                    reviewed_binding = None
+                except ReviewedArtifactIdentityError as exc:
+                    raise SourceActivationError(
+                        "reviewed artifact identity mismatch"
+                    ) from exc
+                else:
+                    contract = reviewed_binding.contract
+            else:
+                explicit = self.evidence_contracts.get(
+                    stored.canonical_entrypoint
+                )
+                if (
+                    explicit is not None
+                    and explicit.grants_direct_web_year
+                    and actual_parser not in {"cdx", "cdxj"}
+                ):
+                    raise SourceActivationError(
+                        "structured DIRECT_WEB_YEAR authority requires a "
+                        "versioned reviewed contract registry"
+                    )
+                contract = resolve_source_evidence_contract(
+                    stored.canonical_entrypoint,
+                    explicit_contracts=self.evidence_contracts,
+                    parser_kind=actual_parser,
+                )
+
+            if reviewed_binding is not None:
+                base_adapter_id = bind_reviewed_artifact_to_adapter_id(
+                    base_adapter_id,
+                    reviewed_binding.artifact,
+                )
             adapter_id = bind_contract_to_adapter_id(
                 base_adapter_id,
                 contract,
@@ -171,6 +253,19 @@ class SourceActivationCompiler:
             direct_evidence_authority=contract.grants_direct_web_year,
         )
         self.index_registry.register_index_space(compiled_index_space)
+        if (
+            reviewed_binding is not None
+            and verified_reviewed_identity is not None
+            and verified_reviewed_identity.kind == "etag+length"
+        ):
+            self.index_registry.bind_object_identity(
+                compiled_index_space.index.index_key,
+                HistoricalIndexObjectIdentity(
+                    kind="remote",
+                    content_length=verified_reviewed_identity.content_length,
+                    etag=verified_reviewed_identity.value,
+                ),
+            )
         if (
             self.index_registry.get_synopsis(
                 compiled_index_space.root_region.region_key
@@ -215,6 +310,11 @@ class SourceActivationCompiler:
                     str(year_from),
                     str(year_to),
                     contract.binding_digest,
+                    (
+                        ""
+                        if reviewed_binding is None
+                        else reviewed_binding.binding_digest
+                    ),
                 )
             ).encode("utf-8")
         ).hexdigest()
@@ -263,6 +363,8 @@ class SourceActivationCompiler:
             adapter_kind=adapter_kind,
             config_hash=config_hash,
         )
+        if reviewed_binding is not None:
+            self._verified_reviewed_adapters.add(adapter_id)
         return ProductionSourceSpec(
             source_key=source_key,
             domain_id=domain_id,

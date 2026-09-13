@@ -24,6 +24,11 @@ import time
 import tomllib
 from typing import Any, Callable
 
+from creeper.source_cli import (
+    SourceProducerIntent,
+    SourceProducerMode,
+    parse_source_producer_intent,
+)
 from creeper.runtime.resource_governor import (
     GovernorState,
     LocalResourceSampler,
@@ -62,6 +67,13 @@ class EvidenceServicePolicy:
     retry_max_seconds: float = 3600.0
     poll_min_seconds: float = 0.25
     poll_max_seconds: float = 10.0
+    # Complete platform-year enumeration is an independent lane and therefore
+    # has its own claim/network budget rather than borrowing exact/range CDX.
+    platform_harvest_enabled: bool = False
+    platform_claim_batch_size: int = 1
+    platform_requests_per_second: float = 0.1
+    platform_max_connections: int = 2
+    platform_poll_seconds: float = 2.0
 
 
 @dataclass(frozen=True)
@@ -91,6 +103,8 @@ class AutopilotConfig:
     runtime_data_root: Path
     supervisor: SupervisorPolicy
     evidence: EvidenceServicePolicy
+    producer_mode: SourceProducerMode = SourceProducerMode.ACTIVATED
+    producer_mode_explicit: bool = False
     source_producer_workers: int = 1
     historical_index_enabled: bool = False
     historical_index_eed_model: Path | None = None
@@ -175,14 +189,11 @@ def _nonnegative_int(value: object, *, name: str) -> int:
 
 def _producer_runtime_config(
     config_path: Path,
-) -> tuple[Path, Path, int, bool]:
+) -> tuple[SourceProducerIntent, Path, Path, int, bool]:
     with config_path.open("rb") as stream:
         root = tomllib.load(stream)
-    source_mode = root.get("source_mode", "static")
-    if source_mode not in {"static", "activated"}:
-        raise ValueError(
-            "autopilot source producer source_mode must be 'static' or 'activated'"
-        )
+    intent = parse_source_producer_intent(root)
+    source_mode = intent.mode
     runtime_root = _resolve(
         root.get("runtime_data_root"),
         base=config_path.parent,
@@ -199,7 +210,7 @@ def _producer_runtime_config(
     workers = _positive_int(
         limits.get(
             "source_workers",
-            4 if source_mode == "activated" else 1,
+            4 if source_mode is SourceProducerMode.ACTIVATED else 1,
         ),
         name="source producer limits.source_workers",
     )
@@ -210,11 +221,11 @@ def _producer_runtime_config(
         historical_raw.get("enabled", False),
         name="source producer historical_index.enabled",
     )
-    if historical_enabled and source_mode != "activated":
+    if historical_enabled and source_mode is not SourceProducerMode.ACTIVATED:
         raise ValueError(
             "historical index optimizer requires source_mode='activated'"
         )
-    return runtime_root, baseline_index, workers, historical_enabled
+    return intent, runtime_root, baseline_index, workers, historical_enabled
 
 
 def load_autopilot_config(config_path: Path) -> AutopilotConfig:
@@ -233,11 +244,17 @@ def load_autopilot_config(config_path: Path) -> AutopilotConfig:
     )
     discovery = load_source_discovery_config(discovery_path)
     (
+        producer_intent,
         producer_root,
         baseline_index,
         source_producer_workers,
         historical_index_enabled,
     ) = _producer_runtime_config(producer_path)
+    if producer_intent.mode is SourceProducerMode.STATIC:
+        raise ValueError(
+            "autopilot always launches source discovery; static producer "
+            "topology is rejected. Run static production standalone instead."
+        )
     if discovery.runtime_data_root.resolve() != producer_root.resolve():
         raise ValueError(
             "source discovery and source producer must share one runtime_data_root"
@@ -362,6 +379,41 @@ def load_autopilot_config(config_path: Path) -> AutopilotConfig:
         poll_max_seconds=_positive_float(
             ev_raw.get("poll_max_seconds", ev_default.poll_max_seconds),
             name="evidence.poll_max_seconds",
+        ),
+        platform_harvest_enabled=_strict_bool(
+            ev_raw.get(
+                "platform_harvest_enabled",
+                ev_default.platform_harvest_enabled,
+            ),
+            name="evidence.platform_harvest_enabled",
+        ),
+        platform_claim_batch_size=_positive_int(
+            ev_raw.get(
+                "platform_claim_batch_size",
+                ev_default.platform_claim_batch_size,
+            ),
+            name="evidence.platform_claim_batch_size",
+        ),
+        platform_requests_per_second=_positive_float(
+            ev_raw.get(
+                "platform_requests_per_second",
+                ev_default.platform_requests_per_second,
+            ),
+            name="evidence.platform_requests_per_second",
+        ),
+        platform_max_connections=_positive_int(
+            ev_raw.get(
+                "platform_max_connections",
+                ev_default.platform_max_connections,
+            ),
+            name="evidence.platform_max_connections",
+        ),
+        platform_poll_seconds=_positive_float(
+            ev_raw.get(
+                "platform_poll_seconds",
+                ev_default.platform_poll_seconds,
+            ),
+            name="evidence.platform_poll_seconds",
         ),
     )
     if evidence.max_keepalive_connections > evidence.max_connections:
@@ -496,6 +548,8 @@ def load_autopilot_config(config_path: Path) -> AutopilotConfig:
         runtime_data_root=producer_root,
         supervisor=supervisor,
         evidence=evidence,
+        producer_mode=producer_intent.mode,
+        producer_mode_explicit=producer_intent.explicitly_configured,
         source_producer_workers=source_producer_workers,
         historical_index_enabled=historical_index_enabled,
         historical_index_eed_model=historical_index_eed_model,
@@ -506,6 +560,10 @@ def load_autopilot_config(config_path: Path) -> AutopilotConfig:
 
 
 def build_child_specs(config: AutopilotConfig) -> tuple[ChildSpec, ...]:
+    if SourceProducerMode(config.producer_mode) is SourceProducerMode.STATIC:
+        raise ValueError(
+            "autopilot source discovery cannot run with a static producer"
+        )
     py = sys.executable
     evidence = config.evidence
     specs = [
@@ -600,6 +658,47 @@ def build_child_specs(config: AutopilotConfig) -> tuple[ChildSpec, ...]:
             ),
         )
     )
+    if evidence.platform_harvest_enabled:
+        specs.append(
+            ChildSpec(
+                "platform-year-harvest",
+                (
+                    py,
+                    "-m",
+                    "creeper.platform_harvest_cli",
+                    str(config.runtime_data_root),
+                    "--watch",
+                    "--owner",
+                    "platform-year-harvest",
+                    "--endpoint",
+                    evidence.endpoint,
+                    "--claim-batch-size",
+                    str(evidence.platform_claim_batch_size),
+                    "--lease-seconds",
+                    str(evidence.lease_seconds),
+                    "--requests-per-second",
+                    str(evidence.platform_requests_per_second),
+                    "--max-connections",
+                    str(evidence.platform_max_connections),
+                    "--max-keepalive-connections",
+                    str(min(1, evidence.platform_max_connections)),
+                    "--keepalive-expiry-seconds",
+                    str(evidence.keepalive_expiry_seconds),
+                    "--throttle-floor-seconds",
+                    str(evidence.throttle_floor_seconds),
+                    "--timeout",
+                    str(evidence.timeout),
+                    "--max-retries",
+                    str(evidence.max_retries),
+                    "--retry-base-seconds",
+                    str(evidence.retry_base_seconds),
+                    "--retry-max-seconds",
+                    str(evidence.retry_max_seconds),
+                    "--poll-seconds",
+                    str(evidence.platform_poll_seconds),
+                ),
+            )
+        )
     if config.readiness is not None:
         if config.baseline_index is None:
             raise ValueError("readiness requires producer baseline_index")
@@ -673,7 +772,11 @@ def _desired_children(
     if state is GovernorState.NORMAL:
         return set(available)
     if state is GovernorState.THROTTLED:
-        return set(available) - {"source-discovery", "historical-index"}
+        return set(available) - {
+            "source-discovery",
+            "historical-index",
+            "platform-year-harvest",
+        }
     if state is GovernorState.DRAIN_ONLY:
         return set(available) & {"readiness-worker"}
     return set()
@@ -718,6 +821,52 @@ def _write_governor_status(
     os.replace(temporary, target)
 
 
+def _write_runtime_topology(config: AutopilotConfig) -> None:
+    """Persist one human-readable startup topology record atomically."""
+    authority_manifest = (
+        config.readiness.authority_manifest
+        if config.readiness is not None
+        else None
+    )
+    baseline_authority: dict[str, object] = {
+        "baseline_index": (
+            None if config.baseline_index is None else str(config.baseline_index)
+        ),
+        "authority_manifest": (
+            None if authority_manifest is None else str(authority_manifest)
+        ),
+    }
+    if authority_manifest is not None and authority_manifest.is_file():
+        try:
+            raw = json.loads(authority_manifest.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            raw = None
+        if isinstance(raw, dict):
+            baseline_authority["baseline_id"] = raw.get("baseline_id")
+            baseline_authority["authority_digest"] = raw.get("authority_digest")
+
+    payload = {
+        "producer_mode": SourceProducerMode(config.producer_mode).value,
+        "producer_mode_explicit": bool(config.producer_mode_explicit),
+        "historical_index_enabled": bool(config.historical_index_enabled),
+        "source_worker_count": int(config.source_producer_workers),
+        "discovery_enabled": True,
+        "platform_year_harvest_enabled": bool(
+            config.evidence.platform_harvest_enabled
+        ),
+        "baseline_authority": baseline_authority,
+    }
+    root = config.runtime_data_root
+    root.mkdir(parents=True, exist_ok=True)
+    target = root / "topology.json"
+    temporary = root / "topology.json.tmp"
+    temporary.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    os.replace(temporary, target)
+
+
 def run_autopilot(
     config: AutopilotConfig,
     *,
@@ -735,6 +884,21 @@ def run_autopilot(
         config.runtime_data_root / "telemetry.sqlite3"
     )
     telemetry.add_counters({"autopilot_runs": 1})
+    _write_runtime_topology(config)
+    telemetry.set_gauges(
+        {
+            "producer_mode_activated": int(
+                SourceProducerMode(config.producer_mode)
+                is SourceProducerMode.ACTIVATED
+            ),
+            "historical_index_enabled": int(config.historical_index_enabled),
+            "source_worker_count": int(config.source_producer_workers),
+            "discovery_enabled": 1,
+            "platform_year_harvest_enabled": int(
+                config.evidence.platform_harvest_enabled
+            ),
+        }
+    )
     children = {
         spec.name: _ChildRuntime(spec)
         for spec in build_child_specs(config)

@@ -439,28 +439,48 @@ class EvidenceStore:
         ).fetchall()
         return [EvidenceCapsule(**dict(row)) for row in rows]
 
-    def canonical_host_year_capsules(self) -> list[EvidenceCapsule]:
-        """Return one deterministic capsule for each proven host-year."""
-        rows = self.connection.execute(
+    def iter_canonical_host_year_capsules(
+        self,
+        *,
+        batch_size: int = 5_000,
+    ):
+        """Stream one deterministic capsule per proven host-year.
+
+        SQLite keeps the SELECT statement on one stable read snapshot while the
+        cursor is open. fetchmany() bounds Python resident memory regardless of
+        the total evidence corpus size.
+        """
+        if batch_size < 1:
+            raise ValueError("batch_size must be positive")
+        # The WITHOUT ROWID primary key is ordered as
+        # (hostname, year, provider, payload_hash, policy_version). Scan it
+        # directly instead of using ROW_NUMBER/PARTITION, which can require a
+        # corpus-sized SQLite temp sort even when Python uses fetchmany().
+        cursor = self.connection.execute(
             """
-            WITH ranked AS (
-                SELECT *,
-                       ROW_NUMBER() OVER (
-                           PARTITION BY hostname, year
-                           ORDER BY provider, payload_hash, policy_version
-                       ) AS rn
-                FROM evidence_capsules
-            )
             SELECT hostname, year, provider, temporal_semantics,
                    evidence_timestamp, source_locator, payload_hash,
                    policy_version, evidence_type, source_id, original_url,
                    record_locator, extraction_method
-            FROM ranked
-            WHERE rn = 1
-            ORDER BY hostname, year
+            FROM evidence_capsules
+            ORDER BY hostname, year, provider, payload_hash, policy_version
             """
-        ).fetchall()
-        return [EvidenceCapsule(**dict(row)) for row in rows]
+        )
+        last_key: tuple[str, int] | None = None
+        while True:
+            rows = cursor.fetchmany(int(batch_size))
+            if not rows:
+                break
+            for row in rows:
+                key = (str(row["hostname"]), int(row["year"]))
+                if key == last_key:
+                    continue
+                last_key = key
+                yield EvidenceCapsule(**dict(row))
+
+    def canonical_host_year_capsules(self) -> list[EvidenceCapsule]:
+        """Compatibility list API; formal export must use the iterator."""
+        return list(self.iter_canonical_host_year_capsules())
 
     def host_years_after(
         self,

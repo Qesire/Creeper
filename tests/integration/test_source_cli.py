@@ -1,5 +1,6 @@
 import json
 import tempfile
+import tomllib
 import unittest
 from pathlib import Path
 from threading import Event
@@ -7,13 +8,52 @@ from unittest.mock import patch
 
 from creeper.authority.baseline_index import BaselineIndex
 from creeper.evidence.policies import EvidenceQueryKey, TemporalScope
-from creeper.source_cli import ActivatedSourceRuntime, run_once, run_watch
+from creeper.source_cli import (
+    ActivatedSourceRuntime,
+    SourceProducerMode,
+    _watch_loop,
+    parse_source_producer_intent,
+    run_once,
+    run_watch,
+)
 from creeper.source_discovery.models import ScoutMeasurement, SourceCandidate, SourceLevel, SourceState
 from creeper.source_discovery.registry import SourceDiscoveryRegistry
 from creeper.storage.control_store import ControlStore
 
 
 class SourceProducerCliTests(unittest.TestCase):
+    def test_missing_source_mode_defaults_to_activated(self):
+        intent = parse_source_producer_intent({})
+        self.assertEqual(intent.mode, SourceProducerMode.ACTIVATED)
+        self.assertFalse(intent.explicitly_configured)
+
+    def test_explicit_static_mode_is_preserved(self):
+        intent = parse_source_producer_intent(
+            {"source_mode": "static", "dataset": "fixture.txt"}
+        )
+        self.assertEqual(intent.mode, SourceProducerMode.STATIC)
+        self.assertTrue(intent.explicitly_configured)
+
+    def test_invalid_source_mode_fails(self):
+        with self.assertRaisesRegex(ValueError, "source_mode"):
+            parse_source_producer_intent({"source_mode": "hybrid"})
+
+    def test_legacy_static_dataset_without_explicit_mode_fails(self):
+        with self.assertRaisesRegex(ValueError, "explicit"):
+            parse_source_producer_intent({"dataset": "fixture.txt"})
+
+    def test_explicit_activated_mode_does_not_require_dataset(self):
+        intent = parse_source_producer_intent({"source_mode": "activated"})
+        self.assertEqual(intent.mode, SourceProducerMode.ACTIVATED)
+
+    def test_v4_activated_example_remains_valid(self):
+        path = Path("conf/creeper.activated.example.toml")
+        with path.open("rb") as stream:
+            config = tomllib.load(stream)
+        intent = parse_source_producer_intent(config)
+        self.assertEqual(intent.mode, SourceProducerMode.ACTIVATED)
+        self.assertNotIn("dataset", config)
+
     def test_watch_reuses_durable_once_runner_until_stop(self):
         stop = Event()
         reports = iter(
@@ -44,25 +84,13 @@ class SourceProducerCliTests(unittest.TestCase):
         def fake_once(config, *, owner):
             return next(reports)
 
-        with tempfile.TemporaryDirectory() as tmp:
-            config = Path(tmp) / "watch.toml"
-            config.write_text(
-                "\n".join(
-                    [
-                        'source_mode = "static"',
-                        "",
-                        "[limits]",
-                    ]
-                ),
-                encoding="utf-8",
-            )
-            with patch("creeper.source_cli.run_once", side_effect=fake_once):
-                result = run_watch(
-                    config,
-                    owner="test",
-                    stop_event=stop,
-                    sleep_fn=lambda _: stop.set(),
-                )
+        result = _watch_loop(
+            lambda: fake_once(None, owner="test"),
+            stop_event=stop,
+            idle_backoff_seconds=1.0,
+            max_idle_backoff_seconds=60.0,
+            sleep_fn=lambda _: stop.set(),
+        )
 
         self.assertEqual(result["leases_succeeded"], 1)
         self.assertEqual(result["source_records"], 2)
@@ -87,27 +115,13 @@ class SourceProducerCliTests(unittest.TestCase):
             if len(sleeps) >= 3:
                 stop.set()
 
-        with tempfile.TemporaryDirectory() as tmp:
-            config = Path(tmp) / "watch.toml"
-            config.write_text(
-                "\n".join(
-                    [
-                        'source_mode = "static"',
-                        "",
-                        "[limits]",
-                    ]
-                ),
-                encoding="utf-8",
-            )
-            with patch("creeper.source_cli.run_once", return_value=blocked):
-                result = run_watch(
-                    config,
-                    owner="backpressure-poll-test",
-                    stop_event=stop,
-                    idle_backoff_seconds=1.0,
-                    max_idle_backoff_seconds=60.0,
-                    sleep_fn=sleep,
-                )
+        result = _watch_loop(
+            lambda: blocked,
+            stop_event=stop,
+            idle_backoff_seconds=1.0,
+            max_idle_backoff_seconds=60.0,
+            sleep_fn=sleep,
+        )
 
         self.assertEqual(sleeps, [1.0, 1.0, 1.0])
         self.assertTrue(result["admission_blocked"])
@@ -570,6 +584,7 @@ class SourceProducerCliTests(unittest.TestCase):
             config.write_text(
                 "\n".join(
                     [
+                        'source_mode = "static"',
                         f'baseline_index = {json.dumps(str(baseline_path))}',
                         f'dataset = {json.dumps(str(dataset))}',
                         f'runtime_data_root = {json.dumps(str(runtime_root))}',
@@ -611,6 +626,135 @@ class SourceProducerCliTests(unittest.TestCase):
                 self.assertIsNone(task.lease_owner)
             finally:
                 control.close()
+
+
+    def test_reviewed_jsonl_registry_flows_through_standard_runtime_and_restart(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task_root = root / "task"
+            baseline_root = task_root / "merged260912-3"
+            baseline_root.mkdir(parents=True)
+            for year in range(1996, 2002):
+                (baseline_root / f"{year}.txt").write_text("", encoding="utf-8")
+            (baseline_root / "candidate_pool.txt").write_text("", encoding="utf-8")
+            baseline_path = root / "baseline.sqlite3"
+            BaselineIndex.build(task_root, baseline_path).close()
+
+            runtime_root = root / "runtime"
+            runtime_root.mkdir()
+            locator = "https://trusted.example/releases/2026/history.jsonl"
+            control = ControlStore(runtime_root / "control.sqlite3")
+            try:
+                registry = SourceDiscoveryRegistry(control)
+                candidate = SourceCandidate(
+                    canonical_entrypoint=locator,
+                    source_family="REVIEWED_STRUCTURED",
+                    level=SourceLevel.SOURCE,
+                    discovered_by="test",
+                    discovery_strategy="fixture",
+                    expected_year_from=1996,
+                    expected_year_to=2001,
+                    expected_volume=100,
+                    enumerability_prior=1.0,
+                    confidence=1.0,
+                    state=SourceState.ACTIVE,
+                )
+                registry.register_proposal(candidate)
+                registry.record_scout_measurement(
+                    candidate.source_key,
+                    ScoutMeasurement(
+                        sampled_records=10,
+                        unique_hosts=10,
+                        novel_hosts=8,
+                        direct_host_years=0,
+                        requests=1,
+                        bytes_read=512,
+                        elapsed_seconds=1.0,
+                        novel_eed=8.0,
+                    ),
+                )
+            finally:
+                control.close()
+
+            contract_registry = root / "reviewed-source-contracts.json"
+            contract_registry.write_text(
+                json.dumps(
+                    {
+                        "registry_version": "reviewed-source-contract-registry-v1",
+                        "entries": [
+                            {
+                                "contract_id": "trusted-history-jsonl-v1",
+                                "locator": locator,
+                                "authority": "DIRECT_WEB_YEAR",
+                                "parser_kind": "jsonl",
+                                "hostname_field": "url",
+                                "timestamp_field": "timestamp",
+                                "temporal_semantics": "reviewed_capture_timestamp",
+                                "evidence_type": "reviewed_historical_web_record",
+                                "policy_version": "trusted-history-policy-v1",
+                                "custodian": "fixture-custodian",
+                                "edition": "2026-09-13",
+                                "review_note": "fixture reviewed direct source",
+                                "source_identity": {
+                                    "kind": "immutable_locator",
+                                    "value": locator,
+                                },
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            config = {
+                "source_mode": "activated",
+                "baseline_index": str(baseline_path),
+                "runtime_data_root": str(runtime_root),
+                "evidence_contract_registry": str(contract_registry),
+            }
+            limits = {
+                "queue_source_records": 10,
+                "queue_observations": 10,
+                "queue_evidence_tasks": 10,
+                "queue_commits": 10,
+                "lease_max_records": 4,
+                "lease_max_requests": 4,
+                "lease_max_bytes": 4096,
+                "lease_max_seconds": 30,
+                "evidence_backlog_capacity": 16,
+            }
+
+            with ActivatedSourceRuntime(
+                root / "activated.toml",
+                config=config,
+                limits=limits,
+                owner="reviewed-runtime-1",
+            ) as runtime:
+                self.assertEqual(runtime.refresh_workset(), 1)
+                reservoir = runtime.control.get_reservoir(
+                    runtime.producer.candidates[0].reservoir_id
+                )
+                self.assertIsNotNone(reservoir)
+                assert reservoir is not None
+                self.assertEqual(reservoir.evidence_mode, "direct_year")
+                first_adapter_id = reservoir.adapter_id
+                self.assertIn(":rsi1:", first_adapter_id)
+                self.assertIn(":evc1:", first_adapter_id)
+
+            with ActivatedSourceRuntime(
+                root / "activated.toml",
+                config=config,
+                limits=limits,
+                owner="reviewed-runtime-2",
+            ) as restarted:
+                self.assertEqual(restarted.refresh_workset(), 1)
+                reservoir = restarted.control.get_reservoir(
+                    restarted.producer.candidates[0].reservoir_id
+                )
+                self.assertIsNotNone(reservoir)
+                assert reservoir is not None
+                self.assertEqual(reservoir.evidence_mode, "direct_year")
+                self.assertEqual(reservoir.adapter_id, first_adapter_id)
+
 
 
 if __name__ == "__main__":

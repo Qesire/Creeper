@@ -17,8 +17,10 @@ from creeper.authority.identity import (
     baseline_authority_signature,
     eed_model_authority_signature,
 )
-from creeper.source_discovery.registry import SourceDiscoveryRegistry
-from creeper.storage.control_store import ControlStore
+from creeper.scheduler.leases import LeaseState
+from creeper.source_discovery.registry import SourceDiscoveryRegistry, SourceRunOutcome
+from creeper.storage.candidate_store import CandidateStore
+from creeper.storage.control_store import ControlStore, TERMINAL_STATES
 from creeper.storage.evidence_store import EvidenceHostYear, EvidenceStore
 
 
@@ -57,6 +59,7 @@ class IncrementalReadinessReport:
     annual: dict[str, dict[str, object]]
     source_attribution: dict[str, dict[str, object]]
     task_kind_attribution: dict[str, dict[str, object]]
+    source_run_attribution: dict[str, dict[str, object]] | None = None
     baseline_id: str = ""
     authority_digest: str = ""
     dispatch_threshold: str = format(DEFAULT_DISPATCH_THRESHOLD, "f")
@@ -89,6 +92,7 @@ class IncrementalReadinessReport:
             "annual": self.annual,
             "source_attribution": self.source_attribution,
             "task_kind_attribution": self.task_kind_attribution,
+            "source_run_attribution": self.source_run_attribution or {},
             "baseline_reconciliation": self.baseline_reconciliation or {},
             "source_contribution": self.source_contribution or {},
         }
@@ -131,6 +135,15 @@ class IncrementalReadinessLedger:
                 novel_host_years INTEGER NOT NULL,
                 novel_eed TEXT NOT NULL
             ) WITHOUT ROWID;
+            CREATE TABLE IF NOT EXISTS readiness_source_run (
+                source_key TEXT NOT NULL,
+                reservoir_id TEXT NOT NULL,
+                lease_id TEXT NOT NULL,
+                novel_host_years INTEGER NOT NULL DEFAULT 0,
+                novel_eed TEXT NOT NULL DEFAULT '0',
+                max_evidence_sequence INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY(source_key, reservoir_id, lease_id)
+            ) WITHOUT ROWID;
             """
         )
         self.connection.commit()
@@ -158,6 +171,7 @@ class IncrementalReadinessLedger:
             self.connection.execute("DELETE FROM readiness_annual")
             self.connection.execute("DELETE FROM readiness_source")
             self.connection.execute("DELETE FROM readiness_task_kind")
+            self.connection.execute("DELETE FROM readiness_source_run")
             self.connection.execute("DELETE FROM readiness_state")
             self.connection.execute(
                 """
@@ -199,6 +213,9 @@ class IncrementalReadinessLedger:
         weights: dict[str, Decimal],
         source_origins: dict[tuple[str, int], str] | None = None,
         task_kinds: dict[tuple[str, int], str] | None = None,
+        run_origins: dict[
+            tuple[str, int], tuple[str, str, str]
+        ] | None = None,
     ) -> int:
         if not rows:
             return 0
@@ -215,12 +232,23 @@ class IncrementalReadinessLedger:
         novel_eed = Decimal("0")
         source_origins = source_origins or {}
         task_kinds = task_kinds or {}
+        run_origins = run_origins or {}
         source_counts: dict[str, int] = {}
         source_eed: dict[str, Decimal] = {}
         task_kind_counts: dict[str, int] = {}
         task_kind_eed: dict[str, Decimal] = {}
+        run_counts: dict[tuple[str, str, str], int] = {}
+        run_eed: dict[tuple[str, str, str], Decimal] = {}
+        run_max_sequence: dict[tuple[str, str, str], int] = {}
 
         for row in rows:
+            pair = (row.hostname, row.year)
+            run_origin = run_origins.get(pair)
+            if run_origin is not None:
+                run_max_sequence[run_origin] = max(
+                    run_max_sequence.get(run_origin, 0),
+                    int(row.sequence),
+                )
             bit = YEAR_BITS.get(row.year)
             if bit is None:
                 continue
@@ -235,13 +263,18 @@ class IncrementalReadinessLedger:
             annual_eed[row.year] += contribution
             novel_count += 1
             novel_eed += contribution
-            source_key = source_origins.get((row.hostname, row.year))
+            source_key = source_origins.get(pair)
             if source_key is not None:
                 source_counts[source_key] = source_counts.get(source_key, 0) + 1
                 source_eed[source_key] = (
                     source_eed.get(source_key, Decimal("0")) + contribution
                 )
-            task_kind = task_kinds.get((row.hostname, row.year))
+            if run_origin is not None:
+                run_counts[run_origin] = run_counts.get(run_origin, 0) + 1
+                run_eed[run_origin] = (
+                    run_eed.get(run_origin, Decimal("0")) + contribution
+                )
+            task_kind = task_kinds.get(pair)
             if task_kind is not None:
                 task_kind_counts[task_kind] = task_kind_counts.get(task_kind, 0) + 1
                 task_kind_eed[task_kind] = (
@@ -320,6 +353,62 @@ class IncrementalReadinessLedger:
                                 "f",
                             ),
                             source_key,
+                        ),
+                    )
+            for run_key in sorted(run_max_sequence):
+                source_key, reservoir_id, lease_id = run_key
+                current_run = self.connection.execute(
+                    """
+                    SELECT novel_host_years, novel_eed, max_evidence_sequence
+                    FROM readiness_source_run
+                    WHERE source_key = ? AND reservoir_id = ? AND lease_id = ?
+                    """,
+                    (source_key, reservoir_id, lease_id),
+                ).fetchone()
+                novel_host_years = run_counts.get(run_key, 0)
+                novel_eed_value = run_eed.get(run_key, Decimal("0"))
+                max_sequence = run_max_sequence[run_key]
+                if current_run is None:
+                    self.connection.execute(
+                        """
+                        INSERT INTO readiness_source_run(
+                            source_key, reservoir_id, lease_id,
+                            novel_host_years, novel_eed, max_evidence_sequence
+                        ) VALUES (?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            source_key,
+                            reservoir_id,
+                            lease_id,
+                            novel_host_years,
+                            format(novel_eed_value, "f"),
+                            max_sequence,
+                        ),
+                    )
+                else:
+                    self.connection.execute(
+                        """
+                        UPDATE readiness_source_run
+                        SET novel_host_years = ?,
+                            novel_eed = ?,
+                            max_evidence_sequence = ?
+                        WHERE source_key = ? AND reservoir_id = ? AND lease_id = ?
+                        """,
+                        (
+                            int(current_run["novel_host_years"])
+                            + novel_host_years,
+                            format(
+                                Decimal(str(current_run["novel_eed"]))
+                                + novel_eed_value,
+                                "f",
+                            ),
+                            max(
+                                int(current_run["max_evidence_sequence"]),
+                                max_sequence,
+                            ),
+                            source_key,
+                            reservoir_id,
+                            lease_id,
                         ),
                     )
             for task_kind in sorted(task_kind_counts):
@@ -434,6 +523,30 @@ class IncrementalReadinessLedger:
                 "SELECT * FROM readiness_task_kind ORDER BY task_kind"
             )
         }
+        source_run_attribution = {
+            "|".join(
+                (
+                    str(row["source_key"]),
+                    str(row["reservoir_id"]),
+                    str(row["lease_id"]),
+                )
+            ): {
+                "source_key": str(row["source_key"]),
+                "reservoir_id": str(row["reservoir_id"]),
+                "lease_id": str(row["lease_id"]),
+                "novel_host_years": int(row["novel_host_years"]),
+                "novel_eed": str(row["novel_eed"]),
+                "max_evidence_sequence": int(row["max_evidence_sequence"]),
+            }
+            for row in self.connection.execute(
+                """
+                SELECT source_key, reservoir_id, lease_id,
+                       novel_host_years, novel_eed, max_evidence_sequence
+                FROM readiness_source_run
+                ORDER BY source_key, reservoir_id, lease_id
+                """
+            )
+        }
         novel_eed = Decimal(str(state["novel_eed"]))
         five_percent = baseline_eed * FORMAL_GROWTH_RATE
         growth_rate = (
@@ -450,15 +563,34 @@ class IncrementalReadinessLedger:
             "novel_host_years": 0,
             "novel_eed": "0",
         })
-        candidate_host_years = sum(
+        verified_kinds = frozenset({"exact", "range", "domain"})
+        verified_candidate_host_years = sum(
             int(payload["novel_host_years"])
             for kind, payload in task_kind_attribution.items()
-            if kind != "direct"
+            if kind in verified_kinds
         )
-        candidate_eed = sum(
-            (Decimal(str(payload["novel_eed"]))
-             for kind, payload in task_kind_attribution.items()
-             if kind != "direct"),
+        verified_candidate_eed = sum(
+            (
+                Decimal(str(payload["novel_eed"]))
+                for kind, payload in task_kind_attribution.items()
+                if kind in verified_kinds
+            ),
+            Decimal("0"),
+        )
+        # Registration/DNS/reference or future provider task kinds do not
+        # silently become annual web-presence contribution. Unknown non-direct
+        # kinds stay restricted until an explicit reviewed lane mapping exists.
+        restricted_host_years = sum(
+            int(payload["novel_host_years"])
+            for kind, payload in task_kind_attribution.items()
+            if kind != "direct" and kind not in verified_kinds
+        )
+        restricted_eed = sum(
+            (
+                Decimal(str(payload["novel_eed"]))
+                for kind, payload in task_kind_attribution.items()
+                if kind != "direct" and kind not in verified_kinds
+            ),
             Decimal("0"),
         )
         reconciliation = {
@@ -489,6 +621,7 @@ class IncrementalReadinessLedger:
             annual=annual,
             source_attribution=source_attribution,
             task_kind_attribution=task_kind_attribution,
+            source_run_attribution=source_run_attribution,
             baseline_id=baseline_id,
             authority_digest=authority_digest,
             dispatch_threshold=format(dispatch_threshold, "f"),
@@ -500,9 +633,13 @@ class IncrementalReadinessLedger:
             source_contribution={
                 "by_source": source_attribution,
                 "direct_annual": direct,
-                "candidate": {
-                    "novel_host_years": candidate_host_years,
-                    "novel_eed": format(candidate_eed, "f"),
+                "verified_candidate": {
+                    "novel_host_years": verified_candidate_host_years,
+                    "novel_eed": format(verified_candidate_eed, "f"),
+                },
+                "other_restricted": {
+                    "novel_host_years": restricted_host_years,
+                    "novel_eed": format(restricted_eed, "f"),
                 },
             },
         )
@@ -553,6 +690,9 @@ class IncrementalReadinessRuntime:
         self.evidence = EvidenceStore(
             self.runtime_data_root / "evidence.sqlite3"
         )
+        self.candidates = CandidateStore(
+            self.runtime_data_root / "candidates.sqlite3"
+        )
         self.control: ControlStore | None = None
         self.ledger = IncrementalReadinessLedger(
             self.runtime_data_root / "readiness.sqlite3"
@@ -593,6 +733,10 @@ class IncrementalReadinessRuntime:
         )
         if self.control is not None:
             self.control.set_eed_tld_weights(self.weights)
+            SourceDiscoveryRegistry(self.control).set_scout_authority(
+                baseline_signature=baseline_signature,
+                model_signature=model_signature,
+            )
         return True
 
     def _control_store(self) -> ControlStore | None:
@@ -615,13 +759,14 @@ class IncrementalReadinessRuntime:
     ) -> tuple[
         dict[tuple[str, int], str],
         dict[tuple[str, int], str],
+        dict[tuple[str, int], tuple[str, str, str]],
     ]:
-        """Resolve final-reward lineage from proof first, cache second.
+        """Resolve proof-valid task, source and source-run attribution.
 
-        Existing host-years at the provenance migration cutover retain their
-        legacy ControlStore attribution. Every host-year first inserted after
-        the cutover must have proof-side provider provenance before provider
-        task/source credit is accepted.
+        Run attribution is deliberately stricter than source attribution: a
+        lease identity is accepted only when it is corroborated by proof-side
+        provenance (provider tasks) or by a direct capsule whose source id
+        matches the durable direct-origin row.
         """
 
         pairs = [(row.hostname, row.year) for row in rows]
@@ -641,9 +786,40 @@ class IncrementalReadinessRuntime:
             if control is None
             else control.resolve_primary_source_origins(pairs)
         )
+        control_runs: dict[
+            tuple[str, int], tuple[str, str, str]
+        ] = {}
+        if control is not None and pairs:
+            limit = 350
+            for offset in range(0, len(pairs), limit):
+                chunk = pairs[offset : offset + limit]
+                predicates = " OR ".join(
+                    "(hostname = ? AND year = ?)" for _ in chunk
+                )
+                params: list[object] = []
+                for hostname, year in chunk:
+                    params.extend((hostname, year))
+                for origin in control.connection.execute(
+                    f"""
+                    SELECT hostname, year, source_key, reservoir_id, lease_id
+                    FROM evidence_host_year_origins
+                    WHERE {predicates}
+                    """,
+                    params,
+                ):
+                    control_runs[
+                        (str(origin["hostname"]), int(origin["year"]))
+                    ] = (
+                        str(origin["source_key"]),
+                        str(origin["reservoir_id"]),
+                        str(origin["lease_id"]),
+                    )
 
         kinds: dict[tuple[str, int], str] = {}
         origins: dict[tuple[str, int], str] = {}
+        run_origins: dict[
+            tuple[str, int], tuple[str, str, str]
+        ] = {}
         for row in rows:
             pair = (row.hostname, row.year)
             direct = direct_sources.get(pair, ())
@@ -672,32 +848,56 @@ class IncrementalReadinessRuntime:
             kinds[pair] = selected_kind
 
             cached_origin = control_origins.get(pair)
+            cached_run = control_runs.get(pair)
             if selected_kind == "direct":
                 if direct:
-                    origins[pair] = (
+                    selected_source = (
                         cached_origin
                         if cached_origin in direct
                         else direct[0]
                     )
+                    origins[pair] = selected_source
+                    if (
+                        cached_run is not None
+                        and cached_run[0] == selected_source
+                    ):
+                        run_origins[pair] = cached_run
                 continue
 
             if not post_cutover:
                 if cached_origin is not None:
                     origins[pair] = cached_origin
+                    if (
+                        cached_run is not None
+                        and cached_run[0] == cached_origin
+                    ):
+                        run_origins[pair] = cached_run
                 elif provider is not None and provider.source_key:
                     origins[pair] = provider.source_key
+                    if provider.reservoir_id and provider.lease_id:
+                        run_origins[pair] = (
+                            provider.source_key,
+                            provider.reservoir_id,
+                            provider.lease_id,
+                        )
                 continue
 
-            # New provider evidence is credited only from the provenance row
-            # that shares its transaction with the proof capsule.
+            # New provider evidence is credited only from provenance persisted
+            # in the same EvidenceStore transaction as the proof capsule.
             if (
                 provider is not None
                 and provider.task_kind == selected_kind
                 and provider.source_key
             ):
                 origins[pair] = provider.source_key
+                if provider.reservoir_id and provider.lease_id:
+                    run_origins[pair] = (
+                        provider.source_key,
+                        provider.reservoir_id,
+                        provider.lease_id,
+                    )
 
-        return kinds, origins
+        return kinds, origins, run_origins
 
     def _publish_evidence_action_rewards(
         self,
@@ -729,7 +929,12 @@ class IncrementalReadinessRuntime:
         *,
         reset: bool,
     ) -> None:
-        """Feed formal readiness attribution back into discovery learning."""
+        """Compatibility path for pre-V5 sources with positive FINAL credit.
+
+        Explicit-zero publication is reserved for registered source runs. This
+        legacy path therefore never manufactures a zero from absence of
+        attribution and never overwrites a V5 run aggregate.
+        """
         control = self._control_store()
         if control is None:
             return
@@ -739,13 +944,247 @@ class IncrementalReadinessRuntime:
         for source_key, payload in report.source_attribution.items():
             candidate = registry.get_candidate(source_key)
             if candidate is None:
-                # Static/non-discovery sources may legitimately appear in the
-                # readiness ledger; they have no search/Codex lineage to train.
+                continue
+            if registry.list_source_run_outcomes(source_key):
+                continue
+            final_eed = float(payload["novel_eed"])
+            if final_eed <= 0:
                 continue
             registry.record_final_reward(
                 source_key,
-                final_accepted_eed=float(payload["novel_eed"]),
+                final_accepted_eed=final_eed,
+                baseline_signature=report.baseline_signature,
+                model_signature=report.model_signature,
             )
+
+    def _max_source_run_evidence_sequence(
+        self,
+        run: SourceRunOutcome,
+    ) -> int:
+        """Return the highest durable host-year sequence attributable to a run."""
+        control = self._control_store()
+        if control is None:
+            return 0
+
+        pairs: set[tuple[str, int]] = set()
+        for row in control.connection.execute(
+            """
+            SELECT hostname, year
+            FROM evidence_host_year_origins
+            WHERE source_key = ? AND reservoir_id = ? AND lease_id = ?
+            """,
+            (run.source_key, run.reservoir_id, run.lease_id),
+        ):
+            pairs.add((str(row["hostname"]), int(row["year"])))
+
+        for row in self.evidence.connection.execute(
+            """
+            SELECT DISTINCT hostname, year
+            FROM evidence_capsule_task_provenance
+            WHERE source_key = ? AND reservoir_id = ? AND lease_id = ?
+            """,
+            (run.source_key, run.reservoir_id, run.lease_id),
+        ):
+            pairs.add((str(row["hostname"]), int(row["year"])))
+
+        maximum = 0
+        values = sorted(pairs)
+        for offset in range(0, len(values), 350):
+            chunk = values[offset : offset + 350]
+            predicates = " OR ".join(
+                "(hostname = ? AND year = ?)" for _ in chunk
+            )
+            params: list[object] = []
+            for hostname, year in chunk:
+                params.extend((hostname, year))
+            row = self.evidence.connection.execute(
+                f"""
+                SELECT COALESCE(MAX(sequence), 0) AS max_sequence
+                FROM evidence_host_years
+                WHERE {predicates}
+                """,
+                params,
+            ).fetchone()
+            maximum = max(maximum, int(row["max_sequence"] or 0))
+        return maximum
+
+    def _source_run_operational_metrics(
+        self,
+        run: SourceRunOutcome,
+    ) -> tuple[bool, int, int, int, int, float]:
+        """Read lease/evidence closure and provider exposure from ControlStore."""
+        control = self._control_store()
+        if control is None:
+            return False, 0, 0, 0, 0, 0.0
+
+        lease = control.connection.execute(
+            "SELECT state FROM work_leases WHERE lease_id = ? AND reservoir_id = ?",
+            (run.lease_id, run.reservoir_id),
+        ).fetchone()
+        lease_terminal = (
+            lease is not None
+            and str(lease["state"])
+            in {
+                LeaseState.SUCCEEDED.value,
+                LeaseState.ABORTED.value,
+                LeaseState.EXPIRED.value,
+            }
+        )
+
+        task = control.connection.execute(
+            f"""
+            SELECT
+                COUNT(*) AS created,
+                SUM(CASE WHEN e.state IN ({",".join("?" for _ in TERMINAL_STATES)})
+                         THEN 1 ELSE 0 END) AS terminal
+            FROM evidence_task_origins o
+            JOIN evidence_tasks e
+              ON e.hostname = o.hostname
+             AND e.year_from = o.year_from
+             AND e.year_to = o.year_to
+             AND e.provider = o.provider
+             AND e.policy_version = o.policy_version
+            WHERE o.source_key = ?
+              AND o.reservoir_id = ?
+              AND o.lease_id = ?
+            """,
+            (*sorted(TERMINAL_STATES), run.source_key, run.reservoir_id, run.lease_id),
+        ).fetchone()
+        queued = int(task["created"] or 0)
+        terminal = int(task["terminal"] or 0)
+
+        staged = 0
+        has_spillover = control.connection.execute(
+            """
+            SELECT 1 FROM sqlite_master
+            WHERE type = 'table' AND name = 'evidence_route_backlog_v1'
+            """
+        ).fetchone()
+        if has_spillover is not None:
+            staged_row = control.connection.execute(
+                """
+                SELECT COUNT(*) AS n
+                FROM evidence_route_backlog_v1
+                WHERE source_key = ? AND reservoir_id = ? AND lease_id = ?
+                """,
+                (run.source_key, run.reservoir_id, run.lease_id),
+            ).fetchone()
+            staged = int(staged_row["n"] or 0)
+
+        provider = control.connection.execute(
+            """
+            SELECT
+                COALESCE(SUM(m.provider_requests), 0) AS provider_requests,
+                COALESCE(SUM(m.provider_elapsed_milliseconds), 0) AS elapsed_ms
+            FROM evidence_task_origins o
+            JOIN evidence_task_attempt_metrics m
+              ON m.hostname = o.hostname
+             AND m.year_from = o.year_from
+             AND m.year_to = o.year_to
+             AND m.provider = o.provider
+             AND m.policy_version = o.policy_version
+             AND m.recorded_at >= o.first_observed_at
+            WHERE o.source_key = ?
+              AND o.reservoir_id = ?
+              AND o.lease_id = ?
+            """,
+            (run.source_key, run.reservoir_id, run.lease_id),
+        ).fetchone()
+
+        direct = control.connection.execute(
+            """
+            SELECT COUNT(*) AS n
+            FROM evidence_host_year_origins
+            WHERE source_key = ?
+              AND reservoir_id = ?
+              AND lease_id = ?
+              AND task_year_from IS NULL
+            """,
+            (run.source_key, run.reservoir_id, run.lease_id),
+        ).fetchone()
+
+        return (
+            lease_terminal,
+            queued + staged,
+            terminal,
+            int(direct["n"] or 0),
+            int(provider["provider_requests"] or 0),
+            float(provider["elapsed_ms"] or 0) / 1000.0,
+        )
+
+    def _reconcile_source_run_rewards(
+        self,
+        report: IncrementalReadinessReport,
+    ) -> int:
+        """Close registered V5 source runs only after all four FINAL gates."""
+        control = self._control_store()
+        if control is None:
+            return 0
+        registry = SourceDiscoveryRegistry(control)
+        runs = registry.list_source_run_outcomes(
+            baseline_signature=report.baseline_signature,
+            model_signature=report.model_signature,
+            closed_only=False,
+        )
+        closed = 0
+        attribution = report.source_run_attribution or {}
+        for run in runs:
+            if run.closed:
+                continue
+            key = "|".join((run.source_key, run.reservoir_id, run.lease_id))
+            payload = attribution.get(key, {})
+            accepted_host_years = int(payload.get("novel_host_years", 0))
+            accepted_eed = float(payload.get("novel_eed", 0.0))
+            readiness_sequence = int(payload.get("max_evidence_sequence", 0))
+            actual_sequence = self._max_source_run_evidence_sequence(run)
+            (
+                lease_terminal,
+                evidence_created,
+                evidence_terminal,
+                direct_committed,
+                provider_requests,
+                provider_elapsed_seconds,
+            ) = self._source_run_operational_metrics(run)
+
+            validation_complete = (
+                lease_terminal
+                and evidence_created == evidence_terminal
+                and report.evidence_cursor >= actual_sequence
+                and readiness_sequence >= actual_sequence
+            )
+            # A zero-proof run has no per-run readiness row. In that case
+            # readiness_sequence=actual_sequence=0 is the correct closed frontier.
+            if actual_sequence == 0:
+                validation_complete = (
+                    lease_terminal
+                    and evidence_created == evidence_terminal
+                )
+
+            registry.record_source_run_validation(
+                run.source_key,
+                reservoir_id=run.reservoir_id,
+                lease_id=run.lease_id,
+                baseline_signature=run.baseline_signature,
+                model_signature=run.model_signature,
+                evidence_tasks_created=evidence_created,
+                evidence_tasks_terminal=evidence_terminal,
+                direct_capsules_committed=direct_committed,
+                provider_requests=provider_requests,
+                provider_elapsed_seconds=provider_elapsed_seconds,
+                accepted_host_years=accepted_host_years,
+                final_accepted_eed=accepted_eed,
+                max_evidence_sequence=actual_sequence,
+                validation_complete=validation_complete,
+            )
+            if validation_complete and registry.close_source_run(
+                run.source_key,
+                reservoir_id=run.reservoir_id,
+                lease_id=run.lease_id,
+                baseline_signature=run.baseline_signature,
+                model_signature=run.model_signature,
+            ):
+                closed += 1
+        return closed
 
     def sync_once(self) -> IncrementalReadinessReport:
         authority_changed = self._refresh_authority()
@@ -762,13 +1201,24 @@ class IncrementalReadinessRuntime:
         )
         if rows:
             assert self.baseline is not None
-            task_kinds, source_origins = self._resolved_attribution(rows)
+            # Resolve candidate state from proof already durable in EvidenceStore
+            # before advancing readiness. CandidateStore is a separate DB, so
+            # this remains idempotent without a cross-database transaction.
+            self.candidates.mark_annual_evidence_obtained_many(
+                row.hostname for row in rows
+            )
+            (
+                task_kinds,
+                source_origins,
+                run_origins,
+            ) = self._resolved_attribution(rows)
             self.ledger.apply_batch(
                 rows,
                 baseline=self.baseline,
                 weights=self.weights,
                 source_origins=source_origins,
                 task_kinds=task_kinds,
+                run_origins=run_origins,
             )
         report = self.ledger.report(
             latest_evidence_sequence=self.evidence.max_host_year_sequence(),
@@ -777,10 +1227,12 @@ class IncrementalReadinessRuntime:
             authority_digest=(self.authority.authority_digest if self.authority else ""),
             dispatch_threshold=self.dispatch_threshold,
         )
+        self._reconcile_source_run_rewards(report)
         if report.evidence_cursor >= report.latest_evidence_sequence:
-            # Only a complete snapshot may train source/action allocation. On
-            # ordinary incremental lag, retain the previous coherent snapshot;
-            # after an authority reset, the invalidation above keeps policy cold.
+            # Provider-action and legacy source projections still require one
+            # globally coherent readiness snapshot. V5 run closure above is
+            # stricter: it is allowed only when that run's own sequence frontier
+            # has been consumed and all attributable work is terminal.
             self._publish_source_rewards(
                 report,
                 reset=False,
@@ -832,6 +1284,7 @@ class IncrementalReadinessRuntime:
             self.control.close()
             self.control = None
         self.ledger.close()
+        self.candidates.close()
         self.evidence.close()
 
     def __enter__(self) -> "IncrementalReadinessRuntime":

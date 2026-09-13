@@ -9,9 +9,18 @@ from pathlib import Path
 from creeper.authority.baseline_index import YEAR_BITS, BaselineIndex
 from creeper.authority.eed import calculate_eed_values
 from creeper.authority.identity import AuthoritySnapshot, eed_model_authority_signature
+from creeper.evidence.classification import (
+    classify_acquisition_lane,
+    contribution_bucket,
+)
+from creeper.storage.candidate_store import CandidateStore
 from creeper.storage.evidence_store import EvidenceStore
+from creeper.submission.artifact_manifest import ArtifactSpec
 from creeper.submission.builder import build_snapshot
+from creeper.submission.precheck import format_growth_rate
 from creeper.submission.snapshot import SubmissionSnapshot
+from creeper.submission.streaming_exporter import build_streaming_submission_zip
+from creeper.submission.verify import VerificationReport, verify_submission_archive
 
 
 @dataclass(frozen=True)
@@ -46,7 +55,11 @@ def _annual_eed_report(
     """
     by_year: dict[int, set[str]] = {year: set() for year in YEAR_BITS}
     by_source: dict[str, dict[int, set[str]]] = {}
-    direct_by_year: dict[int, set[str]] = {year: set() for year in YEAR_BITS}
+    lane_by_year: dict[str, dict[int, set[str]]] = {
+        "direct_annual": {year: set() for year in YEAR_BITS},
+        "verified_candidate": {year: set() for year in YEAR_BITS},
+        "other_restricted": {year: set() for year in YEAR_BITS},
+    }
     for capsule in capsules:
         if capsule.year in by_year:
             by_year[capsule.year].add(capsule.hostname)
@@ -54,8 +67,8 @@ def _annual_eed_report(
             by_source.setdefault(source, {year: set() for year in YEAR_BITS})[
                 capsule.year
             ].add(capsule.hostname)
-            if capsule.evidence_type == "source_direct_year":
-                direct_by_year[capsule.year].add(capsule.hostname)
+            bucket = contribution_bucket(classify_acquisition_lane(capsule))
+            lane_by_year[bucket][capsule.year].add(capsule.hostname)
 
     total = Decimal("0")
     annual: dict[str, object] = {}
@@ -90,28 +103,20 @@ def _annual_eed_report(
             "novel_host_years": source_count,
             "novel_eed": format(source_total, "f"),
         }
-    direct_count = sum(len(values) for values in direct_by_year.values())
-    direct_total = Decimal("0")
-    for year, values in direct_by_year.items():
-        summary, _ = calculate_eed_values(values, Path(model_path))
-        direct_total += Decimal(str(summary["equivalent_english_domains"]))
-    candidate_count = len({
-        (capsule.hostname, capsule.year)
-        for capsule in capsules
-        if capsule.evidence_type != "source_direct_year"
-    })
-    total_eed = Decimal(str(total))
-    source_report = {
-        "by_source": source_contribution,
-        "direct_annual": {
-            "novel_host_years": direct_count,
-            "novel_eed": format(direct_total, "f"),
-        },
-        "candidate": {
-            "novel_host_years": candidate_count,
-            "novel_eed": format(total_eed - direct_total, "f"),
-        },
-    }
+    source_report: dict[str, object] = {"by_source": source_contribution}
+    lane_total = Decimal("0")
+    for bucket, yearly in lane_by_year.items():
+        bucket_total = Decimal("0")
+        for year, values in yearly.items():
+            summary, _ = calculate_eed_values(values, Path(model_path))
+            bucket_total += Decimal(str(summary["equivalent_english_domains"]))
+        lane_total += bucket_total
+        source_report[bucket] = {
+            "novel_host_years": sum(len(values) for values in yearly.values()),
+            "novel_eed": format(bucket_total, "f"),
+        }
+    if lane_total != total:
+        raise ValueError("acquisition-lane EED attribution does not sum to total")
     return {
         "authority": "official-calculator-v1",
         "method": (
@@ -169,7 +174,7 @@ def build_runtime_snapshot(
         novel_eed = str(eed_report["equivalent_english_domains"])
         baseline_eed = Decimal(authority.baseline_eed)
         growth_rate = (
-            format(Decimal(novel_eed) / baseline_eed, "f")
+            format_growth_rate(Decimal(novel_eed), baseline_eed)
             if baseline_eed > 0
             else "0"
         )
@@ -194,3 +199,75 @@ def build_runtime_snapshot(
             else None
         ),
     )
+
+
+def export_runtime_submission(
+    *,
+    snapshot: SubmissionSnapshot,
+    evidence_store: EvidenceStore,
+    candidate_store: CandidateStore,
+    baseline_manifest_path: Path,
+    baseline_index_path: Path,
+    eed_model_path: Path,
+    name: str,
+    output_dir: Path,
+    source_root: Path,
+    documentation_path: Path,
+    artifact_specs: tuple[ArtifactSpec, ...],
+    artifact_allowed_roots: tuple[Path, ...] = (),
+) -> tuple[Path, VerificationReport]:
+    """Stream the formal runtime package and independently verify it.
+
+    The export path never materializes all evidence host-years. Baseline
+    exclusion is applied lazily against the frozen V4 index, the streaming
+    exporter writes bounded temporary files/ZIP entries, and D's verifier then
+    recomputes semantic validity, novelty, EED, and growth from the archive.
+    A package that fails independent verification is removed.
+    """
+    if snapshot.source_contribution is None:
+        raise ValueError(
+            "formal runtime submission requires authoritative source/lane contribution"
+        )
+    authority = AuthoritySnapshot.from_manifest_path(Path(baseline_manifest_path))
+    if eed_model_authority_signature(Path(eed_model_path)) != authority.model_hash:
+        raise ValueError("submission EED model does not match authority manifest")
+
+    baseline = BaselineIndex(Path(baseline_index_path), authority=authority)
+    try:
+        def novel_records():
+            for capsule in evidence_store.iter_canonical_host_year_capsules():
+                bit = YEAR_BITS.get(int(capsule.year))
+                if bit is None:
+                    continue
+                if baseline.year_mask(capsule.hostname) & bit:
+                    continue
+                yield capsule
+
+        archive = build_streaming_submission_zip(
+            snapshot,
+            name,
+            Path(output_dir),
+            source_root=Path(source_root),
+            documentation_path=Path(documentation_path),
+            evidence_records=novel_records(),
+            candidate_store=candidate_store,
+            artifact_specs=artifact_specs,
+            artifact_allowed_roots=artifact_allowed_roots,
+            require_production_config=True,
+        )
+    finally:
+        baseline.close()
+
+    verification = verify_submission_archive(
+        archive,
+        baseline_manifest_path=Path(baseline_manifest_path),
+        baseline_index_path=Path(baseline_index_path),
+        eed_model_path=Path(eed_model_path),
+    )
+    if not verification.ready:
+        archive.unlink(missing_ok=True)
+        raise ValueError(
+            "independent submission verification failed: "
+            + "; ".join(verification.errors)
+        )
+    return archive, verification

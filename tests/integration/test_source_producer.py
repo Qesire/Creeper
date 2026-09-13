@@ -14,6 +14,7 @@ from creeper.scheduler.leases import LeaseResult, WorkLease
 from creeper.scheduler.priority import LeaseCandidate, ResourceCost
 from creeper.sources.domains import DomainState, SourceDomain
 from creeper.sources.reservoirs import Reservoir, ReservoirState
+from creeper.storage.candidate_store import CandidateStore
 from creeper.storage.control_store import ControlStore
 from creeper.storage.evidence_store import EvidenceStore
 
@@ -79,6 +80,8 @@ class SourceProducerTests(unittest.TestCase):
         expected_tasks: int = 1,
         reservation_tasks: int | None = None,
         range_first_fraction: float = 0.0,
+        source_key: str | None = None,
+        source_registry=None,
     ):
         record = SourceRecord(
             source_id="fixture-source",
@@ -127,11 +130,13 @@ class SourceProducerTests(unittest.TestCase):
             evidence_provider="wayback",
             expected_evidence_tasks=expected_tasks,
             reservation_evidence_tasks=reservation_tasks,
+            source_key=source_key,
         )
         runtime = SourceProducer(
             baseline=self.baseline,
             control_store=self.control,
             evidence_store=self.evidence,
+            source_registry=source_registry,
             scheduler=GlobalScheduler(CreditLedger({"wayback": 1})),
             candidates=[candidate],
             adapters={adapter.adapter_id: adapter},
@@ -230,6 +235,35 @@ class SourceProducerTests(unittest.TestCase):
             owner=owner,
         )
         return runtime, adapter, candidate
+
+    def test_source_run_lifecycle_is_registered_for_final_reward_reconciliation(self):
+        calls = []
+
+        class Registry:
+            current_scout_authority = ("baseline-v4", "eed-v4")
+
+            def begin_source_run(self, source_key, **kwargs):
+                calls.append(("begin", source_key, kwargs))
+
+            def record_source_run_read(self, source_key, **kwargs):
+                calls.append(("read", source_key, kwargs))
+
+        runtime, _adapter = self.build_runtime(
+            backlog_capacity=1,
+            source_key="src:fixture",
+            source_registry=Registry(),
+        )
+
+        report = runtime.run_once()
+
+        self.assertEqual(report.leases_succeeded, 1)
+        self.assertEqual([call[0] for call in calls], ["begin", "read"])
+        self.assertEqual(calls[0][1], "src:fixture")
+        self.assertEqual(calls[0][2]["baseline_signature"], "baseline-v4")
+        self.assertEqual(calls[0][2]["model_signature"], "eed-v4")
+        self.assertEqual(calls[1][2]["source_records"], 1)
+        self.assertEqual(calls[1][2]["source_requests"], 1)
+        self.assertTrue(calls[1][2]["read_complete"])
 
     def test_source_producer_only_enqueues_durable_work(self):
         runtime, adapter = self.build_runtime(backlog_capacity=1)
@@ -791,6 +825,20 @@ class SourceProducerTests(unittest.TestCase):
         self.assertEqual(report.leases_succeeded, 0)
         self.assertTrue(report.admission_blocked)
         self.assertEqual(adapter.executions, 0)
+
+
+    def test_source_producer_records_durable_active_candidate(self):
+        ledger = CandidateStore(self.root / "candidates.sqlite3")
+        runtime, _adapter = self.build_runtime(backlog_capacity=1)
+        runtime.candidate_store = ledger
+
+        report = runtime.run_once()
+
+        self.assertEqual(report.leases_succeeded, 1)
+        active = list(ledger.iter_active_candidates())
+        self.assertEqual([row.hostname for row in active], ["novel.example"])
+        self.assertEqual(active[0].source_id, "fixture-source")
+        ledger.close()
 
 
 if __name__ == "__main__":

@@ -1,6 +1,7 @@
 # One-command autonomous Creeper runtime.
 # The referenced discovery and producer configs must point at the same
-# runtime_data_root. The producer may use source_mode = "static" or "activated".
+# runtime_data_root. Autopilot always launches dynamic source discovery, so the
+# producer must be activated. Static production is supported only standalone.
 
 source_discovery_config = "source-discovery.example.toml"
 source_producer_config = "creeper.activated.example.toml"
@@ -37,6 +38,15 @@ retry_base_seconds = 30.0
 retry_max_seconds = 3600.0
 poll_min_seconds = 0.25
 poll_max_seconds = 10.0
+
+# Complete platform/domain enumeration is a distinct resumable lane. It uses
+# its own HTTP client/rate budget and never turns a bounded domain probe into a
+# false completeness claim.
+platform_harvest_enabled = true
+platform_claim_batch_size = 1
+platform_requests_per_second = 0.1
+platform_max_connections = 2
+platform_poll_seconds = 2.0
 
 [readiness]
 # Optional fourth autopilot child. It consumes only newly proven unique

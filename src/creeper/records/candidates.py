@@ -18,6 +18,17 @@ class CandidateSourceScope(StrEnum):
     COMMON_CRAWL_CORPUS_EXCLUDED = "common_crawl_corpus_excluded"
 
 
+class CandidateStatus(StrEnum):
+    """Durable research state. These values never grant evidence authority."""
+
+    ACTIVE_CANDIDATE = "ACTIVE_CANDIDATE"
+    ANNUAL_EVIDENCE_OBTAINED = "ANNUAL_EVIDENCE_OBTAINED"
+    BASELINE_OVERLAP = "BASELINE_OVERLAP"
+    ISC_REFERENCE = "ISC_REFERENCE"
+    EXCLUDED_COMMON_CRAWL = "EXCLUDED_COMMON_CRAWL"
+    UNPARSED = "UNPARSED"
+
+
 @dataclass(frozen=True)
 class CandidateRecord:
     hostname: str

@@ -15,12 +15,14 @@ import time
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from threading import Event, Lock, Thread
+from typing import TYPE_CHECKING
 
 from creeper.authority.baseline_index import BaselineIndex, YEAR_BITS
 from creeper.evidence.planner import EvidencePlanner
 from creeper.evidence.router import EvidenceRouter
 from creeper.evidence.rdap_candidates import rdap_parent_candidate
 from creeper.evidence.policies import EvidenceQueryKey, TemporalScope
+from creeper.records.candidates import CandidateRecord
 from creeper.records.models import HostObservation
 from creeper.runtime.queues import BoundedQueues
 from creeper.scheduler.admission import CapacityReservation, EvidenceBacklogAdmission
@@ -28,10 +30,12 @@ from creeper.scheduler.global_scheduler import GlobalScheduler
 from creeper.scheduler.leases import WorkLease
 from creeper.scheduler.priority import LeaseCandidate
 from creeper.sources.reservoirs import ReservoirState
+from creeper.storage.candidate_store import CandidateStore
 from creeper.storage.control_store import ControlStore
 from creeper.storage.evidence_store import EvidenceStore
 
-
+if TYPE_CHECKING:
+    from creeper.source_discovery.registry import SourceDiscoveryRegistry
 
 
 @dataclass(frozen=True)
@@ -99,6 +103,8 @@ class SourceProducer:
         control_store: ControlStore,
         evidence_store: EvidenceStore,
         scheduler: GlobalScheduler,
+        candidate_store: CandidateStore | None = None,
+        source_registry: "SourceDiscoveryRegistry | None" = None,
         candidates: Iterable[LeaseCandidate],
         adapters: Mapping[str, object],
         backlog_capacities: Mapping[str, int],
@@ -146,6 +152,8 @@ class SourceProducer:
         self.baseline = baseline
         self.control_store = control_store
         self.evidence_store = evidence_store
+        self.candidate_store = candidate_store
+        self.source_registry = source_registry
         self.scheduler = scheduler
         self.candidates = tuple(candidates)
         self.adapters = dict(adapters)
@@ -295,6 +303,7 @@ class SourceProducer:
         origin_source_key = candidate.source_key or candidate.reservoir_id
         running = lease.start()
         self.control_store.save_lease(running)
+        run_authority: tuple[str, str] | None = None
         source_records = observations = planning_observations = 0
         enqueued = direct_committed = 0
         max_source = max_observations = 0
@@ -329,6 +338,16 @@ class SourceProducer:
             next_renew_at = now + max(1.0, postprocess_ttl / 3.0)
 
         try:
+            if self.source_registry is not None and candidate.source_key is not None:
+                run_authority = self.source_registry.current_scout_authority
+                if run_authority is not None:
+                    self.source_registry.begin_source_run(
+                        candidate.source_key,
+                        reservoir_id=candidate.reservoir_id,
+                        lease_id=running.lease_id,
+                        baseline_signature=run_authority[0],
+                        model_signature=run_authority[1],
+                    )
             adapter = self._adapter_for(candidate)
             execute = getattr(adapter, "execute")
             execute_stream = getattr(adapter, "execute_stream", None)
@@ -432,6 +451,27 @@ class SourceProducer:
                     0,
                     int(round((time.monotonic() - lookup_started) * 1000.0)),
                 )
+                if self.candidate_store is not None:
+                    self.candidate_store.record_observations(
+                        CandidateRecord(
+                            hostname=item.hostname,
+                            source_id=item.source_id,
+                            scope=item.scope,
+                            source_locator=item.locator,
+                            source_year=item.source_year,
+                        )
+                        for item in planning_pending
+                    )
+                    self.candidate_store.mark_baseline_overlap_many(
+                        hostname
+                        for hostname, (annual_mask, _candidate) in resolved.items()
+                        if annual_mask
+                    )
+                    self.candidate_store.mark_annual_evidence_obtained_many(
+                        hostname
+                        for hostname, mask in local_masks.items()
+                        if mask
+                    )
                 planning_started = time.monotonic()
                 batch_direct_capsules = []
                 allow_direct = (
@@ -533,6 +573,11 @@ class SourceProducer:
                         reservoir_id=candidate.reservoir_id,
                         lease_id=running.lease_id,
                     )
+                    if self.candidate_store is not None:
+                        self.candidate_store.mark_annual_evidence_obtained_many(
+                            capsule.hostname
+                            for capsule in batch_direct_capsules
+                        )
                 planning_commit_ms += max(
                     0,
                     int(round((time.monotonic() - planning_started) * 1000.0)),
@@ -717,6 +762,22 @@ class SourceProducer:
                 and result.next_cursor is not None
             ):
                 raise RuntimeError("lease made no cursor progress")
+            if (
+                self.source_registry is not None
+                and candidate.source_key is not None
+                and run_authority is not None
+            ):
+                self.source_registry.record_source_run_read(
+                    candidate.source_key,
+                    reservoir_id=candidate.reservoir_id,
+                    lease_id=running.lease_id,
+                    baseline_signature=run_authority[0],
+                    model_signature=run_authority[1],
+                    source_records=source_records,
+                    bytes_read=result.bytes_read,
+                    source_requests=result.requests,
+                    read_complete=True,
+                )
             self.control_store.finalize_lease(
                 running,
                 next_cursor=result.next_cursor,

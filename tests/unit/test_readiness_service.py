@@ -10,6 +10,7 @@ from creeper.authority.baseline_index import BaselineIndex
 from creeper.evidence.policies import EvidenceCapsule
 from creeper.readiness_cli import run_service
 from creeper.storage.evidence_store import EvidenceStore
+from creeper.storage.telemetry_store import RuntimeTelemetryStore
 
 
 class ReadinessServiceTests(unittest.TestCase):
@@ -94,6 +95,20 @@ class ReadinessServiceTests(unittest.TestCase):
             self.assertEqual(payload["novel_eed"], "1")
             self.assertEqual(payload["growth_rate"], "0.05")
             self.assertEqual(len(emitted), 1)
+            self.assertTrue(
+                (readiness_root / "production_value.json").is_file()
+            )
+            with RuntimeTelemetryStore(
+                runtime / "telemetry.sqlite3"
+            ) as telemetry:
+                gauges = telemetry.snapshot().gauges
+            self.assertEqual(gauges["readiness_cursor_lag"], 0.0)
+            self.assertEqual(gauges["candidate_active"], 0.0)
+            self.assertEqual(gauges["candidate_resolved"], 0.0)
+            self.assertEqual(gauges["candidate_unparsed"], 0.0)
+            self.assertEqual(gauges["verified_candidate_eed"], 0.0)
+            self.assertEqual(gauges["direct_annual_eed"], 0.0)
+            self.assertEqual(gauges["closed_source_runs"], 0.0)
 
     def test_baseline_rebase_removes_stale_gate_markers(self):
         with tempfile.TemporaryDirectory() as tmp:
