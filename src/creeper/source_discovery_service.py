@@ -1254,12 +1254,16 @@ async def run_source_discovery_cycles(
     config: SourceDiscoveryServiceConfig,
     *,
     cycles: int = 1,
+    research_once: bool = False,
+    research_subject: str | None = None,
 ) -> list[dict[str, object]]:
     """Run a finite number of discovery ticks without artificial sleeps."""
     if cycles < 1:
         raise ValueError("cycles must be positive")
     reports: list[dict[str, object]] = []
     async with _open_runtime(config) as (registry, coordinator):
+        if research_once:
+            coordinator.request_research_once(subject=research_subject)
         for cycle in range(1, cycles + 1):
             reports.append(await _run_cycle(registry, coordinator, cycle=cycle))
     return reports
@@ -1272,6 +1276,8 @@ async def run_source_discovery_watch(
     busy_sleep_seconds: float = 0.1,
     idle_sleep_seconds: float = 5.0,
     max_cycles: int | None = None,
+    research_once: bool = False,
+    research_subject: str | None = None,
     sleep: Callable[[float], Any] = asyncio.sleep,
 ) -> None:
     """Run a paced long-lived discovery service with one persistent runtime."""
@@ -1281,6 +1287,8 @@ async def run_source_discovery_watch(
         raise ValueError("max_cycles must be positive when provided")
 
     async with _open_runtime(config) as (registry, coordinator):
+        if research_once:
+            coordinator.request_research_once(subject=research_subject)
         cycle = 0
         while max_cycles is None or cycle < max_cycles:
             cycle += 1
@@ -1297,6 +1305,8 @@ async def _run_watch_cli(
     *,
     busy_sleep_seconds: float,
     idle_sleep_seconds: float,
+    research_once: bool = False,
+    research_subject: str | None = None,
 ) -> int:
     """Run watch mode with signal-driven asyncio cancellation.
 
@@ -1334,6 +1344,8 @@ async def _run_watch_cli(
             emit=emit,
             busy_sleep_seconds=busy_sleep_seconds,
             idle_sleep_seconds=idle_sleep_seconds,
+            research_once=research_once,
+            research_subject=research_subject,
         )
         return 0
     except asyncio.CancelledError:
@@ -1353,20 +1365,42 @@ def main(argv: list[str] | None = None) -> int:
     mode.add_argument("--watch", action="store_true")
     parser.add_argument("--busy-sleep-seconds", type=float, default=0.1)
     parser.add_argument("--idle-sleep-seconds", type=float, default=5.0)
+    parser.add_argument(
+        "--research-once",
+        action="store_true",
+        help="request one bounded research child when the deterministic gate permits",
+    )
+    parser.add_argument(
+        "--research-subject",
+        help="optional subject for --research-once",
+    )
     args = parser.parse_args(argv)
 
     try:
         config = load_source_discovery_config(args.config)
+        if args.research_once and not config.coordinator.nonblocking_research:
+            raise ValueError(
+                "--research-once requires coordinator.nonblocking_research = true"
+            )
         if args.watch:
             return asyncio.run(
                 _run_watch_cli(
                     config,
                     busy_sleep_seconds=args.busy_sleep_seconds,
                     idle_sleep_seconds=args.idle_sleep_seconds,
+                    research_once=args.research_once,
+                    research_subject=args.research_subject,
                 )
             )
         else:
-            reports = asyncio.run(run_source_discovery_cycles(config, cycles=args.cycles or 1))
+            reports = asyncio.run(
+                run_source_discovery_cycles(
+                    config,
+                    cycles=args.cycles or 1,
+                    research_once=args.research_once,
+                    research_subject=args.research_subject,
+                )
+            )
             print(json.dumps(reports, ensure_ascii=False, indent=2))
     except KeyboardInterrupt:
         return 130
