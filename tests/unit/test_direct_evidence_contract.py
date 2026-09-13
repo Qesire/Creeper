@@ -118,6 +118,52 @@ class DirectEvidenceContractTests(unittest.TestCase):
         self.assertIn(contract.contract_id, capsule.extraction_method)
         self.assertIn(contract.policy_version, capsule.extraction_method)
 
+    def test_builtin_cdxj_row_becomes_direct_year_with_exact_provenance(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "records.cdxj"
+            path.write_text(
+                'com,example)/ 19981231112233 '
+                '{"url":"https://cdxj-direct.example/a","status":"200"}\n',
+                encoding="utf-8",
+            )
+            reservoir = Reservoir(
+                reservoir_id="reservoir:cdxj-direct",
+                domain_id="domain:cdxj-direct",
+                adapter_id="structured:cdxj-direct",
+                root_locator=str(path),
+                enumeration_kind="structured_records",
+                capacity_lower=1,
+                evidence_mode="direct_year",
+                state=ReservoirState.READY,
+            )
+            adapter = ProductionAdapterFactory.open(reservoir)
+            records, _result = adapter.execute(_lease(reservoir))
+            observation = next(iter(adapter.extract_hosts(next(records))))
+            adapter.close()
+
+        self.assertEqual(observation.hostname, "cdxj-direct.example")
+        self.assertEqual(observation.source_year, 1998)
+        self.assertEqual(observation.source_time, "19981231112233")
+        self.assertEqual(observation.direct_year_mask, 1 << (1998 - 1996))
+        self.assertEqual(observation.original_url, "https://cdxj-direct.example/a")
+        self.assertIn(":byte:0", observation.locator)
+
+        plan = EvidencePlanner().plan(
+            observation,
+            official_mask=0,
+            local_mask=0,
+            provider="wayback",
+            policy_version="runtime-policy-cdxj",
+            allow_direct=True,
+        )
+        self.assertEqual(plan.external_keys, ())
+        self.assertEqual(len(plan.direct_capsules), 1)
+        capsule = plan.direct_capsules[0]
+        self.assertEqual(capsule.evidence_timestamp, "19981231112233")
+        self.assertEqual(capsule.original_url, "https://cdxj-direct.example/a")
+        self.assertEqual(capsule.record_locator, observation.locator)
+        self.assertEqual(capsule.source_locator, observation.locator)
+
     def test_trusted_csv_contract_uses_explicit_columns_for_direct_year(self) -> None:
         contract = _direct_contract(
             "delimited",
