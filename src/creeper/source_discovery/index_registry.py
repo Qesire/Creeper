@@ -18,6 +18,47 @@ from creeper.source_discovery.index_space import (
 from creeper.storage.control_store import ControlStore
 
 
+def _renew_region_harvest_on_connection(
+    connection,
+    *,
+    region_key: str,
+    owner: str,
+    ttl_seconds: float,
+    now: float,
+) -> float:
+    """Extend one live region claim without reviving an expired owner."""
+
+    if not owner.strip():
+        raise ValueError("harvest owner is required")
+    if ttl_seconds <= 0:
+        raise ValueError("harvest ttl_seconds must be positive")
+    expires_at = float(now) + float(ttl_seconds)
+    with connection:
+        changed = connection.execute(
+            """
+            UPDATE source_regions_v1
+            SET harvest_expires_at = ?,
+                updated_at = ?
+            WHERE region_key = ?
+              AND state = ?
+              AND harvest_owner = ?
+              AND harvest_expires_at IS NOT NULL
+              AND harvest_expires_at > ?
+            """,
+            (
+                expires_at,
+                float(now),
+                region_key,
+                RegionState.HARVESTING.value,
+                owner,
+                float(now),
+            ),
+        ).rowcount
+    if changed != 1:
+        raise ValueError("region harvest claim is expired or not owned by caller")
+    return expires_at
+
+
 class IndexSpaceRegistry:
     """Persist recomputable index-space planning state beside ControlStore.
 
@@ -467,6 +508,59 @@ class IndexSpaceRegistry:
             return None
         return self.get_region(region_key)
 
+    def renew_region_harvest(
+        self,
+        region_key: str,
+        *,
+        owner: str,
+        ttl_seconds: float,
+    ) -> float:
+        """Extend a still-live owned harvest claim.
+
+        Renewal is deliberately not reclaim: an expired claim, a recovered
+        region, or a region already claimed by another worker all fail closed.
+        """
+
+        return _renew_region_harvest_on_connection(
+            self.connection,
+            region_key=region_key,
+            owner=owner,
+            ttl_seconds=ttl_seconds,
+            now=float(self.clock()),
+        )
+
+    def assert_region_harvest_owned(
+        self,
+        region_key: str,
+        *,
+        owner: str,
+    ) -> float:
+        """Return the live claim expiry or fail if ownership is no longer valid."""
+
+        if not owner.strip():
+            raise ValueError("harvest owner is required")
+        now = float(self.clock())
+        row = self.connection.execute(
+            """
+            SELECT harvest_expires_at
+            FROM source_regions_v1
+            WHERE region_key = ?
+              AND state = ?
+              AND harvest_owner = ?
+              AND harvest_expires_at IS NOT NULL
+              AND harvest_expires_at > ?
+            """,
+            (
+                region_key,
+                RegionState.HARVESTING.value,
+                owner,
+                now,
+            ),
+        ).fetchone()
+        if row is None:
+            raise ValueError("region harvest claim is expired or not owned by caller")
+        return float(row["harvest_expires_at"])
+
     def complete_region_harvest(
         self,
         region_key: str,
@@ -475,6 +569,7 @@ class IndexSpaceRegistry:
     ) -> None:
         if not owner.strip():
             raise ValueError("harvest owner is required")
+        now = float(self.clock())
         with self.connection:
             changed = self.connection.execute(
                 """
@@ -487,17 +582,20 @@ class IndexSpaceRegistry:
                 WHERE region_key = ?
                   AND state = ?
                   AND harvest_owner = ?
+                  AND harvest_expires_at IS NOT NULL
+                  AND harvest_expires_at > ?
                 """,
                 (
                     RegionState.HARVESTED.value,
-                    float(self.clock()),
+                    now,
                     region_key,
                     RegionState.HARVESTING.value,
                     owner,
+                    now,
                 ),
             ).rowcount
         if changed != 1:
-            raise ValueError("region harvest is not owned by caller")
+            raise ValueError("region harvest is expired or not owned by caller")
 
     def release_region_harvest(
         self,
@@ -510,6 +608,7 @@ class IndexSpaceRegistry:
             raise ValueError("harvest owner is required")
         if resume_cursor is not None and resume_cursor < 0:
             raise ValueError("resume_cursor must be non-negative")
+        now = float(self.clock())
         with self.connection:
             row = self.connection.execute(
                 """
@@ -518,15 +617,18 @@ class IndexSpaceRegistry:
                 WHERE region_key = ?
                   AND state = ?
                   AND harvest_owner = ?
+                  AND harvest_expires_at IS NOT NULL
+                  AND harvest_expires_at > ?
                 """,
                 (
                     region_key,
                     RegionState.HARVESTING.value,
                     owner,
+                    now,
                 ),
             ).fetchone()
             if row is None:
-                raise ValueError("region harvest is not owned by caller")
+                raise ValueError("region harvest is expired or not owned by caller")
             if resume_cursor is not None:
                 start = row["byte_start"]
                 end = row["byte_end"]
@@ -545,14 +647,17 @@ class IndexSpaceRegistry:
                 WHERE region_key = ?
                   AND state = ?
                   AND harvest_owner = ?
+                  AND harvest_expires_at IS NOT NULL
+                  AND harvest_expires_at > ?
                 """,
                 (
                     RegionState.HARVEST_READY.value,
                     resume_cursor,
-                    float(self.clock()),
+                    now,
                     region_key,
                     RegionState.HARVESTING.value,
                     owner,
+                    now,
                 ),
             ).rowcount
         if changed != 1:
