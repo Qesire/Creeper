@@ -148,6 +148,8 @@ def assess_artifact_intake(
     policy = policy or ArtifactIntakePolicy()
     format_kind, compression = classify_artifact(url, triage.content_type)
     content_type = triage.content_type
+    if contract_match is not None:
+        contract_match = contract_match.strip() or None
     access_ok = (
         triage.disposition is TriageDisposition.SCOUT
         and triage.status_code is not None
