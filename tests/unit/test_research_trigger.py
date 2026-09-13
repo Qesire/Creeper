@@ -87,8 +87,8 @@ class ResearchTriggerGateTests(unittest.TestCase):
         decision = self.gate.decide(
             ResearchTriggerSnapshot(
                 ready_minutes=60.0,
-                final_eed_per_hour_15m=4.0,
-                final_eed_per_hour_60m=0.0,
+                final_eed_per_hour_15m=0.0,
+                final_eed_per_hour_60m=4.0,
                 closed_source_runs=4,
                 recent_zero_reward_tail=3,
                 context_hash="ctx",
