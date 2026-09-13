@@ -242,6 +242,8 @@ class ResearchRegistry:
                 pulls INTEGER NOT NULL DEFAULT 0,
                 proxy_reward REAL NOT NULL DEFAULT 0,
                 final_reward REAL NOT NULL DEFAULT 0,
+                final_observation_count INTEGER NOT NULL DEFAULT 0
+                    CHECK(final_observation_count >= 0),
                 decayed_reward REAL NOT NULL DEFAULT 0,
                 schema_version INTEGER NOT NULL,
                 updated_at REAL NOT NULL,
@@ -277,6 +279,21 @@ class ResearchRegistry:
                 ON research_learning_epochs(policy_version, state, started_at);
             """
         )
+        # Additive migration for databases created by the first L3 revision.
+        arm_columns = {
+            str(row["name"])
+            for row in self.connection.execute(
+                "PRAGMA table_info(research_arm_stats)"
+            ).fetchall()
+        }
+        if "final_observation_count" not in arm_columns:
+            self.connection.execute(
+                """
+                ALTER TABLE research_arm_stats
+                ADD COLUMN final_observation_count INTEGER NOT NULL DEFAULT 0
+                CHECK(final_observation_count >= 0)
+                """
+            )
         self.connection.commit()
 
     # roots / programs / queries -------------------------------------------------
@@ -724,6 +741,61 @@ class ResearchRegistry:
             ).rowcount
         return changed == 1
 
+    def get_decision(self, decision_id: str) -> DecisionRecord:
+        """Return one immutable propensity-bearing decision record."""
+        row = self.connection.execute(
+            "SELECT * FROM research_decisions WHERE decision_id=?",
+            (decision_id,),
+        ).fetchone()
+        if row is None:
+            raise KeyError(decision_id)
+        return DecisionRecord(
+            decision_id=row["decision_id"],
+            task_id=row["task_id"],
+            arm_id=row["arm_id"],
+            policy_version=row["policy_version"],
+            policy_snapshot_id=row["policy_snapshot_id"],
+            propensity=float(row["propensity"]),
+            context_hash=row["context_hash"],
+            chosen_at=float(row["chosen_at"]),
+            metadata=_load(row["metadata_json"], {}),
+        )
+
+    def get_decision_lineage(
+        self, decision_id: str, *, strict: bool = True
+    ) -> tuple[DecisionRecord, ...]:
+        """Expand a leaf decision into an ordered L0→leaf ancestry.
+
+        L7 currently records the complete parent list in each lower-level
+        decision's context metadata.  Recursive expansion also supports a future
+        writer that stores only immediate parents.  Missing ancestors fail
+        closed by default so FINAL reward is never partially attributed.
+        """
+        result: list[DecisionRecord] = []
+        emitted: set[str] = set()
+        visiting: set[str] = set()
+
+        def visit(current_id: str) -> None:
+            if current_id in emitted:
+                return
+            if current_id in visiting:
+                raise ValueError("decision lineage cycle detected")
+            try:
+                decision = self.get_decision(current_id)
+            except KeyError:
+                if strict:
+                    raise
+                return
+            visiting.add(current_id)
+            for parent_id in decision.parent_decision_ids:
+                visit(parent_id)
+            visiting.remove(current_id)
+            emitted.add(current_id)
+            result.append(decision)
+
+        visit(decision_id)
+        return tuple(result)
+
     def has_decisions(self, *, policy_version: str) -> bool:
         row = self.connection.execute(
             "SELECT 1 FROM research_decisions WHERE policy_version=? LIMIT 1",
@@ -875,10 +947,16 @@ class ResearchRegistry:
         token = idempotency_token or stable_hash("final-close", source_key, exposure_id)
         rows = self.artifact_lineage(source_key=source_key, exposure_id=exposure_id)
 
+        # Entity-scope rows preserve causal lineage for diagnostics.  They are
+        # not policy observations and therefore do not drive ArmStats.
         entities: set[tuple[RewardScope, str, str]] = {
             (RewardScope.SOURCE, source_key, "")
         }
+        leaf_decision_ids: set[str] = set()
         for row in rows:
+            leaf_decision_id = str(row["decision_id"] or "")
+            if leaf_decision_id:
+                leaf_decision_ids.add(leaf_decision_id)
             for scope, column in (
                 (RewardScope.ARTIFACT, "artifact_id"),
                 (RewardScope.QUERY, "query_id"),
@@ -888,13 +966,31 @@ class ResearchRegistry:
             ):
                 entity = str(row[column] or "")
                 if entity:
-                    entities.add((scope, entity, str(row["decision_id"] or "")))
+                    entities.add((scope, entity, leaf_decision_id))
+
+        # A validated environment outcome is credited exactly once to every
+        # hierarchical decision in the leaf ancestry.  DECISION rows are the
+        # only FINAL rows consumed by rebuild_arm_stats().
+        decision_records: dict[str, DecisionRecord] = {}
+        for leaf_decision_id in sorted(leaf_decision_ids):
+            for decision in self.get_decision_lineage(
+                leaf_decision_id, strict=True
+            ):
+                decision_records[decision.decision_id] = decision
+        for decision_id in decision_records:
+            entities.add((RewardScope.DECISION, decision_id, decision_id))
 
         written = 0
         for scope, entity_id, decision_id in sorted(
             entities, key=lambda item: (item[0].value, item[1], item[2])
         ):
             key = stable_hash("final-attribution", token, scope.value, entity_id)
+            decision = decision_records.get(decision_id)
+            reward_policy_version = (
+                decision.policy_version
+                if scope is RewardScope.DECISION and decision is not None
+                else policy_version
+            )
             reward = RewardRecord(
                 reward_id=stable_hash("reward", key),
                 kind=RewardKind.FINAL,
@@ -905,7 +1001,7 @@ class ResearchRegistry:
                 exposure_id=exposure_id,
                 decision_id=decision_id,
                 validation_closed=True,
-                policy_version=policy_version,
+                policy_version=reward_policy_version,
                 idempotency_key=key,
             )
             written += int(self.record_reward(reward))
@@ -948,10 +1044,23 @@ class ResearchRegistry:
             """
             SELECT d.arm_id,
                    COUNT(DISTINCT d.decision_id) AS pulls,
-                   COALESCE(SUM(CASE WHEN r.reward_kind='PROXY' THEN r.amount ELSE 0 END),0)
-                       AS proxy_reward,
-                   COALESCE(SUM(CASE WHEN r.reward_kind='FINAL' THEN r.amount ELSE 0 END),0)
-                       AS final_reward
+                   COALESCE(SUM(
+                       CASE WHEN r.reward_kind='PROXY' THEN r.amount ELSE 0 END
+                   ),0) AS proxy_reward,
+                   COALESCE(SUM(
+                       CASE
+                           WHEN r.reward_kind='FINAL'
+                            AND r.reward_scope='DECISION'
+                           THEN r.amount ELSE 0
+                       END
+                   ),0) AS final_reward,
+                   COALESCE(SUM(
+                       CASE
+                           WHEN r.reward_kind='FINAL'
+                            AND r.reward_scope='DECISION'
+                           THEN 1 ELSE 0
+                       END
+                   ),0) AS final_observation_count
             FROM research_decisions d
             LEFT JOIN research_rewards r ON r.decision_id=d.decision_id
             WHERE d.policy_version=?
@@ -968,16 +1077,20 @@ class ResearchRegistry:
             for row in rows:
                 proxy = float(row["proxy_reward"])
                 final = float(row["final_reward"])
+                final_count = int(row["final_observation_count"])
                 self.connection.execute(
                     """
                     INSERT INTO research_arm_stats(
                         arm_id,policy_version,pulls,proxy_reward,final_reward,
-                        decayed_reward,schema_version,updated_at
-                    ) VALUES(?,?,?,?,?,?,?,?)
+                        final_observation_count,decayed_reward,
+                        schema_version,updated_at
+                    ) VALUES(?,?,?,?,?,?,?,?,?)
                     """,
                     (
                         row["arm_id"], policy_version, int(row["pulls"]), proxy,
-                        final, final if final else proxy, schema_version, now,
+                        final, final_count,
+                        final if final_count > 0 else proxy,
+                        schema_version, now,
                     ),
                 )
         return self.arm_stats(policy_version=policy_version)
@@ -999,6 +1112,7 @@ class ResearchRegistry:
                 decayed_reward=float(row["decayed_reward"]),
                 schema_version=int(row["schema_version"]),
                 updated_at=float(row["updated_at"]),
+                final_observation_count=int(row["final_observation_count"]),
             )
             for row in rows
         )
