@@ -526,6 +526,12 @@ class CandidateStore:
             ).fetchone()
         return int(row[0])
 
+    def unparsed_count(self) -> int:
+        row = self.connection.execute(
+            "SELECT COUNT(*) FROM unparsed_candidates"
+        ).fetchone()
+        return int(row[0])
+
     def history_count(self) -> int:
         return int(
             self.connection.execute(
