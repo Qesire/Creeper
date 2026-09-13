@@ -794,5 +794,110 @@ class SourceDiscoveryRegistryTests(unittest.TestCase):
                 control.close()
 
 
+
+    def test_open_registry_observes_external_authority_replacement(self) -> None:
+        self.registry.set_scout_authority(
+            baseline_signature="baseline-a",
+            model_signature="model-a",
+        )
+        candidate = self._to_scout_ready(self.candidate("external-authority/"))
+        self.registry.transition(candidate.source_key, SourceState.SCOUTING)
+        self.registry.record_scout_measurement(
+            candidate.source_key,
+            ScoutMeasurement(
+                sampled_records=10,
+                unique_hosts=8,
+                novel_hosts=4,
+                direct_host_years=0,
+                requests=1,
+                bytes_read=256,
+                elapsed_seconds=1.0,
+                novel_eed=4.0,
+            ),
+        )
+        self.assertIsNotNone(
+            self.registry.get_scout_measurement(candidate.source_key)
+        )
+
+        other_control = ControlStore(Path(self.tmp.name) / "control.sqlite3")
+        try:
+            other_registry = SourceDiscoveryRegistry(other_control)
+            other_registry.set_scout_authority(
+                baseline_signature="baseline-b",
+                model_signature="model-a",
+            )
+        finally:
+            other_control.close()
+
+        self.assertEqual(
+            self.registry.current_scout_authority,
+            ("baseline-b", "model-a"),
+        )
+        self.assertIsNone(
+            self.registry.get_scout_measurement(candidate.source_key)
+        )
+
+    def test_explicit_stale_measurement_is_retained_but_not_credited(self) -> None:
+        self.registry.set_scout_authority(
+            baseline_signature="baseline-b",
+            model_signature="model-a",
+        )
+        episode = self.registry.begin_search_episode(
+            strategy="STALE_EXECUTOR",
+            backend="test",
+            query="stale executor",
+            actor="agent:test",
+            episode_id="search:stale-executor",
+        )
+        candidate = self.candidate("stale-executor/")
+        self.registry.register_proposal(
+            candidate,
+            episode_id=episode.episode_id,
+            proposal_id="proposal:stale-executor",
+        )
+        self.registry.finish_search_episode(
+            episode.episode_id,
+            search_cost_seconds=1.0,
+        )
+
+        eligible = self.registry.record_scout_measurement(
+            candidate.source_key,
+            ScoutMeasurement(
+                sampled_records=10,
+                unique_hosts=8,
+                novel_hosts=4,
+                direct_host_years=0,
+                requests=1,
+                bytes_read=256,
+                elapsed_seconds=1.0,
+                novel_eed=4.0,
+            ),
+            baseline_signature="baseline-a",
+            model_signature="model-a",
+        )
+
+        self.assertFalse(eligible)
+        self.assertIsNone(
+            self.registry.get_scout_measurement(candidate.source_key)
+        )
+        self.assertEqual(
+            self.registry.get_search_episode(
+                episode.episode_id
+            ).accepted_novel_eed,
+            0.0,
+        )
+        row = self.registry.connection.execute(
+            """
+            SELECT baseline_signature, model_signature
+            FROM source_scout_metrics
+            WHERE source_key = ?
+            """,
+            (candidate.source_key,),
+        ).fetchone()
+        self.assertEqual(
+            (row["baseline_signature"], row["model_signature"]),
+            ("baseline-a", "model-a"),
+        )
+
 if __name__ == "__main__":
     unittest.main()

@@ -420,16 +420,21 @@ async def _open_runtime(config: SourceDiscoveryServiceConfig):
     with _service_lock(discovery_root / "service.lock"):
         control = ControlStore(root / "control.sqlite3")
         baseline: BaselineIndex | None = None
+        scout_authority: tuple[str, str] | None = None
         try:
             registry = SourceDiscoveryRegistry(control)
             if config.measurement is not None:
-                registry.set_scout_authority(
-                    baseline_signature=baseline_authority_signature(
+                scout_authority = (
+                    baseline_authority_signature(
                         config.measurement.baseline_index
                     ),
-                    model_signature=eed_model_authority_signature(
+                    eed_model_authority_signature(
                         config.measurement.eed_model
                     ),
+                )
+                registry.set_scout_authority(
+                    baseline_signature=scout_authority[0],
+                    model_signature=scout_authority[1],
                 )
                 # Curated direct-evidence catalogs are only useful when the
                 # deterministic baseline/EED scout authority is configured.
@@ -490,6 +495,7 @@ async def _open_runtime(config: SourceDiscoveryServiceConfig):
                     triage_executor=triage,
                     scout_executor=scout,
                     search_executor=search,
+                    scout_authority=scout_authority,
                     triage_parallelism=config.coordinator.triage_parallelism,
                     scout_parallelism=config.coordinator.scout_parallelism,
                     search_parallelism=config.coordinator.search_parallelism,

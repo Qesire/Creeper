@@ -73,7 +73,6 @@ class SourceDiscoveryRegistry:
         self.max_graph_hops = max_graph_hops
         self.clock = clock
         self._ensure_schema()
-        self._scout_authority = self._load_scout_authority()
 
     def _ensure_schema(self) -> None:
         self.connection.executescript(
@@ -336,7 +335,19 @@ class SourceDiscoveryRegistry:
 
     @property
     def current_scout_authority(self) -> tuple[str, str] | None:
-        return self._scout_authority
+        # Read the one-row marker so independent long-running processes observe
+        # authority replacement without restarting or hashing large assets.
+        return self._load_scout_authority()
+
+    def is_current_scout_authority(
+        self,
+        baseline_signature: str,
+        model_signature: str,
+    ) -> bool:
+        return self._load_scout_authority() == (
+            baseline_signature,
+            model_signature,
+        )
 
     def set_scout_authority(
         self,
@@ -360,7 +371,6 @@ class SourceDiscoveryRegistry:
         authority = (baseline_signature, model_signature)
         persisted = self._load_scout_authority()
         if persisted == authority:
-            self._scout_authority = authority
             return False
 
         self.connection.execute("BEGIN IMMEDIATE")
@@ -444,7 +454,6 @@ class SourceDiscoveryRegistry:
         except BaseException:
             self.connection.rollback()
             raise
-        self._scout_authority = authority
         return True
 
     def _measurement_from_row(self, row: sqlite3.Row) -> ScoutMeasurement:
@@ -1030,19 +1039,27 @@ class SourceDiscoveryRegistry:
             if target in {SourceState.WARM, SourceState.ACTIVE}:
                 measured = self.connection.execute(
                     """
-                    SELECT baseline_signature, model_signature
-                    FROM source_scout_metrics
-                    WHERE source_key = ?
+                    SELECT
+                        m.baseline_signature,
+                        m.model_signature,
+                        a.baseline_signature AS current_baseline_signature,
+                        a.model_signature AS current_model_signature
+                    FROM source_scout_metrics m
+                    LEFT JOIN source_scout_authority a ON a.singleton = 1
+                    WHERE m.source_key = ?
                     """,
                     (source_key,),
                 ).fetchone()
                 eligible = measured is not None
-                if eligible and self._scout_authority is not None:
+                if (
+                    eligible
+                    and measured["current_baseline_signature"] is not None
+                ):
                     eligible = (
                         str(measured["baseline_signature"] or "")
-                        == self._scout_authority[0]
+                        == str(measured["current_baseline_signature"])
                         and str(measured["model_signature"] or "")
-                        == self._scout_authority[1]
+                        == str(measured["current_model_signature"])
                     )
                 if not eligible:
                     raise StateTransitionError(
@@ -1233,15 +1250,16 @@ class SourceDiscoveryRegistry:
         *,
         baseline_signature: str | None = None,
         model_signature: str | None = None,
-    ) -> None:
+    ) -> bool:
         if self.get_candidate(source_key) is None:
             raise KeyError(f"unknown source: {source_key}")
         if (baseline_signature is None) != (model_signature is None):
             raise ValueError(
                 "baseline_signature and model_signature must be provided together"
             )
+        current_authority = self._load_scout_authority()
         measurement_authority = (
-            self._scout_authority
+            current_authority
             if baseline_signature is None
             else (baseline_signature, model_signature)
         )
@@ -1334,10 +1352,11 @@ class SourceDiscoveryRegistry:
                         now,
                     ),
                 )
-            if (
-                self._scout_authority is None
-                or measurement_authority == self._scout_authority
-            ):
+            eligible = (
+                current_authority is None
+                or measurement_authority == current_authority
+            )
+            if eligible:
                 self._attribute_search_reward_locked(
                     source_key,
                     accepted_novel_eed=measurement.novel_eed_for_ranking,
@@ -1353,6 +1372,7 @@ class SourceDiscoveryRegistry:
                         else measurement_authority[1]
                     ),
                 )
+            return eligible
 
     def get_scout_measurement(
         self,
@@ -1365,17 +1385,31 @@ class SourceDiscoveryRegistry:
             raise ValueError(
                 "baseline_signature and model_signature must be provided together"
             )
-        required_authority = (
-            self._scout_authority
+        explicit_authority = (
+            None
             if baseline_signature is None
             else (baseline_signature, model_signature)
         )
         row = self.connection.execute(
-            "SELECT * FROM source_scout_metrics WHERE source_key = ?",
+            """
+            SELECT
+                m.*,
+                a.baseline_signature AS current_baseline_signature,
+                a.model_signature AS current_model_signature
+            FROM source_scout_metrics m
+            LEFT JOIN source_scout_authority a ON a.singleton = 1
+            WHERE m.source_key = ?
+            """,
             (source_key,),
         ).fetchone()
         if row is None:
             return None
+        required_authority = explicit_authority
+        if required_authority is None and row["current_baseline_signature"] is not None:
+            required_authority = (
+                str(row["current_baseline_signature"]),
+                str(row["current_model_signature"]),
+            )
         if required_authority is not None and (
             str(row["baseline_signature"] or "") != required_authority[0]
             or str(row["model_signature"] or "") != required_authority[1]
