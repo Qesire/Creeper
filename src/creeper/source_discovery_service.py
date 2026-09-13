@@ -40,7 +40,13 @@ from creeper.source_discovery.coordinator import (
 )
 from creeper.source_discovery.curated_seeds import ensure_curated_direct_catalogs
 from creeper.source_discovery.intelligence import SourceIntelligenceContextBuilder
-from creeper.source_discovery.manager import SourcePoolTargets, SourceReservoirManager
+from creeper.source_discovery.manager import (
+    SearchDirective,
+    SearchDirectiveKind,
+    SourceIntelligenceTask,
+    SourcePoolTargets,
+    SourceReservoirManager,
+)
 from creeper.source_discovery.measured_scout import (
     MeasuredYieldScoutExecutor,
     MeasuredYieldScoutPolicy,
@@ -48,6 +54,11 @@ from creeper.source_discovery.measured_scout import (
 from creeper.source_discovery.models import SourceState
 from creeper.source_discovery.models import is_direct_evidence_entrypoint
 from creeper.source_discovery.registry import SourceDiscoveryRegistry
+from creeper.source_discovery.research_trigger import (
+    ResearchDirective,
+    ResearchTriggerGate,
+    ResearchTriggerSnapshot,
+)
 from creeper.source_discovery.saturation import (
     SaturationPolicy,
     SourceSaturationController,
@@ -69,6 +80,8 @@ class CoordinatorConfig:
     triage_parallelism: int = 4
     scout_parallelism: int = 4
     search_parallelism: int = 3
+    region_parallelism: int = 2
+    nonblocking_research: bool = False
     failure_retry_seconds: float = 30.0
     search_cooldown_seconds: float = 30.0
     search_ucb_exploration: float = 0.35
@@ -83,6 +96,19 @@ class AgentConfig:
     cwd: Path | None
     policy: CommandAgentSearchPolicy
     admission: SearchAdmissionPolicy
+    max_active_calls: int = 1
+    min_seconds_between_starts: float = 120.0
+    same_context_failure_cooldown_seconds: float = 600.0
+
+    def __post_init__(self) -> None:
+        if self.max_active_calls != 1:
+            raise ValueError("integrated L8 requires agent.max_active_calls = 1")
+        if self.min_seconds_between_starts < 0:
+            raise ValueError("agent.min_seconds_between_starts must be non-negative")
+        if self.same_context_failure_cooldown_seconds < 0:
+            raise ValueError(
+                "agent.same_context_failure_cooldown_seconds must be non-negative"
+            )
 
 
 @dataclass(frozen=True)
@@ -241,6 +267,14 @@ def load_source_discovery_config(config_path: Path) -> SourceDiscoveryServiceCon
             coordinator_raw.get("scout_parallelism", pool.scout_parallelism), name="coordinator.scout_parallelism"
         ),
         search_parallelism=_positive_int(coordinator_raw.get("search_parallelism", 3), name="coordinator.search_parallelism"),
+        region_parallelism=_positive_int(
+            coordinator_raw.get("region_parallelism", 2),
+            name="coordinator.region_parallelism",
+        ),
+        nonblocking_research=_strict_bool(
+            coordinator_raw.get("nonblocking_research", False),
+            name="coordinator.nonblocking_research",
+        ),
         failure_retry_seconds=_positive_float(
             coordinator_raw.get("failure_retry_seconds", 30.0), name="coordinator.failure_retry_seconds"
         ),
@@ -364,6 +398,18 @@ def load_source_discovery_config(config_path: Path) -> SourceDiscoveryServiceCon
             ),
         ),
         admission=admission,
+        max_active_calls=_positive_int(
+            agent_raw.get("max_active_calls", 1),
+            name="agent.max_active_calls",
+        ),
+        min_seconds_between_starts=_nonnegative_float(
+            agent_raw.get("min_seconds_between_starts", 120.0),
+            name="agent.min_seconds_between_starts",
+        ),
+        same_context_failure_cooldown_seconds=_nonnegative_float(
+            agent_raw.get("same_context_failure_cooldown_seconds", 600.0),
+            name="agent.same_context_failure_cooldown_seconds",
+        ),
     )
 
     measurement: MeasurementConfig | None = None
@@ -517,6 +563,91 @@ def _requeue_unexpanded_audited_arquivo_catalog(
     return requeued
 
 
+def _research_snapshot(
+    registry: SourceDiscoveryRegistry,
+) -> ResearchTriggerSnapshot:
+    """Build a bounded scheduler snapshot without exposing authority handles."""
+
+    live_states = (
+        SourceState.DISCOVERED,
+        SourceState.TRIAGED,
+        SourceState.SCOUT_READY,
+        SourceState.SCOUTING,
+    )
+    deterministic_backlog = len(registry.list_candidates_in_states(live_states))
+    productive_direct = sum(
+        1
+        for candidate in registry.list_candidates_in_states(
+            (SourceState.WARM, SourceState.ACTIVE)
+        )
+        if candidate.direct_evidence_prior >= 0.5
+    )
+
+    executable_regions = 0
+    pending_regions = 0
+    list_executable = getattr(registry, "list_executable_regions", None)
+    if callable(list_executable):
+        executable_regions = len(list_executable(limit=10_000))
+    list_regions = getattr(registry, "list_regions", None)
+    if callable(list_regions):
+        for region in list_regions():
+            state = getattr(region.state, "value", str(region.state))
+            if state in {"PROPOSED", "VALIDATED", "RUNNING"}:
+                pending_regions += 1
+
+    context_payload = {
+        "deterministic_backlog": deterministic_backlog,
+        "executable_regions": executable_regions,
+        "pending_regions": pending_regions,
+        "productive_direct": productive_direct,
+    }
+    context_hash = __import__("hashlib").sha256(
+        json.dumps(context_payload, sort_keys=True).encode("utf-8")
+    ).hexdigest()
+    return ResearchTriggerSnapshot(
+        executable_regions=executable_regions,
+        pending_region_count=pending_regions,
+        deterministic_candidate_backlog=deterministic_backlog,
+        productive_direct_inventory=productive_direct,
+        context_hash=context_hash,
+    )
+
+
+def _legacy_background_research_executor(
+    search: CommandAgentSearchExecutor,
+    *,
+    desired_candidates: int,
+):
+    """Compatibility adapter until L6 unified proposal envelopes are merged."""
+
+    async def execute(directive: ResearchDirective) -> object:
+        task = SourceIntelligenceTask(directive.task_type)
+        kind = {
+            SourceIntelligenceTask.DISCOVER_NEW_SOURCE:
+                SearchDirectiveKind.DISCOVER_NEW_FAMILY,
+            SourceIntelligenceTask.EXPLOIT_SUCCESS_PATTERN:
+                SearchDirectiveKind.EXPLOIT_SOURCE_FAMILY,
+            SourceIntelligenceTask.INTERPRET_STRUCTURE:
+                SearchDirectiveKind.INTERPRET_STRUCTURE,
+            SourceIntelligenceTask.INTERPRET_EVIDENCE_CONTRACT:
+                SearchDirectiveKind.INTERPRET_STRUCTURE,
+            SourceIntelligenceTask.RECOVER_STAGNATION:
+                SearchDirectiveKind.RECOVER_STAGNATION,
+        }[task]
+        return await search(
+            SearchDirective(
+                kind=kind,
+                strategy=directive.strategy,
+                desired_candidates=desired_candidates,
+                subject=directive.subject,
+                reason=directive.reason,
+                task_type=task,
+            )
+        )
+
+    return execute
+
+
 @asynccontextmanager
 async def _open_runtime(config: SourceDiscoveryServiceConfig):
     root = config.runtime_data_root
@@ -528,6 +659,7 @@ async def _open_runtime(config: SourceDiscoveryServiceConfig):
         control = ControlStore(root / "control.sqlite3")
         baseline: BaselineIndex | None = None
         scout_authority: tuple[str, str] | None = None
+        coordinator: SourceDiscoveryCoordinator | None = None
         try:
             registry = SourceDiscoveryRegistry(control)
             if config.measurement is not None:
@@ -562,6 +694,14 @@ async def _open_runtime(config: SourceDiscoveryServiceConfig):
                 search_cooldown_seconds=config.coordinator.search_cooldown_seconds,
                 search_ucb_exploration=config.coordinator.search_ucb_exploration,
                 stagnation_window=config.coordinator.stagnation_window,
+                trigger_gate=ResearchTriggerGate(
+                    min_seconds_between_llm_starts=(
+                        config.agent.min_seconds_between_starts
+                    ),
+                    same_context_failure_cooldown_seconds=(
+                        config.agent.same_context_failure_cooldown_seconds
+                    ),
+                ),
             )
             max_io = max(config.coordinator.triage_parallelism, config.coordinator.scout_parallelism)
             limits = httpx.Limits(
@@ -615,6 +755,14 @@ async def _open_runtime(config: SourceDiscoveryServiceConfig):
                     admission_policy=config.agent.admission,
                     context_builder=intelligence_context,
                 )
+                background_research = (
+                    _legacy_background_research_executor(
+                        search,
+                        desired_candidates=config.agent.policy.max_returned_candidates,
+                    )
+                    if config.coordinator.nonblocking_research
+                    else None
+                )
                 coordinator = SourceDiscoveryCoordinator(
                     registry,
                     manager,
@@ -627,10 +775,19 @@ async def _open_runtime(config: SourceDiscoveryServiceConfig):
                     triage_parallelism=config.coordinator.triage_parallelism,
                     scout_parallelism=config.coordinator.scout_parallelism,
                     search_parallelism=config.coordinator.search_parallelism,
+                    region_parallelism=config.coordinator.region_parallelism,
                     failure_retry_seconds=config.coordinator.failure_retry_seconds,
+                    research_snapshot_provider=(
+                        (lambda: _research_snapshot(registry))
+                        if background_research is not None
+                        else None
+                    ),
+                    research_executor=background_research,
                 )
                 yield registry, coordinator
         finally:
+            if coordinator is not None:
+                await coordinator.shutdown()
             if baseline is not None:
                 baseline.close()
             control.close()
