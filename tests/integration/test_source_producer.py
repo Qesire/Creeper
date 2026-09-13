@@ -675,6 +675,120 @@ class SourceProducerTests(unittest.TestCase):
         self.assertEqual(report.evidence_tasks_enqueued, 0)
 
 
+    def test_direct_year_batch_masks_wayback_even_when_undated_row_arrives_first(self):
+        records = [
+            SourceRecord(
+                source_id="mixed-direct-fixture",
+                locator="fixture://mixed/undated",
+                payload="mixed.example",
+                scope=CandidateSourceScope.LOCAL_DISCOVERY,
+            ),
+            SourceRecord(
+                source_id="mixed-direct-fixture",
+                locator="fixture://mixed/cdxj:byte:42",
+                payload="mixed.example",
+                scope=CandidateSourceScope.LOCAL_DISCOVERY,
+                source_year=1997,
+                source_time="19971231235959",
+                record_type="CDX_CAPTURE",
+                artifact_ref="fixture://mixed/cdxj:byte:42",
+                direct_year_mask=1 << (1997 - 1996),
+            ),
+        ]
+        adapter = FakeSource(records)
+        domain = SourceDomain(
+            domain_id="mixed-direct-domain",
+            family="DIRECT_FIXTURE",
+            discovery_mechanism="test",
+            temporal_scope=(1996, 2001),
+            state=DomainState.EXPLORING,
+        )
+        reservoir = Reservoir(
+            reservoir_id="mixed-direct-reservoir",
+            domain_id=domain.domain_id,
+            adapter_id=adapter.adapter_id,
+            root_locator="fixture://mixed-direct",
+            enumeration_kind="finite_list",
+            capacity_lower=2,
+            capacity_upper=2,
+            evidence_mode="direct_year",
+            state=ReservoirState.READY,
+        )
+        self.control.save_domain(domain)
+        self.control.save_reservoir(reservoir)
+        template = WorkLease.create(
+            reservoir_id=reservoir.reservoir_id,
+            max_records=2,
+            max_requests=1,
+            max_bytes=4096,
+            max_seconds=30,
+            expected_evidence_tasks=0,
+            expected_novel_eed=1.0,
+        )
+        candidate = LeaseCandidate(
+            reservoir_id=reservoir.reservoir_id,
+            expected_novel_eed=1.0,
+            costs=ResourceCost(0, 0, 1, 1),
+            reservoir=reservoir,
+            lease=template,
+            evidence_mode="direct_year",
+            evidence_provider="wayback",
+            expected_evidence_tasks=0,
+        )
+        runtime = SourceProducer(
+            baseline=self.baseline,
+            control_store=self.control,
+            evidence_store=self.evidence,
+            scheduler=GlobalScheduler(CreditLedger({"wayback": 8})),
+            candidates=[candidate],
+            adapters={adapter.adapter_id: adapter},
+            backlog_capacities={"wayback": 8},
+            queue_capacities={
+                "source_records": 4,
+                "observations": 4,
+                "evidence_tasks": 4,
+                "commits": 4,
+            },
+            pipeline_batch_size=10,
+        )
+
+        report = runtime.run_once()
+
+        self.assertEqual(report.direct_capsules_committed, 1)
+        self.assertEqual(report.evidence_tasks_enqueued, 2)
+        tasks = [
+            task
+            for task in self.control.list_evidence_tasks()
+            if task.key.provider == "wayback"
+            and task.key.hostname == "mixed.example"
+        ]
+        scopes = sorted(
+            (
+                task.key.temporal_scope.year_from,
+                task.key.temporal_scope.year_to,
+            )
+            for task in tasks
+        )
+        self.assertEqual(scopes, [(1996, 1996), (1998, 2001)])
+        self.assertTrue(
+            all(
+                not (
+                    task.key.temporal_scope.year_from
+                    <= 1997
+                    <= task.key.temporal_scope.year_to
+                )
+                for task in tasks
+            )
+        )
+        capsules = self.evidence.for_hostname("mixed.example")
+        self.assertEqual(len(capsules), 1)
+        self.assertEqual(capsules[0].year, 1997)
+        self.assertEqual(capsules[0].evidence_timestamp, "19971231235959")
+        self.assertEqual(
+            capsules[0].record_locator,
+            "fixture://mixed/cdxj:byte:42",
+        )
+
     def test_high_fanout_parent_enqueues_one_domain_probe(self):
         records = [
             SourceRecord(
