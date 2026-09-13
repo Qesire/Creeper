@@ -558,6 +558,25 @@ class CommandAgentResearchExecutor:
         self.compiler = compiler
         self.clock = clock
 
+    async def _terminate_group(self, process: asyncio.subprocess.Process) -> None:
+        """Terminate the isolated research child process group within a bounded grace."""
+        if process.returncode is not None:
+            return
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            return
+        try:
+            await asyncio.wait_for(process.wait(), timeout=2.0)
+            return
+        except TimeoutError:
+            pass
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        await process.wait()
+
     @staticmethod
     def _directive_value(directive: Any, name: str, default: Any = None) -> Any:
         value = getattr(directive, name, default)
