@@ -197,6 +197,7 @@ class SourceDiscoveryCoordinator:
         triage_executor: TriageExecutor,
         scout_executor: ScoutExecutor,
         search_executor: SearchExecutor,
+        scout_authority: tuple[str, str] | None = None,
         triage_parallelism: int = 4,
         scout_parallelism: int | None = None,
         search_parallelism: int = 3,
@@ -217,6 +218,13 @@ class SourceDiscoveryCoordinator:
         self.triage_executor = triage_executor
         self.scout_executor = scout_executor
         self.search_executor = search_executor
+        if scout_authority is not None and (
+            len(scout_authority) != 2
+            or not scout_authority[0]
+            or not scout_authority[1]
+        ):
+            raise ValueError("scout_authority must contain two non-empty signatures")
+        self.scout_authority = scout_authority
         self.triage_parallelism = triage_parallelism
         self.scout_parallelism = min(scout_parallelism, manager.targets.scout_parallelism)
         self.search_parallelism = search_parallelism
@@ -426,10 +434,27 @@ class SourceDiscoveryCoordinator:
                 continue
             result = outcome.value
             assert result is not None
+            measurement_current = True
             if result.measurement is not None:
-                self.registry.record_scout_measurement(candidate.source_key, result.measurement)
+                authority_kwargs: dict[str, str] = {}
+                if self.scout_authority is not None:
+                    authority_kwargs = {
+                        "baseline_signature": self.scout_authority[0],
+                        "model_signature": self.scout_authority[1],
+                    }
+                measurement_current = self.registry.record_scout_measurement(
+                    candidate.source_key,
+                    result.measurement,
+                    **authority_kwargs,
+                )
             self._commit_scout_children(current, result, counts)
-            if result.disposition is ScoutDisposition.WARM:
+            if (
+                result.disposition is ScoutDisposition.WARM
+                and not measurement_current
+            ):
+                self.registry.transition(candidate.source_key, SourceState.HOLD)
+                counts["scouted_hold"] += 1
+            elif result.disposition is ScoutDisposition.WARM:
                 self.registry.transition(candidate.source_key, SourceState.WARM)
                 self._commit_year_motif_siblings(current, counts)
                 counts["scouted_warm"] += 1

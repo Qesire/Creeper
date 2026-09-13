@@ -7,6 +7,7 @@ from pathlib import Path
 from creeper.source_discovery.index_registry import IndexSpaceRegistry
 from creeper.source_discovery.index_space import (
     RegionKind,
+    RegionState,
     RegionSynopsis,
     child_region,
     compile_candidate_index_space,
@@ -87,6 +88,136 @@ class IndexSpaceRegistryTests(unittest.TestCase):
         stored = self.registry.get_synopsis(synopsis.region_key)
 
         self.assertEqual(stored, synopsis)
+
+    def _registered_ready_region(self) -> str:
+        compiled = compile_candidate_index_space(
+            self.candidate(),
+            range_supported=True,
+            content_length=1024,
+            direct_evidence_authority=True,
+        )
+        self.registry.register_index_space(compiled)
+        self.registry.mark_region_state(
+            compiled.root_region.region_key,
+            RegionState.HARVEST_READY,
+        )
+        return compiled.root_region.region_key
+
+    def test_region_harvest_renew_extends_claim(self) -> None:
+        now = [100.0]
+        self.registry.clock = lambda: now[0]
+        region_key = self._registered_ready_region()
+        claimed = self.registry.claim_region_for_harvest(
+            region_key,
+            owner="worker-a",
+            ttl_seconds=10.0,
+        )
+        self.assertIsNotNone(claimed)
+
+        now[0] = 104.0
+        renewed_until = self.registry.renew_region_harvest(
+            region_key,
+            owner="worker-a",
+            ttl_seconds=10.0,
+        )
+
+        self.assertEqual(renewed_until, 114.0)
+        self.assertEqual(
+            self.registry.assert_region_harvest_owned(
+                region_key,
+                owner="worker-a",
+            ),
+            114.0,
+        )
+        self.assertEqual(
+            self.registry.recover_expired_harvest_claims(now=111.0),
+            0,
+        )
+
+    def test_wrong_owner_cannot_renew(self) -> None:
+        now = [100.0]
+        self.registry.clock = lambda: now[0]
+        region_key = self._registered_ready_region()
+        self.registry.claim_region_for_harvest(
+            region_key,
+            owner="worker-a",
+            ttl_seconds=10.0,
+        )
+
+        with self.assertRaisesRegex(ValueError, "not owned"):
+            self.registry.renew_region_harvest(
+                region_key,
+                owner="worker-b",
+                ttl_seconds=10.0,
+            )
+
+    def test_expired_claim_cannot_be_renewed(self) -> None:
+        now = [100.0]
+        self.registry.clock = lambda: now[0]
+        region_key = self._registered_ready_region()
+        self.registry.claim_region_for_harvest(
+            region_key,
+            owner="worker-a",
+            ttl_seconds=10.0,
+        )
+
+        now[0] = 110.0
+        with self.assertRaisesRegex(ValueError, "expired"):
+            self.registry.renew_region_harvest(
+                region_key,
+                owner="worker-a",
+                ttl_seconds=10.0,
+            )
+
+    def test_claim_recovers_after_heartbeat_stops(self) -> None:
+        now = [100.0]
+        self.registry.clock = lambda: now[0]
+        region_key = self._registered_ready_region()
+        self.registry.claim_region_for_harvest(
+            region_key,
+            owner="worker-a",
+            ttl_seconds=10.0,
+        )
+        now[0] = 105.0
+        self.registry.renew_region_harvest(
+            region_key,
+            owner="worker-a",
+            ttl_seconds=10.0,
+        )
+
+        self.assertEqual(
+            self.registry.recover_expired_harvest_claims(now=114.0),
+            0,
+        )
+        self.assertEqual(
+            self.registry.recover_expired_harvest_claims(now=116.0),
+            1,
+        )
+        self.assertEqual(
+            self.registry.get_region(region_key).state,
+            RegionState.HARVEST_READY,
+        )
+
+    def test_complete_requires_current_owner(self) -> None:
+        now = [100.0]
+        self.registry.clock = lambda: now[0]
+        region_key = self._registered_ready_region()
+        self.registry.claim_region_for_harvest(
+            region_key,
+            owner="worker-a",
+            ttl_seconds=10.0,
+        )
+
+        now[0] = 111.0
+        with self.assertRaisesRegex(ValueError, "expired"):
+            self.registry.complete_region_harvest(
+                region_key,
+                owner="worker-a",
+            )
+        self.assertEqual(
+            self.registry.get_region(region_key).state,
+            RegionState.HARVESTING,
+        )
 
     def test_synopsis_requires_registered_region(self) -> None:
         synopsis = RegionSynopsis(

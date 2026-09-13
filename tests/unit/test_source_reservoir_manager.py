@@ -426,5 +426,91 @@ class SourceReservoirManagerTests(unittest.TestCase):
         self.assertEqual(plan.scout_source_keys[0], queued_a.source_key)
 
 
+    def test_baseline_change_removes_scout_from_candidate_value(self) -> None:
+        self.registry.set_scout_authority(
+            baseline_signature="baseline-a",
+            model_signature="model-a",
+        )
+        candidate = self.candidate("authority-value")
+        self.to_warm(
+            candidate,
+            novel_eed=100.0,
+            elapsed_seconds=1.0,
+        )
+        manager = SourceReservoirManager(
+            self.registry,
+            targets=SourcePoolTargets(
+                active_min=0,
+                active_target=0,
+                warm_min=0,
+                warm_target=0,
+                cold_min=0,
+                cold_target=0,
+            ),
+        )
+        before = manager._candidate_value(candidate, active=[])
+
+        self.registry.set_scout_authority(
+            baseline_signature="baseline-b",
+            model_signature="model-a",
+        )
+        after = manager._candidate_value(candidate, active=[])
+
+        self.assertGreater(before, after)
+        self.assertIsNone(
+            self.registry.get_scout_measurement(candidate.source_key)
+        )
+
+    def test_baseline_change_removes_old_best_measured_family(self) -> None:
+        self.registry.set_scout_authority(
+            baseline_signature="baseline-a",
+            model_signature="model-a",
+        )
+        candidate = self.candidate(
+            "authority-family",
+            family="OLD_HIGH_YIELD",
+        )
+        self.to_warm(
+            candidate,
+            novel_eed=20.0,
+            elapsed_seconds=1.0,
+        )
+        candidate = self.registry.get_candidate(candidate.source_key)
+        assert candidate is not None
+        manager = SourceReservoirManager(
+            self.registry,
+            targets=SourcePoolTargets(
+                active_min=0,
+                active_target=0,
+                warm_min=2,
+                warm_target=4,
+                cold_min=2,
+                cold_target=4,
+                max_search_directives=3,
+            ),
+        )
+        self.assertEqual(
+            manager._best_measured_family([candidate])[0],
+            "OLD_HIGH_YIELD",
+        )
+
+        self.registry.set_scout_authority(
+            baseline_signature="baseline-b",
+            model_signature="model-a",
+        )
+
+        self.assertIsNone(
+            manager._best_measured_family([candidate])
+        )
+        plan = manager.plan()
+        self.assertFalse(
+            any(
+                directive.kind is SearchDirectiveKind.EXPLOIT_SOURCE_FAMILY
+                and directive.subject == "OLD_HIGH_YIELD"
+                for directive in plan.search_directives
+            )
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

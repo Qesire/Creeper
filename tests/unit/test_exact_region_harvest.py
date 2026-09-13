@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import tempfile
+import threading
+import time
 import unittest
 from dataclasses import replace
 from pathlib import Path
@@ -917,6 +919,163 @@ class ExactRegionHarvestTests(unittest.TestCase):
         self.assertEqual(
             self.registry.get_region(region.region_key).state,
             RegionState.HARVEST_READY,
+        )
+
+    def test_heartbeat_prevents_recovery_during_long_harvest(self) -> None:
+        path = self.root / "heartbeat.cdxj"
+        path.write_text(
+            self._line("novel", 1998, "0101000000"),
+            encoding="utf-8",
+        )
+        compiled = self._compiled_local(path)
+        region = self._register_ready(compiled)
+        executor = RegionHarvestExecutor(
+            registry=self.registry,
+            baseline=self.baseline,
+            evidence_store=self.evidence,
+            owner="worker-a",
+            policy=RegionHarvestPolicy(
+                max_seconds=0.3,
+                claim_grace_seconds=0.7,
+                heartbeat_interval_seconds=0.05,
+            ),
+        )
+        original_execute = executor._execute_local_region
+        entered = threading.Event()
+        allow_finish = threading.Event()
+        outcome: dict[str, object] = {}
+
+        def blocked_execute(*, index, lease, emit_record):
+            row = self.registry.connection.execute(
+                """
+                SELECT harvest_expires_at
+                FROM source_regions_v1
+                WHERE region_key = ?
+                """,
+                (region.region_key,),
+            ).fetchone()
+            assert row is not None
+            outcome["original_expiry"] = float(row["harvest_expires_at"])
+            entered.set()
+            if not allow_finish.wait(timeout=2.0):
+                raise AssertionError("challenger did not inspect renewed claim")
+            return original_execute(
+                index=index,
+                lease=lease,
+                emit_record=emit_record,
+            )
+
+        executor._execute_local_region = blocked_execute  # type: ignore[method-assign]
+
+        def challenger() -> None:
+            peer_control = None
+            try:
+                if not entered.wait(timeout=2.0):
+                    raise AssertionError("harvest did not enter blocked transport")
+                original_expiry = float(outcome["original_expiry"])
+                peer_control = ControlStore(self.root / "control.sqlite3")
+                peer = IndexSpaceRegistry(peer_control)
+                deadline = time.monotonic() + 2.0
+                while True:
+                    row = peer.connection.execute(
+                        """
+                        SELECT harvest_expires_at
+                        FROM source_regions_v1
+                        WHERE region_key = ?
+                        """,
+                        (region.region_key,),
+                    ).fetchone()
+                    assert row is not None
+                    expiry = float(row["harvest_expires_at"])
+                    if expiry > original_expiry:
+                        break
+                    if time.monotonic() >= deadline:
+                        raise AssertionError("heartbeat did not extend claim")
+                    threading.Event().wait(0.005)
+                outcome["renewed_expiry"] = expiry
+                outcome["recovered"] = peer.recover_expired_harvest_claims(
+                    now=original_expiry + 0.001,
+                )
+            except BaseException as exc:
+                outcome["error"] = exc
+            finally:
+                if peer_control is not None:
+                    peer_control.close()
+                allow_finish.set()
+
+        thread = threading.Thread(target=challenger, daemon=True)
+        thread.start()
+        report = executor.harvest(region.region_key)
+        thread.join(timeout=2.0)
+
+        self.assertFalse(thread.is_alive())
+        self.assertNotIn("error", outcome, msg=repr(outcome.get("error")))
+        self.assertEqual(outcome.get("recovered"), 0)
+        self.assertGreater(
+            float(outcome["renewed_expiry"]),
+            float(outcome["original_expiry"]),
+        )
+        self.assertIsNotNone(report)
+        assert report is not None
+        self.assertTrue(report.completed)
+        self.assertEqual(self.evidence.host_year_count(), 1)
+
+    def test_lost_ownership_aborts_before_evidence_commit(self) -> None:
+        path = self.root / "lost-ownership.cdxj"
+        path.write_text(
+            self._line("novel", 1998, "0101000000"),
+            encoding="utf-8",
+        )
+        compiled = self._compiled_local(path)
+        region = self._register_ready(compiled)
+        now = [100.0]
+        self.registry.clock = lambda: now[0]
+        executor = RegionHarvestExecutor(
+            registry=self.registry,
+            baseline=self.baseline,
+            evidence_store=self.evidence,
+            owner="worker-a",
+            policy=RegionHarvestPolicy(
+                max_seconds=5.0,
+                claim_grace_seconds=5.0,
+                heartbeat_interval_seconds=9.0,
+            ),
+        )
+        original_execute = executor._execute_local_region
+
+        def steal_after_read(*, index, lease, emit_record):
+            result = original_execute(
+                index=index,
+                lease=lease,
+                emit_record=emit_record,
+            )
+            now[0] = 111.0
+            self.assertEqual(
+                self.registry.recover_expired_harvest_claims(),
+                1,
+            )
+            reclaimed = self.registry.claim_region_for_harvest(
+                region.region_key,
+                owner="worker-b",
+                ttl_seconds=10.0,
+            )
+            self.assertIsNotNone(reclaimed)
+            return result
+
+        executor._execute_local_region = steal_after_read  # type: ignore[method-assign]
+
+        with self.assertRaisesRegex(RegionHarvestError, "no longer owned"):
+            executor.harvest(region.region_key)
+
+        self.assertEqual(self.evidence.host_year_count(), 0)
+        current = self.registry.get_region(region.region_key)
+        self.assertIsNotNone(current)
+        assert current is not None
+        self.assertEqual(current.state, RegionState.HARVESTING)
+        self.registry.release_region_harvest(
+            region.region_key,
+            owner="worker-b",
+            resume_cursor=0,
         )
 
     def test_harvest_claim_expires_and_can_be_recovered(self) -> None:
