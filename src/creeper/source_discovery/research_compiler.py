@@ -350,7 +350,10 @@ class ResearchCompiler:
             surface_kind=surface,
             root=root,
             query_family=dict(proposal.query_family),
-            enumerator_spec={"kind": enumerator.value},
+            enumerator_spec={
+                "kind": enumerator.value,
+                "config": dict(proposal.enumerator_config),
+            },
             artifact_predicate=dict(proposal.artifact_predicate),
             hard_bounds=bounds,
             stop_conditions=proposal.stop_conditions,
