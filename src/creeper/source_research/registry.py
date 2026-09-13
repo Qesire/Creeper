@@ -156,6 +156,20 @@ class ResearchRegistry:
             CREATE INDEX IF NOT EXISTS idx_research_artifact_source
                 ON research_artifact_lineage(source_key, source_exposure_id, created_at);
 
+            CREATE TABLE IF NOT EXISTS research_lineage_exposures (
+                lineage_id TEXT NOT NULL,
+                source_key TEXT NOT NULL,
+                exposure_id TEXT NOT NULL,
+                bound_at REAL NOT NULL,
+                PRIMARY KEY(lineage_id, exposure_id),
+                FOREIGN KEY(lineage_id)
+                    REFERENCES research_artifact_lineage(lineage_id)
+            ) WITHOUT ROWID;
+            CREATE INDEX IF NOT EXISTS idx_research_lineage_exposure
+                ON research_lineage_exposures(
+                    source_key, exposure_id, bound_at
+                );
+
             CREATE TABLE IF NOT EXISTS research_rewards (
                 reward_id TEXT PRIMARY KEY,
                 reward_kind TEXT NOT NULL,
@@ -586,6 +600,64 @@ class ResearchRegistry:
         sql += " ORDER BY created_at,lineage_id"
         return tuple(self.connection.execute(sql, params).fetchall())
 
+    def bind_source_exposure_lineage(
+        self,
+        *,
+        source_key: str,
+        exposure_id: str,
+    ) -> int:
+        """Bind one production exposure to every causal lineage for its source.
+
+        A source may be measured in multiple independent production exposures.
+        This additive mapping preserves every observation without mutating the
+        immutable artifact lineage or stealing it from an earlier exposure.
+        """
+        if not source_key or not exposure_id:
+            raise ValueError("source_key and exposure_id are required")
+        now = self.clock()
+        with self.connection:
+            changed = self.connection.execute(
+                """
+                INSERT OR IGNORE INTO research_lineage_exposures(
+                    lineage_id,source_key,exposure_id,bound_at
+                )
+                SELECT lineage_id,source_key,?,?
+                FROM research_artifact_lineage
+                WHERE source_key=?
+                """,
+                (exposure_id, now, source_key),
+            ).rowcount
+        return int(changed)
+
+    def artifact_lineage_for_exposure(
+        self,
+        *,
+        source_key: str,
+        exposure_id: str,
+    ) -> tuple[sqlite3.Row, ...]:
+        """Return causal lineage for one concrete production observation."""
+        rows = tuple(
+            self.connection.execute(
+                """
+                SELECT l.*
+                FROM research_artifact_lineage AS l
+                JOIN research_lineage_exposures AS x
+                  ON x.lineage_id=l.lineage_id
+                WHERE x.source_key=? AND x.exposure_id=?
+                ORDER BY l.created_at,l.lineage_id
+                """,
+                (source_key, exposure_id),
+            ).fetchall()
+        )
+        if rows:
+            return rows
+        # Backward compatibility for databases populated before the additive
+        # exposure mapping existed.
+        return self.artifact_lineage(
+            source_key=source_key,
+            exposure_id=exposure_id,
+        )
+
     # frontier -----------------------------------------------------------------
     def enqueue_frontier(self, task: FrontierTask) -> str:
         now = self.clock()
@@ -973,7 +1045,10 @@ class ResearchRegistry:
         if final_eed < 0:
             raise ValueError("final_eed must be non-negative")
         token = idempotency_token or stable_hash("final-close", source_key, exposure_id)
-        rows = self.artifact_lineage(source_key=source_key, exposure_id=exposure_id)
+        rows = self.artifact_lineage_for_exposure(
+            source_key=source_key,
+            exposure_id=exposure_id,
+        )
 
         # Entity-scope rows preserve causal lineage for diagnostics.  They are
         # not policy observations and therefore do not drive ArmStats.
