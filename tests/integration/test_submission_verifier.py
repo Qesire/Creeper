@@ -396,6 +396,23 @@ class SubmissionVerifierTests(unittest.TestCase):
                 any("original URL hostname does not match" in error for error in report.errors)
             )
 
+    def test_stable_classifier_distinguishes_direct_and_verified_candidate(self):
+        candidate = EvidenceCapsule(**_candidate_record())
+        self.assertEqual(
+            classify_acquisition_lane(candidate),
+            AcquisitionLane.VERIFIED_CANDIDATE,
+        )
+        direct = _direct_record()
+        direct["extraction_method"] = (
+            "CDX_CAPTURE;"
+            "contract=archive-cdx-capture-v1@archive-capture-contract-v1"
+        )
+        direct_capsule = EvidenceCapsule(**direct)
+        self.assertEqual(
+            classify_acquisition_lane(direct_capsule),
+            AcquisitionLane.DIRECT_ANNUAL,
+        )
+
     def test_current_direct_cdxj_is_direct_annual_and_verifies(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
