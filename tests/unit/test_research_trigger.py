@@ -99,6 +99,7 @@ class ResearchTriggerGateTests(unittest.TestCase):
     def test_sustained_final_zero_tail_triggers_recovery(self) -> None:
         decision = self.gate.decide(
             ResearchTriggerSnapshot(
+                ready_minutes=60.0,
                 final_eed_per_hour_60m=0.0,
                 closed_source_runs=4,
                 recent_zero_reward_tail=3,
@@ -128,6 +129,25 @@ class ResearchTriggerGateTests(unittest.TestCase):
             ResearchTriggerReason.EXPLICIT_OPERATOR_REQUEST,
         )
         self.assertEqual(decision.desired_regions, 1)
+
+    def test_manager_returns_one_strategy_directive(self) -> None:
+        from creeper.source_discovery.manager import SourceReservoirManager
+
+        manager = object.__new__(SourceReservoirManager)
+        manager.trigger_gate = self.gate
+        directive = manager.plan_research(
+            ResearchTriggerSnapshot(
+                ready_minutes=5.0,
+                productive_direct_inventory=2,
+                context_hash="ctx",
+                now=1_000.0,
+            )
+        )
+        self.assertIsNotNone(directive)
+        assert directive is not None
+        self.assertEqual(directive.task_type, "EXPLOIT_SUCCESS_PATTERN")
+        self.assertEqual(directive.strategy, "EXPLOIT_SUCCESS")
+        self.assertEqual(directive.desired_regions, 1)
 
 
 if __name__ == "__main__":
