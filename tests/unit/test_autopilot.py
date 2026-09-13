@@ -88,6 +88,46 @@ class AutopilotTests(unittest.TestCase):
         self.assertIn("--requests-per-second", evidence)
         self.assertIn("0.5", evidence)
 
+    def test_platform_harvest_uses_independent_supervised_budget(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = AutopilotConfig(
+                source_discovery_config=root / "discovery.toml",
+                source_producer_config=root / "producer.toml",
+                runtime_data_root=root / "runtime",
+                supervisor=SupervisorPolicy(),
+                evidence=EvidenceServicePolicy(
+                    platform_harvest_enabled=True,
+                    platform_claim_batch_size=2,
+                    platform_requests_per_second=0.125,
+                    platform_max_connections=3,
+                ),
+            )
+            specs = build_child_specs(config)
+
+        platform = next(
+            spec for spec in specs if spec.name == "platform-year-harvest"
+        )
+        self.assertIn("creeper.platform_harvest_cli", platform.argv)
+        self.assertEqual(
+            platform.argv[platform.argv.index("--claim-batch-size") + 1],
+            "2",
+        )
+        self.assertEqual(
+            platform.argv[platform.argv.index("--requests-per-second") + 1],
+            "0.125",
+        )
+        self.assertEqual(
+            platform.argv[platform.argv.index("--max-connections") + 1],
+            "3",
+        )
+        throttled = _desired_children(
+            GovernorState.THROTTLED,
+            {spec.name for spec in specs},
+        )
+        self.assertNotIn("platform-year-harvest", throttled)
+        self.assertIn("evidence-worker", throttled)
+
     def test_multiple_source_workers_are_independent_children(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
