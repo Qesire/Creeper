@@ -83,6 +83,7 @@ class ExplorationExecutor:
         seen: set[str] = set()
         started = self.clock()
         pages_this_run = 0
+        search_exhausted = True
         for index in range(cp.query_index, len(queries)):
             query = queries[index]
             batches = self._batches(plan, query=query, checkpoint=cp)
@@ -90,7 +91,7 @@ class ExplorationExecutor:
                 pages_this_run += 1
                 next_cp = RegionExecutionCheckpoint(
                     query_index=index + (1 if batch.terminal else 0),
-                    cursor=batch.next_cursor if batch.next_cursor is not None else batch.cursor,
+                    cursor=batch.next_cursor,
                     page=batch.page,
                     requests=cp.requests + batch.requests,
                     bytes_read=cp.bytes_read + batch.bytes_read,
@@ -99,7 +100,16 @@ class ExplorationExecutor:
                 if next_cp.requests > plan.hard_bounds.max_requests or next_cp.bytes_read > plan.hard_bounds.max_bytes:
                     return RegionExecutionResult(plan.region_id, False, next_cp, tuple(candidates), tuple(negatives), next_cp.requests, next_cp.bytes_read)
                 batch_candidates = self._candidates(plan, batch.artifacts, seen)
-                if batch_candidates and commit_batch is not None:
+                remaining = plan.hard_bounds.max_artifacts - len(candidates)
+                if len(batch_candidates) > remaining:
+                    # The page was fetched but cannot be committed partially: the
+                    # parent must replay it under a larger artifact budget.
+                    search_exhausted = False
+                    return RegionExecutionResult(
+                        plan.region_id, False, next_cp, tuple(candidates),
+                        tuple(negatives), next_cp.requests, next_cp.bytes_read,
+                    )
+                if commit_batch is not None:
                     outcome = commit_batch(tuple(batch_candidates), next_cp)
                     if inspect.isawaitable(outcome):
                         await outcome
@@ -110,13 +120,15 @@ class ExplorationExecutor:
                     or cp.requests >= plan.hard_bounds.max_requests
                     or self.clock() - started >= plan.hard_bounds.max_wall_seconds
                 ):
+                    search_exhausted = False
                     return RegionExecutionResult(plan.region_id, False, cp, tuple(candidates), tuple(negatives), cp.requests, cp.bytes_read)
                 if batch.terminal:
                     break
             if cp.query_index <= index:
+                search_exhausted = False
                 break
 
-        terminal = cp.query_index >= len(queries) and (plan.query_family is not None or plan.enumerator.kind in {"STATIC_LIST", "FILENAME_PATTERN"})
+        terminal = search_exhausted and cp.query_index >= len(queries)
         return RegionExecutionResult(plan.region_id, terminal, cp, tuple(candidates), tuple(negatives), cp.requests, cp.bytes_read)
 
     def _batches(self, plan: CompiledScoutPlan, *, query: str, checkpoint: RegionExecutionCheckpoint):
