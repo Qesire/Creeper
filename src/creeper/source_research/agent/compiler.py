@@ -292,7 +292,7 @@ class UnifiedResearchCompiler:
         }:
             if not isinstance(context, ResearchCompilerContext):
                 raise CompilerGateError("research task requires ResearchCompilerContext")
-            self._reject_common_crawl_identity(
+            UnifiedResearchCompiler._reject_common_crawl_identity(
                 context.root_id, *context.root_capabilities
             )
             if context.equivalent_unexecuted_program:
