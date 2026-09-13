@@ -18,6 +18,7 @@ from threading import Event, Lock, Thread
 
 from creeper.authority.baseline_index import BaselineIndex, YEAR_BITS
 from creeper.evidence.planner import EvidencePlanner
+from creeper.evidence.router import EvidenceRouter
 from creeper.evidence.rdap_candidates import rdap_parent_candidate
 from creeper.evidence.policies import EvidenceQueryKey, TemporalScope
 from creeper.records.models import HostObservation
@@ -138,8 +139,9 @@ class SourceProducer:
             for provider, value in capacities.items()
         ):
             raise ValueError("backlog capacities must be non-negative integers")
-        if not capacities:
-            raise ValueError("at least one evidence backlog capacity is required")
+        # Direct-year sources do not require any external provider lane.
+        # An empty mapping is therefore valid; discovery-only sources simply
+        # remain admission-blocked until their provider capacity is configured.
 
         self.baseline = baseline
         self.control_store = control_store
@@ -162,6 +164,11 @@ class SourceProducer:
         self.reservation_grace_seconds = reservation_grace_seconds
         self.evidence_planner = EvidencePlanner()
         self.admission = EvidenceBacklogAdmission(control_store)
+        self.evidence_router = EvidenceRouter(
+            control_store,
+            self.admission,
+            backlog_capacities=self.backlog_capacities,
+        )
 
     def refresh_workset(
         self,
@@ -189,37 +196,41 @@ class SourceProducer:
 
     def _grant_fresh_lease(
         self,
-    ) -> tuple[LeaseCandidate, WorkLease, CapacityReservation] | None:
+    ) -> tuple[LeaseCandidate, WorkLease, CapacityReservation | None] | None:
         self.control_store.recover_expired_leases()
         for candidate in self.scheduler.rank(self.candidates):
             template = candidate.lease
             if template is None:
                 raise ValueError("source candidate requires a lease template")
+            if candidate.reservoir is None:
+                raise ValueError("source candidate requires a reservoir")
             provider = candidate.evidence_provider
-            try:
-                capacity = self.backlog_capacities[provider]
-            except KeyError as exc:
-                raise KeyError(f"no backlog capacity configured for {provider}") from exc
+            direct_source = candidate.reservoir.evidence_mode == "direct_year"
 
-            reservation_amount = (
-                candidate.expected_evidence_tasks
-                if candidate.reservation_evidence_tasks is None
-                else candidate.reservation_evidence_tasks
-            )
             postprocess_ttl = max(
                 60.0,
                 min(300.0, float(template.max_seconds)),
                 self.reservation_grace_seconds,
             )
             ownership_ttl = float(template.max_seconds) + postprocess_ttl
-            reservation = self.admission.try_reserve(
-                provider=provider,
-                amount=reservation_amount,
-                capacity=capacity,
-                ttl_seconds=ownership_ttl,
-            )
-            if reservation is None:
-                continue
+            reservation: CapacityReservation | None = None
+            if not direct_source:
+                capacity = self.backlog_capacities.get(provider, 0)
+                if capacity <= 0:
+                    continue
+                reservation_amount = (
+                    candidate.expected_evidence_tasks
+                    if candidate.reservation_evidence_tasks is None
+                    else candidate.reservation_evidence_tasks
+                )
+                reservation = self.admission.try_reserve(
+                    provider=provider,
+                    amount=reservation_amount,
+                    capacity=capacity,
+                    ttl_seconds=ownership_ttl,
+                )
+                if reservation is None:
+                    continue
             try:
                 lease = self.control_store.grant_fresh_lease(
                     candidate.reservoir_id,
@@ -229,7 +240,9 @@ class SourceProducer:
                     max_bytes=template.max_bytes,
                     max_seconds=template.max_seconds,
                     resource_class=template.resource_class,
-                    expected_evidence_tasks=candidate.expected_evidence_tasks,
+                    expected_evidence_tasks=(
+                        0 if direct_source else candidate.expected_evidence_tasks
+                    ),
                     expected_novel_eed=candidate.expected_novel_eed,
                     now=float(self.control_store.clock()),
                     lease_ttl_seconds=ownership_ttl,
@@ -237,7 +250,8 @@ class SourceProducer:
                 if lease is None:
                     self.admission.release(reservation)
                     continue
-                self.admission.bind_lease(reservation, lease.lease_id)
+                if reservation is not None:
+                    self.admission.bind_lease(reservation, lease.lease_id)
                 return candidate, lease, reservation
             except BaseException:
                 self.admission.release(reservation)
@@ -259,6 +273,13 @@ class SourceProducer:
             )
         )
         queues = BoundedQueues(**self.queue_capacities)
+        # Spillover routing is provider-specific and opportunistic.  Failure to
+        # make room in one lane (especially Wayback) cannot prevent the source
+        # scheduler from considering direct-year reservoirs below.
+        self.evidence_router.flush_pending(
+            ttl_seconds=max(60.0, self.reservation_grace_seconds),
+            max_needs=256,
+        )
         granted = self._grant_fresh_lease()
         if granted is None:
             # A READY durable source with no grant means admission/backpressure
@@ -295,10 +316,11 @@ class SourceProducer:
             now = float(self.control_store.clock())
             if not force and now < next_renew_at:
                 return
-            reservation = self.admission.renew(
-                reservation,
-                ttl_seconds=postprocess_ttl,
-            )
+            if reservation is not None:
+                reservation = self.admission.renew(
+                    reservation,
+                    ttl_seconds=postprocess_ttl,
+                )
             self.control_store.renew_lease(
                 running,
                 ttl_seconds=postprocess_ttl,
@@ -322,11 +344,26 @@ class SourceProducer:
 
             def enqueue_external_keys(keys: Iterable[EvidenceQueryKey]) -> None:
                 nonlocal enqueued
-                fresh = [key for key in keys if key not in scheduled_keys]
+                routed = self.evidence_router.route_external(
+                    keys,
+                    preferred_provider=provider,
+                )
+                fresh = [key for key in routed if key not in scheduled_keys]
                 if not fresh:
                     return
                 for key in fresh:
                     scheduled_keys[key] = None
+                if reservation is None:
+                    routed_result = self.evidence_router.enqueue_or_stage(
+                        fresh,
+                        source_key=origin_source_key,
+                        reservoir_id=candidate.reservoir_id,
+                        lease_id=running.lease_id,
+                        ttl_seconds=postprocess_ttl,
+                        preferred_provider=provider,
+                    )
+                    enqueued += routed_result.enqueued
+                    return
                 enqueued += self.admission.enqueue_reserved(
                     reservation,
                     fresh,
@@ -338,39 +375,22 @@ class SourceProducer:
             def enqueue_auxiliary_keys(
                 aux_provider: str,
                 keys: Iterable[EvidenceQueryKey],
-            ) -> int | None:
-                """Enqueue independently budgeted provider work with source lineage."""
+            ) -> int:
+                """Route an auxiliary lane without borrowing Wayback capacity."""
                 nonlocal enqueued
                 rows = list(dict.fromkeys(keys))
                 if not rows:
                     return 0
-                capacity = self.backlog_capacities.get(aux_provider, 0)
-                if capacity <= 0:
-                    return None
-                aux_reservation = self.admission.try_reserve(
-                    provider=aux_provider,
-                    amount=len(rows),
-                    capacity=capacity,
+                routed_result = self.evidence_router.enqueue_or_stage(
+                    rows,
+                    source_key=origin_source_key,
+                    reservoir_id=candidate.reservoir_id,
+                    lease_id=running.lease_id,
                     ttl_seconds=postprocess_ttl,
+                    preferred_provider=aux_provider,
                 )
-                if aux_reservation is None:
-                    return None
-                try:
-                    self.admission.bind_lease(
-                        aux_reservation,
-                        running.lease_id,
-                    )
-                    inserted = self.admission.enqueue_reserved(
-                        aux_reservation,
-                        rows,
-                        source_key=origin_source_key,
-                        reservoir_id=candidate.reservoir_id,
-                        lease_id=running.lease_id,
-                    )
-                    enqueued += inserted
-                    return inserted
-                finally:
-                    self.admission.release(aux_reservation)
+                enqueued += routed_result.enqueued
+                return routed_result.enqueued
 
             def resolve_pending() -> None:
                 nonlocal direct_committed, pipeline_batches, planning_observations
