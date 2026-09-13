@@ -38,5 +38,27 @@ class ResearchCompilerTests(unittest.TestCase):
         plan=ResearchCompiler().compile_response({"query":"q","regions":[region(expected_fanout=1, surface_kind="MANIFEST", hard_bounds={"max_requests":1})]})[0]
         self.assertEqual(plan.expected_fanout,1)
 
+    def test_rejects_query_family_expansion_above_policy(self):
+        with self.assertRaisesRegex(ResearchCompilerError, "query family expansion"):
+            ResearchCompiler().compile_response({
+                "query":"q",
+                "regions":[region(
+                    query_family={"A":list(range(513))},
+                    hard_bounds={"max_items":1},
+                    expected_fanout=513,
+                )],
+            })
+
+    def test_rejects_compiled_fanout_above_policy(self):
+        with self.assertRaisesRegex(ResearchCompilerError, "compiled fanout"):
+            ResearchCompiler().compile_response({
+                "query":"q",
+                "regions":[region(
+                    query_family={"A":list(range(64))},
+                    hard_bounds={"max_items":100},
+                    expected_fanout=4096,
+                )],
+            })
+
 if __name__=="__main__":
     unittest.main()
