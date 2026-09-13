@@ -245,36 +245,37 @@ def load_source_discovery_config(config_path: Path) -> SourceDiscoveryServiceCon
     )
 
     coordinator_raw = _table(root, "coordinator")
+    coordinator_defaults = CoordinatorConfig()
     coordinator = CoordinatorConfig(
-        triage_parallelism=_positive_int(coordinator_raw.get("triage_parallelism", 4), name="coordinator.triage_parallelism"),
+        triage_parallelism=_positive_int(coordinator_raw.get("triage_parallelism", coordinator_defaults.triage_parallelism), name="coordinator.triage_parallelism"),
         scout_parallelism=_positive_int(
-            coordinator_raw.get("scout_parallelism", pool.scout_parallelism), name="coordinator.scout_parallelism"
+            coordinator_raw.get("scout_parallelism", coordinator_defaults.scout_parallelism), name="coordinator.scout_parallelism"
         ),
-        search_parallelism=_positive_int(coordinator_raw.get("search_parallelism", 3), name="coordinator.search_parallelism"),
+        search_parallelism=_positive_int(coordinator_raw.get("search_parallelism", coordinator_defaults.search_parallelism), name="coordinator.search_parallelism"),
         failure_retry_seconds=_positive_float(
-            coordinator_raw.get("failure_retry_seconds", 30.0), name="coordinator.failure_retry_seconds"
+            coordinator_raw.get("failure_retry_seconds", coordinator_defaults.failure_retry_seconds), name="coordinator.failure_retry_seconds"
         ),
         search_cooldown_seconds=_nonnegative_float(
-            coordinator_raw.get("search_cooldown_seconds", 30.0), name="coordinator.search_cooldown_seconds"
+            coordinator_raw.get("search_cooldown_seconds", coordinator_defaults.search_cooldown_seconds), name="coordinator.search_cooldown_seconds"
         ),
         search_ucb_exploration=_nonnegative_float(
-            coordinator_raw.get("search_ucb_exploration", 0.35),
+            coordinator_raw.get("search_ucb_exploration", coordinator_defaults.search_ucb_exploration),
             name="coordinator.search_ucb_exploration",
         ),
         stagnation_window=_positive_int(
-            coordinator_raw.get("stagnation_window", 6),
+            coordinator_raw.get("stagnation_window", coordinator_defaults.stagnation_window),
             name="coordinator.stagnation_window",
         ),
         region_parallelism=_positive_int(
-            coordinator_raw.get("region_parallelism", 2),
+            coordinator_raw.get("region_parallelism", coordinator_defaults.region_parallelism),
             name="coordinator.region_parallelism",
         ),
         research_poll_seconds=_nonnegative_float(
-            coordinator_raw.get("research_poll_seconds", 0.0),
+            coordinator_raw.get("research_poll_seconds", coordinator_defaults.research_poll_seconds),
             name="coordinator.research_poll_seconds",
         ),
         nonblocking_research=_strict_bool(
-            coordinator_raw.get("nonblocking_research", False),
+            coordinator_raw.get("nonblocking_research", coordinator_defaults.nonblocking_research),
             name="coordinator.nonblocking_research",
         ),
     )
