@@ -18,6 +18,7 @@ from creeper.autopilot import (
     run_autopilot,
 )
 from creeper.runtime.resource_governor import GovernorState, ResourceSample
+from creeper.source_cli import SourceProducerMode
 
 
 class _FakeProcess:
@@ -42,6 +43,21 @@ class _FakeProcess:
 
 
 class AutopilotTests(unittest.TestCase):
+    def test_manual_static_topology_is_rejected_before_child_creation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = AutopilotConfig(
+                source_discovery_config=root / "discovery.toml",
+                source_producer_config=root / "producer.toml",
+                runtime_data_root=root / "runtime",
+                supervisor=SupervisorPolicy(),
+                evidence=EvidenceServicePolicy(),
+                producer_mode=SourceProducerMode.STATIC,
+                producer_mode_explicit=True,
+            )
+            with self.assertRaisesRegex(ValueError, "static producer"):
+                build_child_specs(config)
+
     def _config(self, root: Path, **supervisor_changes):
         policy = SupervisorPolicy(**supervisor_changes)
         return AutopilotConfig(
@@ -619,7 +635,7 @@ class AutopilotTests(unittest.TestCase):
             )
             self.assertEqual(loaded.resource_governor.recovery_samples, 7)
 
-    def test_config_requires_shared_runtime_and_accepts_static_producer(self):
+    def test_config_requires_shared_runtime_and_rejects_static_producer(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             scrapy = root / "scrapy"
@@ -671,16 +687,75 @@ class AutopilotTests(unittest.TestCase):
                         'source_mode = "static"',
                         f'runtime_data_root = "{runtime}"',
                         f'baseline_index = "{root / "baseline.sqlite3"}"',
+                        f'dataset = "{root / "static-hosts.txt"}"',
                     ]
                 ),
                 encoding="utf-8",
             )
-            static_loaded = load_autopilot_config(config)
-            self.assertEqual(static_loaded.runtime_data_root, runtime.resolve())
+            with self.assertRaisesRegex(
+                ValueError,
+                "static producer topology is rejected",
+            ):
+                load_autopilot_config(config)
+
+
+    def test_config_omitted_source_mode_defaults_to_activated_and_surfaces_topology(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            scrapy = root / "scrapy"
+            scrapy.mkdir()
+            runtime = root / "runtime"
+            discovery = root / "discovery.toml"
+            discovery.write_text(
+                "\n".join(
+                    [
+                        f'runtime_data_root = "{runtime}"',
+                        f'scrapy_project_dir = "{scrapy}"',
+                        "",
+                        "[agent]",
+                        'command = ["python", "agent.py"]',
+                        'backend = "fixture"',
+                        'actor = "agent:test"',
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            producer = root / "producer.toml"
+            producer.write_text(
+                "\n".join(
+                    [
+                        f'runtime_data_root = "{runtime}"',
+                        f'baseline_index = "{root / "baseline.sqlite3"}"',
+                        "",
+                        "[limits]",
+                        "source_workers = 3",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            config = root / "autopilot.toml"
+            config.write_text(
+                "\n".join(
+                    [
+                        f'source_discovery_config = "{discovery}"',
+                        f'source_producer_config = "{producer}"',
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            loaded = load_autopilot_config(config)
+
+            self.assertEqual(loaded.producer_mode, SourceProducerMode.ACTIVATED)
+            self.assertFalse(loaded.producer_mode_explicit)
+            self.assertEqual(loaded.source_producer_workers, 3)
+            self.assertFalse(loaded.historical_index_enabled)
+            self.assertEqual(loaded.runtime_data_root, runtime.resolve())
             self.assertEqual(
-                static_loaded.baseline_index,
+                loaded.baseline_index,
                 (root / "baseline.sqlite3").resolve(),
             )
+
 
 
 if __name__ == "__main__":
