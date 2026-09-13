@@ -8,6 +8,7 @@ import os
 import tempfile
 import zipfile
 from collections.abc import Iterable, Iterator
+from contextlib import ExitStack
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
@@ -403,226 +404,229 @@ def build_streaming_submission_zip(
     archive_tmp = output_dir / f".{archive.name}.partial"
     archive_tmp.unlink(missing_ok=True)
 
-    with tempfile.TemporaryDirectory(
-        prefix=".creeper-export-",
-        dir=output_dir,
-    ) as tmp:
-        staging = Path(tmp)
-        evidence_stage = _stage_evidence(staging, evidence_records)
-        candidate_stage = _stage_candidates(staging, snapshot, candidate_store)
+    with ExitStack() as cleanup:
+        cleanup.callback(archive_tmp.unlink, missing_ok=True)
+        with tempfile.TemporaryDirectory(
+            prefix=".creeper-export-",
+            dir=output_dir,
+        ) as tmp:
+            staging = Path(tmp)
+            evidence_stage = _stage_evidence(staging, evidence_records)
+            candidate_stage = _stage_candidates(staging, snapshot, candidate_store)
 
-        hashes: dict[str, str] = {}
-        source_files: list[str] = []
-        with zipfile.ZipFile(
-            archive_tmp,
-            "w",
-            compression=zipfile.ZIP_DEFLATED,
-            allowZip64=True,
-        ) as bundle:
-            for year in range(1996, 2002):
-                _write_file(
-                    bundle,
-                    f"{year}.txt",
-                    evidence_stage["annual_paths"][year],
-                    created_at=snapshot.created_at,
-                    hashes=hashes,
-                )
-            _write_file(
-                bundle,
-                "evidence.jsonl",
-                evidence_stage["evidence_path"],
-                created_at=snapshot.created_at,
-                hashes=hashes,
-            )
-            for archive_path, path in candidate_stage["paths"].items():
-                _write_file(
-                    bundle,
-                    archive_path,
-                    path,
-                    created_at=snapshot.created_at,
-                    hashes=hashes,
-                )
-
-            _write_bytes(
-                bundle,
-                "reports/eed.json",
-                json.dumps(
-                    snapshot.eed_report,
-                    indent=2,
-                    sort_keys=True,
-                ).encode(),
-                created_at=snapshot.created_at,
-                hashes=hashes,
-            )
-            streamed_count = int(evidence_stage["count"])
-            reconciliation = {
-                "baseline_id": snapshot.baseline_id,
-                "baseline_eed": snapshot.baseline_eed,
-                "input_records": (
-                    streamed_count
-                    + snapshot.invalid_count
-                    + snapshot.overlap_count
-                    + snapshot.within_year_duplicates
-                    + int(evidence_stage["duplicate_count"])
-                ),
-                "within_year_duplicates": (
-                    snapshot.within_year_duplicates
-                    + int(evidence_stage["duplicate_count"])
-                ),
-                "invalid_records": snapshot.invalid_count,
-                "baseline_overlap": snapshot.overlap_count,
-                "novel_host_years": streamed_count,
-                "novel_eed": snapshot.novel_eed,
-                "growth_rate": snapshot.growth_rate,
-            }
-            _write_bytes(
-                bundle,
-                "reports/baseline_reconciliation.json",
-                json.dumps(
-                    reconciliation,
-                    indent=2,
-                    sort_keys=True,
-                ).encode(),
-                created_at=snapshot.created_at,
-                hashes=hashes,
-            )
-            _write_bytes(
-                bundle,
-                "reports/source_contribution.json",
-                json.dumps(
-                    _source_contribution(
-                        snapshot,
-                        total_records=streamed_count,
-                        direct_records=int(evidence_stage["direct_count"]),
-                    ),
-                    indent=2,
-                    sort_keys=True,
-                ).encode(),
-                created_at=snapshot.created_at,
-                hashes=hashes,
-            )
-            _write_bytes(
-                bundle,
-                "cdx_audit.json",
-                json.dumps(
-                    list(snapshot.cdx_audit_set),
-                    indent=2,
-                ).encode(),
-                created_at=snapshot.created_at,
-                hashes=hashes,
-            )
-            _write_bytes(
-                bundle,
-                "source_reports.json",
-                json.dumps(
-                    list(snapshot.source_report_set),
-                    indent=2,
-                ).encode(),
-                created_at=snapshot.created_at,
-                hashes=hashes,
-            )
-            _write_bytes(
-                bundle,
-                "method_failure_summary.json",
-                json.dumps(
-                    {
-                        "incomplete_query_count": snapshot.incomplete_query_count,
-                    },
-                    indent=2,
-                ).encode(),
-                created_at=snapshot.created_at,
-                hashes=hashes,
-            )
-
-            documentation_archive = f"documentation/{documentation_path.name}"
-            _write_file(
-                bundle,
-                documentation_archive,
-                documentation_path,
-                created_at=snapshot.created_at,
-                hashes=hashes,
-            )
-
-            for path, relative in _iter_source_files(
-                source_root,
-                excluded_root=output_dir,
-            ):
-                _write_file(
-                    bundle,
-                    f"code/{relative}",
-                    path,
-                    created_at=snapshot.created_at,
-                    hashes=hashes,
-                )
-                source_files.append(relative)
-
-            artifact_rows = artifact_manifest_rows(resolved_artifacts)
-            _write_bytes(
-                bundle,
-                "artifacts/manifest.json",
-                json.dumps(
-                    artifact_rows,
-                    indent=2,
-                    sort_keys=True,
-                ).encode(),
-                created_at=snapshot.created_at,
-                hashes=hashes,
-            )
-            for artifact in resolved_artifacts:
-                _write_file(
-                    bundle,
-                    artifact.archive_path,
-                    artifact.source_path,
-                    created_at=snapshot.created_at,
-                    hashes=hashes,
-                    expected=artifact,
-                )
-
-            manifest = {
-                "format_version": "submission-v2",
-                "exporter": "streaming-v1",
-                "submission_snapshot_id": snapshot.submission_snapshot_id,
-                "created_at": snapshot.created_at,
-                "baseline_id": snapshot.baseline_id,
-                "baseline_hashes": snapshot.baseline_hashes,
-                "candidate_file_hash": snapshot.candidate_file_hash,
-                "model_hash": snapshot.model_hash,
-                "baseline_eed": snapshot.baseline_eed,
-                "authority_digest": snapshot.authority_digest,
-                "policy_versions": {
-                    "normalizer": snapshot.normalizer_version,
-                    "evidence": snapshot.evidence_policy_version,
-                    "eed": snapshot.eed_policy_version,
-                },
-                "code_revision": snapshot.code_revision,
-                "novel_records": streamed_count,
-                "active_candidates": candidate_stage["active_count"],
-                "active_candidate_scopes": candidate_stage["active_scopes"],
-                "isc_reference_records": candidate_stage["isc_count"],
-                "unparsed_records": candidate_stage["unparsed_count"],
-                "source_files": source_files,
-                "documentation_file": documentation_archive,
-                "novel_eed": snapshot.novel_eed,
-                "growth_rate": snapshot.growth_rate,
-                "evidence_coverage": snapshot.evidence_coverage,
-                "artifacts": artifact_rows,
-                "entry_sha256": {
-                    path: hashes[path]
-                    for path in sorted(hashes)
-                },
-            }
-            manifest_payload = json.dumps(
-                manifest,
-                indent=2,
-                sort_keys=True,
-            ).encode()
-            # MANIFEST is deliberately last and is not self-hashed.
-            with bundle.open(
-                _zip_info("MANIFEST.json", snapshot.created_at),
+            hashes: dict[str, str] = {}
+            source_files: list[str] = []
+            with zipfile.ZipFile(
+                archive_tmp,
                 "w",
-            ) as target:
-                target.write(manifest_payload)
-        # Only publish a final archive after every entry (including required
-        # external artifacts) has been copied and re-verified successfully.
-        os.replace(archive_tmp, archive)
+                compression=zipfile.ZIP_DEFLATED,
+                allowZip64=True,
+            ) as bundle:
+                for year in range(1996, 2002):
+                    _write_file(
+                        bundle,
+                        f"{year}.txt",
+                        evidence_stage["annual_paths"][year],
+                        created_at=snapshot.created_at,
+                        hashes=hashes,
+                    )
+                _write_file(
+                    bundle,
+                    "evidence.jsonl",
+                    evidence_stage["evidence_path"],
+                    created_at=snapshot.created_at,
+                    hashes=hashes,
+                )
+                for archive_path, path in candidate_stage["paths"].items():
+                    _write_file(
+                        bundle,
+                        archive_path,
+                        path,
+                        created_at=snapshot.created_at,
+                        hashes=hashes,
+                    )
+
+                _write_bytes(
+                    bundle,
+                    "reports/eed.json",
+                    json.dumps(
+                        snapshot.eed_report,
+                        indent=2,
+                        sort_keys=True,
+                    ).encode(),
+                    created_at=snapshot.created_at,
+                    hashes=hashes,
+                )
+                streamed_count = int(evidence_stage["count"])
+                reconciliation = {
+                    "baseline_id": snapshot.baseline_id,
+                    "baseline_eed": snapshot.baseline_eed,
+                    "input_records": (
+                        streamed_count
+                        + snapshot.invalid_count
+                        + snapshot.overlap_count
+                        + snapshot.within_year_duplicates
+                        + int(evidence_stage["duplicate_count"])
+                    ),
+                    "within_year_duplicates": (
+                        snapshot.within_year_duplicates
+                        + int(evidence_stage["duplicate_count"])
+                    ),
+                    "invalid_records": snapshot.invalid_count,
+                    "baseline_overlap": snapshot.overlap_count,
+                    "novel_host_years": streamed_count,
+                    "novel_eed": snapshot.novel_eed,
+                    "growth_rate": snapshot.growth_rate,
+                }
+                _write_bytes(
+                    bundle,
+                    "reports/baseline_reconciliation.json",
+                    json.dumps(
+                        reconciliation,
+                        indent=2,
+                        sort_keys=True,
+                    ).encode(),
+                    created_at=snapshot.created_at,
+                    hashes=hashes,
+                )
+                _write_bytes(
+                    bundle,
+                    "reports/source_contribution.json",
+                    json.dumps(
+                        _source_contribution(
+                            snapshot,
+                            total_records=streamed_count,
+                            direct_records=int(evidence_stage["direct_count"]),
+                        ),
+                        indent=2,
+                        sort_keys=True,
+                    ).encode(),
+                    created_at=snapshot.created_at,
+                    hashes=hashes,
+                )
+                _write_bytes(
+                    bundle,
+                    "cdx_audit.json",
+                    json.dumps(
+                        list(snapshot.cdx_audit_set),
+                        indent=2,
+                    ).encode(),
+                    created_at=snapshot.created_at,
+                    hashes=hashes,
+                )
+                _write_bytes(
+                    bundle,
+                    "source_reports.json",
+                    json.dumps(
+                        list(snapshot.source_report_set),
+                        indent=2,
+                    ).encode(),
+                    created_at=snapshot.created_at,
+                    hashes=hashes,
+                )
+                _write_bytes(
+                    bundle,
+                    "method_failure_summary.json",
+                    json.dumps(
+                        {
+                            "incomplete_query_count": snapshot.incomplete_query_count,
+                        },
+                        indent=2,
+                    ).encode(),
+                    created_at=snapshot.created_at,
+                    hashes=hashes,
+                )
+
+                documentation_archive = f"documentation/{documentation_path.name}"
+                _write_file(
+                    bundle,
+                    documentation_archive,
+                    documentation_path,
+                    created_at=snapshot.created_at,
+                    hashes=hashes,
+                )
+
+                for path, relative in _iter_source_files(
+                    source_root,
+                    excluded_root=output_dir,
+                ):
+                    _write_file(
+                        bundle,
+                        f"code/{relative}",
+                        path,
+                        created_at=snapshot.created_at,
+                        hashes=hashes,
+                    )
+                    source_files.append(relative)
+
+                artifact_rows = artifact_manifest_rows(resolved_artifacts)
+                _write_bytes(
+                    bundle,
+                    "artifacts/manifest.json",
+                    json.dumps(
+                        artifact_rows,
+                        indent=2,
+                        sort_keys=True,
+                    ).encode(),
+                    created_at=snapshot.created_at,
+                    hashes=hashes,
+                )
+                for artifact in resolved_artifacts:
+                    _write_file(
+                        bundle,
+                        artifact.archive_path,
+                        artifact.source_path,
+                        created_at=snapshot.created_at,
+                        hashes=hashes,
+                        expected=artifact,
+                    )
+
+                manifest = {
+                    "format_version": "submission-v2",
+                    "exporter": "streaming-v1",
+                    "submission_snapshot_id": snapshot.submission_snapshot_id,
+                    "created_at": snapshot.created_at,
+                    "baseline_id": snapshot.baseline_id,
+                    "baseline_hashes": snapshot.baseline_hashes,
+                    "candidate_file_hash": snapshot.candidate_file_hash,
+                    "model_hash": snapshot.model_hash,
+                    "baseline_eed": snapshot.baseline_eed,
+                    "authority_digest": snapshot.authority_digest,
+                    "policy_versions": {
+                        "normalizer": snapshot.normalizer_version,
+                        "evidence": snapshot.evidence_policy_version,
+                        "eed": snapshot.eed_policy_version,
+                    },
+                    "code_revision": snapshot.code_revision,
+                    "novel_records": streamed_count,
+                    "active_candidates": candidate_stage["active_count"],
+                    "active_candidate_scopes": candidate_stage["active_scopes"],
+                    "isc_reference_records": candidate_stage["isc_count"],
+                    "unparsed_records": candidate_stage["unparsed_count"],
+                    "source_files": source_files,
+                    "documentation_file": documentation_archive,
+                    "novel_eed": snapshot.novel_eed,
+                    "growth_rate": snapshot.growth_rate,
+                    "evidence_coverage": snapshot.evidence_coverage,
+                    "artifacts": artifact_rows,
+                    "entry_sha256": {
+                        path: hashes[path]
+                        for path in sorted(hashes)
+                    },
+                }
+                manifest_payload = json.dumps(
+                    manifest,
+                    indent=2,
+                    sort_keys=True,
+                ).encode()
+                # MANIFEST is deliberately last and is not self-hashed.
+                with bundle.open(
+                    _zip_info("MANIFEST.json", snapshot.created_at),
+                    "w",
+                ) as target:
+                    target.write(manifest_payload)
+            # Only publish a final archive after every entry (including required
+            # external artifacts) has been copied and re-verified successfully.
+            os.replace(archive_tmp, archive)
+        cleanup.pop_all()
     return archive
