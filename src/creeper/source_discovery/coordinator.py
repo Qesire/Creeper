@@ -29,6 +29,10 @@ from creeper.source_discovery.models import (
     source_key,
 )
 from creeper.source_discovery.registry import SourceDiscoveryRegistry
+from creeper.source_discovery.research_trigger import (
+    ResearchDirective,
+    ResearchTriggerSnapshot,
+)
 from creeper.source_discovery.saturation import SourceSaturationController
 
 
@@ -147,6 +151,16 @@ class CoordinatorCycleReport:
     search_candidates_dropped: int = 0
     search_failures: int = 0
     search_backoff_skipped: int = 0
+    regions_started: int = 0
+    regions_completed: int = 0
+    regions_exhausted: int = 0
+    region_candidates_registered: int = 0
+    research_active: bool = False
+    research_started: int = 0
+    research_completed: int = 0
+    research_failures: int = 0
+    research_suppressed: int = 0
+    agent_hot_path_block_seconds: float = 0.0
 
 
 T = TypeVar("T")
@@ -162,6 +176,12 @@ class _Outcome(Generic[T]):
 TriageExecutor = Callable[[SourceCandidate], Awaitable[TriageResult]]
 ScoutExecutor = Callable[[SourceCandidate], Awaitable[ScoutResult]]
 SearchExecutor = Callable[[SearchDirective], Awaitable[SearchBatch]]
+RegionPlanner = Callable[[], tuple[object, ...]]
+RegionExecutor = Callable[[object], Awaitable[object]]
+ResearchSnapshotProvider = Callable[[], ResearchTriggerSnapshot]
+ResearchExecutor = Callable[[ResearchDirective], Awaitable[object]]
+ResearchResultCommitter = Callable[[ResearchDirective, object, float], None]
+ResearchFailureRecorder = Callable[[ResearchDirective, Exception, float], None]
 
 
 @contextmanager
@@ -211,8 +231,15 @@ class SourceDiscoveryCoordinator:
         search_parallelism: int = 3,
         failure_retry_seconds: float = 30.0,
         retry_clock=time.monotonic,
+        region_planner: RegionPlanner | None = None,
+        region_executor: RegionExecutor | None = None,
+        region_parallelism: int = 2,
+        research_snapshot_provider: ResearchSnapshotProvider | None = None,
+        research_executor: ResearchExecutor | None = None,
+        research_result_committer: ResearchResultCommitter | None = None,
+        research_failure_recorder: ResearchFailureRecorder | None = None,
     ) -> None:
-        if triage_parallelism < 1 or search_parallelism < 1:
+        if triage_parallelism < 1 or search_parallelism < 1 or region_parallelism < 1:
             raise ValueError("coordinator parallelism must be positive")
         if scout_parallelism is None:
             scout_parallelism = manager.targets.scout_parallelism
@@ -248,6 +275,22 @@ class SourceDiscoveryCoordinator:
         self.retry_clock = retry_clock
         self._startup_recovered = False
         self._search_retry_deadlines: dict[str, float] = {}
+        if (region_planner is None) != (region_executor is None):
+            raise ValueError("region_planner and region_executor must be configured together")
+        if research_executor is not None and research_snapshot_provider is None:
+            raise ValueError("research_snapshot_provider is required with research_executor")
+        self.region_planner = region_planner
+        self.region_executor = region_executor
+        self.region_parallelism = int(region_parallelism)
+        self.research_snapshot_provider = research_snapshot_provider
+        self.research_executor = research_executor
+        self.research_result_committer = research_result_committer
+        self.research_failure_recorder = research_failure_recorder
+        self._research_task: asyncio.Task[_Outcome[object]] | None = None
+        self._research_directive: ResearchDirective | None = None
+        self._research_started_at: float | None = None
+        self._last_research_started_at: float | None = None
+        self._research_context_failures: dict[str, int] = {}
 
     @staticmethod
     def _failure_reason(stage: str, error: Exception) -> str:
@@ -600,9 +643,160 @@ class SourceDiscoveryCoordinator:
             counts["search_candidates_registered"] += len(accepted)
             counts["search_candidates_dropped"] += dropped
 
+    async def _poll_background_research(
+        self,
+        counts: dict[str, int | bool | float],
+    ) -> None:
+        """Commit a completed slow child without ever waiting for it here."""
+        task = self._research_task
+        directive = self._research_directive
+        if task is None or directive is None or not task.done():
+            return
+
+        started_at = self._research_started_at
+        self._research_task = None
+        self._research_directive = None
+        self._research_started_at = None
+        try:
+            outcome = task.result()
+        except asyncio.CancelledError as exc:
+            outcome = _Outcome(error=exc)
+        except Exception as exc:  # defensive: _capture normally owns exceptions
+            outcome = _Outcome(error=exc)
+
+        elapsed = outcome.elapsed_seconds
+        if elapsed <= 0.0 and started_at is not None:
+            elapsed = max(0.0, float(self.retry_clock()) - started_at)
+
+        if outcome.error is not None:
+            counts["research_failures"] += 1
+            self._research_context_failures[directive.context_key] = (
+                self._research_context_failures.get(directive.context_key, 0) + 1
+            )
+            if self.research_failure_recorder is not None:
+                self.research_failure_recorder(directive, outcome.error, elapsed)
+            return
+
+        self._research_context_failures.pop(directive.context_key, None)
+        if self.research_result_committer is not None and outcome.value is not None:
+            self.research_result_committer(directive, outcome.value, elapsed)
+        counts["research_completed"] += 1
+
+    async def _run_regions(
+        self,
+        counts: dict[str, int | bool | float],
+    ) -> None:
+        if self.region_planner is None or self.region_executor is None:
+            return
+        regions = tuple(self.region_planner())[: self.region_parallelism]
+        if not regions:
+            return
+        counts["regions_started"] += len(regions)
+        outcomes = await self._bounded_batch(
+            regions,
+            self.region_executor,
+            self.region_parallelism,
+        )
+        for outcome in outcomes:
+            if outcome.error is not None:
+                continue
+            counts["regions_completed"] += 1
+            value = outcome.value
+            if value is None:
+                continue
+            if bool(getattr(value, "terminal", False)):
+                counts["regions_exhausted"] += 1
+            counts["region_candidates_registered"] += int(
+                getattr(value, "new_candidates", 0)
+            )
+
+    def _current_research_snapshot(self) -> ResearchTriggerSnapshot | None:
+        if self.research_snapshot_provider is None:
+            return None
+        snapshot = self.research_snapshot_provider()
+        active = self._research_task is not None and not self._research_task.done()
+        last_started = snapshot.last_llm_started_at
+        if self._last_research_started_at is not None:
+            last_started = (
+                self._last_research_started_at
+                if last_started is None
+                else max(last_started, self._last_research_started_at)
+            )
+        local_failures = self._research_context_failures.get(
+            snapshot.context_hash or "default", 0
+        )
+        return replace(
+            snapshot,
+            active_llm_episode_id=(
+                snapshot.active_llm_episode_id
+                or ("background-research" if active else None)
+            ),
+            last_llm_started_at=last_started,
+            same_context_failures=max(snapshot.same_context_failures, local_failures),
+            now=snapshot.now if snapshot.now is not None else float(self.retry_clock()),
+        )
+
+    def _launch_background_research(
+        self,
+        counts: dict[str, int | bool | float],
+    ) -> None:
+        """Launch at most one slow child; never await it on the hot path."""
+        if self.research_executor is None:
+            return
+        if self._research_task is not None and not self._research_task.done():
+            counts["research_suppressed"] += 1
+            return
+        snapshot = self._current_research_snapshot()
+        if snapshot is None:
+            return
+        directive = self.manager.plan_research(snapshot)
+        if directive is None:
+            return
+        started_at = float(self.retry_clock())
+        self._research_directive = directive
+        self._research_started_at = started_at
+        self._last_research_started_at = started_at
+        self._research_task = asyncio.create_task(
+            _capture(self.research_executor(directive))
+        )
+        counts["research_started"] += 1
+
+    async def shutdown(self, grace_seconds: float = 2.0) -> None:
+        """Bound shutdown of one slow child without turning cancellation into success."""
+        if grace_seconds <= 0:
+            raise ValueError("grace_seconds must be positive")
+        task = self._research_task
+        if task is None:
+            return
+        if not task.done():
+            try:
+                await asyncio.wait_for(asyncio.shield(task), timeout=grace_seconds)
+            except TimeoutError:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+        self._research_task = None
+        self._research_directive = None
+        self._research_started_at = None
+
     async def run_once(self) -> CoordinatorCycleReport:
-        """Run one finite cycle. Independent external work overlaps; commits do not."""
+        """Run one finite cycle; slow research is always off the hot path."""
         with _coordinator_lock(self.lock_path):
+            counts: dict[str, int | bool | float] = {
+                "regions_started": 0,
+                "regions_completed": 0,
+                "regions_exhausted": 0,
+                "region_candidates_registered": 0,
+                "research_active": False,
+                "research_started": 0,
+                "research_completed": 0,
+                "research_failures": 0,
+                "research_suppressed": 0,
+                "agent_hot_path_block_seconds": 0.0,
+            }
+            await self._poll_background_research(counts)
             recovered = 0
             if not self._startup_recovered:
                 recovered = self._recover_stranded_scouts()
@@ -611,26 +805,22 @@ class SourceDiscoveryCoordinator:
 
             production_exhausted = self.registry.reconcile_exhausted_activations()
 
-            # Suppression authority is updated on the same serialized SQLite
-            # path as planning. A newly saturated origin must disappear from
-            # usable cold inventory before this cycle's manager.plan().
             suppressions_pruned = self.registry.prune_expired_suppressions()
             saturation_decisions = ()
             saturation_updates = 0
             if self.saturation_controller is not None:
-                saturation_decisions = (
-                    self.saturation_controller.evaluate_all()
-                )
+                saturation_decisions = self.saturation_controller.evaluate_all()
                 saturation_updates = sum(
                     int(self.saturation_controller.apply(decision))
                     for decision in saturation_decisions
                 )
 
             plan = self.manager.plan()
+            foreground_search = () if self.research_executor is not None else plan.search_directives
             search_directives, search_backoff_skipped = self._eligible_search_directives(
-                plan.search_directives
+                foreground_search
             )
-            counts = {
+            counts.update({
                 "recovered_scouts": recovered,
                 "production_exhausted": production_exhausted,
                 "suppressions_pruned": suppressions_pruned,
@@ -659,7 +849,7 @@ class SourceDiscoveryCoordinator:
                 "search_candidates_dropped": 0,
                 "search_failures": 0,
                 "search_backoff_skipped": search_backoff_skipped,
-            }
+            })
 
             for source_key in plan.activate_source_keys:
                 candidate = self.registry.get_candidate(source_key)
@@ -676,33 +866,25 @@ class SourceDiscoveryCoordinator:
             ]
             scout_candidates = self._claim_scouts(plan.scout_source_keys)
 
-            # Search, triage, and scout I/O are independent pipeline stages and
-            # run concurrently. No executor receives the SQLite connection.
             triage_task = self._bounded_batch(
-                triage_candidates,
-                self.triage_executor,
-                self.triage_parallelism,
+                triage_candidates, self.triage_executor, self.triage_parallelism
             )
             scout_task = self._bounded_batch(
-                scout_candidates,
-                self.scout_executor,
-                self.scout_parallelism,
+                scout_candidates, self.scout_executor, self.scout_parallelism
             )
             search_task = self._bounded_batch(
-                search_directives,
-                self.search_executor,
-                self.search_parallelism,
+                search_directives, self.search_executor, self.search_parallelism
             )
             triage_outcomes, scout_outcomes, search_outcomes = await asyncio.gather(
-                triage_task,
-                scout_task,
-                search_task,
+                triage_task, scout_task, search_task
             )
 
-            # All durable mutations return to this coordinator task. This keeps
-            # the sqlite3 connection thread-confined while external I/O remains concurrent.
             self._commit_triage(triage_candidates, triage_outcomes, counts)
             self._commit_scouts(scout_candidates, scout_outcomes, counts)
             self._commit_searches(search_directives, search_outcomes, counts)
-
+            await self._run_regions(counts)
+            self._launch_background_research(counts)
+            counts["research_active"] = bool(
+                self._research_task is not None and not self._research_task.done()
+            )
             return CoordinatorCycleReport(**counts)
