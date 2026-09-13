@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import unittest
 
+from creeper.source_discovery.arquivo_catalog_scout import AUDITED_ARQUIVO_CATALOG_URL
 from creeper.source_discovery.coordinator import ScoutDisposition, ScoutResult
 from creeper.source_discovery.models import ScoutMeasurement, SourceCandidate, SourceLevel
 from creeper.source_discovery.scout_router import SourceScoutRouter
@@ -31,6 +32,60 @@ class SourceScoutRouterTests(unittest.IsolatedAsyncioTestCase):
             elapsed_seconds=0.5,
             novel_eed=2.0,
         )
+
+    async def test_audited_arquivo_catalog_uses_dedicated_executor(self) -> None:
+        calls: list[str] = []
+
+        async def structural(candidate: SourceCandidate) -> ScoutResult:
+            calls.append(f"structural:{candidate.source_key}")
+            return ScoutResult(ScoutDisposition.HOLD, reason="generic")
+
+        async def arquivo(candidate: SourceCandidate) -> ScoutResult:
+            calls.append(f"arquivo:{candidate.source_key}")
+            return ScoutResult(ScoutDisposition.HOLD, reason="arquivo")
+
+        candidate = SourceCandidate(
+            canonical_entrypoint=AUDITED_ARQUIVO_CATALOG_URL,
+            source_family="PUBLIC_ARCHIVE_INDEX_CATALOG",
+            level=SourceLevel.METASOURCE,
+            discovered_by="curated-official-seed",
+            discovery_strategy="CURATED_DIRECT_CATALOG",
+            confidence=1.0,
+        )
+        result = await SourceScoutRouter(
+            structural_executor=structural,
+            arquivo_catalog_executor=arquivo,
+        )(candidate)
+
+        self.assertEqual(result.reason, "arquivo")
+        self.assertEqual(calls, [f"arquivo:{candidate.source_key}"])
+
+    async def test_generic_non_analogue_metasource_keeps_structural_route(self) -> None:
+        calls: list[str] = []
+
+        async def structural(candidate: SourceCandidate) -> ScoutResult:
+            calls.append(f"structural:{candidate.source_key}")
+            return ScoutResult(ScoutDisposition.HOLD, reason="generic")
+
+        async def arquivo(candidate: SourceCandidate) -> ScoutResult:
+            calls.append(f"arquivo:{candidate.source_key}")
+            return ScoutResult(ScoutDisposition.HOLD, reason="arquivo")
+
+        candidate = SourceCandidate(
+            canonical_entrypoint="https://example.com/catalog/",
+            source_family="PUBLIC_ARCHIVE_INDEX_CATALOG",
+            level=SourceLevel.METASOURCE,
+            discovered_by="curated-official-seed",
+            discovery_strategy="CURATED_DIRECT_CATALOG",
+            confidence=1.0,
+        )
+        result = await SourceScoutRouter(
+            structural_executor=structural,
+            arquivo_catalog_executor=arquivo,
+        )(candidate)
+
+        self.assertEqual(result.reason, "generic")
+        self.assertEqual(calls, [f"structural:{candidate.source_key}"])
 
     async def test_collection_routes_to_structural_executor_only(self) -> None:
         calls: list[str] = []
