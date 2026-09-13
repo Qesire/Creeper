@@ -86,6 +86,15 @@ class SourceEvidenceContract:
 
         if (
             self.authority is EvidenceAuthority.DIRECT_WEB_YEAR
+            and self.parser_kind == "warc_arc"
+        ):
+            raise ValueError(
+                "warc_arc DIRECT_WEB_YEAR contracts are not supported by the "
+                "current production adapter"
+            )
+
+        if (
+            self.authority is EvidenceAuthority.DIRECT_WEB_YEAR
             and self.parser_kind not in {"cdx", "cdxj"}
             and self.hostname_field is None
         ):
