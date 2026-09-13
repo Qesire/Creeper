@@ -15,6 +15,10 @@ from creeper.source_discovery.harvest import (
     RegionHarvestPolicy,
 )
 from creeper.source_discovery.harvest_service import RegionHarvestService
+from creeper.source_discovery.index_identity import (
+    HistoricalIndexObjectIdentity,
+    capture_local_identity,
+)
 from creeper.source_discovery.index_registry import IndexSpaceRegistry
 from creeper.source_discovery.index_space import (
     RegionKind,
@@ -92,6 +96,30 @@ class ExactRegionHarvestTests(unittest.TestCase):
         index = replace(compiled.index, locator=str(path))
         root_region = replace(compiled.root_region, locator=str(path))
         return replace(compiled, index=index, root_region=root_region)
+
+    def _compiled_remote(self, content_length: int):
+        self.counter += 1
+        candidate = SourceCandidate(
+            canonical_entrypoint=(
+                f"https://archive{self.counter}.example/remote.cdxj"
+            ),
+            source_family="BULK_ARTIFACT",
+            level=SourceLevel.SOURCE,
+            discovered_by="test",
+            discovery_strategy="DIRECT_EVIDENCE_BULK",
+            expected_year_from=1996,
+            expected_year_to=2001,
+            expected_volume=10_000,
+            direct_evidence_prior=1.0,
+            enumerability_prior=1.0,
+            confidence=1.0,
+        )
+        return compile_candidate_index_space(
+            candidate,
+            range_supported=True,
+            content_length=content_length,
+            direct_evidence_authority=True,
+        )
 
     def _register_ready(self, compiled):
         self.registry.register_index_space(compiled)
@@ -286,6 +314,7 @@ class ExactRegionHarvestTests(unittest.TestCase):
                     ),
                     "Content-Length": str(len(body)),
                     "Accept-Ranges": "bytes",
+                    "ETag": '"stable-v1"',
                 },
                 stream=httpx.ByteStream(body),
                 request=request,
@@ -569,6 +598,303 @@ class ExactRegionHarvestTests(unittest.TestCase):
             self.registry.get_region(region.region_key).state,
             RegionState.HARVEST_READY,
         )
+        self.assertEqual(self.evidence.host_year_count(), 0)
+
+    def test_same_size_inode_replacement_after_binding_fails_closed(self) -> None:
+        path = self.root / "inode-drift.cdxj"
+        path.write_text(
+            self._line("alpha", 1998, "0101000000"),
+            encoding="utf-8",
+        )
+        compiled = self._compiled_local(path)
+        region = self._register_ready(compiled)
+        bound = capture_local_identity(path)
+        self.registry.bind_object_identity(compiled.index.index_key, bound)
+
+        replacement = self.root / "inode-drift-replacement.cdxj"
+        replacement.write_text(
+            self._line("bravo", 1998, "0101000000"),
+            encoding="utf-8",
+        )
+        self.assertEqual(replacement.stat().st_size, path.stat().st_size)
+        replacement.replace(path)
+        self.assertNotEqual(path.stat().st_ino, bound.local_inode)
+
+        executor = RegionHarvestExecutor(
+            registry=self.registry,
+            baseline=self.baseline,
+            evidence_store=self.evidence,
+        )
+        with self.assertRaisesRegex(
+            RegionHarvestError,
+            "historical index object identity changed after tomography",
+        ):
+            executor.harvest(region.region_key)
+
+        self.assertEqual(self.evidence.host_year_count(), 0)
+        self.assertEqual(
+            self.registry.get_region(region.region_key).state,
+            RegionState.HARVEST_READY,
+        )
+
+    def test_same_size_in_place_rewrite_after_binding_fails_closed(self) -> None:
+        path = self.root / "content-drift.cdxj"
+        path.write_text(
+            self._line("alpha", 1998, "0101000000"),
+            encoding="utf-8",
+        )
+        compiled = self._compiled_local(path)
+        region = self._register_ready(compiled)
+        bound = capture_local_identity(path)
+        self.registry.bind_object_identity(compiled.index.index_key, bound)
+
+        path.write_text(
+            self._line("bravo", 1998, "0101000000"),
+            encoding="utf-8",
+        )
+        self.assertEqual(path.stat().st_size, bound.content_length)
+        self.assertEqual(path.stat().st_ino, bound.local_inode)
+
+        executor = RegionHarvestExecutor(
+            registry=self.registry,
+            baseline=self.baseline,
+            evidence_store=self.evidence,
+        )
+        with self.assertRaisesRegex(
+            RegionHarvestError,
+            "historical index object identity changed after tomography",
+        ):
+            executor.harvest(region.region_key)
+
+        self.assertEqual(self.evidence.host_year_count(), 0)
+
+    def test_resume_cursor_does_not_advance_after_same_size_object_drift(self) -> None:
+        path = self.root / "resume-drift.cdxj"
+        original = "".join(
+            [
+                self._line("alpha", 1997, "0101000000"),
+                self._line("bravo", 1998, "0101000000"),
+                self._line("gamma", 1999, "0101000000"),
+            ]
+        )
+        path.write_text(original, encoding="utf-8")
+        compiled = self._compiled_local(path)
+        region = self._register_ready(compiled)
+        executor = RegionHarvestExecutor(
+            registry=self.registry,
+            baseline=self.baseline,
+            evidence_store=self.evidence,
+            policy=RegionHarvestPolicy(
+                max_records_per_lease=1,
+                baseline_batch_size=1,
+            ),
+        )
+
+        first = executor.harvest(region.region_key)
+        self.assertIsNotNone(first)
+        assert first is not None
+        self.assertFalse(first.completed)
+        cursor = first.resume_cursor
+        self.assertIsNotNone(cursor)
+        self.assertEqual(self.evidence.host_year_count(), 1)
+
+        changed = "".join(
+            [
+                self._line("alpha", 1997, "0101000000"),
+                self._line("delta", 1998, "0101000000"),
+                self._line("omega", 1999, "0101000000"),
+            ]
+        )
+        self.assertEqual(len(changed.encode("utf-8")), len(original.encode("utf-8")))
+        path.write_text(changed, encoding="utf-8")
+
+        with self.assertRaisesRegex(
+            RegionHarvestError,
+            "historical index object identity changed after tomography",
+        ):
+            executor.harvest(region.region_key)
+
+        self.assertEqual(
+            self.registry.get_region_harvest_cursor(region.region_key),
+            cursor,
+        )
+        self.assertEqual(self.evidence.host_year_count(), 1)
+
+    def test_remote_same_length_changed_strong_etag_fails_closed(self) -> None:
+        payload = self._line("alpha", 1998, "0101000000").encode("utf-8")
+        compiled = self._compiled_remote(len(payload))
+        region = self._register_ready(compiled)
+        self.registry.bind_object_identity(
+            compiled.index.index_key,
+            HistoricalIndexObjectIdentity(
+                kind="remote",
+                content_length=len(payload),
+                etag='"object-v1"',
+            ),
+        )
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            self.assertEqual(request.headers.get("if-range"), '"object-v1"')
+            return httpx.Response(
+                206,
+                headers={
+                    "Content-Range": f"bytes 0-{len(payload) - 1}/{len(payload)}",
+                    "Content-Length": str(len(payload)),
+                    "ETag": '"object-v2"',
+                },
+                stream=httpx.ByteStream(payload),
+                request=request,
+            )
+
+        client = httpx.Client(transport=httpx.MockTransport(handler))
+        try:
+            executor = RegionHarvestExecutor(
+                registry=self.registry,
+                baseline=self.baseline,
+                evidence_store=self.evidence,
+                http_client=client,
+            )
+            with self.assertRaisesRegex(
+                RegionHarvestError,
+                "historical index object identity changed after tomography",
+            ):
+                executor.harvest(region.region_key)
+        finally:
+            client.close()
+
+        self.assertEqual(self.evidence.host_year_count(), 0)
+
+    def test_remote_same_length_changed_last_modified_fails_closed(self) -> None:
+        payload = self._line("alpha", 1998, "0101000000").encode("utf-8")
+        compiled = self._compiled_remote(len(payload))
+        region = self._register_ready(compiled)
+        original = "Mon, 01 Jan 2024 00:00:00 GMT"
+        self.registry.bind_object_identity(
+            compiled.index.index_key,
+            HistoricalIndexObjectIdentity(
+                kind="remote",
+                content_length=len(payload),
+                last_modified=original,
+            ),
+        )
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            self.assertEqual(request.headers.get("if-range"), original)
+            return httpx.Response(
+                206,
+                headers={
+                    "Content-Range": f"bytes 0-{len(payload) - 1}/{len(payload)}",
+                    "Content-Length": str(len(payload)),
+                    "Last-Modified": "Tue, 02 Jan 2024 00:00:00 GMT",
+                },
+                stream=httpx.ByteStream(payload),
+                request=request,
+            )
+
+        client = httpx.Client(transport=httpx.MockTransport(handler))
+        try:
+            executor = RegionHarvestExecutor(
+                registry=self.registry,
+                baseline=self.baseline,
+                evidence_store=self.evidence,
+                http_client=client,
+            )
+            with self.assertRaisesRegex(
+                RegionHarvestError,
+                "historical index object identity changed after tomography",
+            ):
+                executor.harvest(region.region_key)
+        finally:
+            client.close()
+
+        self.assertEqual(self.evidence.host_year_count(), 0)
+
+    def test_if_range_drift_returning_full_200_fails_closed(self) -> None:
+        payload = self._line("alpha", 1998, "0101000000").encode("utf-8")
+        compiled = self._compiled_remote(len(payload))
+        region = self._register_ready(compiled)
+        self.registry.bind_object_identity(
+            compiled.index.index_key,
+            HistoricalIndexObjectIdentity(
+                kind="remote",
+                content_length=len(payload),
+                etag='"object-v1"',
+            ),
+        )
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            self.assertEqual(request.headers.get("if-range"), '"object-v1"')
+            return httpx.Response(
+                200,
+                headers={
+                    "Content-Length": str(len(payload)),
+                    "ETag": '"object-v2"',
+                },
+                stream=httpx.ByteStream(payload),
+                request=request,
+            )
+
+        client = httpx.Client(transport=httpx.MockTransport(handler))
+        try:
+            executor = RegionHarvestExecutor(
+                registry=self.registry,
+                baseline=self.baseline,
+                evidence_store=self.evidence,
+                http_client=client,
+            )
+            with self.assertRaisesRegex(
+                RegionHarvestError,
+                "historical index object identity changed after tomography",
+            ):
+                executor.harvest(region.region_key)
+        finally:
+            client.close()
+
+        self.assertEqual(self.evidence.host_year_count(), 0)
+
+    def test_remote_content_range_total_drift_fails_closed(self) -> None:
+        payload = self._line("alpha", 1998, "0101000000").encode("utf-8")
+        compiled = self._compiled_remote(len(payload))
+        region = self._register_ready(compiled)
+        self.registry.bind_object_identity(
+            compiled.index.index_key,
+            HistoricalIndexObjectIdentity(
+                kind="remote",
+                content_length=len(payload),
+                etag='"object-v1"',
+            ),
+        )
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                206,
+                headers={
+                    "Content-Range": (
+                        f"bytes 0-{len(payload) - 1}/{len(payload) + 1}"
+                    ),
+                    "Content-Length": str(len(payload)),
+                    "ETag": '"object-v1"',
+                },
+                stream=httpx.ByteStream(payload),
+                request=request,
+            )
+
+        client = httpx.Client(transport=httpx.MockTransport(handler))
+        try:
+            executor = RegionHarvestExecutor(
+                registry=self.registry,
+                baseline=self.baseline,
+                evidence_store=self.evidence,
+                http_client=client,
+            )
+            with self.assertRaisesRegex(
+                RegionHarvestError,
+                "remote source size changed",
+            ):
+                executor.harvest(region.region_key)
+        finally:
+            client.close()
+
         self.assertEqual(self.evidence.host_year_count(), 0)
 
     def test_direct_authority_failure_releases_claim_immediately(self) -> None:
