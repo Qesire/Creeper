@@ -439,9 +439,20 @@ class EvidenceStore:
         ).fetchall()
         return [EvidenceCapsule(**dict(row)) for row in rows]
 
-    def canonical_host_year_capsules(self) -> list[EvidenceCapsule]:
-        """Return one deterministic capsule for each proven host-year."""
-        rows = self.connection.execute(
+    def iter_canonical_host_year_capsules(
+        self,
+        *,
+        batch_size: int = 5_000,
+    ):
+        """Stream one deterministic capsule per proven host-year.
+
+        SQLite keeps the SELECT statement on one stable read snapshot while the
+        cursor is open. fetchmany() bounds Python resident memory regardless of
+        the total evidence corpus size.
+        """
+        if batch_size < 1:
+            raise ValueError("batch_size must be positive")
+        cursor = self.connection.execute(
             """
             WITH ranked AS (
                 SELECT *,
@@ -459,8 +470,17 @@ class EvidenceStore:
             WHERE rn = 1
             ORDER BY hostname, year
             """
-        ).fetchall()
-        return [EvidenceCapsule(**dict(row)) for row in rows]
+        )
+        while True:
+            rows = cursor.fetchmany(int(batch_size))
+            if not rows:
+                break
+            for row in rows:
+                yield EvidenceCapsule(**dict(row))
+
+    def canonical_host_year_capsules(self) -> list[EvidenceCapsule]:
+        """Compatibility list API; formal export must use the iterator."""
+        return list(self.iter_canonical_host_year_capsules())
 
     def host_years_after(
         self,

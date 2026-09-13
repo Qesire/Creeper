@@ -14,6 +14,7 @@ from creeper.scheduler.leases import LeaseResult, WorkLease
 from creeper.scheduler.priority import LeaseCandidate, ResourceCost
 from creeper.sources.domains import DomainState, SourceDomain
 from creeper.sources.reservoirs import Reservoir, ReservoirState
+from creeper.storage.candidate_store import CandidateStore
 from creeper.storage.control_store import ControlStore
 from creeper.storage.evidence_store import EvidenceStore
 
@@ -791,6 +792,20 @@ class SourceProducerTests(unittest.TestCase):
         self.assertEqual(report.leases_succeeded, 0)
         self.assertTrue(report.admission_blocked)
         self.assertEqual(adapter.executions, 0)
+
+
+    def test_source_producer_records_durable_active_candidate(self):
+        ledger = CandidateStore(self.root / "candidates.sqlite3")
+        runtime, _adapter = self.build_runtime(backlog_capacity=1)
+        runtime.candidate_store = ledger
+
+        report = runtime.run_once()
+
+        self.assertEqual(report.leases_succeeded, 1)
+        active = list(ledger.iter_active_candidates())
+        self.assertEqual([row.hostname for row in active], ["novel.example"])
+        self.assertEqual(active[0].source_id, "fixture-source")
+        ledger.close()
 
 
 if __name__ == "__main__":

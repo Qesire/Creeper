@@ -21,6 +21,7 @@ from creeper.evidence.planner import EvidencePlanner
 from creeper.evidence.router import EvidenceRouter
 from creeper.evidence.rdap_candidates import rdap_parent_candidate
 from creeper.evidence.policies import EvidenceQueryKey, TemporalScope
+from creeper.records.candidates import CandidateRecord
 from creeper.records.models import HostObservation
 from creeper.runtime.queues import BoundedQueues
 from creeper.scheduler.admission import CapacityReservation, EvidenceBacklogAdmission
@@ -28,6 +29,7 @@ from creeper.scheduler.global_scheduler import GlobalScheduler
 from creeper.scheduler.leases import WorkLease
 from creeper.scheduler.priority import LeaseCandidate
 from creeper.sources.reservoirs import ReservoirState
+from creeper.storage.candidate_store import CandidateStore
 from creeper.storage.control_store import ControlStore
 from creeper.storage.evidence_store import EvidenceStore
 
@@ -99,6 +101,7 @@ class SourceProducer:
         control_store: ControlStore,
         evidence_store: EvidenceStore,
         scheduler: GlobalScheduler,
+        candidate_store: CandidateStore | None = None,
         candidates: Iterable[LeaseCandidate],
         adapters: Mapping[str, object],
         backlog_capacities: Mapping[str, int],
@@ -146,6 +149,7 @@ class SourceProducer:
         self.baseline = baseline
         self.control_store = control_store
         self.evidence_store = evidence_store
+        self.candidate_store = candidate_store
         self.scheduler = scheduler
         self.candidates = tuple(candidates)
         self.adapters = dict(adapters)
@@ -432,6 +436,27 @@ class SourceProducer:
                     0,
                     int(round((time.monotonic() - lookup_started) * 1000.0)),
                 )
+                if self.candidate_store is not None:
+                    self.candidate_store.record_observations(
+                        CandidateRecord(
+                            hostname=item.hostname,
+                            source_id=item.source_id,
+                            scope=item.scope,
+                            source_locator=item.locator,
+                            source_year=item.source_year,
+                        )
+                        for item in planning_pending
+                    )
+                    self.candidate_store.mark_baseline_overlap_many(
+                        hostname
+                        for hostname, (annual_mask, _candidate) in resolved.items()
+                        if annual_mask
+                    )
+                    self.candidate_store.mark_annual_evidence_obtained_many(
+                        hostname
+                        for hostname, mask in local_masks.items()
+                        if mask
+                    )
                 planning_started = time.monotonic()
                 batch_direct_capsules = []
                 allow_direct = (
@@ -533,6 +558,11 @@ class SourceProducer:
                         reservoir_id=candidate.reservoir_id,
                         lease_id=running.lease_id,
                     )
+                    if self.candidate_store is not None:
+                        self.candidate_store.mark_annual_evidence_obtained_many(
+                            capsule.hostname
+                            for capsule in batch_direct_capsules
+                        )
                 planning_commit_ms += max(
                     0,
                     int(round((time.monotonic() - planning_started) * 1000.0)),
