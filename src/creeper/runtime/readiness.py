@@ -521,6 +521,30 @@ class IncrementalReadinessLedger:
                 "SELECT * FROM readiness_task_kind ORDER BY task_kind"
             )
         }
+        source_run_attribution = {
+            "|".join(
+                (
+                    str(row["source_key"]),
+                    str(row["reservoir_id"]),
+                    str(row["lease_id"]),
+                )
+            ): {
+                "source_key": str(row["source_key"]),
+                "reservoir_id": str(row["reservoir_id"]),
+                "lease_id": str(row["lease_id"]),
+                "novel_host_years": int(row["novel_host_years"]),
+                "novel_eed": str(row["novel_eed"]),
+                "max_evidence_sequence": int(row["max_evidence_sequence"]),
+            }
+            for row in self.connection.execute(
+                """
+                SELECT source_key, reservoir_id, lease_id,
+                       novel_host_years, novel_eed, max_evidence_sequence
+                FROM readiness_source_run
+                ORDER BY source_key, reservoir_id, lease_id
+                """
+            )
+        }
         novel_eed = Decimal(str(state["novel_eed"]))
         five_percent = baseline_eed * FORMAL_GROWTH_RATE
         growth_rate = (
@@ -576,6 +600,7 @@ class IncrementalReadinessLedger:
             annual=annual,
             source_attribution=source_attribution,
             task_kind_attribution=task_kind_attribution,
+            source_run_attribution=source_run_attribution,
             baseline_id=baseline_id,
             authority_digest=authority_digest,
             dispatch_threshold=format(dispatch_threshold, "f"),
