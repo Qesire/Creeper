@@ -70,10 +70,37 @@ Prefer:
 5. hypotheses testable with very few requests.
 
 Return ONLY one JSON object matching the supplied schema. Emit no prose,
-markdown, or code fences around the JSON. The object must contain a non-empty
-``query`` string and a ``hypotheses`` array. Every hypothesis must include all
-required fields; use JSON null for unused candidate/template/variables fields.
+markdown, or code fences around the JSON. Never return search hits, artifact
+bodies, pagination cursors, evidence decisions, scheduler actions, or submission
+decisions. Every proposal must be finite, have explicit hard bounds and stop
+conditions, and carry a reusable identity.
 """
+
+
+def _output_policy(request: dict[str, Any]) -> str:
+    """Select one output dialect from the parent-declared contract.
+
+    v2 is a compatibility adapter only. All new L6 tasks use the unified
+    research-compiler proposal envelope.
+    """
+    contract = str(request.get("contract", ""))
+    if contract == "creeper.llm-research-compiler.v1":
+        task = request.get("task", {})
+        task_type = task.get("task_type", "") if isinstance(task, dict) else ""
+        return (
+            "\n\nUNIFIED L6 OUTPUT CONTRACT:\n"
+            "- Return query plus a proposals array; do not return hypotheses.\n"
+            f"- The parent-selected task_type is {task_type!r}; emit only proposal "
+            "types appropriate for that task.\n"
+            "- Do not self-schedule or activate rules.\n"
+            "- Do not emit per-hit, per-artifact, per-page, per-cursor, or per-host work.\n"
+        )
+    return (
+        "\n\nLEGACY V2 COMPATIBILITY OUTPUT CONTRACT:\n"
+        "- Return query plus a hypotheses array; do not return unified proposals.\n"
+        "- Every hypothesis must include all schema-required fields; use null "
+        "for unused candidate/template/variables fields.\n"
+    )
 
 
 def _drop_nulls(candidate: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -217,15 +244,18 @@ def _select_payload(text: str, *, episode_id: str) -> dict[str, Any]:
     """Return the best source-intelligence object found in the model text.
 
     Preference order:
-    1. an object with a ``hypotheses`` array (canonical v2 shape),
-    2. an object with a ``candidates`` array (legacy direct shape),
-    3. any object carrying a non-empty ``query``.
+    1. an object with a ``proposals`` array (unified L6 shape),
+    2. an object with a ``hypotheses`` array (v2 compatibility shape),
+    3. an object with a ``candidates`` array (legacy direct shape),
+    4. any object carrying a non-empty ``query``.
 
     A top-level JSON array of hypotheses/candidates is also accepted and wrapped
     so the downstream contract stays object-shaped.
     """
     best: dict[str, Any] | None = None
     for candidate in _iter_json_objects(text):
+        if isinstance(candidate.get("proposals"), list):
+            return candidate
         if isinstance(candidate.get("hypotheses"), list):
             return candidate
         if isinstance(candidate.get("candidates"), list):
@@ -381,6 +411,7 @@ def main(argv: list[str] | None = None) -> int:
 
     prompt = (
         _SYSTEM_POLICY
+        + _output_policy(request)
         + "\n\nSOURCE-INTELLIGENCE OUTPUT JSON SCHEMA:\n"
         + schema.read_text(encoding="utf-8")
         + "\n\nCREEPER REQUEST JSON:\n"
@@ -440,20 +471,38 @@ def main(argv: list[str] | None = None) -> int:
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
 
-    hypotheses = payload.get("hypotheses")
-    if not isinstance(hypotheses, list):
-        raise SystemExit(f"{args.backend} response hypotheses must be an array")
     query = payload.get("query")
     if not isinstance(query, str) or not query.strip():
         query = "source-intelligence episode"
-    normalized = {
-        "query": query,
-        "hypotheses": [
-            _normalize_hypothesis(item)
-            for item in hypotheses
-            if isinstance(item, dict)
-        ],
-    }
+
+    proposals = payload.get("proposals")
+    hypotheses = payload.get("hypotheses")
+    if isinstance(proposals, list):
+        if not proposals or not all(isinstance(item, dict) for item in proposals):
+            raise SystemExit(
+                f"{args.backend} response proposals must be a non-empty object array"
+            )
+        normalized = {
+            "query": query,
+            "proposals": proposals,
+        }
+        if isinstance(payload.get("contract"), str):
+            normalized["contract"] = payload["contract"]
+        if isinstance(payload.get("context_hash"), str):
+            normalized["context_hash"] = payload["context_hash"]
+    elif isinstance(hypotheses, list):
+        normalized = {
+            "query": query,
+            "hypotheses": [
+                _normalize_hypothesis(item)
+                for item in hypotheses
+                if isinstance(item, dict)
+            ],
+        }
+    else:
+        raise SystemExit(
+            f"{args.backend} response must contain proposals or hypotheses"
+        )
 
     temporary = response_path.with_suffix(response_path.suffix + ".tmp")
     temporary.write_text(

@@ -28,6 +28,13 @@ from creeper.source_discovery.motifs import (
 from creeper.source_discovery.coordinator import SearchBatch
 from creeper.source_discovery.manager import SearchDirective
 from creeper.source_discovery.models import SourceCandidate, SourceLevel, SourceState
+from creeper.source_research.agent.compiler import UnifiedResearchCompiler
+from creeper.source_research.agent.context import (
+    LearningCompilerContext,
+    ResearchCompilerContext,
+    UnifiedCompilerRequest,
+)
+from creeper.source_research.agent.protocol import ProposalEnvelope
 
 
 class SearchAgentProtocolError(RuntimeError):
@@ -507,3 +514,177 @@ class CommandAgentSearchExecutor:
             hypotheses=hypotheses,
             hypothesis_attribution=hypothesis_attribution,
         )
+
+
+
+@dataclass(frozen=True)
+class UnifiedCommandResearchPolicy:
+    """Process/file bounds for the new unified L6 child-agent contract."""
+
+    timeout_seconds: float = 120.0
+    termination_grace_seconds: float = 2.0
+    max_response_bytes: int = 2 * 1024 * 1024
+
+    def __post_init__(self) -> None:
+        if self.timeout_seconds <= 0 or self.termination_grace_seconds <= 0:
+            raise ValueError("unified research timeouts must be positive")
+        if self.max_response_bytes < 1:
+            raise ValueError("max_response_bytes must be positive")
+
+
+class UnifiedCommandResearchExecutor:
+    """Invoke one bounded L6 child and compile its proposal-only response.
+
+    This is the forward L6 interface for L8.  The existing
+    CommandAgentSearchExecutor remains as a compatibility adapter until runtime
+    wiring explicitly cuts over; both use the same isolated subprocess boundary.
+    """
+
+    def __init__(
+        self,
+        command: tuple[str, ...] | list[str],
+        invocation_root: Path,
+        *,
+        cwd: Path | None = None,
+        policy: UnifiedCommandResearchPolicy | None = None,
+        compiler: UnifiedResearchCompiler | None = None,
+        clock=time.monotonic,
+    ) -> None:
+        command = tuple(command)
+        if not command or any(
+            not isinstance(item, str) or not item for item in command
+        ):
+            raise ValueError(
+                "unified research command must contain non-empty arguments"
+            )
+        self.command = command
+        self.invocation_root = Path(invocation_root).resolve()
+        self.cwd = None if cwd is None else Path(cwd).resolve()
+        self.policy = policy or UnifiedCommandResearchPolicy()
+        self.compiler = compiler or UnifiedResearchCompiler()
+        self.clock = clock
+
+    async def _terminate_group(
+        self, process: asyncio.subprocess.Process
+    ) -> None:
+        if process.returncode is not None:
+            return
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            return
+        try:
+            await asyncio.wait_for(
+                process.wait(),
+                timeout=self.policy.termination_grace_seconds,
+            )
+            return
+        except TimeoutError:
+            pass
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        await process.wait()
+
+    def _read_payload(self, path: Path) -> dict[str, Any]:
+        try:
+            size = path.stat().st_size
+        except FileNotFoundError as exc:
+            raise SearchAgentProtocolError(
+                "unified child exited without response JSON"
+            ) from exc
+        if size > self.policy.max_response_bytes:
+            raise SearchAgentProtocolError(
+                "unified child response exceeds max_response_bytes"
+            )
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise SearchAgentProtocolError(
+                f"invalid unified child response JSON: {exc}"
+            ) from exc
+        if not isinstance(payload, dict):
+            raise SearchAgentProtocolError(
+                "unified child response must be a JSON object"
+            )
+        return payload
+
+    async def __call__(
+        self,
+        request: UnifiedCompilerRequest,
+        *,
+        context: ResearchCompilerContext
+        | LearningCompilerContext
+        | None = None,
+    ) -> ProposalEnvelope:
+        if context is not None and request.context_hash != context.context_hash:
+            raise SearchAgentProtocolError(
+                "request context_hash does not match typed context"
+            )
+
+        invocation_id = uuid.uuid4().hex
+        episode_id = f"llm:{invocation_id}"
+        invocation_dir = self.invocation_root / invocation_id
+        invocation_dir.mkdir(parents=True, exist_ok=False)
+        request_path = invocation_dir / "request.json"
+        response_path = invocation_dir / "response.json"
+
+        payload = request.as_payload()
+        payload["episode_id"] = episode_id
+        request_path.write_text(
+            json.dumps(
+                payload,
+                ensure_ascii=False,
+                sort_keys=True,
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        process = await asyncio.create_subprocess_exec(
+            *self.command,
+            "--request",
+            str(request_path),
+            "--response",
+            str(response_path),
+            cwd=self.cwd,
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        try:
+            try:
+                returncode = await asyncio.wait_for(
+                    process.wait(),
+                    timeout=self.policy.timeout_seconds,
+                )
+            except TimeoutError:
+                await self._terminate_group(process)
+                raise TimeoutError(
+                    "unified research child exceeded "
+                    f"{self.policy.timeout_seconds:g}s timeout"
+                )
+        except asyncio.CancelledError:
+            await self._terminate_group(process)
+            raise
+
+        if returncode != 0:
+            raise RuntimeError(
+                f"unified research child failed rc={returncode}"
+            )
+
+        response = self._read_payload(response_path)
+        try:
+            return self.compiler.compile(
+                response,
+                task_type=request.task_type,
+                context=context,
+                context_hash=request.context_hash,
+            )
+        except ValueError as exc:
+            raise SearchAgentProtocolError(
+                f"unified proposal compilation failed: {exc}"
+            ) from exc
