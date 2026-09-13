@@ -18,7 +18,7 @@ from creeper.authority.identity import (
     eed_model_authority_signature,
 )
 from creeper.source_discovery.registry import SourceDiscoveryRegistry
-from creeper.storage.control_store import ControlStore
+from creeper.storage.control_store import ControlStore, TERMINAL_STATES
 from creeper.storage.evidence_store import EvidenceHostYear, EvidenceStore
 
 
@@ -57,6 +57,7 @@ class IncrementalReadinessReport:
     annual: dict[str, dict[str, object]]
     source_attribution: dict[str, dict[str, object]]
     task_kind_attribution: dict[str, dict[str, object]]
+    source_run_attribution: dict[str, dict[str, object]] | None = None
     baseline_id: str = ""
     authority_digest: str = ""
     dispatch_threshold: str = format(DEFAULT_DISPATCH_THRESHOLD, "f")
@@ -89,6 +90,7 @@ class IncrementalReadinessReport:
             "annual": self.annual,
             "source_attribution": self.source_attribution,
             "task_kind_attribution": self.task_kind_attribution,
+            "source_run_attribution": self.source_run_attribution or {},
             "baseline_reconciliation": self.baseline_reconciliation or {},
             "source_contribution": self.source_contribution or {},
         }
@@ -131,6 +133,15 @@ class IncrementalReadinessLedger:
                 novel_host_years INTEGER NOT NULL,
                 novel_eed TEXT NOT NULL
             ) WITHOUT ROWID;
+            CREATE TABLE IF NOT EXISTS readiness_source_run (
+                source_key TEXT NOT NULL,
+                reservoir_id TEXT NOT NULL,
+                lease_id TEXT NOT NULL,
+                novel_host_years INTEGER NOT NULL DEFAULT 0,
+                novel_eed TEXT NOT NULL DEFAULT '0',
+                max_evidence_sequence INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY(source_key, reservoir_id, lease_id)
+            ) WITHOUT ROWID;
             """
         )
         self.connection.commit()
@@ -158,6 +169,7 @@ class IncrementalReadinessLedger:
             self.connection.execute("DELETE FROM readiness_annual")
             self.connection.execute("DELETE FROM readiness_source")
             self.connection.execute("DELETE FROM readiness_task_kind")
+            self.connection.execute("DELETE FROM readiness_source_run")
             self.connection.execute("DELETE FROM readiness_state")
             self.connection.execute(
                 """
