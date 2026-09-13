@@ -20,6 +20,15 @@ class BanditStats:
     updated_at: float = 0.0
     final_observation_count: int = 0
 
+    def __post_init__(self) -> None:
+        if self.final_observation_count < 0:
+            raise ValueError("final_observation_count must be non-negative")
+        # Backward-compatible construction: historically a non-zero
+        # final_reward itself implied one observed FINAL. Closed zero rewards
+        # remain distinguishable because they must carry an explicit count.
+        if self.final_observation_count == 0 and self.final_reward != 0.0:
+            object.__setattr__(self, "final_observation_count", 1)
+
     @classmethod
     def from_object(cls, value: object) -> "BanditStats":
         return cls(
