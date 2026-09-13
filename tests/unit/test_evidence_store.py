@@ -182,5 +182,46 @@ class EvidenceStoreTests(unittest.TestCase):
             store.close()
 
 
+    def test_canonical_host_year_iterator_is_deterministic_and_batched(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = EvidenceStore(Path(tmp) / "evidence.sqlite3")
+            store.put_many([
+                EvidenceCapsule(
+                    "zeta.example", 2000, "wayback", "capture_timestamp_year",
+                    "20000101000000", "http://zeta.example/", "c" * 64, "cdx-v1"
+                ),
+                EvidenceCapsule(
+                    "alpha.example", 1997, "wayback", "capture_timestamp_year",
+                    "19970101000000", "http://alpha.example/z", "b" * 64, "cdx-v1"
+                ),
+                EvidenceCapsule(
+                    "alpha.example", 1997, "arquivo", "capture_timestamp_year",
+                    "19970201000000", "http://alpha.example/a", "a" * 64, "archive-v1"
+                ),
+                EvidenceCapsule(
+                    "alpha.example", 1998, "wayback", "capture_timestamp_year",
+                    "19980101000000", "http://alpha.example/", "d" * 64, "cdx-v1"
+                ),
+            ])
+
+            rows = list(store.iter_canonical_host_year_capsules(batch_size=1))
+
+            self.assertEqual(
+                [(row.hostname, row.year, row.provider) for row in rows],
+                [
+                    ("alpha.example", 1997, "arquivo"),
+                    ("alpha.example", 1998, "wayback"),
+                    ("zeta.example", 2000, "wayback"),
+                ],
+            )
+            self.assertEqual(
+                store.canonical_host_year_capsules(),
+                rows,
+            )
+            with self.assertRaisesRegex(ValueError, "batch_size"):
+                list(store.iter_canonical_host_year_capsules(batch_size=0))
+            store.close()
+
+
 if __name__ == "__main__":
     unittest.main()
