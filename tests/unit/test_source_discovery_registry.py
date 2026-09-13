@@ -899,5 +899,66 @@ class SourceDiscoveryRegistryTests(unittest.TestCase):
             ("baseline-a", "model-a"),
         )
 
+
+    def test_late_stale_measurement_cannot_overwrite_current_remeasurement(self) -> None:
+        self.registry.set_scout_authority(
+            baseline_signature="baseline-b",
+            model_signature="model-a",
+        )
+        candidate = self._to_scout_ready(self.candidate("late-stale/"))
+        self.registry.transition(candidate.source_key, SourceState.SCOUTING)
+        current = ScoutMeasurement(
+            sampled_records=10,
+            unique_hosts=8,
+            novel_hosts=5,
+            direct_host_years=0,
+            requests=1,
+            bytes_read=256,
+            elapsed_seconds=1.0,
+            novel_eed=5.0,
+        )
+        self.assertTrue(
+            self.registry.record_scout_measurement(
+                candidate.source_key,
+                current,
+            )
+        )
+
+        stale = ScoutMeasurement(
+            sampled_records=10,
+            unique_hosts=8,
+            novel_hosts=9,
+            direct_host_years=0,
+            requests=1,
+            bytes_read=256,
+            elapsed_seconds=1.0,
+            novel_eed=99.0,
+        )
+        self.assertFalse(
+            self.registry.record_scout_measurement(
+                candidate.source_key,
+                stale,
+                baseline_signature="baseline-a",
+                model_signature="model-a",
+            )
+        )
+
+        self.assertEqual(
+            self.registry.get_scout_measurement(candidate.source_key),
+            current,
+        )
+        row = self.registry.connection.execute(
+            """
+            SELECT baseline_signature, model_signature, novel_eed
+            FROM source_scout_metrics
+            WHERE source_key = ?
+            """,
+            (candidate.source_key,),
+        ).fetchone()
+        self.assertEqual(row["baseline_signature"], "baseline-b")
+        self.assertEqual(row["model_signature"], "model-a")
+        self.assertEqual(float(row["novel_eed"]), 5.0)
+
+
 if __name__ == "__main__":
     unittest.main()

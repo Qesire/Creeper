@@ -1257,105 +1257,136 @@ class SourceDiscoveryRegistry:
             raise ValueError(
                 "baseline_signature and model_signature must be provided together"
             )
-        current_authority = self._load_scout_authority()
-        measurement_authority = (
-            current_authority
-            if baseline_signature is None
-            else (baseline_signature, model_signature)
-        )
-        if measurement_authority is not None and (
-            not measurement_authority[0]
-            or not measurement_authority[1]
-        ):
-            raise ValueError("scout authority signatures must be non-empty")
-        now = float(self.clock())
-        with self.connection:
-            self.connection.execute(
-                """
-                INSERT INTO source_scout_metrics(
-                    source_key, sampled_records, unique_hosts, novel_hosts,
-                    direct_host_years, requests, bytes_read, elapsed_seconds,
-                    novel_eed, measurement_mode, observed_host_year_pairs,
-                    novel_host_year_pairs, novel_pair_eed,
-                    singleton_observations, doubleton_observations,
-                    estimated_unseen_fraction, baseline_signature,
-                    model_signature, measured_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(source_key) DO UPDATE SET
-                    sampled_records = excluded.sampled_records,
-                    unique_hosts = excluded.unique_hosts,
-                    novel_hosts = excluded.novel_hosts,
-                    direct_host_years = excluded.direct_host_years,
-                    requests = excluded.requests,
-                    bytes_read = excluded.bytes_read,
-                    elapsed_seconds = excluded.elapsed_seconds,
-                    novel_eed = excluded.novel_eed,
-                    measurement_mode = excluded.measurement_mode,
-                    observed_host_year_pairs = excluded.observed_host_year_pairs,
-                    novel_host_year_pairs = excluded.novel_host_year_pairs,
-                    novel_pair_eed = excluded.novel_pair_eed,
-                    singleton_observations = excluded.singleton_observations,
-                    doubleton_observations = excluded.doubleton_observations,
-                    estimated_unseen_fraction = excluded.estimated_unseen_fraction,
-                    baseline_signature = excluded.baseline_signature,
-                    model_signature = excluded.model_signature,
-                    measured_at = excluded.measured_at
-                """,
-                (
-                    source_key,
-                    measurement.sampled_records,
-                    measurement.unique_hosts,
-                    measurement.novel_hosts,
-                    measurement.direct_host_years,
-                    measurement.requests,
-                    measurement.bytes_read,
-                    measurement.elapsed_seconds,
-                    measurement.novel_eed,
-                    measurement.measurement_mode.value,
-                    measurement.observed_host_year_pairs,
-                    measurement.novel_host_year_pairs,
-                    measurement.novel_pair_eed,
-                    measurement.singleton_observations,
-                    measurement.doubleton_observations,
-                    measurement.estimated_unseen_fraction,
-                    (
-                        None
-                        if measurement_authority is None
-                        else measurement_authority[0]
-                    ),
-                    (
-                        None
-                        if measurement_authority is None
-                        else measurement_authority[1]
-                    ),
-                    now,
-                ),
+
+        # Authority selection and the metric write share one IMMEDIATE
+        # transaction. That prevents an authority replacement from interleaving
+        # between the comparison and durable attribution.
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            current_authority = self._load_scout_authority()
+            measurement_authority = (
+                current_authority
+                if baseline_signature is None
+                else (baseline_signature, model_signature)
             )
-            if measurement.minhash_values:
-                self.connection.execute(
-                    """
-                    INSERT INTO source_overlap_sketches(
-                        source_key, width, sketch_json, updated_at
-                    ) VALUES (?, ?, ?, ?)
-                    ON CONFLICT(source_key) DO UPDATE SET
-                        width = excluded.width,
-                        sketch_json = excluded.sketch_json,
-                        updated_at = excluded.updated_at
-                    """,
-                    (
-                        source_key,
-                        len(measurement.minhash_values),
-                        json.dumps(
-                            list(measurement.minhash_values),
-                            separators=(",", ":"),
-                        ),
-                        now,
-                    ),
-                )
+            if measurement_authority is not None and (
+                not measurement_authority[0]
+                or not measurement_authority[1]
+            ):
+                raise ValueError("scout authority signatures must be non-empty")
             eligible = (
                 current_authority is None
                 or measurement_authority == current_authority
             )
+
+            # A late result from an old measured executor may be retained only
+            # when no current-authority row exists. It must never clobber a
+            # remeasurement that already completed under the new authority.
+            preserve_current = False
+            if not eligible and current_authority is not None:
+                preserve_current = (
+                    self.connection.execute(
+                        """
+                        SELECT 1
+                        FROM source_scout_metrics
+                        WHERE source_key = ?
+                          AND baseline_signature = ?
+                          AND model_signature = ?
+                        """,
+                        (
+                            source_key,
+                            current_authority[0],
+                            current_authority[1],
+                        ),
+                    ).fetchone()
+                    is not None
+                )
+
+            if not preserve_current:
+                now = float(self.clock())
+                self.connection.execute(
+                    """
+                    INSERT INTO source_scout_metrics(
+                        source_key, sampled_records, unique_hosts, novel_hosts,
+                        direct_host_years, requests, bytes_read, elapsed_seconds,
+                        novel_eed, measurement_mode, observed_host_year_pairs,
+                        novel_host_year_pairs, novel_pair_eed,
+                        singleton_observations, doubleton_observations,
+                        estimated_unseen_fraction, baseline_signature,
+                        model_signature, measured_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(source_key) DO UPDATE SET
+                        sampled_records = excluded.sampled_records,
+                        unique_hosts = excluded.unique_hosts,
+                        novel_hosts = excluded.novel_hosts,
+                        direct_host_years = excluded.direct_host_years,
+                        requests = excluded.requests,
+                        bytes_read = excluded.bytes_read,
+                        elapsed_seconds = excluded.elapsed_seconds,
+                        novel_eed = excluded.novel_eed,
+                        measurement_mode = excluded.measurement_mode,
+                        observed_host_year_pairs = excluded.observed_host_year_pairs,
+                        novel_host_year_pairs = excluded.novel_host_year_pairs,
+                        novel_pair_eed = excluded.novel_pair_eed,
+                        singleton_observations = excluded.singleton_observations,
+                        doubleton_observations = excluded.doubleton_observations,
+                        estimated_unseen_fraction = excluded.estimated_unseen_fraction,
+                        baseline_signature = excluded.baseline_signature,
+                        model_signature = excluded.model_signature,
+                        measured_at = excluded.measured_at
+                    """,
+                    (
+                        source_key,
+                        measurement.sampled_records,
+                        measurement.unique_hosts,
+                        measurement.novel_hosts,
+                        measurement.direct_host_years,
+                        measurement.requests,
+                        measurement.bytes_read,
+                        measurement.elapsed_seconds,
+                        measurement.novel_eed,
+                        measurement.measurement_mode.value,
+                        measurement.observed_host_year_pairs,
+                        measurement.novel_host_year_pairs,
+                        measurement.novel_pair_eed,
+                        measurement.singleton_observations,
+                        measurement.doubleton_observations,
+                        measurement.estimated_unseen_fraction,
+                        (
+                            None
+                            if measurement_authority is None
+                            else measurement_authority[0]
+                        ),
+                        (
+                            None
+                            if measurement_authority is None
+                            else measurement_authority[1]
+                        ),
+                        now,
+                    ),
+                )
+                if measurement.minhash_values:
+                    self.connection.execute(
+                        """
+                        INSERT INTO source_overlap_sketches(
+                            source_key, width, sketch_json, updated_at
+                        ) VALUES (?, ?, ?, ?)
+                        ON CONFLICT(source_key) DO UPDATE SET
+                            width = excluded.width,
+                            sketch_json = excluded.sketch_json,
+                            updated_at = excluded.updated_at
+                        """,
+                        (
+                            source_key,
+                            len(measurement.minhash_values),
+                            json.dumps(
+                                list(measurement.minhash_values),
+                                separators=(",", ":"),
+                            ),
+                            now,
+                        ),
+                    )
+
             if eligible:
                 self._attribute_search_reward_locked(
                     source_key,
@@ -1372,7 +1403,11 @@ class SourceDiscoveryRegistry:
                         else measurement_authority[1]
                     ),
                 )
-            return eligible
+            self.connection.commit()
+        except BaseException:
+            self.connection.rollback()
+            raise
+        return eligible
 
     def get_scout_measurement(
         self,
