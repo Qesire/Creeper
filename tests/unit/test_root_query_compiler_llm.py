@@ -113,6 +113,32 @@ class RootQueryCompilerLLMTests(unittest.TestCase):
         with self.assertRaises(RootQueryCompilerError):
             RootQueryCompiler(lambda _: bad).compile_root_query_program(context())
 
+    def test_model_cannot_return_hits_artifacts_or_pagination_state(self) -> None:
+        bad = response(1)
+        bad["hits"] = [{"id": "native-1"}]
+        with self.assertRaisesRegex(RootQueryCompilerError, "forbidden"):
+            RootQueryCompiler(lambda _: bad).compile_root_query_program(context())
+
+        with self.assertRaisesRegex(RootQueryCompilerError, "forbidden"):
+            RootQueryCompiler(
+                lambda _: {"classifications": [], "resumptionToken": "next"}
+            ).classify_result_cluster(context(), {"cluster_id": "c1", "size": 2})
+
+    def test_new_root_hypothesis_has_strict_research_only_schema(self) -> None:
+        payload = {
+            "new_root_hypotheses": [
+                {
+                    "kind": "CATALOG",
+                    "entrypoint": "https://example.test/api/search",
+                    "capabilities": ["search", "enumerate"],
+                    "rationale": "reusable catalog",
+                    "metadata": {"records": 10},
+                }
+            ]
+        }
+        with self.assertRaisesRegex(RootQueryCompilerError, "forbidden"):
+            RootQueryCompiler(lambda _: payload).propose_new_root(context())
+
     def test_cluster_classification_is_not_per_hit(self) -> None:
         payload = {"classifications": [{"cluster_id": "c1", "classification": "MANIFEST", "reusable_surface": True, "rationale": "shared catalog"}]}
         result = RootQueryCompiler(lambda _: payload).classify_result_cluster(
@@ -123,6 +149,24 @@ class RootQueryCompilerLLMTests(unittest.TestCase):
             RootQueryCompiler(lambda _: payload).classify_result_cluster(
                 context(), {"cluster_id": "c1", "size": 1}
             )
+
+    def test_cluster_classification_does_not_require_seed_exhaustion(self) -> None:
+        payload = {"classifications": [{"cluster_id": "c1", "classification": "CATALOG"}]}
+        result = RootQueryCompiler(lambda _: payload).classify_result_cluster(
+            context(seed_current_program_exhausted=False), {"cluster_id": "c1", "size": 2}
+        )
+        self.assertEqual(result[0]["classification"], "CATALOG")
+
+    def test_pivot_programs_are_bounded_and_stop_conditions_are_strings(self) -> None:
+        program = response(1)["programs"][0]
+        payload = {"pivot_programs": [program] * 9}
+        with self.assertRaisesRegex(RootQueryCompilerError, "too many"):
+            RootQueryCompiler(lambda _: payload).compile_pivot_program(context())
+
+        invalid = dict(program)
+        invalid["stop_conditions"] = ["ok", 3]
+        with self.assertRaises(RootQueryCompilerError):
+            RootQueryCompiler(lambda _: {"pivot_programs": [invalid]}).compile_pivot_program(context())
 
     def test_new_root_requires_reusable_capabilities(self) -> None:
         payload = {"new_root_hypotheses": [{"kind": "CATALOG", "entrypoint": "https://example.test", "capabilities": ["search"], "rationale": "catalog"}]}

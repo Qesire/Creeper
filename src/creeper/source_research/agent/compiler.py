@@ -31,13 +31,27 @@ class RootQueryCompiler:
     MAX_PROGRAMS = 8
     MAX_HARD_REQUESTS = 80
     FORBIDDEN_FILTERS = {"cursor", "page", "start", "offset", "hit", "artifact"}
+    FORBIDDEN_RESPONSE_FIELDS = {
+        "artifact",
+        "artifacts",
+        "cursor",
+        "hits",
+        "metadata",
+        "next",
+        "page",
+        "resumptiontoken",
+    }
 
     def __init__(self, model_call: ModelCall) -> None:
         self.model_call = model_call
 
     def _check_gate(self, context: ResearchCompilerContext) -> None:
+        self._check_call_gate(context)
         if not context.seed_current_program_exhausted:
             raise CompilerGateError("deterministic seed program is not exhausted")
+
+    @staticmethod
+    def _check_call_gate(context: ResearchCompilerContext) -> None:
         if context.equivalent_unexecuted_program:
             raise CompilerGateError("equivalent deterministic program is unexecuted")
         if not context.cooldown_satisfied:
@@ -47,7 +61,22 @@ class RootQueryCompiler:
     def _mapping(value: Any, name: str) -> Mapping[str, Any]:
         if not isinstance(value, Mapping):
             raise RootQueryCompilerError(f"{name} must be an object")
+        if any(not isinstance(key, str) for key in value):
+            raise RootQueryCompilerError(f"{name} contains non-string fields")
         return value
+
+    def _model_payload(
+        self, context: ResearchCompilerContext
+    ) -> Mapping[str, Any]:
+        payload = self._mapping(self.model_call(context), "model response")
+        forbidden = {
+            str(key).casefold()
+            for key in payload
+            if str(key).casefold() in self.FORBIDDEN_RESPONSE_FIELDS
+        }
+        if forbidden:
+            raise RootQueryCompilerError("model response contains forbidden fields")
+        return payload
 
     def _query(self, raw: Any, context: ResearchCompilerContext) -> RootQuery:
         item = self._mapping(raw, "query")
@@ -79,7 +108,7 @@ class RootQueryCompiler:
 
     def compile_root_query_program(self, context: ResearchCompilerContext) -> RootQueryProgram:
         self._check_gate(context)
-        payload = self._mapping(self.model_call(context), "model response")
+        payload = self._model_payload(context)
         programs = payload.get("programs")
         if not isinstance(programs, list) or not programs:
             raise RootQueryCompilerError("programs must be a non-empty array")
@@ -115,8 +144,8 @@ class RootQueryCompiler:
         )
 
     def _call(self, context: ResearchCompilerContext) -> Mapping[str, Any]:
-        self._check_gate(context)
-        return self._mapping(self.model_call(context), "model response")
+        self._check_call_gate(context)
+        return self._model_payload(context)
 
     def classify_result_cluster(
         self, context: ResearchCompilerContext, cluster: Mapping[str, Any]
@@ -151,6 +180,8 @@ class RootQueryCompiler:
         raw = payload.get("pivot_programs")
         if not isinstance(raw, list):
             raise RootQueryCompilerError("pivot_programs must be an array")
+        if len(raw) > self.MAX_PROGRAMS:
+            raise RootQueryCompilerError("too many pivot programs in one model call")
         result: list[RootQueryProgram] = []
         for item in raw:
             value = self._mapping(item, "pivot program")
@@ -175,15 +206,17 @@ class RootQueryCompiler:
             raise RootQueryCompilerError("strategy must be non-empty")
         if not isinstance(bounds, int) or not 1 <= bounds <= self.MAX_HARD_REQUESTS:
             raise RootQueryCompilerError("hard_max_requests must be within 1..80")
-        if not isinstance(stops, list) or not stops:
-            raise RootQueryCompilerError("stop_conditions must be non-empty")
+        if not isinstance(stops, list) or not stops or any(
+            not isinstance(stop, str) or not stop.strip() for stop in stops
+        ):
+            raise RootQueryCompilerError("stop_conditions must be non-empty strings")
         normalized = tuple(self._query(item, context) for item in queries)
         return RootQueryProgram(
             root_id=context.root_id,
             strategy=strategy.strip(),
             queries=normalized,
             hard_max_requests=bounds,
-            stop_conditions=tuple(stops),
+            stop_conditions=tuple(stop.strip() for stop in stops),
             context_hash=context.context_hash,
         )
 
@@ -197,6 +230,9 @@ class RootQueryCompiler:
         result: list[dict[str, Any]] = []
         for item in raw:
             value = self._mapping(item, "new root hypothesis")
+            allowed = {"kind", "entrypoint", "capabilities", "rationale"}
+            if set(value) - allowed:
+                raise RootQueryCompilerError("new root hypothesis contains forbidden fields")
             required = {"kind", "entrypoint", "capabilities", "rationale"}
             if not required <= set(value):
                 raise RootQueryCompilerError("new root requires capability-bearing metadata")
