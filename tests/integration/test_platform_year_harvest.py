@@ -12,6 +12,11 @@ from creeper.evidence.platform_harvest import (
     PlatformHarvestState,
     PlatformYearHarvestWorker,
 )
+from creeper.evidence.platform_admission import (
+    PlatformYearAdmission,
+    PlatformYearAdmissionPolicy,
+    PlatformYearObservation,
+)
 from creeper.evidence.providers.async_cdx import AsyncWaybackCDXClient
 from creeper.storage.control_store import ControlStore
 from creeper.storage.evidence_store import EvidenceStore
@@ -74,13 +79,26 @@ class PlatformYearHarvestIntegrationTests(unittest.IsolatedAsyncioTestCase):
             await bootstrap.aclose()
 
             control = ControlStore(control_path)
-            seed = control.enqueue_platform_year_harvest(
-                provider="wayback",
-                subject="example.com",
-                target_year=1997,
-                request_template_hash=template_hash,
-                policy_version="platform-v1",
+            admission = PlatformYearAdmission(
+                control,
+                policy=PlatformYearAdmissionPolicy(max_tasks=1),
             )
+            admission_report = admission.admit(
+                [
+                    PlatformYearObservation(
+                        provider="wayback",
+                        subject="example.com",
+                        target_year=1997,
+                        request_template_hash=template_hash,
+                        policy_version="platform-v1",
+                        source_key="source:example",
+                        reservoir_id="reservoir:example",
+                        authority_digest="authority-v1",
+                    )
+                ]
+            )
+            self.assertEqual(admission_report.admitted, 1)
+            seed = admission_report.tasks[0]
             control.close()
 
             # Restart the entire control/evidence/provider stack after every
@@ -123,6 +141,10 @@ class PlatformYearHarvestIntegrationTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(final.unique_host_years_seen, 4)
             self.assertIsNone(final.resume_key)
             self.assertIsNotNone(final.completed_at)
+            self.assertEqual(final.source_key, "source:example")
+            self.assertEqual(final.reservoir_id, "reservoir:example")
+            self.assertEqual(final.authority_digest, "authority-v1")
+            self.assertTrue(final.exposure_id)
             self.assertEqual(seen_resume, [None, "resume-1", "resume-2"])
 
             canonical = evidence.canonical_host_year_capsules()
@@ -139,6 +161,49 @@ class PlatformYearHarvestIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 all(
                     item.extraction_method == "cdx_harvest_platform_year"
                     for item in canonical
+                )
+            )
+            provenance = evidence.resolve_platform_year_provenance(
+                source_key="source:example",
+                reservoir_id="reservoir:example",
+                exposure_id=final.exposure_id,
+            )
+            self.assertEqual(len(provenance), 4)
+            self.assertEqual(
+                {(item.hostname, item.year) for item in provenance},
+                {(item.hostname, item.year) for item in canonical},
+            )
+            self.assertEqual(
+                control.get_production_exposure(final.exposure_id).state.value,
+                "READ_COMPLETE",
+            )
+            frontier = evidence.max_platform_year_provenance_sequence(
+                source_key="source:example",
+                reservoir_id="reservoir:example",
+                exposure_id=final.exposure_id,
+            )
+            closed = control.finalize_platform_year_harvest(
+                final.harvest_id,
+                final_eed=1.25,
+                accepted_host_years=4,
+                evidence_frontier=frontier,
+                authority_digest="authority-v1",
+            )
+            self.assertTrue(closed)
+            finalized = control.get_platform_year_harvest(final.harvest_id)
+            self.assertEqual(finalized.final_eed, 1.25)
+            self.assertEqual(finalized.evidence_frontier, frontier)
+            self.assertEqual(
+                control.get_production_exposure(final.exposure_id).state.value,
+                "FINAL_CLOSED",
+            )
+            self.assertTrue(
+                control.finalize_platform_year_harvest(
+                    final.harvest_id,
+                    final_eed=1.25,
+                    accepted_host_years=4,
+                    evidence_frontier=frontier,
+                    authority_digest="authority-v1",
                 )
             )
             evidence.close()
@@ -175,13 +240,20 @@ class PlatformYearHarvestIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 1997,
                 policy_version="platform-v1",
             )
-            task = control.enqueue_platform_year_harvest(
-                provider="wayback",
-                subject="example.com",
-                target_year=1997,
-                request_template_hash=template_hash,
-                policy_version="platform-v1",
-            )
+            task = PlatformYearAdmission(control).admit(
+                [
+                    PlatformYearObservation(
+                        provider="wayback",
+                        subject="example.com",
+                        target_year=1997,
+                        request_template_hash=template_hash,
+                        policy_version="platform-v1",
+                        source_key="source:example",
+                        reservoir_id="reservoir:example",
+                        authority_digest="authority-v1",
+                    )
+                ]
+            ).tasks[0]
             worker = PlatformYearHarvestWorker(
                 control_store=control,
                 evidence_store=evidence,
@@ -200,6 +272,10 @@ class PlatformYearHarvestIntegrationTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(stored.state, PlatformHarvestState.PARTIAL)
             self.assertEqual(stored.resume_key, "resume-next")
             self.assertIsNone(stored.completed_at)
+            self.assertEqual(
+                control.get_production_exposure(stored.exposure_id).state.value,
+                "RUNNING",
+            )
 
             await client.aclose()
             evidence.close()

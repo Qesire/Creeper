@@ -26,6 +26,7 @@ class EvidenceTaskProvenance:
     reservoir_id: str = ""
     lease_id: str = ""
     committed_at: float = 0.0
+    task_kind: str = ""
 
 
 @dataclass(frozen=True)
@@ -298,14 +299,14 @@ class EvidenceStore:
                 raise ValueError("evidence capsule contains an invalid hostname")
             key = provenance.key
             scope = key.temporal_scope
-            task_kind = self._task_kind(key)
+            task_kind = provenance.task_kind or self._task_kind(key)
             if capsule.provider != key.provider:
                 raise ValueError("capsule provider does not match evidence task")
             if capsule.policy_version != key.policy_version:
                 raise ValueError("capsule policy does not match evidence task")
             if not scope.year_from <= int(capsule.year) <= scope.year_to:
                 raise ValueError("capsule year falls outside evidence task scope")
-            if task_kind != "domain" and hostname != key.hostname:
+            if task_kind not in {"domain", "platform_year"} and hostname != key.hostname:
                 raise ValueError("non-domain capsule hostname must match evidence task")
             capsule_rows.append(
                 (
@@ -371,6 +372,68 @@ class EvidenceStore:
             ("provider-task-provenance-v1-cutover-sequence",),
         ).fetchone()
         return 0 if row is None else int(row[0])
+
+    def resolve_platform_year_provenance(
+        self,
+        *,
+        source_key: str,
+        reservoir_id: str,
+        exposure_id: str,
+    ) -> list[EvidenceHostYearTaskProvenance]:
+        """Return the proof rows belonging to one platform exposure."""
+
+        if not source_key.strip() or not reservoir_id.strip() or not exposure_id.strip():
+            raise ValueError("platform provenance identity is required")
+        rows = self.connection.execute(
+            """
+            WITH ranked AS (
+                SELECT p.hostname, p.year, p.task_kind, p.source_key,
+                       p.reservoir_id, p.lease_id, p.committed_at,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY p.hostname, p.year ORDER BY p.sequence
+                       ) AS rn
+                FROM evidence_capsule_task_provenance AS p
+                WHERE p.task_kind = 'platform_year'
+                  AND p.source_key = ? AND p.reservoir_id = ? AND p.lease_id = ?
+            )
+            SELECT hostname, year, task_kind, source_key,
+                   reservoir_id, lease_id, committed_at
+            FROM ranked
+            WHERE rn = 1
+            ORDER BY hostname, year
+            """,
+            (source_key, reservoir_id, exposure_id),
+        ).fetchall()
+        return [
+            EvidenceHostYearTaskProvenance(
+                hostname=str(row["hostname"]),
+                year=int(row["year"]),
+                task_kind=str(row["task_kind"]),
+                source_key=str(row["source_key"]),
+                reservoir_id=str(row["reservoir_id"]),
+                lease_id=str(row["lease_id"]),
+                committed_at=float(row["committed_at"]),
+            )
+            for row in rows
+        ]
+
+    def max_platform_year_provenance_sequence(
+        self,
+        *,
+        source_key: str,
+        reservoir_id: str,
+        exposure_id: str,
+    ) -> int:
+        row = self.connection.execute(
+            """
+            SELECT COALESCE(MAX(sequence), 0) AS frontier
+            FROM evidence_capsule_task_provenance
+            WHERE task_kind = 'platform_year'
+              AND source_key = ? AND reservoir_id = ? AND lease_id = ?
+            """,
+            (source_key, reservoir_id, exposure_id),
+        ).fetchone()
+        return int(row["frontier"])
 
     def resolve_provider_task_provenance(
         self,

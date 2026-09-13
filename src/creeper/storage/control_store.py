@@ -143,10 +143,14 @@ class ControlStore:
                 created_at REAL NOT NULL,
                 updated_at REAL NOT NULL,
                 completed_at REAL,
-                UNIQUE(
-                    provider, subject, target_year,
-                    request_template_hash, policy_version
-                )
+                source_key TEXT NOT NULL DEFAULT '',
+                reservoir_id TEXT NOT NULL DEFAULT '',
+                exposure_id TEXT NOT NULL DEFAULT '',
+                authority_digest TEXT NOT NULL DEFAULT '',
+                origin_decision TEXT NOT NULL DEFAULT '',
+                evidence_frontier INTEGER NOT NULL DEFAULT 0
+                    CHECK(evidence_frontier >= 0),
+                terminal_reason TEXT
             ) WITHOUT ROWID;
             CREATE INDEX IF NOT EXISTS idx_platform_year_harvest_claim
                 ON platform_year_harvests(
@@ -418,6 +422,7 @@ class ControlStore:
                 ON domain_fanout_state(query_enqueued, observed_self, child_count);
             """
         )
+        self._migrate_platform_year_harvest_schema()
         evidence_columns = {
             str(row["name"])
             for row in self.connection.execute(
@@ -534,6 +539,7 @@ class ControlStore:
         except BaseException:
             self.connection.rollback()
             raise
+
         self.connection.executescript(
             """
             CREATE TABLE IF NOT EXISTS eed_tld_weights (
@@ -561,6 +567,124 @@ class ControlStore:
         )
         self.connection.commit()
 
+    def _migrate_platform_year_harvest_schema(self) -> None:
+        """Rebuild the legacy table to remove its five-field uniqueness key.
+
+        The old five-field key is retained for old callers through the legacy
+        task hash.  New admitted tasks include source lineage in their hash,
+        so the physical table must allow multiple lineage rows for the same
+        provider/subject/year/template tuple.
+        """
+
+        columns = {
+            str(row["name"])
+            for row in self.connection.execute(
+                "PRAGMA table_info(platform_year_harvests)"
+            ).fetchall()
+        }
+        if "source_key" in columns:
+            return
+        self.connection.commit()
+        self.connection.execute("PRAGMA foreign_keys=OFF")
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            self.connection.execute("DROP INDEX IF EXISTS idx_platform_year_harvest_claim")
+            self.connection.execute(
+                "ALTER TABLE platform_year_harvest_host_years "
+                "RENAME TO platform_year_harvest_host_years_v1"
+            )
+            self.connection.execute(
+                "ALTER TABLE platform_year_harvests RENAME TO platform_year_harvests_v1"
+            )
+            self.connection.execute(
+                """
+                CREATE TABLE platform_year_harvests (
+                    harvest_id TEXT PRIMARY KEY,
+                    provider TEXT NOT NULL,
+                    subject TEXT NOT NULL,
+                    target_year INTEGER NOT NULL CHECK(target_year BETWEEN 1996 AND 2001),
+                    request_template_hash TEXT NOT NULL,
+                    policy_version TEXT NOT NULL,
+                    resume_key TEXT,
+                    page_number INTEGER NOT NULL DEFAULT 0 CHECK(page_number >= 0),
+                    state TEXT NOT NULL,
+                    attempt INTEGER NOT NULL DEFAULT 0 CHECK(attempt >= 0),
+                    retry_at REAL,
+                    claimed_by TEXT,
+                    lease_expires_at REAL,
+                    rows_seen INTEGER NOT NULL DEFAULT 0 CHECK(rows_seen >= 0),
+                    unique_host_years_seen INTEGER NOT NULL DEFAULT 0 CHECK(unique_host_years_seen >= 0),
+                    requests INTEGER NOT NULL DEFAULT 0 CHECK(requests >= 0),
+                    bytes_read INTEGER NOT NULL DEFAULT 0 CHECK(bytes_read >= 0),
+                    elapsed_seconds REAL NOT NULL DEFAULT 0 CHECK(elapsed_seconds >= 0),
+                    baseline_external_host_years INTEGER NOT NULL DEFAULT 0 CHECK(baseline_external_host_years >= 0),
+                    final_eed REAL NOT NULL DEFAULT 0 CHECK(final_eed >= 0),
+                    last_error TEXT,
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL,
+                    completed_at REAL,
+                    source_key TEXT NOT NULL DEFAULT '',
+                    reservoir_id TEXT NOT NULL DEFAULT '',
+                    exposure_id TEXT NOT NULL DEFAULT '',
+                    authority_digest TEXT NOT NULL DEFAULT '',
+                    origin_decision TEXT NOT NULL DEFAULT '',
+                    evidence_frontier INTEGER NOT NULL DEFAULT 0 CHECK(evidence_frontier >= 0),
+                    terminal_reason TEXT
+                ) WITHOUT ROWID
+                """
+            )
+            self.connection.execute(
+                """
+                INSERT INTO platform_year_harvests(
+                    harvest_id, provider, subject, target_year,
+                    request_template_hash, policy_version, resume_key,
+                    page_number, state, attempt, retry_at, claimed_by,
+                    lease_expires_at, rows_seen, unique_host_years_seen,
+                    requests, bytes_read, elapsed_seconds,
+                    baseline_external_host_years, final_eed, last_error,
+                    created_at, updated_at, completed_at
+                )
+                SELECT harvest_id, provider, subject, target_year,
+                       request_template_hash, policy_version, resume_key,
+                       page_number, state, attempt, retry_at, claimed_by,
+                       lease_expires_at, rows_seen, unique_host_years_seen,
+                       requests, bytes_read, elapsed_seconds,
+                       baseline_external_host_years, final_eed, last_error,
+                       created_at, updated_at, completed_at
+                FROM platform_year_harvests_v1
+                """
+            )
+            self.connection.execute(
+                """
+                CREATE TABLE platform_year_harvest_host_years (
+                    harvest_id TEXT NOT NULL,
+                    hostname TEXT NOT NULL,
+                    year INTEGER NOT NULL CHECK(year BETWEEN 1996 AND 2001),
+                    PRIMARY KEY(harvest_id, hostname, year),
+                    FOREIGN KEY(harvest_id) REFERENCES platform_year_harvests(harvest_id)
+                        ON DELETE CASCADE
+                ) WITHOUT ROWID
+                """
+            )
+            self.connection.execute(
+                """
+                INSERT INTO platform_year_harvest_host_years(harvest_id, hostname, year)
+                SELECT harvest_id, hostname, year
+                FROM platform_year_harvest_host_years_v1
+                """
+            )
+            self.connection.execute("DROP TABLE platform_year_harvest_host_years_v1")
+            self.connection.execute("DROP TABLE platform_year_harvests_v1")
+            self.connection.execute(
+                """CREATE INDEX idx_platform_year_harvest_claim
+                   ON platform_year_harvests(state, retry_at, lease_expires_at, provider, updated_at)"""
+            )
+            self.connection.commit()
+        except BaseException:
+            self.connection.rollback()
+            raise
+        finally:
+            self.connection.execute("PRAGMA foreign_keys=ON")
     @staticmethod
     def _values(key: EvidenceQueryKey) -> tuple[object, ...]:
         scope = key.temporal_scope
@@ -618,6 +742,13 @@ class ControlStore:
             created_at=float(row["created_at"]),
             updated_at=float(row["updated_at"]),
             completed_at=row["completed_at"],
+            source_key=str(row["source_key"]),
+            reservoir_id=str(row["reservoir_id"]),
+            exposure_id=str(row["exposure_id"]),
+            authority_digest=str(row["authority_digest"]),
+            origin_decision=str(row["origin_decision"]),
+            evidence_frontier=int(row["evidence_frontier"]),
+            terminal_reason=row["terminal_reason"],
         )
 
     @staticmethod
@@ -2686,6 +2817,10 @@ class ControlStore:
         ).fetchall()
         return [self._task(row) for row in rows]
 
+    @staticmethod
+    def platform_year_harvest_identity(**kwargs: object) -> str:
+        return platform_year_harvest_id(**kwargs)
+
     def enqueue_platform_year_harvest(
         self,
         *,
@@ -2694,8 +2829,19 @@ class ControlStore:
         target_year: int,
         request_template_hash: str,
         policy_version: str,
+        source_key: str = "",
+        reservoir_id: str = "",
+        exposure_id: str = "",
+        authority_digest: str = "",
+        origin_decision: str = "",
     ) -> PlatformYearHarvestTask:
         """Idempotently register one durable platform/subject/year traversal."""
+
+        lineage = (source_key, reservoir_id, exposure_id, authority_digest)
+        if any(lineage) and not all(value.strip() for value in lineage):
+            raise ValueError("platform task lineage must be complete")
+        if origin_decision and not all(lineage):
+            raise ValueError("platform task decision requires lineage")
 
         harvest_id = platform_year_harvest_id(
             provider=provider,
@@ -2703,6 +2849,10 @@ class ControlStore:
             target_year=target_year,
             request_template_hash=request_template_hash,
             policy_version=policy_version,
+            source_key=source_key,
+            reservoir_id=reservoir_id,
+            exposure_id=exposure_id,
+            authority_digest=authority_digest,
         )
         # Let the dataclass normalize and validate the subject/year before
         # anything is persisted.
@@ -2713,6 +2863,11 @@ class ControlStore:
             target_year=target_year,
             request_template_hash=request_template_hash,
             policy_version=policy_version,
+            source_key=source_key,
+            reservoir_id=reservoir_id,
+            exposure_id=exposure_id,
+            authority_digest=authority_digest,
+            origin_decision=origin_decision,
         )
         now = float(self.clock())
         with self.connection:
@@ -2725,14 +2880,17 @@ class ControlStore:
                     lease_expires_at, rows_seen, unique_host_years_seen,
                     requests, bytes_read, elapsed_seconds,
                     baseline_external_host_years, final_eed, last_error,
-                    created_at, updated_at, completed_at
+                    created_at, updated_at, completed_at,
+                    source_key, reservoir_id, exposure_id, authority_digest,
+                    origin_decision, evidence_frontier, terminal_reason
                 ) VALUES (
                     ?, ?, ?, ?, ?, ?, NULL,
                     0, ?, 0, NULL, NULL,
                     NULL, 0, 0,
                     0, 0, 0,
                     0, 0, NULL,
-                    ?, ?, NULL
+                    ?, ?, NULL,
+                    ?, ?, ?, ?, ?, 0, NULL
                 )
                 """,
                 (
@@ -2745,6 +2903,11 @@ class ControlStore:
                     PlatformHarvestState.READY.value,
                     now,
                     now,
+                    source_key,
+                    reservoir_id,
+                    exposure_id,
+                    authority_digest,
+                    origin_decision,
                 ),
             )
         stored = self.get_platform_year_harvest(seed.harvest_id)
@@ -3071,6 +3234,117 @@ class ControlStore:
         stored = self.get_platform_year_harvest(result.harvest_id)
         assert stored is not None
         return stored
+
+    def ensure_platform_year_exposure(
+        self,
+        task: PlatformYearHarvestTask,
+    ) -> ProductionExposure | None:
+        """Create the task exposure once lineage has been admitted."""
+
+        if not task.source_key:
+            return None
+        existing = self.get_production_exposure(task.exposure_id)
+        if existing is not None:
+            return existing
+        return self.begin_production_exposure(
+            source_key=task.source_key,
+            reservoir_id=task.reservoir_id,
+            task_id=task.harvest_id,
+            exposure_id=task.exposure_id,
+            lane="platform_year",
+            baseline_signature=task.authority_digest,
+            model_signature=task.authority_digest,
+        )
+
+    def record_platform_year_exposure_progress(
+        self,
+        harvest_id: str,
+        *,
+        state: ProductionExposureState | str,
+        provider_requests: int,
+        provider_bytes: int,
+        provider_elapsed_seconds: float,
+        evidence_frontier: int,
+        accepted_host_years: int,
+    ) -> PlatformYearHarvestTask:
+        task = self.get_platform_year_harvest(harvest_id)
+        if task is None:
+            raise KeyError(f"unknown platform harvest: {harvest_id}")
+        if task.source_key:
+            self.record_production_exposure_progress(
+                task.exposure_id,
+                state=state,
+                provider_requests=provider_requests,
+                provider_bytes=provider_bytes,
+                provider_elapsed_seconds=provider_elapsed_seconds,
+                evidence_frontier=evidence_frontier,
+                accepted_host_years=accepted_host_years,
+            )
+        now = float(self.clock())
+        with self.connection:
+            self.connection.execute(
+                """
+                UPDATE platform_year_harvests
+                SET evidence_frontier = ?, updated_at = ?
+                WHERE harvest_id = ?
+                """,
+                (int(evidence_frontier), now, harvest_id),
+            )
+        stored = self.get_platform_year_harvest(harvest_id)
+        assert stored is not None
+        return stored
+
+    def finalize_platform_year_harvest(
+        self,
+        harvest_id: str,
+        *,
+        final_eed: float,
+        accepted_host_years: int,
+        evidence_frontier: int,
+        authority_digest: str,
+    ) -> bool:
+        """Publish FINAL only for a complete task and a closed frontier."""
+
+        task = self.get_platform_year_harvest(harvest_id)
+        if task is None:
+            raise KeyError(f"unknown platform harvest: {harvest_id}")
+        if task.state is not PlatformHarvestState.COMPLETE:
+            return False
+        if not task.source_key or task.authority_digest != authority_digest:
+            return False
+        exposure = self.get_production_exposure(task.exposure_id)
+        if exposure is None:
+            return False
+        if exposure.state is not ProductionExposureState.FINAL_CLOSED:
+            self.record_production_exposure_progress(
+                task.exposure_id,
+                state=ProductionExposureState.VALIDATING,
+                provider_requests=task.requests,
+                provider_bytes=task.bytes,
+                provider_elapsed_seconds=task.elapsed_seconds,
+                evidence_frontier=evidence_frontier,
+                accepted_host_years=accepted_host_years,
+            )
+        finalized = self.finalize_production_exposure(
+            task.exposure_id,
+            final_accepted_eed=final_eed,
+            accepted_host_years=accepted_host_years,
+            evidence_frontier=evidence_frontier,
+            authority=(authority_digest, authority_digest),
+        )
+        if not finalized:
+            return False
+        with self.connection:
+            self.connection.execute(
+                """
+                UPDATE platform_year_harvests
+                SET final_eed = ?, evidence_frontier = ?,
+                    terminal_reason = ?, updated_at = ?
+                WHERE harvest_id = ?
+                """,
+                (float(final_eed), int(evidence_frontier), "finalized", float(self.clock()), harvest_id),
+            )
+        return True
 
     def platform_year_harvest_state_counts(self) -> dict[str, int]:
         counts = {state.value: 0 for state in PlatformHarvestState}

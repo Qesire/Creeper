@@ -48,6 +48,10 @@ def platform_year_harvest_id(
     target_year: int,
     request_template_hash: str,
     policy_version: str,
+    source_key: str = "",
+    reservoir_id: str = "",
+    exposure_id: str = "",
+    authority_digest: str = "",
 ) -> str:
     normalized = normalize_official(subject)
     if normalized is None:
@@ -56,18 +60,56 @@ def platform_year_harvest_id(
         raise ValueError("platform harvest year must be within 1996-2001")
     if not provider.strip() or not request_template_hash.strip() or not policy_version.strip():
         raise ValueError("platform harvest identity fields must be non-empty")
+    identity = {
+        "provider": provider,
+        "subject": normalized,
+        "target_year": int(target_year),
+        "request_template_hash": request_template_hash,
+        "policy_version": policy_version,
+    }
+    lineage = {
+        "source_key": source_key,
+        "reservoir_id": reservoir_id,
+        "exposure_id": exposure_id,
+        "authority_digest": authority_digest,
+    }
+    if any(lineage.values()):
+        if not all(value.strip() for value in lineage.values()):
+            raise ValueError("platform task lineage must be complete")
+        identity.update(lineage)
     payload = json.dumps(
-        {
-            "provider": provider,
-            "subject": normalized,
-            "target_year": int(target_year),
-            "request_template_hash": request_template_hash,
-            "policy_version": policy_version,
-        },
+        identity,
         sort_keys=True,
         separators=(",", ":"),
     ).encode("utf-8")
     return "platform-year:" + hashlib.sha256(payload).hexdigest()
+
+
+def platform_year_exposure_id(
+    *,
+    provider: str,
+    subject: str,
+    target_year: int,
+    request_template_hash: str,
+    policy_version: str,
+    source_key: str,
+    reservoir_id: str,
+    authority_digest: str,
+) -> str:
+    """Return a deterministic exposure identity for an admitted task."""
+
+    task_id = platform_year_harvest_id(
+        provider=provider,
+        subject=subject,
+        target_year=target_year,
+        request_template_hash=request_template_hash,
+        policy_version=policy_version,
+        source_key=source_key,
+        reservoir_id=reservoir_id,
+        exposure_id="pending",
+        authority_digest=authority_digest,
+    )
+    return "platform-exposure:" + hashlib.sha256(task_id.encode("utf-8")).hexdigest()
 
 
 @dataclass(frozen=True)
@@ -95,6 +137,13 @@ class PlatformYearHarvestTask:
     created_at: float = 0.0
     updated_at: float = 0.0
     completed_at: float | None = None
+    source_key: str = ""
+    reservoir_id: str = ""
+    exposure_id: str = ""
+    authority_digest: str = ""
+    origin_decision: str = ""
+    evidence_frontier: int = 0
+    terminal_reason: str | None = None
 
     def __post_init__(self) -> None:
         normalized = normalize_official(self.subject)
@@ -110,11 +159,25 @@ class PlatformYearHarvestTask:
             target_year=self.target_year,
             request_template_hash=self.request_template_hash,
             policy_version=self.policy_version,
+            source_key=self.source_key,
+            reservoir_id=self.reservoir_id,
+            exposure_id=self.exposure_id,
+            authority_digest=self.authority_digest,
         )
         if self.harvest_id != expected:
             raise ValueError("platform harvest id does not match durable identity")
         if self.page_number < 0 or self.attempt < 0:
             raise ValueError("platform harvest counters must be non-negative")
+        lineage = (
+            self.source_key,
+            self.reservoir_id,
+            self.exposure_id,
+            self.authority_digest,
+        )
+        if any(lineage) and not all(value.strip() for value in lineage):
+            raise ValueError("platform harvest lineage must be complete")
+        if self.evidence_frontier < 0:
+            raise ValueError("platform harvest evidence frontier must be non-negative")
         if any(
             value < 0
             for value in (
@@ -276,6 +339,7 @@ class PlatformYearHarvestWorker:
         pages_committed = complete = partial = retryable = failed_invalid = 0
         inserted_capsules = rows_seen = provider_requests = bytes_seen = 0
         for task in tasks:
+            self.control_store.ensure_platform_year_exposure(task)
             provider = self.providers.get(task.provider)
             if provider is None:
                 result = PlatformYearHarvestResult(
@@ -306,7 +370,29 @@ class PlatformYearHarvestWorker:
                     )
 
             # Never advance the durable resume cursor before proof is durable.
-            inserted_capsules += self.evidence_store.put_many(result.capsules)
+            if task.source_key:
+                from creeper.evidence.policies import EvidenceQueryKey, TemporalScope
+                from creeper.storage.evidence_store import EvidenceTaskProvenance
+
+                task_key = EvidenceQueryKey(
+                    task.subject,
+                    TemporalScope(task.target_year, task.target_year),
+                    task.provider,
+                    task.policy_version,
+                )
+                provenance = EvidenceTaskProvenance(
+                    key=task_key,
+                    source_key=task.source_key,
+                    reservoir_id=task.reservoir_id,
+                    lease_id=task.exposure_id,
+                    committed_at=float(self.clock()),
+                    task_kind="platform_year",
+                )
+                inserted_capsules += self.evidence_store.put_many_with_task_provenance(
+                    (capsule, provenance) for capsule in result.capsules
+                )
+            else:
+                inserted_capsules += self.evidence_store.put_many(result.capsules)
             retry_at = (
                 self._retry_at(task.attempt)
                 if result.state is PlatformHarvestState.RETRYABLE
@@ -317,6 +403,27 @@ class PlatformYearHarvestWorker:
                 owner=self.owner,
                 retry_at=retry_at,
             )
+            if task.source_key:
+                stored = self.control_store.get_platform_year_harvest(task.harvest_id)
+                assert stored is not None
+                frontier = self.evidence_store.max_platform_year_provenance_sequence(
+                    source_key=task.source_key,
+                    reservoir_id=task.reservoir_id,
+                    exposure_id=task.exposure_id,
+                )
+                self.control_store.record_platform_year_exposure_progress(
+                    task.harvest_id,
+                    state=(
+                        "READ_COMPLETE"
+                        if result.state is PlatformHarvestState.COMPLETE
+                        else "RUNNING"
+                    ),
+                    provider_requests=stored.requests,
+                    provider_bytes=stored.bytes,
+                    provider_elapsed_seconds=stored.elapsed_seconds,
+                    evidence_frontier=frontier,
+                    accepted_host_years=stored.unique_host_years_seen,
+                )
 
             if result.state in {
                 PlatformHarvestState.PARTIAL,
