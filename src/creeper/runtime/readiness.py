@@ -211,6 +211,9 @@ class IncrementalReadinessLedger:
         weights: dict[str, Decimal],
         source_origins: dict[tuple[str, int], str] | None = None,
         task_kinds: dict[tuple[str, int], str] | None = None,
+        run_origins: dict[
+            tuple[str, int], tuple[str, str, str]
+        ] | None = None,
     ) -> int:
         if not rows:
             return 0
@@ -227,12 +230,23 @@ class IncrementalReadinessLedger:
         novel_eed = Decimal("0")
         source_origins = source_origins or {}
         task_kinds = task_kinds or {}
+        run_origins = run_origins or {}
         source_counts: dict[str, int] = {}
         source_eed: dict[str, Decimal] = {}
         task_kind_counts: dict[str, int] = {}
         task_kind_eed: dict[str, Decimal] = {}
+        run_counts: dict[tuple[str, str, str], int] = {}
+        run_eed: dict[tuple[str, str, str], Decimal] = {}
+        run_max_sequence: dict[tuple[str, str, str], int] = {}
 
         for row in rows:
+            pair = (row.hostname, row.year)
+            run_origin = run_origins.get(pair)
+            if run_origin is not None:
+                run_max_sequence[run_origin] = max(
+                    run_max_sequence.get(run_origin, 0),
+                    int(row.sequence),
+                )
             bit = YEAR_BITS.get(row.year)
             if bit is None:
                 continue
@@ -247,13 +261,18 @@ class IncrementalReadinessLedger:
             annual_eed[row.year] += contribution
             novel_count += 1
             novel_eed += contribution
-            source_key = source_origins.get((row.hostname, row.year))
+            source_key = source_origins.get(pair)
             if source_key is not None:
                 source_counts[source_key] = source_counts.get(source_key, 0) + 1
                 source_eed[source_key] = (
                     source_eed.get(source_key, Decimal("0")) + contribution
                 )
-            task_kind = task_kinds.get((row.hostname, row.year))
+            if run_origin is not None:
+                run_counts[run_origin] = run_counts.get(run_origin, 0) + 1
+                run_eed[run_origin] = (
+                    run_eed.get(run_origin, Decimal("0")) + contribution
+                )
+            task_kind = task_kinds.get(pair)
             if task_kind is not None:
                 task_kind_counts[task_kind] = task_kind_counts.get(task_kind, 0) + 1
                 task_kind_eed[task_kind] = (
@@ -332,6 +351,62 @@ class IncrementalReadinessLedger:
                                 "f",
                             ),
                             source_key,
+                        ),
+                    )
+            for run_key in sorted(run_max_sequence):
+                source_key, reservoir_id, lease_id = run_key
+                current_run = self.connection.execute(
+                    """
+                    SELECT novel_host_years, novel_eed, max_evidence_sequence
+                    FROM readiness_source_run
+                    WHERE source_key = ? AND reservoir_id = ? AND lease_id = ?
+                    """,
+                    (source_key, reservoir_id, lease_id),
+                ).fetchone()
+                novel_host_years = run_counts.get(run_key, 0)
+                novel_eed_value = run_eed.get(run_key, Decimal("0"))
+                max_sequence = run_max_sequence[run_key]
+                if current_run is None:
+                    self.connection.execute(
+                        """
+                        INSERT INTO readiness_source_run(
+                            source_key, reservoir_id, lease_id,
+                            novel_host_years, novel_eed, max_evidence_sequence
+                        ) VALUES (?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            source_key,
+                            reservoir_id,
+                            lease_id,
+                            novel_host_years,
+                            format(novel_eed_value, "f"),
+                            max_sequence,
+                        ),
+                    )
+                else:
+                    self.connection.execute(
+                        """
+                        UPDATE readiness_source_run
+                        SET novel_host_years = ?,
+                            novel_eed = ?,
+                            max_evidence_sequence = ?
+                        WHERE source_key = ? AND reservoir_id = ? AND lease_id = ?
+                        """,
+                        (
+                            int(current_run["novel_host_years"])
+                            + novel_host_years,
+                            format(
+                                Decimal(str(current_run["novel_eed"]))
+                                + novel_eed_value,
+                                "f",
+                            ),
+                            max(
+                                int(current_run["max_evidence_sequence"]),
+                                max_sequence,
+                            ),
+                            source_key,
+                            reservoir_id,
+                            lease_id,
                         ),
                     )
             for task_kind in sorted(task_kind_counts):
