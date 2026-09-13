@@ -112,6 +112,48 @@ def platform_year_exposure_id(
     return "platform-exposure:" + hashlib.sha256(task_id.encode("utf-8")).hexdigest()
 
 
+def platform_year_request_template_hash(
+    *,
+    endpoint: str,
+    subject: str,
+    target_year: int,
+    policy_version: str,
+    provider: str = "wayback",
+    limit: int = 1_000,
+) -> str:
+    """Build the same deterministic request identity used by the provider."""
+
+    normalized = normalize_official(subject)
+    if normalized is None:
+        raise ValueError("platform harvest subject must be a valid hostname")
+    if not 1996 <= int(target_year) <= 2001:
+        raise ValueError("platform harvest year must be within 1996-2001")
+    if not endpoint.strip() or not provider.strip() or not policy_version.strip():
+        raise ValueError("platform request identity fields must be non-empty")
+    payload = json.dumps(
+        {
+            "template_version": "wayback-platform-year-v1",
+            "provider": provider,
+            "endpoint": endpoint,
+            "subject": normalized,
+            "target_year": int(target_year),
+            "policy_version": policy_version,
+            "matchType": "domain",
+            "from": f"{int(target_year)}0101000000",
+            "to": f"{int(target_year)}1231235959",
+            "output": "json",
+            "fl": "urlkey,timestamp,original,statuscode,digest,length",
+            "filter": "statuscode:[23][0-9][0-9]",
+            "gzip": "false",
+            "showResumeKey": "true",
+            "limit": str(int(limit)),
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
 @dataclass(frozen=True)
 class PlatformYearHarvestTask:
     harvest_id: str

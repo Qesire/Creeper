@@ -9,6 +9,10 @@ baseline_index = "/path/to/Creeper-data/v4-merged260912-3/indexes/baseline-fast.
 # has a reviewed contract + artifact identity here.
 # evidence_contract_registry = "/abs/path/reviewed-source-contracts.json"
 
+# When supervised by autopilot, platform-year admission reads durable,
+# authority-scoped host-year observations from this same runtime database.
+# Its independent budget is configured in autopilot.example.toml.
+
 [limits]
 # Independent source workers claim different durable reservoir leases. This is
 # the outer pipeline layer: source I/O on one reservoir overlaps lookup/planning

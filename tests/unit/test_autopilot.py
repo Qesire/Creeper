@@ -128,6 +128,170 @@ class AutopilotTests(unittest.TestCase):
         self.assertNotIn("platform-year-harvest", throttled)
         self.assertIn("evidence-worker", throttled)
 
+    def test_platform_admission_has_an_independent_supervised_child(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = AutopilotConfig(
+                source_discovery_config=root / "discovery.toml",
+                source_producer_config=root / "producer.toml",
+                runtime_data_root=root / "runtime",
+                supervisor=SupervisorPolicy(),
+                evidence=EvidenceServicePolicy(platform_harvest_enabled=True),
+                platform_admission_enabled=True,
+                platform_year_budget=7,
+            )
+            specs = build_child_specs(config)
+
+        names = [spec.name for spec in specs]
+        self.assertIn("platform-year-admission", names)
+        admission = next(
+            spec for spec in specs if spec.name == "platform-year-admission"
+        )
+        self.assertIn("--admission", admission.argv)
+        self.assertEqual(
+            admission.argv[admission.argv.index("--platform-year-budget") + 1], "7"
+        )
+
+    def test_platform_admission_is_explicit_and_has_independent_budget(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            scrapy = root / "scrapy"
+            scrapy.mkdir()
+            runtime = root / "runtime"
+            baseline = root / "baseline.sqlite3"
+            baseline.write_bytes(b"fixture")
+            discovery = root / "discovery.toml"
+            discovery.write_text(
+                "\n".join(
+                    [
+                        f'runtime_data_root = "{runtime}"',
+                        f'scrapy_project_dir = "{scrapy}"',
+                        "",
+                        "[agent]",
+                        'command = ["python", "agent.py"]',
+                        'backend = "fixture"',
+                        'actor = "agent:test"',
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            producer = root / "producer.toml"
+            producer.write_text(
+                "\n".join(
+                    [
+                        'source_mode = "activated"',
+                        f'runtime_data_root = "{runtime}"',
+                        f'baseline_index = "{baseline}"',
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            config_path = root / "autopilot.toml"
+            config_path.write_text(
+                "\n".join(
+                    [
+                        f'source_discovery_config = "{discovery}"',
+                        f'source_producer_config = "{producer}"',
+                        "",
+                        "[evidence]",
+                        "platform_harvest_enabled = true",
+                        "",
+                        "[platform_admission]",
+                        "enabled = true",
+                        "platform_year_budget = 3",
+                        "poll_seconds = 7.5",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            loaded = load_autopilot_config(config_path)
+            specs = build_child_specs(loaded)
+
+        self.assertIsNotNone(loaded.platform_admission)
+        assert loaded.platform_admission is not None
+        self.assertTrue(loaded.platform_admission.enabled)
+        self.assertEqual(loaded.platform_admission.platform_year_budget, 3)
+        self.assertEqual(loaded.platform_admission.poll_seconds, 7.5)
+        names = [spec.name for spec in specs]
+        self.assertIn("platform-year-admission", names)
+        self.assertIn("platform-year-harvest", names)
+        admission = next(
+            spec for spec in specs if spec.name == "platform-year-admission"
+        )
+        self.assertIn("--admission", admission.argv)
+        self.assertEqual(
+            admission.argv[admission.argv.index("--platform-year-budget") + 1],
+            "3",
+        )
+        self.assertEqual(
+            admission.argv[admission.argv.index("--poll-seconds") + 1],
+            "7.5",
+        )
+        throttled = _desired_children(
+            GovernorState.THROTTLED,
+            set(names),
+        )
+        self.assertNotIn("platform-year-admission", throttled)
+
+    def test_old_config_keeps_platform_admission_disabled(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            loaded = self._config(Path(tmp))
+            self.assertIsNone(loaded.platform_admission)
+            self.assertNotIn(
+                "platform-year-admission",
+                [spec.name for spec in build_child_specs(loaded)],
+            )
+
+    def test_platform_admission_config_rejects_invalid_budget(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            scrapy = root / "scrapy"
+            scrapy.mkdir()
+            runtime = root / "runtime"
+            discovery = root / "discovery.toml"
+            discovery.write_text(
+                "\n".join(
+                    [
+                        f'runtime_data_root = "{runtime}"',
+                        f'scrapy_project_dir = "{scrapy}"',
+                        "",
+                        "[agent]",
+                        'command = ["python", "agent.py"]',
+                        'backend = "fixture"',
+                        'actor = "agent:test"',
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            producer = root / "producer.toml"
+            producer.write_text(
+                "\n".join(
+                    [
+                        'source_mode = "activated"',
+                        f'runtime_data_root = "{runtime}"',
+                        f'baseline_index = "{root / "baseline.sqlite3"}"',
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            config = root / "autopilot.toml"
+            config.write_text(
+                "\n".join(
+                    [
+                        f'source_discovery_config = "{discovery}"',
+                        f'source_producer_config = "{producer}"',
+                        "",
+                        "[platform_admission]",
+                        "enabled = true",
+                        "platform_year_budget = 0",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "platform_year_budget"):
+                load_autopilot_config(config)
+
     def test_multiple_source_workers_are_independent_children(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

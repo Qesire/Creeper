@@ -77,6 +77,13 @@ class EvidenceServicePolicy:
 
 
 @dataclass(frozen=True)
+class PlatformAdmissionPolicy:
+    enabled: bool = False
+    platform_year_budget: int = 1
+    poll_seconds: float = 2.0
+
+
+@dataclass(frozen=True)
 class ReadinessServicePolicy:
     eed_model: Path
     baseline_eed: str
@@ -111,6 +118,11 @@ class AutopilotConfig:
     baseline_index: Path | None = None
     readiness: ReadinessServicePolicy | None = None
     resource_governor: ResourceGovernorPolicy | None = None
+    platform_admission: PlatformAdmissionPolicy | None = None
+    # Compatibility knobs for programmatic callers that predate the nested
+    # policy. Parsed TOML uses platform_admission above.
+    platform_admission_enabled: bool = False
+    platform_year_budget: int = 1
 
 
 @dataclass(frozen=True)
@@ -497,6 +509,26 @@ def load_autopilot_config(config_path: Path) -> AutopilotConfig:
                 ),
             )
 
+    platform_admission = None
+    platform_admission_raw = root.get("platform_admission")
+    if platform_admission_raw is not None:
+        if not isinstance(platform_admission_raw, dict):
+            raise ValueError("[platform_admission] must be a TOML table")
+        platform_admission = PlatformAdmissionPolicy(
+            enabled=_strict_bool(
+                platform_admission_raw.get("enabled", False),
+                name="platform_admission.enabled",
+            ),
+            platform_year_budget=_positive_int(
+                platform_admission_raw.get("platform_year_budget", 1),
+                name="platform_year_budget",
+            ),
+            poll_seconds=_positive_float(
+                platform_admission_raw.get("poll_seconds", 2.0),
+                name="platform_admission.poll_seconds",
+            ),
+        )
+
     resource_governor = None
     resource_raw = root.get("resource_governor")
     if resource_raw is not None:
@@ -556,7 +588,30 @@ def load_autopilot_config(config_path: Path) -> AutopilotConfig:
         baseline_index=baseline_index,
         readiness=readiness,
         resource_governor=resource_governor,
+        platform_admission=platform_admission,
+        platform_admission_enabled=_strict_bool(
+            root.get("platform_admission_enabled", False),
+            name="platform_admission_enabled",
+        ),
+        platform_year_budget=_positive_int(
+            root.get("platform_year_budget", 1),
+            name="platform_year_budget",
+        ),
     )
+
+
+def _platform_admission_policy(
+    config: AutopilotConfig,
+) -> PlatformAdmissionPolicy | None:
+    if config.platform_admission is not None:
+        return config.platform_admission
+    if config.platform_admission_enabled:
+        return PlatformAdmissionPolicy(
+            enabled=True,
+            platform_year_budget=config.platform_year_budget,
+            poll_seconds=config.evidence.platform_poll_seconds,
+        )
+    return None
 
 
 def build_child_specs(config: AutopilotConfig) -> tuple[ChildSpec, ...]:
@@ -699,6 +754,29 @@ def build_child_specs(config: AutopilotConfig) -> tuple[ChildSpec, ...]:
                 ),
             )
         )
+    platform_admission = _platform_admission_policy(config)
+    if platform_admission is not None and platform_admission.enabled:
+        specs.append(
+            ChildSpec(
+                "platform-year-admission",
+                (
+                    py,
+                    "-m",
+                    "creeper.platform_harvest_cli",
+                    str(config.runtime_data_root),
+                    "--admission",
+                    "--watch",
+                    "--owner",
+                    "platform-year-admission",
+                    "--platform-year-budget",
+                    str(platform_admission.platform_year_budget),
+                    "--endpoint",
+                    evidence.endpoint,
+                    "--poll-seconds",
+                    str(platform_admission.poll_seconds),
+                ),
+            )
+        )
     if config.readiness is not None:
         if config.baseline_index is None:
             raise ValueError("readiness requires producer baseline_index")
@@ -776,6 +854,7 @@ def _desired_children(
             "source-discovery",
             "historical-index",
             "platform-year-harvest",
+            "platform-year-admission",
         }
     if state is GovernorState.DRAIN_ONLY:
         return set(available) & {"readiness-worker"}
@@ -854,6 +933,13 @@ def _write_runtime_topology(config: AutopilotConfig) -> None:
         "platform_year_harvest_enabled": bool(
             config.evidence.platform_harvest_enabled
         ),
+        "platform_year_admission_enabled": bool(
+            _platform_admission_policy(config)
+            and _platform_admission_policy(config).enabled
+        ),
+        "platform_year_budget": int(
+            (_platform_admission_policy(config) or PlatformAdmissionPolicy()).platform_year_budget
+        ),
         "baseline_authority": baseline_authority,
     }
     root = config.runtime_data_root
@@ -896,6 +982,15 @@ def run_autopilot(
             "discovery_enabled": 1,
             "platform_year_harvest_enabled": int(
                 config.evidence.platform_harvest_enabled
+            ),
+            "platform_year_admission_enabled": int(
+                bool(
+                    _platform_admission_policy(config)
+                    and _platform_admission_policy(config).enabled
+                )
+            ),
+            "platform_year_budget": int(
+                (_platform_admission_policy(config) or PlatformAdmissionPolicy()).platform_year_budget
             ),
         }
     )

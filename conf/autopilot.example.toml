@@ -5,6 +5,13 @@
 
 source_discovery_config = "source-discovery.example.toml"
 source_producer_config = "creeper.activated.example.toml"
+# The admission producer turns durable source host-year observations into
+# platform-year tasks. Its budget is separate from exact/range production.
+
+[platform_admission]
+enabled = true
+platform_year_budget = 1
+poll_seconds = 2.0
 
 [supervisor]
 # Child health is checked at this cadence.

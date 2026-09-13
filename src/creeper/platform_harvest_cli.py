@@ -10,15 +10,24 @@ import argparse
 import asyncio
 from dataclasses import asdict
 import fcntl
+import hashlib
 import json
 import os
 from pathlib import Path
 import signal
+import time
 
 from creeper.evidence.platform_harvest import (
     PlatformHarvestState,
     PlatformYearHarvestWorker,
     PlatformYearHarvestWorkerReport,
+    platform_year_request_template_hash,
+)
+from creeper.evidence.platform_admission import (
+    PlatformAdmissionReport,
+    PlatformYearAdmission,
+    PlatformYearAdmissionPolicy,
+    PlatformYearObservation,
 )
 from creeper.evidence.providers.async_cdx import AsyncWaybackCDXClient
 from creeper.storage.control_store import ControlStore
@@ -35,6 +44,158 @@ def _accumulate(
         for name in total.__dataclass_fields__
     }
     return PlatformYearHarvestWorkerReport(**values)
+
+
+def _platform_authority_digest(control: ControlStore) -> str | None:
+    row = control.connection.execute(
+        """
+        SELECT baseline_signature, model_signature
+        FROM source_scout_authority
+        WHERE singleton = 1
+        """
+    ).fetchone()
+    if row is None:
+        return None
+    payload = json.dumps(
+        {
+            "baseline_signature": str(row["baseline_signature"]),
+            "model_signature": str(row["model_signature"]),
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def admit_platform_year_once(
+    runtime_data_root: Path,
+    *,
+    endpoint: str,
+    budget: int,
+    policy_version: str = "platform-v1",
+) -> PlatformAdmissionReport:
+    """Admit bounded platform work from durable source host-year evidence."""
+
+    if budget < 1:
+        raise ValueError("platform admission budget must be positive")
+    root = Path(runtime_data_root)
+    control = ControlStore(root / "control.sqlite3")
+    try:
+        authority_digest = _platform_authority_digest(control)
+        if authority_digest is None:
+            return PlatformAdmissionReport()
+        rows = control.connection.execute(
+            """
+            SELECT DISTINCT hostname, year, source_key, reservoir_id
+            FROM (
+                SELECT o.hostname, o.year, o.source_key, o.reservoir_id
+                FROM evidence_host_year_origin_units AS o
+                JOIN source_activations AS a
+                  ON a.source_key = o.source_key
+                 AND a.reservoir_id = o.reservoir_id
+                WHERE a.activation_state = 'ACTIVE'
+                UNION ALL
+                SELECT o.hostname, o.year, o.source_key, o.reservoir_id
+                FROM evidence_host_year_origins AS o
+                JOIN source_activations AS a
+                  ON a.source_key = o.source_key
+                 AND a.reservoir_id = o.reservoir_id
+                WHERE a.activation_state = 'ACTIVE'
+            )
+            ORDER BY source_key, reservoir_id, hostname, year
+            LIMIT ?
+            """,
+            (max(1, int(budget) * 4),),
+        ).fetchall()
+        observations = []
+        for row in rows:
+            subject = str(row["hostname"])
+            year = int(row["year"])
+            observations.append(
+                PlatformYearObservation(
+                    provider="wayback",
+                    subject=subject,
+                    target_year=year,
+                    request_template_hash=platform_year_request_template_hash(
+                        endpoint=endpoint,
+                        subject=subject,
+                        target_year=year,
+                        policy_version=policy_version,
+                    ),
+                    policy_version=policy_version,
+                    source_key=str(row["source_key"]),
+                    reservoir_id=str(row["reservoir_id"]),
+                    authority_digest=authority_digest,
+                )
+            )
+        return PlatformYearAdmission(
+            control,
+            policy=PlatformYearAdmissionPolicy(max_tasks=int(budget)),
+        ).admit(observations)
+    finally:
+        control.close()
+
+
+def run_admission_service(
+    runtime_data_root: Path,
+    *,
+    owner: str,
+    once: bool,
+    endpoint: str,
+    budget: int,
+    poll_seconds: float,
+) -> PlatformAdmissionReport:
+    """Run the independent platform admission producer under its own lock."""
+
+    if poll_seconds <= 0:
+        raise ValueError("platform admission poll_seconds must be positive")
+    root = Path(runtime_data_root)
+    lock_path = root / "locks" / "platform-year-admission.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise RuntimeError(
+                f"platform admission producer is already running: {lock_path}"
+            ) from exc
+        telemetry = RuntimeTelemetryStore(root / "telemetry.sqlite3")
+        total = PlatformAdmissionReport()
+        try:
+            while True:
+                report = admit_platform_year_once(
+                    root,
+                    endpoint=endpoint,
+                    budget=budget,
+                )
+                total = PlatformAdmissionReport(
+                    admitted=total.admitted + report.admitted,
+                    idempotent=total.idempotent + report.idempotent,
+                    blocked=total.blocked + report.blocked,
+                    tasks=report.tasks,
+                )
+                telemetry.add_counters(
+                    {
+                        "platform_admission_admitted": report.admitted,
+                        "platform_admission_idempotent": report.idempotent,
+                        "platform_admission_blocked": report.blocked,
+                    }
+                )
+                telemetry.set_gauges(
+                    {"platform_year_budget": int(budget)}
+                )
+                if once:
+                    break
+                time.sleep(poll_seconds)
+        finally:
+            telemetry.close()
+        return total
+    finally:
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        finally:
+            os.close(lock_fd)
 
 
 async def run_service(
@@ -180,6 +341,11 @@ def main(argv: list[str] | None = None) -> int:
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--once", action="store_true")
     mode.add_argument("--watch", action="store_true")
+    parser.add_argument(
+        "--admission",
+        action="store_true",
+        help="run the durable platform-year admission producer",
+    )
     parser.add_argument("--owner", default=f"platform-harvest-{os.getpid()}")
     parser.add_argument(
         "--endpoint",
@@ -197,29 +363,46 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--retry-base-seconds", type=float, default=30.0)
     parser.add_argument("--retry-max-seconds", type=float, default=3600.0)
     parser.add_argument("--poll-seconds", type=float, default=2.0)
+    parser.add_argument(
+        "--platform-year-budget",
+        "--budget",
+        dest="budget",
+        type=int,
+        default=1,
+    )
     args = parser.parse_args(argv)
 
     try:
-        report = asyncio.run(
-            run_service(
+        if args.admission:
+            report = run_admission_service(
                 args.runtime_data_root,
                 owner=args.owner,
                 once=args.once,
                 endpoint=args.endpoint,
-                claim_batch_size=args.claim_batch_size,
-                lease_seconds=args.lease_seconds,
-                requests_per_second=args.requests_per_second,
-                max_connections=args.max_connections,
-                max_keepalive_connections=args.max_keepalive_connections,
-                keepalive_expiry_seconds=args.keepalive_expiry_seconds,
-                throttle_floor_seconds=args.throttle_floor_seconds,
-                timeout=args.timeout,
-                max_retries=args.max_retries,
-                retry_base_seconds=args.retry_base_seconds,
-                retry_max_seconds=args.retry_max_seconds,
+                budget=args.budget,
                 poll_seconds=args.poll_seconds,
             )
-        )
+        else:
+            report = asyncio.run(
+                run_service(
+                    args.runtime_data_root,
+                    owner=args.owner,
+                    once=args.once,
+                    endpoint=args.endpoint,
+                    claim_batch_size=args.claim_batch_size,
+                    lease_seconds=args.lease_seconds,
+                    requests_per_second=args.requests_per_second,
+                    max_connections=args.max_connections,
+                    max_keepalive_connections=args.max_keepalive_connections,
+                    keepalive_expiry_seconds=args.keepalive_expiry_seconds,
+                    throttle_floor_seconds=args.throttle_floor_seconds,
+                    timeout=args.timeout,
+                    max_retries=args.max_retries,
+                    retry_base_seconds=args.retry_base_seconds,
+                    retry_max_seconds=args.retry_max_seconds,
+                    poll_seconds=args.poll_seconds,
+                )
+            )
     except (OSError, ValueError, RuntimeError) as exc:
         parser.error(str(exc))
     print(json.dumps(asdict(report), ensure_ascii=False, indent=2))
