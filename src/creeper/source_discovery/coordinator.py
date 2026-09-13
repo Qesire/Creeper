@@ -62,6 +62,8 @@ class TriageResult:
     content_type: str | None = None
     content_length: int | None = None
     range_supported: bool | None = None
+    etag: str | None = None
+    last_modified: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "disposition", TriageDisposition(self.disposition))
@@ -408,7 +410,67 @@ class SourceDiscoveryCoordinator:
                 range_supported=result.range_supported,
             )
             self.registry.transition(candidate.source_key, SourceState.TRIAGED)
-            if result.disposition is TriageDisposition.SCOUT:
+
+            # L2 progressive artifact intake is mandatory for structured-root
+            # artifact leads. It is a scheduling/admission boundary only:
+            # WARM here means eligible for deterministic scout, not production WARM.
+            if candidate.discovery_strategy == "structured_root_artifact":
+                from creeper.source_discovery.artifact_intake import (
+                    ArtifactAdmission,
+                    assess_artifact_intake,
+                    classify_artifact,
+                )
+                from creeper.source_discovery.index_identity import (
+                    remote_identity_from_headers,
+                )
+
+                headers: dict[str, str] = {}
+                if result.etag:
+                    headers["etag"] = result.etag
+                if result.last_modified:
+                    headers["last-modified"] = result.last_modified
+                identity = remote_identity_from_headers(
+                    headers,
+                    content_length=result.content_length,
+                )
+                format_kind, _ = classify_artifact(
+                    candidate.canonical_entrypoint,
+                    result.content_type,
+                )
+                expected = candidate.source_family.strip().upper()
+                contract_match = (
+                    candidate.source_family
+                    if expected == format_kind and format_kind != "UNKNOWN"
+                    else None
+                )
+                intake = assess_artifact_intake(
+                    result,
+                    url=candidate.canonical_entrypoint,
+                    identity=identity,
+                    contract_match=contract_match,
+                )
+                if intake.admission is ArtifactAdmission.WARM:
+                    self.registry.transition(
+                        candidate.source_key,
+                        SourceState.SCOUT_READY,
+                        reason="L2 artifact intake admitted deterministic scout",
+                    )
+                    counts["triaged_to_scout"] += 1
+                elif intake.admission is ArtifactAdmission.HOLD:
+                    self.registry.transition(
+                        candidate.source_key,
+                        SourceState.HOLD,
+                        reason=intake.failure_reason or "L2 artifact intake hold",
+                    )
+                    counts["triaged_hold"] += 1
+                else:
+                    self.registry.transition(
+                        candidate.source_key,
+                        SourceState.REJECTED,
+                        reason=intake.failure_reason or "L2 artifact intake rejected",
+                    )
+                    counts["triaged_rejected"] += 1
+            elif result.disposition is TriageDisposition.SCOUT:
                 self.registry.transition(candidate.source_key, SourceState.SCOUT_READY)
                 counts["triaged_to_scout"] += 1
             elif result.disposition is TriageDisposition.HOLD:
