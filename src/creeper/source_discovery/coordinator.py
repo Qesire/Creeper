@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import fcntl
+import hashlib
 import os
 import time
 from collections.abc import Awaitable, Callable
@@ -291,6 +292,7 @@ class SourceDiscoveryCoordinator:
         self._research_started_at: float | None = None
         self._last_research_started_at: float | None = None
         self._research_context_failures: dict[str, int] = {}
+        self._research_completed_contexts: set[str] = set()
         self._operator_research_requested = False
         self._operator_research_subject: str | None = None
 
@@ -726,6 +728,7 @@ class SourceDiscoveryCoordinator:
             except (KeyError, ValueError):
                 counts["research_failures"] += 1
                 return
+        self._research_completed_contexts.add(directive.context_key)
         counts["research_completed"] += 1
 
     async def _run_regions(
@@ -770,6 +773,22 @@ class SourceDiscoveryCoordinator:
         local_failures = self._research_context_failures.get(
             snapshot.context_hash or "default", 0
         )
+        operator_requested = (
+            snapshot.operator_requested or self._operator_research_requested
+        )
+        subject = (
+            self._operator_research_subject
+            if self._operator_research_requested
+            and self._operator_research_subject is not None
+            else snapshot.subject
+        )
+        context_hash = snapshot.context_hash
+        if self._operator_research_requested:
+            payload = (
+                f"{snapshot.context_hash}|operator|{subject or ''}"
+            ).encode("utf-8")
+            context_hash = hashlib.sha256(payload).hexdigest()
+            local_failures = self._research_context_failures.get(context_hash, 0)
         return replace(
             snapshot,
             active_llm_episode_id=(
@@ -778,15 +797,9 @@ class SourceDiscoveryCoordinator:
             ),
             last_llm_started_at=last_started,
             same_context_failures=max(snapshot.same_context_failures, local_failures),
-            operator_requested=(
-                snapshot.operator_requested or self._operator_research_requested
-            ),
-            subject=(
-                self._operator_research_subject
-                if self._operator_research_requested
-                and self._operator_research_subject is not None
-                else snapshot.subject
-            ),
+            operator_requested=operator_requested,
+            subject=subject,
+            context_hash=context_hash,
             now=snapshot.now if snapshot.now is not None else float(self.retry_clock()),
         )
 
@@ -802,6 +815,9 @@ class SourceDiscoveryCoordinator:
             return
         snapshot = self._current_research_snapshot()
         if snapshot is None:
+            return
+        if snapshot.context_hash in self._research_completed_contexts:
+            counts["research_suppressed"] += 1
             return
         directive = self.manager.plan_research(snapshot)
         if directive is None:
