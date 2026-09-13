@@ -73,6 +73,12 @@ class CoordinatorConfig:
     search_cooldown_seconds: float = 30.0
     search_ucb_exploration: float = 0.35
     stagnation_window: int = 6
+    region_parallelism: int = 2
+    research_poll_seconds: float = 0.0
+    nonblocking_research: bool = False
+    region_parallelism: int = 2
+    research_poll_seconds: float = 0.0
+    nonblocking_research: bool = False
 
 
 @dataclass(frozen=True)
@@ -83,6 +89,20 @@ class AgentConfig:
     cwd: Path | None
     policy: CommandAgentSearchPolicy
     admission: SearchAdmissionPolicy
+    max_active_calls: int = 1
+    min_seconds_between_starts: float = 120.0
+    same_context_failure_cooldown_seconds: float = 600.0
+    max_regions_per_response: int = 8
+    min_expected_fanout: int = 100
+    max_query_expansion: int = 512
+    max_template_expansion: int = 4096
+    max_active_calls: int = 1
+    min_seconds_between_starts: float = 120.0
+    same_context_failure_cooldown_seconds: float = 600.0
+    max_regions_per_response: int = 8
+    min_expected_fanout: int = 100
+    max_query_expansion: int = 512
+    max_template_expansion: int = 4096
 
 
 @dataclass(frozen=True)
@@ -255,6 +275,18 @@ def load_source_discovery_config(config_path: Path) -> SourceDiscoveryServiceCon
             coordinator_raw.get("stagnation_window", 6),
             name="coordinator.stagnation_window",
         ),
+        region_parallelism=_positive_int(
+            coordinator_raw.get("region_parallelism", 2),
+            name="coordinator.region_parallelism",
+        ),
+        research_poll_seconds=_nonnegative_float(
+            coordinator_raw.get("research_poll_seconds", 0.0),
+            name="coordinator.research_poll_seconds",
+        ),
+        nonblocking_research=_strict_bool(
+            coordinator_raw.get("nonblocking_research", False),
+            name="coordinator.nonblocking_research",
+        ),
     )
 
     saturation_raw = _table(root, "saturation")
@@ -364,6 +396,13 @@ def load_source_discovery_config(config_path: Path) -> SourceDiscoveryServiceCon
             ),
         ),
         admission=admission,
+        max_active_calls=_positive_int(agent_raw.get("max_active_calls", 1), name="agent.max_active_calls"),
+        min_seconds_between_starts=_nonnegative_float(agent_raw.get("min_seconds_between_starts", 120.0), name="agent.min_seconds_between_starts"),
+        same_context_failure_cooldown_seconds=_positive_float(agent_raw.get("same_context_failure_cooldown_seconds", 600.0), name="agent.same_context_failure_cooldown_seconds"),
+        max_regions_per_response=_positive_int(agent_raw.get("max_regions_per_response", 8), name="agent.max_regions_per_response"),
+        min_expected_fanout=_positive_int(agent_raw.get("min_expected_fanout", 100), name="agent.min_expected_fanout"),
+        max_query_expansion=_positive_int(agent_raw.get("max_query_expansion", 512), name="agent.max_query_expansion"),
+        max_template_expansion=_positive_int(agent_raw.get("max_template_expansion", 4096), name="agent.max_template_expansion"),
     )
 
     measurement: MeasurementConfig | None = None
@@ -628,6 +667,8 @@ async def _open_runtime(config: SourceDiscoveryServiceConfig):
                     scout_parallelism=config.coordinator.scout_parallelism,
                     search_parallelism=config.coordinator.search_parallelism,
                     failure_retry_seconds=config.coordinator.failure_retry_seconds,
+                    region_parallelism=config.coordinator.region_parallelism,
+                    research_executor=search if config.coordinator.nonblocking_research else None,
                 )
                 yield registry, coordinator
         finally:
