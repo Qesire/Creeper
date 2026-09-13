@@ -648,6 +648,111 @@ def _legacy_background_research_executor(
     return execute
 
 
+def _region_runtime_adapters(
+    registry: SourceDiscoveryRegistry,
+):
+    """Bind L1 through its public API when that lane is present.
+
+    The imports are intentionally lazy so L8 remains independently mergeable
+    before L1.  After L1 lands, RUNNING regions are included in planning so a
+    process restart reclaims them with a new generation fence.
+    """
+    try:
+        from creeper.source_discovery.exploration_executor import (
+            ExplorationExecutor,
+            RegionExecutionCheckpoint,
+        )
+        from creeper.source_discovery.region_compilation import compile_region
+        from creeper.source_discovery.research_models import RegionState
+    except ImportError:
+        return None, None
+
+    required = (
+        "list_executable_regions",
+        "list_regions",
+        "claim_region",
+        "get_region_checkpoint",
+        "register_proposal",
+        "add_region_source_edge",
+        "checkpoint_region",
+        "finish_region",
+    )
+    if any(not hasattr(registry, name) for name in required):
+        return None, None
+
+    executor = ExplorationExecutor()
+
+    def plan_regions() -> tuple[object, ...]:
+        scheduled: dict[str, object] = {}
+        for region in registry.list_regions():
+            state = getattr(region.state, "value", str(region.state))
+            if state == "RUNNING":
+                scheduled[region.region_id] = region
+        for region in registry.list_executable_regions(limit=10_000):
+            scheduled.setdefault(region.region_id, region)
+        return tuple(scheduled.values())
+
+    async def execute_region(region: object) -> object:
+        region_id = str(getattr(region, "region_id"))
+        generation = registry.claim_region(region_id)
+        raw_checkpoint = registry.get_region_checkpoint(region_id)
+        checkpoint = (
+            None
+            if raw_checkpoint is None
+            else RegionExecutionCheckpoint(**raw_checkpoint)
+        )
+        plan = compile_region(region)
+
+        def commit_batch(batch, next_checkpoint) -> None:
+            for candidate in batch:
+                registry.register_proposal(candidate)
+                registry.add_region_source_edge(
+                    region_id,
+                    candidate.source_key,
+                )
+            registry.checkpoint_region(
+                region_id,
+                generation,
+                next_checkpoint.as_dict(),
+            )
+
+        try:
+            result = await executor.execute(
+                plan,
+                checkpoint=checkpoint,
+                commit_batch=commit_batch,
+            )
+        except asyncio.CancelledError:
+            # Leave RUNNING durable.  The next process includes RUNNING regions
+            # in plan_regions() and claim_region() advances the generation fence.
+            raise
+        except Exception as exc:
+            latest = registry.get_region_checkpoint(region_id)
+            registry.finish_region(
+                region_id,
+                generation,
+                RegionState.FAILED_RETRYABLE,
+                checkpoint=latest,
+                reason=f"{type(exc).__name__}: {exc}"[:1000],
+            )
+            raise
+
+        registry.finish_region(
+            region_id,
+            generation,
+            RegionState.EXHAUSTED if result.terminal else RegionState.HOLD,
+            checkpoint=result.checkpoint.as_dict(),
+            reason=(
+                "deterministic region exhausted"
+                if result.terminal
+                else "bounded region execution stopped before exhaustion"
+            ),
+        )
+        return result
+
+    return plan_regions, execute_region
+
+
 @asynccontextmanager
 async def _open_runtime(config: SourceDiscoveryServiceConfig):
     root = config.runtime_data_root
@@ -763,6 +868,7 @@ async def _open_runtime(config: SourceDiscoveryServiceConfig):
                     if config.coordinator.nonblocking_research
                     else None
                 )
+                region_planner, region_executor = _region_runtime_adapters(registry)
                 coordinator = SourceDiscoveryCoordinator(
                     registry,
                     manager,
@@ -775,6 +881,8 @@ async def _open_runtime(config: SourceDiscoveryServiceConfig):
                     triage_parallelism=config.coordinator.triage_parallelism,
                     scout_parallelism=config.coordinator.scout_parallelism,
                     search_parallelism=config.coordinator.search_parallelism,
+                    region_planner=region_planner,
+                    region_executor=region_executor,
                     region_parallelism=config.coordinator.region_parallelism,
                     failure_retry_seconds=config.coordinator.failure_retry_seconds,
                     research_snapshot_provider=(
