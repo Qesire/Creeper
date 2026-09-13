@@ -1056,6 +1056,7 @@ class IncrementalReadinessRuntime:
              AND m.year_to = o.year_to
              AND m.provider = o.provider
              AND m.policy_version = o.policy_version
+             AND m.recorded_at >= o.first_observed_at
             WHERE o.source_key = ?
               AND o.reservoir_id = ?
               AND o.lease_id = ?
