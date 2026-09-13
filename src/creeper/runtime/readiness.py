@@ -594,6 +594,15 @@ class IncrementalReadinessRuntime:
             model_signature=report.model_signature,
         )
 
+    def _invalidate_learning_rewards(self) -> None:
+        """Fail cold while a changed baseline/model authority is rebuilding."""
+
+        control = self._control_store()
+        if control is None:
+            return
+        control.invalidate_evidence_action_final_rewards()
+        SourceDiscoveryRegistry(control).reset_final_rewards()
+
     def _publish_source_rewards(
         self,
         report: IncrementalReadinessReport,
@@ -620,6 +629,12 @@ class IncrementalReadinessRuntime:
 
     def sync_once(self) -> IncrementalReadinessReport:
         authority_changed = self._refresh_authority()
+        if authority_changed:
+            # A prefix of a full authority rebuild is not a final reward. Drop
+            # the old formal policy immediately and stay on bootstrap behavior
+            # until every durable host-year has been re-evaluated.
+            self._invalidate_learning_rewards()
+
         cursor = self.ledger.cursor()
         rows = self.evidence.host_years_after(
             cursor,
@@ -638,11 +653,15 @@ class IncrementalReadinessRuntime:
             latest_evidence_sequence=self.evidence.max_host_year_sequence(),
             baseline_eed=self.baseline_eed,
         )
-        self._publish_source_rewards(
-            report,
-            reset=authority_changed,
-        )
-        self._publish_evidence_action_rewards(report)
+        if report.evidence_cursor >= report.latest_evidence_sequence:
+            # Only a complete snapshot may train source/action allocation. On
+            # ordinary incremental lag, retain the previous coherent snapshot;
+            # after an authority reset, the invalidation above keeps policy cold.
+            self._publish_source_rewards(
+                report,
+                reset=False,
+            )
+            self._publish_evidence_action_rewards(report)
         return report
 
     def sync_until_current(
