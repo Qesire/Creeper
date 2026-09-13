@@ -163,6 +163,7 @@ class CoordinatorCycleReport:
     research_completed: int = 0
     research_failures: int = 0
     research_suppressed: int = 0
+    research_final_projections: int = 0
     agent_hot_path_block_seconds: float = 0.0
 
 
@@ -185,6 +186,7 @@ ResearchSnapshotProvider = Callable[[], ResearchTriggerSnapshot]
 ResearchExecutor = Callable[[ResearchDirective], Awaitable[object]]
 ResearchResultCommitter = Callable[[ResearchDirective, object, float], None]
 ResearchFailureRecorder = Callable[[ResearchDirective, Exception, float], None]
+FinalRewardSynchronizer = Callable[[], int]
 
 
 @contextmanager
@@ -241,6 +243,7 @@ class SourceDiscoveryCoordinator:
         research_executor: ResearchExecutor | None = None,
         research_result_committer: ResearchResultCommitter | None = None,
         research_failure_recorder: ResearchFailureRecorder | None = None,
+        final_reward_synchronizer: FinalRewardSynchronizer | None = None,
     ) -> None:
         if triage_parallelism < 1 or search_parallelism < 1 or region_parallelism < 1:
             raise ValueError("coordinator parallelism must be positive")
@@ -289,6 +292,7 @@ class SourceDiscoveryCoordinator:
         self.research_executor = research_executor
         self.research_result_committer = research_result_committer
         self.research_failure_recorder = research_failure_recorder
+        self.final_reward_synchronizer = final_reward_synchronizer
         self._research_task: asyncio.Task[_Outcome[object]] | None = None
         self._research_directive: ResearchDirective | None = None
         self._research_started_at: float | None = None
@@ -980,9 +984,14 @@ class SourceDiscoveryCoordinator:
                 "research_completed": 0,
                 "research_failures": 0,
                 "research_suppressed": 0,
+                "research_final_projections": 0,
                 "agent_hot_path_block_seconds": 0.0,
             }
             await self._poll_background_research(counts)
+            if self.final_reward_synchronizer is not None:
+                counts["research_final_projections"] = max(
+                    0, int(self.final_reward_synchronizer())
+                )
             recovered = 0
             if not self._startup_recovered:
                 recovered = self._recover_stranded_scouts()
