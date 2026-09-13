@@ -22,6 +22,12 @@ from creeper.source_discovery.models import (
     is_common_crawl_provenance,
 )
 from creeper.storage.control_store import ControlStore
+from creeper.source_discovery.negative_knowledge import NegativeKnowledge
+from creeper.source_discovery.research_models import (
+    ExplorationRegion,
+    RegionState,
+    legal_region_transition,
+)
 
 
 _TRANSITIONS: dict[SourceState, frozenset[SourceState]] = {
@@ -355,8 +361,120 @@ class SourceDiscoveryRegistry:
             ) WITHOUT ROWID;
             CREATE INDEX IF NOT EXISTS idx_source_suppressions_expiry
                 ON source_suppressions(expires_at);
+
+            CREATE TABLE IF NOT EXISTS source_exploration_regions (
+                region_id TEXT PRIMARY KEY,
+                region_key TEXT NOT NULL UNIQUE,
+                surface_kind TEXT NOT NULL,
+                root TEXT NOT NULL,
+                purpose TEXT NOT NULL,
+                query_family_json TEXT NOT NULL,
+                enumerator_spec_json TEXT NOT NULL,
+                artifact_predicate_json TEXT NOT NULL,
+                hard_bounds_json TEXT NOT NULL,
+                stop_conditions_json TEXT NOT NULL,
+                expected_source_family TEXT NOT NULL,
+                expected_contract_family TEXT NOT NULL,
+                context_hash TEXT NOT NULL,
+                created_by_episode_id TEXT,
+                compiler_version TEXT NOT NULL,
+                state TEXT NOT NULL,
+                state_reason TEXT NOT NULL DEFAULT '',
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL
+            ) WITHOUT ROWID;
+            CREATE INDEX IF NOT EXISTS idx_source_exploration_regions_state
+                ON source_exploration_regions(state, updated_at);
+            CREATE INDEX IF NOT EXISTS idx_source_exploration_regions_episode
+                ON source_exploration_regions(created_by_episode_id);
+
+            CREATE TABLE IF NOT EXISTS source_region_progress (
+                region_id TEXT PRIMARY KEY,
+                execution_generation INTEGER NOT NULL CHECK(execution_generation > 0),
+                query_index INTEGER NOT NULL DEFAULT 0 CHECK(query_index >= 0),
+                cursor_json TEXT,
+                page INTEGER,
+                requests INTEGER NOT NULL DEFAULT 0 CHECK(requests >= 0),
+                bytes_read INTEGER NOT NULL DEFAULT 0 CHECK(bytes_read >= 0),
+                results_seen INTEGER NOT NULL DEFAULT 0 CHECK(results_seen >= 0),
+                new_candidates INTEGER NOT NULL DEFAULT 0 CHECK(new_candidates >= 0),
+                duplicate_candidates INTEGER NOT NULL DEFAULT 0 CHECK(duplicate_candidates >= 0),
+                checkpoint_json TEXT NOT NULL DEFAULT '{}',
+                updated_at REAL NOT NULL,
+                FOREIGN KEY(region_id) REFERENCES source_exploration_regions(region_id)
+            ) WITHOUT ROWID;
+
+            CREATE TABLE IF NOT EXISTS source_region_edges (
+                region_id TEXT NOT NULL,
+                source_key TEXT NOT NULL,
+                relation TEXT NOT NULL,
+                created_at REAL NOT NULL,
+                PRIMARY KEY(region_id, source_key, relation),
+                FOREIGN KEY(region_id) REFERENCES source_exploration_regions(region_id),
+                FOREIGN KEY(source_key) REFERENCES source_candidates(source_key)
+            ) WITHOUT ROWID;
+            CREATE INDEX IF NOT EXISTS idx_source_region_edges_source
+                ON source_region_edges(source_key, region_id);
+
+            CREATE TABLE IF NOT EXISTS source_negative_knowledge (
+                negative_id TEXT PRIMARY KEY,
+                scope_kind TEXT NOT NULL,
+                scope_key TEXT NOT NULL,
+                reason_code TEXT NOT NULL,
+                evidence_ref TEXT NOT NULL DEFAULT '',
+                policy_version TEXT NOT NULL,
+                created_at REAL NOT NULL,
+                expires_at REAL
+            ) WITHOUT ROWID;
+            CREATE INDEX IF NOT EXISTS idx_source_negative_knowledge_scope
+                ON source_negative_knowledge(
+                    scope_kind, scope_key, reason_code, expires_at
+                );
+
+            CREATE TABLE IF NOT EXISTS source_region_rewards (
+                region_id TEXT PRIMARY KEY,
+                scout_proxy_eed REAL NOT NULL DEFAULT 0 CHECK(scout_proxy_eed >= 0),
+                final_accepted_eed REAL NOT NULL DEFAULT 0 CHECK(final_accepted_eed >= 0),
+                requests INTEGER NOT NULL DEFAULT 0 CHECK(requests >= 0),
+                bytes INTEGER NOT NULL DEFAULT 0 CHECK(bytes >= 0),
+                cost_seconds REAL NOT NULL DEFAULT 0 CHECK(cost_seconds >= 0),
+                updated_at REAL NOT NULL,
+                FOREIGN KEY(region_id) REFERENCES source_exploration_regions(region_id)
+            ) WITHOUT ROWID;
             """
         )
+        llm_columns = {
+            str(row[1])
+            for row in self.connection.execute(
+                "PRAGMA table_info(source_llm_episodes)"
+            ).fetchall()
+        }
+        llm_migrations = {
+            "trigger_reason": (
+                "ALTER TABLE source_llm_episodes "
+                "ADD COLUMN trigger_reason TEXT"
+            ),
+            "regions_proposed": (
+                "ALTER TABLE source_llm_episodes "
+                "ADD COLUMN regions_proposed INTEGER NOT NULL DEFAULT 0"
+            ),
+            "regions_accepted": (
+                "ALTER TABLE source_llm_episodes "
+                "ADD COLUMN regions_accepted INTEGER NOT NULL DEFAULT 0"
+            ),
+            "deterministic_actions": (
+                "ALTER TABLE source_llm_episodes "
+                "ADD COLUMN deterministic_actions INTEGER NOT NULL DEFAULT 0"
+            ),
+            "final_credited_eed": (
+                "ALTER TABLE source_llm_episodes "
+                "ADD COLUMN final_credited_eed REAL NOT NULL DEFAULT 0"
+            ),
+        }
+        for name, statement in llm_migrations.items():
+            if name not in llm_columns:
+                self.connection.execute(statement)
+
         source_run_columns = {
             str(row[1])
             for row in self.connection.execute(
@@ -2809,3 +2927,660 @@ class SourceDiscoveryRegistry:
                 (source_key,),
             )
         ]
+
+    @staticmethod
+    def _region_from_row(row: sqlite3.Row) -> ExplorationRegion:
+        return ExplorationRegion(
+            region_id=str(row["region_id"]),
+            region_key=str(row["region_key"]),
+            surface_kind=str(row["surface_kind"]),
+            root=str(row["root"]),
+            purpose=str(row["purpose"]),
+            query_family_json=str(row["query_family_json"]),
+            enumerator_spec_json=str(row["enumerator_spec_json"]),
+            artifact_predicate_json=str(row["artifact_predicate_json"]),
+            hard_bounds_json=str(row["hard_bounds_json"]),
+            stop_conditions_json=str(row["stop_conditions_json"]),
+            expected_source_family=str(row["expected_source_family"]),
+            expected_contract_family=str(row["expected_contract_family"]),
+            context_hash=str(row["context_hash"]),
+            created_by_episode_id=(
+                None
+                if row["created_by_episode_id"] is None
+                else str(row["created_by_episode_id"])
+            ),
+            compiler_version=str(row["compiler_version"]),
+            state=RegionState(str(row["state"])),
+            state_reason=str(row["state_reason"]),
+            created_at=float(row["created_at"]),
+            updated_at=float(row["updated_at"]),
+        )
+
+    def register_region(
+        self, region: ExplorationRegion
+    ) -> tuple[ExplorationRegion, bool]:
+        """Register a semantic region once; equivalent proposals dedupe by key."""
+        now = float(self.clock())
+        with self.connection:
+            cursor = self.connection.execute(
+                """
+                INSERT INTO source_exploration_regions(
+                    region_id, region_key, surface_kind, root, purpose,
+                    query_family_json, enumerator_spec_json,
+                    artifact_predicate_json, hard_bounds_json,
+                    stop_conditions_json, expected_source_family,
+                    expected_contract_family, context_hash,
+                    created_by_episode_id, compiler_version, state,
+                    state_reason, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(region_key) DO NOTHING
+                """,
+                (
+                    region.region_id,
+                    region.region_key,
+                    region.surface_kind,
+                    region.root,
+                    region.purpose,
+                    region.query_family_json,
+                    region.enumerator_spec_json,
+                    region.artifact_predicate_json,
+                    region.hard_bounds_json,
+                    region.stop_conditions_json,
+                    region.expected_source_family,
+                    region.expected_contract_family,
+                    region.context_hash,
+                    region.created_by_episode_id,
+                    region.compiler_version,
+                    region.state.value,
+                    region.state_reason,
+                    now,
+                    now,
+                ),
+            )
+        stored = self.get_region(region.region_key)
+        if stored is None:
+            raise RuntimeError("region disappeared after registration")
+        return stored, cursor.rowcount == 1
+
+    def get_region(self, region_id_or_key: str) -> ExplorationRegion | None:
+        row = self.connection.execute(
+            """
+            SELECT * FROM source_exploration_regions
+            WHERE region_id = ? OR region_key = ?
+            """,
+            (region_id_or_key, region_id_or_key),
+        ).fetchone()
+        return None if row is None else self._region_from_row(row)
+
+    def list_regions(
+        self, state: RegionState | str | None = None
+    ) -> list[ExplorationRegion]:
+        if state is None:
+            rows = self.connection.execute(
+                """
+                SELECT * FROM source_exploration_regions
+                ORDER BY created_at, region_id
+                """
+            ).fetchall()
+        else:
+            rows = self.connection.execute(
+                """
+                SELECT * FROM source_exploration_regions
+                WHERE state = ?
+                ORDER BY created_at, region_id
+                """,
+                (RegionState(state).value,),
+            ).fetchall()
+        return [self._region_from_row(row) for row in rows]
+
+    def list_executable_regions(
+        self, *, limit: int = 100
+    ) -> list[ExplorationRegion]:
+        if limit < 1:
+            return []
+        rows = self.connection.execute(
+            """
+            SELECT * FROM source_exploration_regions
+            WHERE state IN (?, ?)
+            ORDER BY updated_at, created_at, region_id
+            LIMIT ?
+            """,
+            (
+                RegionState.READY.value,
+                RegionState.FAILED_RETRYABLE.value,
+                int(limit),
+            ),
+        ).fetchall()
+        return [self._region_from_row(row) for row in rows]
+
+    def transition_region(
+        self,
+        region_id: str,
+        new_state: RegionState | str,
+        reason: str = "",
+    ) -> ExplorationRegion:
+        target = RegionState(new_state)
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            row = self.connection.execute(
+                """
+                SELECT state FROM source_exploration_regions
+                WHERE region_id = ?
+                """,
+                (region_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"unknown region: {region_id}")
+            current = RegionState(str(row["state"]))
+            if current != target and not legal_region_transition(current, target):
+                raise StateTransitionError(
+                    f"illegal region transition "
+                    f"{current.value} -> {target.value}"
+                )
+            self.connection.execute(
+                """
+                UPDATE source_exploration_regions
+                SET state = ?, state_reason = ?, updated_at = ?
+                WHERE region_id = ?
+                """,
+                (target.value, reason, float(self.clock()), region_id),
+            )
+            self.connection.commit()
+        except BaseException:
+            self.connection.rollback()
+            raise
+        stored = self.get_region(region_id)
+        if stored is None:
+            raise RuntimeError("region disappeared after transition")
+        return stored
+
+    def claim_region(self, region_id: str) -> int:
+        """Claim/reclaim a region and increment its generation fence."""
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            row = self.connection.execute(
+                """
+                SELECT state FROM source_exploration_regions
+                WHERE region_id = ?
+                """,
+                (region_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"unknown region: {region_id}")
+            state = RegionState(str(row["state"]))
+            if state not in {
+                RegionState.READY,
+                RegionState.FAILED_RETRYABLE,
+                RegionState.RUNNING,
+            }:
+                raise StateTransitionError(
+                    f"region {region_id} is not claimable from {state.value}"
+                )
+            progress = self.connection.execute(
+                """
+                SELECT execution_generation FROM source_region_progress
+                WHERE region_id = ?
+                """,
+                (region_id,),
+            ).fetchone()
+            generation = (
+                1
+                if progress is None
+                else int(progress["execution_generation"]) + 1
+            )
+            now = float(self.clock())
+            self.connection.execute(
+                """
+                UPDATE source_exploration_regions
+                SET state = ?, state_reason = ?, updated_at = ?
+                WHERE region_id = ?
+                """,
+                (RegionState.RUNNING.value, "claimed", now, region_id),
+            )
+            self.connection.execute(
+                """
+                INSERT INTO source_region_progress(
+                    region_id, execution_generation, updated_at
+                ) VALUES (?, ?, ?)
+                ON CONFLICT(region_id) DO UPDATE SET
+                    execution_generation = excluded.execution_generation,
+                    updated_at = excluded.updated_at
+                """,
+                (region_id, generation, now),
+            )
+            self.connection.commit()
+            return generation
+        except BaseException:
+            self.connection.rollback()
+            raise
+
+    @staticmethod
+    def _checkpoint_fields(
+        checkpoint: dict[str, object],
+    ) -> tuple[dict[str, object], str]:
+        if not isinstance(checkpoint, dict):
+            raise TypeError("checkpoint must be a dictionary")
+        cursor = checkpoint.get("cursor")
+        cursor_json = (
+            None
+            if cursor is None
+            else json.dumps(
+                cursor,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        )
+        page_value = checkpoint.get("page", 0)
+        page = None if page_value is None else int(page_value)
+        fields: dict[str, object] = {
+            "query_index": int(checkpoint.get("query_index", 0)),
+            "cursor_json": cursor_json,
+            "page": page,
+            "requests": int(checkpoint.get("requests", 0)),
+            "bytes_read": int(
+                checkpoint.get("bytes_read", checkpoint.get("bytes", 0))
+            ),
+            "results_seen": int(checkpoint.get("results_seen", 0)),
+            "new_candidates": int(checkpoint.get("new_candidates", 0)),
+            "duplicate_candidates": int(
+                checkpoint.get("duplicate_candidates", 0)
+            ),
+        }
+        for name in (
+            "query_index",
+            "requests",
+            "bytes_read",
+            "results_seen",
+            "new_candidates",
+            "duplicate_candidates",
+        ):
+            if int(fields[name]) < 0:
+                raise ValueError("checkpoint counters must be non-negative")
+        if page is not None and page < 0:
+            raise ValueError("checkpoint page must be non-negative")
+        checkpoint_json = json.dumps(
+            checkpoint,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return fields, checkpoint_json
+
+    def _checkpoint_region_locked(
+        self,
+        region_id: str,
+        generation: int,
+        checkpoint: dict[str, object],
+    ) -> None:
+        fields, checkpoint_json = self._checkpoint_fields(checkpoint)
+        row = self.connection.execute(
+            """
+            SELECT p.*, r.state AS region_state
+            FROM source_region_progress AS p
+            JOIN source_exploration_regions AS r USING(region_id)
+            WHERE p.region_id = ?
+            """,
+            (region_id,),
+        ).fetchone()
+        if row is None:
+            raise KeyError(f"unknown region progress: {region_id}")
+        if int(row["execution_generation"]) != generation:
+            raise RuntimeError("stale or unknown region execution generation")
+        if RegionState(str(row["region_state"])) is not RegionState.RUNNING:
+            raise StateTransitionError(
+                f"region {region_id} is not RUNNING"
+            )
+        for name in (
+            "query_index",
+            "requests",
+            "bytes_read",
+            "results_seen",
+            "new_candidates",
+            "duplicate_candidates",
+        ):
+            if int(fields[name]) < int(row[name]):
+                raise RuntimeError(
+                    f"checkpoint regression for {name}: "
+                    f"{fields[name]} < {row[name]}"
+                )
+        self.connection.execute(
+            """
+            UPDATE source_region_progress SET
+                query_index = ?,
+                cursor_json = ?,
+                page = ?,
+                requests = ?,
+                bytes_read = ?,
+                results_seen = ?,
+                new_candidates = ?,
+                duplicate_candidates = ?,
+                checkpoint_json = ?,
+                updated_at = ?
+            WHERE region_id = ? AND execution_generation = ?
+            """,
+            (
+                fields["query_index"],
+                fields["cursor_json"],
+                fields["page"],
+                fields["requests"],
+                fields["bytes_read"],
+                fields["results_seen"],
+                fields["new_candidates"],
+                fields["duplicate_candidates"],
+                checkpoint_json,
+                float(self.clock()),
+                region_id,
+                generation,
+            ),
+        )
+
+    def checkpoint_region(
+        self,
+        region_id: str,
+        generation: int,
+        checkpoint: dict[str, object],
+    ) -> bool:
+        if generation < 1:
+            raise ValueError("generation must be positive")
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            self._checkpoint_region_locked(
+                region_id, generation, checkpoint
+            )
+            self.connection.commit()
+            return True
+        except BaseException:
+            self.connection.rollback()
+            raise
+
+    def get_region_checkpoint(
+        self, region_id: str
+    ) -> dict[str, object] | None:
+        row = self.connection.execute(
+            """
+            SELECT checkpoint_json FROM source_region_progress
+            WHERE region_id = ?
+            """,
+            (region_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return dict(json.loads(str(row["checkpoint_json"])))
+
+    def get_region_generation(self, region_id: str) -> int | None:
+        row = self.connection.execute(
+            """
+            SELECT execution_generation FROM source_region_progress
+            WHERE region_id = ?
+            """,
+            (region_id,),
+        ).fetchone()
+        return None if row is None else int(row["execution_generation"])
+
+    def finish_region(
+        self,
+        region_id: str,
+        generation: int,
+        terminal_state: RegionState | str,
+        *,
+        checkpoint: dict[str, object] | None = None,
+        reason: str = "",
+    ) -> ExplorationRegion:
+        target = RegionState(terminal_state)
+        if target not in {
+            RegionState.EXHAUSTED,
+            RegionState.HOLD,
+            RegionState.FAILED_RETRYABLE,
+            RegionState.REJECTED,
+        }:
+            raise ValueError(
+                "finish_region requires terminal/retryable state"
+            )
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            row = self.connection.execute(
+                """
+                SELECT r.state, p.execution_generation
+                FROM source_exploration_regions AS r
+                JOIN source_region_progress AS p USING(region_id)
+                WHERE r.region_id = ?
+                """,
+                (region_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(
+                    f"unknown region or missing progress: {region_id}"
+                )
+            if int(row["execution_generation"]) != generation:
+                raise RuntimeError(
+                    "stale or unknown region execution generation"
+                )
+            current = RegionState(str(row["state"]))
+            if not legal_region_transition(current, target):
+                raise StateTransitionError(
+                    f"illegal region transition "
+                    f"{current.value} -> {target.value}"
+                )
+            if checkpoint is not None:
+                self._checkpoint_region_locked(
+                    region_id, generation, checkpoint
+                )
+            self.connection.execute(
+                """
+                UPDATE source_exploration_regions
+                SET state = ?, state_reason = ?, updated_at = ?
+                WHERE region_id = ?
+                """,
+                (
+                    target.value,
+                    reason,
+                    float(self.clock()),
+                    region_id,
+                ),
+            )
+            self.connection.commit()
+        except BaseException:
+            self.connection.rollback()
+            raise
+        stored = self.get_region(region_id)
+        if stored is None:
+            raise RuntimeError("region disappeared after finish")
+        return stored
+
+    def add_region_source_edge(
+        self,
+        region_id: str,
+        source_key: str,
+        *,
+        relation: str = "produces",
+    ) -> bool:
+        if not relation.strip():
+            raise ValueError("region edge relation is required")
+        with self.connection:
+            changed = self.connection.execute(
+                """
+                INSERT INTO source_region_edges(
+                    region_id, source_key, relation, created_at
+                ) VALUES (?, ?, ?, ?)
+                ON CONFLICT(region_id, source_key, relation) DO NOTHING
+                """,
+                (
+                    region_id,
+                    source_key,
+                    relation,
+                    float(self.clock()),
+                ),
+            ).rowcount
+        return changed == 1
+
+    def record_region_reward(
+        self,
+        region_id: str,
+        *,
+        scout_proxy_eed: float = 0.0,
+        final_accepted_eed: float = 0.0,
+        requests: int = 0,
+        bytes: int = 0,
+        cost_seconds: float = 0.0,
+    ) -> None:
+        """Store cumulative reward snapshots; repeated closure is idempotent."""
+        numeric_values = (
+            float(scout_proxy_eed),
+            float(final_accepted_eed),
+            float(requests),
+            float(bytes),
+            float(cost_seconds),
+        )
+        if any(value < 0 for value in numeric_values):
+            raise ValueError("region reward values must be non-negative")
+        if isinstance(requests, bool) or int(requests) != requests:
+            raise ValueError("requests must be a non-negative integer")
+        if isinstance(bytes, bool) or int(bytes) != bytes:
+            raise ValueError("bytes must be a non-negative integer")
+        with self.connection:
+            self.connection.execute(
+                """
+                INSERT INTO source_region_rewards(
+                    region_id, scout_proxy_eed, final_accepted_eed,
+                    requests, bytes, cost_seconds, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(region_id) DO UPDATE SET
+                    scout_proxy_eed = MAX(
+                        source_region_rewards.scout_proxy_eed,
+                        excluded.scout_proxy_eed
+                    ),
+                    final_accepted_eed = MAX(
+                        source_region_rewards.final_accepted_eed,
+                        excluded.final_accepted_eed
+                    ),
+                    requests = MAX(
+                        source_region_rewards.requests,
+                        excluded.requests
+                    ),
+                    bytes = MAX(
+                        source_region_rewards.bytes,
+                        excluded.bytes
+                    ),
+                    cost_seconds = MAX(
+                        source_region_rewards.cost_seconds,
+                        excluded.cost_seconds
+                    ),
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    region_id,
+                    float(scout_proxy_eed),
+                    float(final_accepted_eed),
+                    int(requests),
+                    int(bytes),
+                    float(cost_seconds),
+                    float(self.clock()),
+                ),
+            )
+
+    @staticmethod
+    def _negative_id(knowledge: NegativeKnowledge) -> str:
+        identity = json.dumps(
+            [
+                knowledge.scope_kind,
+                knowledge.scope_key,
+                knowledge.reason_code,
+                knowledge.policy_version,
+            ],
+            separators=(",", ":"),
+            ensure_ascii=True,
+        )
+        return "neg:" + uuid.uuid5(uuid.NAMESPACE_URL, identity).hex
+
+    def upsert_negative_knowledge(
+        self, knowledge: NegativeKnowledge
+    ) -> bool:
+        negative_id = self._negative_id(knowledge)
+        created_at = float(knowledge.created_at or self.clock())
+        with self.connection:
+            self.connection.execute(
+                """
+                INSERT INTO source_negative_knowledge(
+                    negative_id, scope_kind, scope_key, reason_code,
+                    evidence_ref, policy_version, created_at, expires_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(negative_id) DO UPDATE SET
+                    evidence_ref = CASE
+                        WHEN excluded.evidence_ref != ''
+                        THEN excluded.evidence_ref
+                        ELSE source_negative_knowledge.evidence_ref
+                    END,
+                    created_at = MIN(
+                        source_negative_knowledge.created_at,
+                        excluded.created_at
+                    ),
+                    expires_at = CASE
+                        WHEN source_negative_knowledge.expires_at IS NULL
+                          OR excluded.expires_at IS NULL
+                        THEN NULL
+                        ELSE MAX(
+                            source_negative_knowledge.expires_at,
+                            excluded.expires_at
+                        )
+                    END
+                """,
+                (
+                    negative_id,
+                    knowledge.scope_kind,
+                    knowledge.scope_key,
+                    knowledge.reason_code,
+                    knowledge.evidence_ref,
+                    knowledge.policy_version,
+                    created_at,
+                    knowledge.expires_at,
+                ),
+            )
+        return True
+
+    def negative_knowledge_matches(
+        self,
+        *,
+        scope_kind: str,
+        scope_key: str,
+        reason_code: str | None = None,
+    ) -> list[NegativeKnowledge]:
+        sql = (
+            "SELECT * FROM source_negative_knowledge "
+            "WHERE scope_kind = ? AND scope_key = ?"
+        )
+        params: list[object] = [scope_kind, scope_key]
+        if reason_code is not None:
+            sql += " AND reason_code = ?"
+            params.append(reason_code)
+        sql += (
+            " AND (expires_at IS NULL OR expires_at > ?) "
+            "ORDER BY created_at DESC, negative_id"
+        )
+        params.append(float(self.clock()))
+        rows = self.connection.execute(sql, params).fetchall()
+        return [
+            NegativeKnowledge(
+                scope_kind=str(row["scope_kind"]),
+                scope_key=str(row["scope_key"]),
+                reason_code=str(row["reason_code"]),
+                evidence_ref=str(row["evidence_ref"]),
+                policy_version=str(row["policy_version"]),
+                created_at=float(row["created_at"]),
+                expires_at=(
+                    None
+                    if row["expires_at"] is None
+                    else float(row["expires_at"])
+                ),
+            )
+            for row in rows
+        ]
+
+    def prune_expired_negative_knowledge(self) -> int:
+        with self.connection:
+            return self.connection.execute(
+                """
+                DELETE FROM source_negative_knowledge
+                WHERE expires_at IS NOT NULL AND expires_at <= ?
+                """,
+                (float(self.clock()),),
+            ).rowcount
+
