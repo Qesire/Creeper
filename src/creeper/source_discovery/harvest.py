@@ -9,9 +9,12 @@ per-year witness reduction, and bounded resume semantics.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
+import sqlite3
+import threading
 import time
 from urllib.parse import unquote, urlsplit
 
@@ -23,7 +26,10 @@ from creeper.records.candidates import CandidateSourceScope
 from creeper.records.models import HostObservation, SourceRecord
 from creeper.runtime.http import configured_http_proxy
 from creeper.scheduler.leases import LeaseResult, WorkLease
-from creeper.source_discovery.index_registry import IndexSpaceRegistry
+from creeper.source_discovery.index_registry import (
+    IndexSpaceRegistry,
+    _renew_region_harvest_on_connection,
+)
 from creeper.source_discovery.index_space import HarvestRegion, RegionState
 from creeper.sources.archive.cdx import parse_cdx_line
 from creeper.sources.archive.cdxj import parse_cdxj_line
@@ -45,6 +51,7 @@ class RegionHarvestPolicy:
     max_records_per_lease: int = 100_000
     policy_version: str = "historical-region-v1"
     claim_grace_seconds: float = 60.0
+    heartbeat_interval_seconds: float | None = None
     boundary_record_max_bytes: int = 4 * 1024 * 1024
 
     def __post_init__(self) -> None:
@@ -58,8 +65,25 @@ class RegionHarvestPolicy:
             raise ValueError("policy_version is required")
         if self.claim_grace_seconds < 0:
             raise ValueError("claim_grace_seconds must be non-negative")
+        if self.heartbeat_interval_seconds is not None:
+            if self.heartbeat_interval_seconds <= 0:
+                raise ValueError("heartbeat_interval_seconds must be positive")
+            if self.heartbeat_interval_seconds >= self.claim_ttl_seconds:
+                raise ValueError(
+                    "heartbeat_interval_seconds must be less than claim TTL"
+                )
         if self.boundary_record_max_bytes < 1:
             raise ValueError("boundary_record_max_bytes must be positive")
+
+    @property
+    def claim_ttl_seconds(self) -> float:
+        return self.max_seconds + self.claim_grace_seconds
+
+    @property
+    def resolved_heartbeat_interval_seconds(self) -> float:
+        if self.heartbeat_interval_seconds is not None:
+            return self.heartbeat_interval_seconds
+        return min(60.0, self.max_seconds / 3.0)
 
 
 @dataclass(frozen=True)
@@ -89,6 +113,112 @@ def _cursor_value(cursor: str | None) -> int | None:
     if not value.isdigit():
         raise RegionHarvestError("structured harvest returned an invalid byte cursor")
     return int(value)
+
+
+class _RegionHarvestHeartbeat:
+    """Renew one region claim from a dedicated SQLite connection.
+
+    ControlStore's primary sqlite3 connection is thread-affine.  The heartbeat
+    therefore opens its own connection to the same WAL database instead of
+    sharing the executor's connection across threads.
+    """
+
+    def __init__(
+        self,
+        *,
+        registry: IndexSpaceRegistry,
+        region_key: str,
+        owner: str,
+        ttl_seconds: float,
+        interval_seconds: float,
+    ) -> None:
+        if interval_seconds <= 0 or interval_seconds >= ttl_seconds:
+            raise ValueError("heartbeat interval must be positive and less than TTL")
+        database_path = ""
+        for row in registry.connection.execute("PRAGMA database_list").fetchall():
+            if str(row[1]) == "main":
+                database_path = str(row[2])
+                break
+        if not database_path:
+            raise RegionHarvestError(
+                "region harvest heartbeat requires a file-backed ControlStore"
+            )
+        self.registry = registry
+        self.region_key = region_key
+        self.owner = owner
+        self.ttl_seconds = float(ttl_seconds)
+        self.interval_seconds = float(interval_seconds)
+        self.database_path = database_path
+        self._stop = threading.Event()
+        self._failure_lock = threading.Lock()
+        self._failure: BaseException | None = None
+        self._thread = threading.Thread(
+            target=self._run,
+            name=f"region-heartbeat-{region_key[-12:]}",
+            daemon=True,
+        )
+
+    def _set_failure(self, exc: BaseException) -> None:
+        with self._failure_lock:
+            if self._failure is None:
+                self._failure = exc
+
+    def _get_failure(self) -> BaseException | None:
+        with self._failure_lock:
+            return self._failure
+
+    def _run(self) -> None:
+        busy_seconds = max(0.1, min(5.0, self.interval_seconds))
+        connection = sqlite3.connect(
+            self.database_path,
+            timeout=busy_seconds,
+        )
+        try:
+            connection.execute(
+                f"PRAGMA busy_timeout={int(busy_seconds * 1000)}"
+            )
+            while not self._stop.wait(self.interval_seconds):
+                try:
+                    _renew_region_harvest_on_connection(
+                        connection,
+                        region_key=self.region_key,
+                        owner=self.owner,
+                        ttl_seconds=self.ttl_seconds,
+                        now=float(self.registry.clock()),
+                    )
+                except BaseException as exc:
+                    self._set_failure(exc)
+                    return
+        finally:
+            connection.close()
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def raise_if_failed(self) -> None:
+        failure = self._get_failure()
+        if failure is not None:
+            raise RegionHarvestError(
+                "region harvest claim heartbeat lost ownership"
+            ) from failure
+
+    def assert_owned(self) -> None:
+        self.raise_if_failed()
+        try:
+            self.registry.assert_region_harvest_owned(
+                self.region_key,
+                owner=self.owner,
+            )
+        except ValueError as exc:
+            raise RegionHarvestError(
+                "region harvest claim is no longer owned by this worker"
+            ) from exc
+        self.raise_if_failed()
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread.ident is not None:
+            self._thread.join()
 
 
 class RegionHarvestExecutor:
@@ -142,6 +272,7 @@ class RegionHarvestExecutor:
         source_key: str | None = None,
         reservoir_id: str | None = None,
         origin_unit_id: str | None = None,
+        assert_claim_owned: Callable[[], None] | None = None,
     ) -> None:
         if not groups:
             return
@@ -197,6 +328,11 @@ class RegionHarvestExecutor:
 
         counters["planned"] += len(capsules)
         if capsules:
+            # A heartbeat failure is an ownership fence, not merely telemetry.
+            # Re-check immediately before the authoritative EvidenceStore write
+            # so a stale worker cannot commit proof after recovery/reclaim.
+            if assert_claim_owned is not None:
+                assert_claim_owned()
             # Evidence is the stronger authority. Commit proof first; readiness
             # can reconstruct direct source provenance from the capsule itself
             # if this process dies before ControlStore attribution is written.
@@ -627,7 +763,7 @@ class RegionHarvestExecutor:
         """Claim and advance one region; return None when another owner won."""
 
         harvest_started = time.monotonic()
-        ttl = self.policy.max_seconds + self.policy.claim_grace_seconds
+        ttl = self.policy.claim_ttl_seconds
         claimed = self.registry.claim_region_for_harvest(
             region_key,
             owner=self.owner,
@@ -727,8 +863,11 @@ class RegionHarvestExecutor:
             if activation is None
             else str(activation["reservoir_id"])
         )
+        heartbeat: _RegionHarvestHeartbeat | None = None
 
         def flush_pending() -> None:
+            if heartbeat is None:
+                raise RegionHarvestError("region harvest heartbeat is not active")
             self._flush_groups(
                 pending,
                 counters=counters,
@@ -739,6 +878,7 @@ class RegionHarvestExecutor:
                 ),
                 reservoir_id=origin_reservoir_id,
                 origin_unit_id=region_key,
+                assert_claim_owned=heartbeat.assert_owned,
             )
 
         def emit(record: SourceRecord) -> None:
@@ -749,6 +889,16 @@ class RegionHarvestExecutor:
                     flush_pending()
 
         try:
+            heartbeat = _RegionHarvestHeartbeat(
+                registry=self.registry,
+                region_key=region_key,
+                owner=self.owner,
+                ttl_seconds=ttl,
+                interval_seconds=(
+                    self.policy.resolved_heartbeat_interval_seconds
+                ),
+            )
+            heartbeat.start()
             scheme = urlsplit(index.locator).scheme.lower()
             if scheme in {"http", "https"}:
                 result = self._execute_http_region(
@@ -766,10 +916,14 @@ class RegionHarvestExecutor:
                 raise RegionHarvestError(
                     f"unsupported exact region transport: {scheme}"
                 )
+            heartbeat.raise_if_failed()
             final_group = reducer.finish()
             if final_group is not None:
                 pending.append(final_group)
             flush_pending()
+            heartbeat.assert_owned()
+            heartbeat.stop()
+            heartbeat.assert_owned()
 
             resume_cursor = _cursor_value(result.next_cursor)
             completed = resume_cursor is None
@@ -811,6 +965,8 @@ class RegionHarvestExecutor:
                 resume_cursor=resume_cursor,
             )
         except BaseException:
+            if heartbeat is not None:
+                heartbeat.stop()
             # Keep any pre-existing resume cursor. Evidence writes are
             # idempotent, so replay after a hard failure is safe.
             try:
