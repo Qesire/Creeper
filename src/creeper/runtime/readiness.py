@@ -563,15 +563,34 @@ class IncrementalReadinessLedger:
             "novel_host_years": 0,
             "novel_eed": "0",
         })
-        candidate_host_years = sum(
+        verified_kinds = frozenset({"exact", "range", "domain"})
+        verified_candidate_host_years = sum(
             int(payload["novel_host_years"])
             for kind, payload in task_kind_attribution.items()
-            if kind != "direct"
+            if kind in verified_kinds
         )
-        candidate_eed = sum(
-            (Decimal(str(payload["novel_eed"]))
-             for kind, payload in task_kind_attribution.items()
-             if kind != "direct"),
+        verified_candidate_eed = sum(
+            (
+                Decimal(str(payload["novel_eed"]))
+                for kind, payload in task_kind_attribution.items()
+                if kind in verified_kinds
+            ),
+            Decimal("0"),
+        )
+        # Registration/DNS/reference or future provider task kinds do not
+        # silently become annual web-presence contribution. Unknown non-direct
+        # kinds stay restricted until an explicit reviewed lane mapping exists.
+        restricted_host_years = sum(
+            int(payload["novel_host_years"])
+            for kind, payload in task_kind_attribution.items()
+            if kind != "direct" and kind not in verified_kinds
+        )
+        restricted_eed = sum(
+            (
+                Decimal(str(payload["novel_eed"]))
+                for kind, payload in task_kind_attribution.items()
+                if kind != "direct" and kind not in verified_kinds
+            ),
             Decimal("0"),
         )
         reconciliation = {
@@ -614,9 +633,13 @@ class IncrementalReadinessLedger:
             source_contribution={
                 "by_source": source_attribution,
                 "direct_annual": direct,
-                "candidate": {
-                    "novel_host_years": candidate_host_years,
-                    "novel_eed": format(candidate_eed, "f"),
+                "verified_candidate": {
+                    "novel_host_years": verified_candidate_host_years,
+                    "novel_eed": format(verified_candidate_eed, "f"),
+                },
+                "other_restricted": {
+                    "novel_host_years": restricted_host_years,
+                    "novel_eed": format(restricted_eed, "f"),
                 },
             },
         )
