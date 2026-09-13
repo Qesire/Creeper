@@ -189,7 +189,10 @@ class ResearchCompiler:
         bounds = self._bounds(raw["hard_bounds"])
         stops = self._stops(raw["stop_conditions"])
         fanout = self._fanout(raw["query_family"], raw["enumerator"], bounds, raw["expected_fanout"])
-        if fanout < self.policy.min_expected_fanout and not self._small_region_exception(raw, surface):
+        small_region = self._small_region_exception(raw, surface)
+        if small_region and int(raw["expected_fanout"]) < self.policy.min_expected_fanout:
+            fanout = int(raw["expected_fanout"])
+        if fanout < self.policy.min_expected_fanout and not small_region:
             raise ResearchCompilerError("expected fanout is below minimum")
         confidence = raw["confidence"]
         if isinstance(confidence, bool) or not isinstance(confidence, (int, float)) or not 0 <= confidence <= 1:
