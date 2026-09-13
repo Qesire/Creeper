@@ -398,6 +398,100 @@ class IncrementalReadinessTests(unittest.TestCase):
             )
             check_control.close()
 
+    def test_direct_capsule_provenance_recovers_missing_or_stale_control_credit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            runtime_root = root / "runtime"
+            runtime_root.mkdir()
+            baseline = self._build_baseline(root)
+            model = self._model(root)
+
+            # Simulate an orphan pre-evidence attribution from an interrupted
+            # old writer. The actual persisted proof belongs to source-new.
+            control = ControlStore(runtime_root / "control.sqlite3")
+            domain = SourceDomain(
+                domain_id="stale-domain",
+                family="FIXTURE",
+                discovery_mechanism="test",
+                temporal_scope=(1996, 2001),
+            )
+            reservoir = Reservoir(
+                reservoir_id="stale-reservoir",
+                domain_id=domain.domain_id,
+                adapter_id="fixture",
+                root_locator="fixture://stale",
+                enumeration_kind="finite_list",
+                capacity_lower=1,
+                capacity_upper=1,
+                evidence_mode="direct_year",
+            )
+            control.save_domain(domain)
+            control.save_reservoir(reservoir)
+            lease = WorkLease.create(
+                reservoir_id=reservoir.reservoir_id,
+                max_records=1,
+                max_requests=1,
+                max_bytes=1024,
+                max_seconds=30,
+                now=100.0,
+                expires_at=130.0,
+            )
+            control.save_lease(lease)
+            control.attribute_direct_host_years(
+                [("recover.org", 1997, "direct:source-old")],
+                source_key="source-old",
+                reservoir_id=reservoir.reservoir_id,
+                lease_id=lease.lease_id,
+            )
+            control.close()
+
+            evidence = EvidenceStore(runtime_root / "evidence.sqlite3")
+            evidence.put(
+                EvidenceCapsule(
+                    hostname="recover.org",
+                    year=1997,
+                    provider="direct:source-new",
+                    temporal_semantics="source_direct_year",
+                    evidence_timestamp="19970101000000",
+                    source_locator="https://archive.example/index.cdxj:byte:10",
+                    payload_hash="f" * 64,
+                    policy_version="historical-region-v1",
+                    evidence_type="dated_archive_index",
+                    source_id="source-new",
+                    original_url="http://recover.org/",
+                    record_locator="https://archive.example/index.cdxj:byte:10",
+                    extraction_method="cdxj",
+                )
+            )
+            evidence.close()
+
+            with IncrementalReadinessRuntime(
+                runtime_root,
+                baseline_index=baseline,
+                eed_model=model,
+                baseline_eed="20",
+            ) as runtime:
+                report = runtime.sync_until_current()
+
+            self.assertEqual(
+                report.source_attribution,
+                {
+                    "source-new": {
+                        "novel_host_years": 1,
+                        "novel_eed": "1",
+                    }
+                },
+            )
+            self.assertEqual(
+                report.task_kind_attribution,
+                {
+                    "direct": {
+                        "novel_host_years": 1,
+                        "novel_eed": "1",
+                    }
+                },
+            )
+
     def test_gate_report_uses_exact_decimal_thresholds(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

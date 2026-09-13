@@ -177,6 +177,20 @@ class RuntimeValidationTests(unittest.TestCase):
                         "rdap_rate_limit_wait_ms": 12000,
                         "rdap_adaptive_rate_decreases": 4,
                         "rdap_adaptive_rate_increases": 2,
+                        "historical_index_cycles": 3,
+                        "historical_index_probe_attempts": 4,
+                        "historical_index_probe_requests": 3,
+                        "historical_index_probe_bytes": 12000,
+                        "historical_index_probe_failures": 1,
+                        "historical_index_harvest_requests": 2,
+                        "historical_index_harvest_bytes": 88000,
+                        "historical_index_harvest_failures": 0,
+                        "historical_index_network_requests": 5,
+                        "historical_index_io_bytes": 100000,
+                        "historical_index_direct_capsules_inserted": 7,
+                        "historical_index_exhausted_reservoirs": 1,
+                        "historical_index_compile_failures": 0,
+                        "historical_index_wall_milliseconds": 9000,
                         "wayback_rate_limit_wait_ms": 1200,
                         "wayback_cooldown_wait_ms": 300,
                         "wayback_retry_backoff_wait_ms": 100,
@@ -274,7 +288,14 @@ class RuntimeValidationTests(unittest.TestCase):
                 float(report["provider_pacing_utilization"]),
                 (500 / 3600) / 0.5,
             )
-            self.assertEqual(report["report_version"], "runtime-validation-report-v6")
+            self.assertEqual(report["report_version"], "runtime-validation-report-v7")
+            self.assertTrue(report["cold_start_ab_eligible"])
+            self.assertIsNone(report["cold_start_ab_warning"])
+            self.assertEqual(report["measured_network_requests"], 605)
+            self.assertEqual(
+                report["novel_eed_per_1000_measured_network_requests"],
+                "165.2892561983471074380165289",
+            )
             self.assertAlmostEqual(
                 float(report["provider_active_request_starts_per_second"]),
                 400 / 1200,
@@ -295,6 +316,25 @@ class RuntimeValidationTests(unittest.TestCase):
             self.assertTrue(report["source_progress_observed"])
             self.assertTrue(report["integrated_capacity_baseline_eligible"])
             self.assertEqual(report["provider_transport_error_types"], {})
+            self.assertEqual(
+                report["historical_index"],
+                {
+                    "cycles": 3,
+                    "probe_attempts": 4,
+                    "probe_requests": 3,
+                    "probe_bytes": 12000,
+                    "probe_failures": 1,
+                    "harvest_requests": 2,
+                    "harvest_bytes": 88000,
+                    "harvest_failures": 0,
+                    "network_requests": 5,
+                    "io_bytes": 100000,
+                    "direct_capsules_inserted": 7,
+                    "exhausted_reservoirs": 1,
+                    "compile_failures": 0,
+                    "wall_milliseconds": 9000,
+                },
+            )
             self.assertEqual(
                 report["rdap_provider"],
                 {
@@ -454,6 +494,60 @@ class RuntimeValidationTests(unittest.TestCase):
             self.assertTrue((run_dir / "start.json").is_file())
             self.assertTrue((run_dir / "end.json").is_file())
             self.assertTrue((run_dir / "report.json").is_file())
+
+    def test_validation_marks_warm_learned_policy_as_not_cold_start_ab(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "runtime"
+            root.mkdir()
+            RuntimeTelemetryStore(root / "telemetry.sqlite3").close()
+            EvidenceStore(root / "evidence.sqlite3").close()
+            control = ControlStore(root / "control.sqlite3")
+            try:
+                key = EvidenceQueryKey(
+                    "warm.example",
+                    TemporalScope(1998, 1998),
+                    "wayback",
+                    "cdx-v1",
+                )
+                control.enqueue_evidence_tasks([key])
+                control.record_evidence_task_attempt_metric(
+                    key,
+                    attempt=1,
+                    state="empty_exhaustive",
+                    provider_requests=1,
+                    provider_elapsed_milliseconds=10,
+                    pages_seen=1,
+                    records_seen=0,
+                )
+            finally:
+                control.close()
+            self._readiness(root, eed="0", cursor=0, latest=0)
+            run_dir = root / "validation" / "warm"
+
+            start_validation_run(
+                runtime_data_root=root,
+                run_dir=run_dir,
+                label="warm",
+                clock=lambda: 10.0,
+            )
+            report = finish_validation_run(
+                runtime_data_root=root,
+                run_dir=run_dir,
+                clock=lambda: 20.0,
+            )
+
+            self.assertTrue(report["valid_for_throughput"])
+            self.assertFalse(report["cold_start_ab_eligible"])
+            self.assertIn(
+                "learned policy state",
+                report["cold_start_ab_warning"],
+            )
+            self.assertEqual(
+                report["policy_state_start"]["evidence_actions"]["exact"][
+                    "provider_requests"
+                ],
+                1,
+            )
 
     def test_start_rejects_readiness_backlog_to_prevent_false_yield(self):
         with tempfile.TemporaryDirectory() as tmp:

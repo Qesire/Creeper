@@ -118,6 +118,71 @@ def capture_runtime_snapshot(
             evidence_origin_coverage = control.evidence_task_origin_coverage()
             evidence_attempt_metrics = control.evidence_attempt_metric_summary()
             source_provider_requests = control.source_provider_request_totals()
+            action_stats = control.evidence_action_value_summary()
+            evidence_action_value_state = {
+                kind: {
+                    "attempts": value.attempts,
+                    "provider_requests": value.provider_requests,
+                    "final_novel_host_years": value.final_novel_host_years,
+                    "final_novel_eed": value.final_novel_eed,
+                    "posterior_host_years_per_request": (
+                        value.posterior_host_years_per_request
+                    ),
+                }
+                for kind, value in sorted(action_stats.items())
+            }
+
+            def table_exists(name: str) -> bool:
+                return (
+                    control.connection.execute(
+                        """
+                        SELECT 1 FROM sqlite_master
+                        WHERE type = 'table' AND name = ?
+                        """,
+                        (name,),
+                    ).fetchone()
+                    is not None
+                )
+
+            source_learning_state = {
+                "final_reward_sources": 0,
+                "positive_final_reward_sources": 0,
+                "final_accepted_eed": 0.0,
+                "search_episodes": 0,
+                "llm_episodes": 0,
+            }
+            if table_exists("source_final_rewards"):
+                row = control.connection.execute(
+                    """
+                    SELECT COUNT(*) AS sources,
+                           COALESCE(SUM(
+                               CASE WHEN final_accepted_eed > 0 THEN 1 ELSE 0 END
+                           ), 0) AS positive_sources,
+                           COALESCE(SUM(final_accepted_eed), 0) AS eed
+                    FROM source_final_rewards
+                    """
+                ).fetchone()
+                source_learning_state.update(
+                    {
+                        "final_reward_sources": int(row["sources"] or 0),
+                        "positive_final_reward_sources": int(
+                            row["positive_sources"] or 0
+                        ),
+                        "final_accepted_eed": float(row["eed"] or 0.0),
+                    }
+                )
+            if table_exists("source_search_episodes"):
+                source_learning_state["search_episodes"] = int(
+                    control.connection.execute(
+                        "SELECT COUNT(*) FROM source_search_episodes"
+                    ).fetchone()[0]
+                )
+            if table_exists("source_llm_episodes"):
+                source_learning_state["llm_episodes"] = int(
+                    control.connection.execute(
+                        "SELECT COUNT(*) FROM source_llm_episodes"
+                    ).fetchone()[0]
+                )
         finally:
             control.close()
     else:
@@ -128,6 +193,14 @@ def capture_runtime_snapshot(
         evidence_origin_coverage = {}
         evidence_attempt_metrics = {}
         source_provider_requests = {}
+        evidence_action_value_state = {}
+        source_learning_state = {
+            "final_reward_sources": 0,
+            "positive_final_reward_sources": 0,
+            "final_accepted_eed": 0.0,
+            "search_episodes": 0,
+            "llm_episodes": 0,
+        }
 
     evidence_path = root / "evidence.sqlite3"
     if evidence_path.exists():
@@ -161,6 +234,8 @@ def capture_runtime_snapshot(
         "evidence_task_origin_coverage": evidence_origin_coverage,
         "evidence_attempt_metrics": evidence_attempt_metrics,
         "source_provider_requests": source_provider_requests,
+        "evidence_action_value_state": evidence_action_value_state,
+        "source_learning_state": source_learning_state,
         "reservoir_states": reservoir_states,
         "work_lease_states": lease_states,
         "evidence_capsules": evidence_capsules,
@@ -404,6 +479,25 @@ def build_validation_report(
     rdap_429 = deltas.get("rdap_http_429", 0)
     rdap_5xx = deltas.get("rdap_http_5xx", 0)
     rdap_transport_errors = deltas.get("rdap_transport_errors", 0)
+    historical_probe_requests = deltas.get(
+        "historical_index_probe_requests", 0
+    )
+    historical_harvest_requests = deltas.get(
+        "historical_index_harvest_requests", 0
+    )
+    historical_requests = deltas.get(
+        "historical_index_network_requests",
+        historical_probe_requests + historical_harvest_requests,
+    )
+    historical_probe_bytes = deltas.get("historical_index_probe_bytes", 0)
+    historical_harvest_bytes = deltas.get("historical_index_harvest_bytes", 0)
+    historical_io_bytes = deltas.get(
+        "historical_index_io_bytes",
+        historical_probe_bytes + historical_harvest_bytes,
+    )
+    measured_network_requests = (
+        http_requests + rdap_requests + historical_requests
+    )
     request_start_segments = deltas.get("wayback_request_start_segments", 0)
     request_start_gaps = deltas.get("wayback_request_start_gaps", 0)
     request_start_gap_ms = deltas.get("wayback_request_start_gap_ms", 0)
@@ -467,6 +561,15 @@ def build_validation_report(
         if not valid or http_requests <= 0
         else eed_delta * Decimal("1000") / Decimal(http_requests)
     )
+    eed_per_1000_measured_network_requests = (
+        None
+        if not valid or measured_network_requests <= 0
+        else (
+            eed_delta
+            * Decimal("1000")
+            / Decimal(measured_network_requests)
+        )
+    )
 
     def ratio(numerator: int, denominator: int) -> str | None:
         if denominator <= 0:
@@ -506,6 +609,7 @@ def build_validation_report(
     source_progress_observed = (
         source_records > 0
         or deltas.get("source_direct_capsules_committed", 0) > 0
+        or deltas.get("historical_index_direct_capsules_inserted", 0) > 0
     )
     integrated_capacity_baseline_eligible = (
         valid
@@ -575,6 +679,27 @@ def build_validation_report(
         )
         target_reached = source_records >= target_source_records
 
+    start_action_state = start.get("evidence_action_value_state", {})
+    start_source_state = start.get("source_learning_state", {})
+    cold_action_state = (
+        isinstance(start_action_state, dict)
+        and all(
+            isinstance(item, dict)
+            and int(item.get("attempts", 0)) == 0
+            and int(item.get("provider_requests", 0)) == 0
+            and int(item.get("final_novel_host_years", 0)) == 0
+            and float(item.get("final_novel_eed", 0.0)) == 0.0
+            for item in start_action_state.values()
+        )
+    )
+    cold_source_state = (
+        isinstance(start_source_state, dict)
+        and int(start_source_state.get("final_reward_sources", 0)) == 0
+        and int(start_source_state.get("search_episodes", 0)) == 0
+        and int(start_source_state.get("llm_episodes", 0)) == 0
+    )
+    cold_start_ab_eligible = bool(cold_action_state and cold_source_state)
+
     engineering_targets = []
     for target in ENGINEERING_EED_PER_DAY_TARGETS:
         engineering_targets.append(
@@ -589,7 +714,7 @@ def build_validation_report(
         )
 
     return {
-        "report_version": "runtime-validation-report-v6",
+        "report_version": "runtime-validation-report-v7",
         "label": label,
         "code_revision": code_revision,
         "runtime_data_root": end.get("runtime_data_root"),
@@ -619,6 +744,23 @@ def build_validation_report(
         "finish_readiness_current": end_current,
         "authority_changed": authority_changed,
         "counter_deltas": deltas,
+        "policy_state_start": {
+            "evidence_actions": start_action_state,
+            "source_learning": start_source_state,
+        },
+        "policy_state_end": {
+            "evidence_actions": end.get("evidence_action_value_state", {}),
+            "source_learning": end.get("source_learning_state", {}),
+        },
+        "cold_start_ab_eligible": cold_start_ab_eligible,
+        "cold_start_ab_warning": (
+            None
+            if cold_start_ab_eligible
+            else (
+                "validation window started with learned policy state; "
+                "do not treat it as an independent cold-start A/B arm"
+            )
+        ),
         "novel_eed_delta": None if eed_delta is None else format(eed_delta, "f"),
         "novel_eed_per_hour": (
             None if eed_per_hour is None else format(eed_per_hour, "f")
@@ -630,6 +772,15 @@ def build_validation_report(
             None
             if eed_per_1000_requests is None
             else format(eed_per_1000_requests, "f")
+        ),
+        "measured_network_requests": measured_network_requests,
+        "novel_eed_per_1000_measured_network_requests": (
+            None
+            if eed_per_1000_measured_network_requests is None
+            else format(
+                eed_per_1000_measured_network_requests,
+                "f",
+            )
         ),
         "provider_request_starts_per_second": format(observed_rps, "f"),
         "provider_active_request_starts_per_second": (
@@ -741,6 +892,36 @@ def build_validation_report(
             "circuit_open_events": deltas.get("wayback_circuit_open_events", 0),
             "circuit_fast_failures": deltas.get(
                 "wayback_circuit_fast_failures", 0
+            ),
+        },
+        "historical_index": {
+            "cycles": deltas.get("historical_index_cycles", 0),
+            "probe_attempts": deltas.get(
+                "historical_index_probe_attempts", 0
+            ),
+            "probe_requests": historical_probe_requests,
+            "probe_bytes": historical_probe_bytes,
+            "probe_failures": deltas.get(
+                "historical_index_probe_failures", 0
+            ),
+            "harvest_requests": historical_harvest_requests,
+            "harvest_bytes": historical_harvest_bytes,
+            "harvest_failures": deltas.get(
+                "historical_index_harvest_failures", 0
+            ),
+            "network_requests": historical_requests,
+            "io_bytes": historical_io_bytes,
+            "direct_capsules_inserted": deltas.get(
+                "historical_index_direct_capsules_inserted", 0
+            ),
+            "exhausted_reservoirs": deltas.get(
+                "historical_index_exhausted_reservoirs", 0
+            ),
+            "compile_failures": deltas.get(
+                "historical_index_compile_failures", 0
+            ),
+            "wall_milliseconds": deltas.get(
+                "historical_index_wall_milliseconds", 0
             ),
         },
         "rdap_provider": {

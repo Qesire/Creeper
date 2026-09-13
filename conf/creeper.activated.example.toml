@@ -71,6 +71,9 @@ min_score_per_mib = 0.0
 harvest_max_seconds = 300.0
 harvest_max_records_per_lease = 100000
 harvest_baseline_batch_size = 20000
+# Allows a record that starts inside a selected region to finish past the
+# partition edge without making region reads unbounded.
+boundary_record_max_bytes = 4194304
 harvest_policy_version = "historical-region-v1"
 claim_grace_seconds = 60.0
 

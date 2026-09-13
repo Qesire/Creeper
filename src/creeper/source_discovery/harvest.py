@@ -11,8 +11,9 @@ from __future__ import annotations
 
 from contextlib import nullcontext
 from dataclasses import dataclass
+from pathlib import Path
 import time
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 
 import httpx
 
@@ -30,8 +31,6 @@ from creeper.sources.archive.host_year import (
     ContiguousHostYearWitnessReducer,
     HostYearWitnessGroup,
 )
-from creeper.sources.production import StructuredProductionAdapter
-from creeper.sources.reservoirs import Reservoir
 from creeper.storage.evidence_store import EvidenceStore
 
 
@@ -46,6 +45,7 @@ class RegionHarvestPolicy:
     max_records_per_lease: int = 100_000
     policy_version: str = "historical-region-v1"
     claim_grace_seconds: float = 60.0
+    boundary_record_max_bytes: int = 4 * 1024 * 1024
 
     def __post_init__(self) -> None:
         if self.max_seconds <= 0:
@@ -58,6 +58,8 @@ class RegionHarvestPolicy:
             raise ValueError("policy_version is required")
         if self.claim_grace_seconds < 0:
             raise ValueError("claim_grace_seconds must be non-negative")
+        if self.boundary_record_max_bytes < 1:
+            raise ValueError("boundary_record_max_bytes must be positive")
 
 
 @dataclass(frozen=True)
@@ -137,6 +139,9 @@ class RegionHarvestExecutor:
         groups: list[HostYearWitnessGroup],
         *,
         counters: dict[str, int],
+        source_key: str | None = None,
+        reservoir_id: str | None = None,
+        origin_unit_id: str | None = None,
     ) -> None:
         if not groups:
             return
@@ -192,8 +197,197 @@ class RegionHarvestExecutor:
 
         counters["planned"] += len(capsules)
         if capsules:
+            # Evidence is the stronger authority. Commit proof first; readiness
+            # can reconstruct direct source provenance from the capsule itself
+            # if this process dies before ControlStore attribution is written.
             counters["inserted"] += self.evidence_store.put_many(capsules)
+            if source_key is not None:
+                if reservoir_id is None or origin_unit_id is None:
+                    raise RegionHarvestError(
+                        "direct region attribution requires reservoir and origin identity"
+                    )
+                self.registry.control_store.attribute_direct_origin_unit_host_years(
+                    (
+                        (capsule.hostname, capsule.year, capsule.provider)
+                        for capsule in capsules
+                    ),
+                    source_key=source_key,
+                    reservoir_id=reservoir_id,
+                    origin_kind="region_harvest",
+                    origin_unit_id=origin_unit_id,
+                )
         groups.clear()
+
+    def _expected_content_length(self, index) -> int | None:
+        if index.content_length is not None:
+            return int(index.content_length)
+        roots = [
+            region
+            for region in self.registry.list_regions(index.index_key)
+            if region.depth == 0
+            and region.byte_start == 0
+            and region.byte_end is not None
+        ]
+        if len(roots) == 1:
+            return int(roots[0].byte_end) + 1
+        return None
+
+    @staticmethod
+    def _parse_region_record(index, raw: bytes, *, line_start: int) -> SourceRecord | None:
+        line = raw.decode("utf-8", errors="replace").rstrip("\r\n")
+        locator = f"{index.locator}:byte:{line_start}"
+        if index.capabilities.format == "CDXJ":
+            return parse_cdxj_line(
+                line,
+                source_id=index.source_key,
+                locator=locator,
+            )
+        return parse_cdx_line(
+            line,
+            source_id=index.source_key,
+            locator=locator,
+        )
+
+    def _execute_local_region(
+        self,
+        *,
+        index,
+        lease: WorkLease,
+        emit_record,
+    ) -> LeaseResult:
+        """Harvest records whose *start offsets* belong to one local region.
+
+        A trailing record may extend beyond the byte partition and is still
+        owned by this region when its first byte is inside the partition. This
+        makes adjacent partitions lossless without double-counting boundary
+        records.
+        """
+
+        start = _cursor_value(lease.cursor_start)
+        end_exclusive = _cursor_value(lease.cursor_end)
+        if start is None or end_exclusive is None:
+            raise RegionHarvestError("local region harvest requires byte cursors")
+        if end_exclusive <= start:
+            return LeaseResult(lease.lease_id, next_cursor=None)
+
+        parsed = urlsplit(index.locator)
+        if parsed.scheme == "file":
+            path = Path(unquote(parsed.path))
+        elif parsed.scheme:
+            raise RegionHarvestError(
+                f"unsupported local region scheme: {parsed.scheme}"
+            )
+        else:
+            path = Path(index.locator)
+        size = path.stat().st_size
+        expected_size = self._expected_content_length(index)
+        if (
+            expected_size is not None
+            and size != expected_size
+        ):
+            raise RegionHarvestError(
+                "local source size changed after region bounds were established"
+            )
+        if end_exclusive > size:
+            raise RegionHarvestError(
+                "local source is shorter than the selected region"
+            )
+
+        emitted = 0
+        bytes_read = 0
+        downstream_wait = 0.0
+        started = time.monotonic()
+        cursor = start
+        stopped = False
+        max_record = self.policy.boundary_record_max_bytes
+
+        with path.open("rb") as source:
+            if start > 0:
+                source.seek(start - 1)
+                previous = source.read(1)
+                bytes_read += len(previous)
+                source.seek(start)
+                if previous != b"\n":
+                    # The record began before this region, so it is not owned
+                    # here. readline(size) stops at the first newline without
+                    # over-reading bytes that would then be read a second time.
+                    core_remaining = end_exclusive - start
+                    skipped = source.readline(core_remaining)
+                    bytes_read += len(skipped)
+                    cursor += len(skipped)
+                    if not skipped.endswith(b"\n"):
+                        return LeaseResult(
+                            lease_id=lease.lease_id,
+                            records=0,
+                            requests=0,
+                            bytes_read=bytes_read,
+                            elapsed_seconds=max(
+                                0.0,
+                                time.monotonic() - started,
+                            ),
+                            next_cursor=None,
+                        )
+            else:
+                source.seek(start)
+
+            while cursor < end_exclusive:
+                if (
+                    time.monotonic() - started - downstream_wait
+                    >= self.policy.max_seconds
+                ):
+                    stopped = True
+                    break
+                line_start = cursor
+                raw = source.readline(max_record + 1)
+                if not raw:
+                    cursor = size
+                    break
+                bytes_read += len(raw)
+                cursor = source.tell()
+                if len(raw) > max_record:
+                    raise RegionHarvestError(
+                        "CDX/CDXJ record crossing a region boundary exceeds "
+                        "boundary_record_max_bytes"
+                    )
+                if not raw.endswith(b"\n") and cursor < size:
+                    raise RegionHarvestError(
+                        "bounded local read ended before a complete CDX/CDXJ record"
+                    )
+                record = self._parse_region_record(
+                    index,
+                    raw,
+                    line_start=line_start,
+                )
+                if record is not None:
+                    emit_started = time.monotonic()
+                    emit_record(record)
+                    downstream_wait += time.monotonic() - emit_started
+                    emitted += 1
+                if emitted >= lease.max_records:
+                    stopped = cursor < end_exclusive
+                    break
+                if (
+                    time.monotonic() - started - downstream_wait
+                    >= self.policy.max_seconds
+                ):
+                    stopped = cursor < end_exclusive
+                    break
+
+        return LeaseResult(
+            lease_id=lease.lease_id,
+            records=emitted,
+            requests=0,
+            bytes_read=bytes_read,
+            elapsed_seconds=max(
+                0.0,
+                time.monotonic() - started - downstream_wait,
+            ),
+            next_cursor=(
+                f"byte:{cursor}"
+                if stopped and cursor < end_exclusive
+                else None
+            ),
+        )
 
     def _execute_http_region(
         self,
@@ -202,13 +396,12 @@ class RegionHarvestExecutor:
         lease: WorkLease,
         emit_record,
     ) -> LeaseResult:
-        """Stream one finite HTTP byte region without fsspec HTTP extras.
+        """Stream one finite HTTP byte region with lossless boundary ownership.
 
-        The request starts one byte before a nonzero cursor so a resumed or
-        subdivided region can prove whether its first byte is a line boundary.
-        Progress is persisted only after complete newline-terminated records.
-        Bytes fetched beyond the last committed line in the final network chunk
-        may be re-fetched on resume; they are never skipped.
+        The selected region owns every record whose start offset is inside
+        [start, end). A bounded tail is requested so the final owned record can
+        finish after the partition boundary. The next partition will discard
+        that same tail record because its start offset is before its own start.
         """
 
         start = _cursor_value(lease.cursor_start)
@@ -219,7 +412,12 @@ class RegionHarvestExecutor:
             return LeaseResult(lease.lease_id, next_cursor=None)
 
         request_start = start - 1 if start > 0 else start
-        request_end = end_exclusive - 1
+        expected_size = self._expected_content_length(index)
+        request_end = (
+            end_exclusive - 1 + self.policy.boundary_record_max_bytes
+        )
+        if expected_size is not None:
+            request_end = min(request_end, expected_size - 1)
         headers = {
             "Range": f"bytes={request_start}-{request_end}",
             "Accept-Encoding": "identity",
@@ -247,6 +445,27 @@ class RegionHarvestExecutor:
         boundary_ready = start == 0
         prefix_checked = start == 0
         stopped = False
+        completed = False
+        total_size: int | None = None
+        returned_end: int | None = None
+
+        def emit_raw(raw: bytes, *, line_start: int) -> None:
+            nonlocal emitted, downstream_wait
+            if len(raw) > self.policy.boundary_record_max_bytes:
+                raise RegionHarvestError(
+                    "CDX/CDXJ record crossing a region boundary exceeds "
+                    "boundary_record_max_bytes"
+                )
+            record = self._parse_region_record(
+                index,
+                raw,
+                line_start=line_start,
+            )
+            if record is not None:
+                emit_started = time.monotonic()
+                emit_record(record)
+                downstream_wait += time.monotonic() - emit_started
+                emitted += 1
 
         with context as client:
             assert client is not None
@@ -261,25 +480,45 @@ class RegionHarvestExecutor:
                         "remote exact harvest requires HTTP 206 Range response"
                     )
                 content_range = response.headers.get("content-range", "")
-                if not content_range.lower().startswith("bytes ") or "/" not in content_range:
+                if (
+                    not content_range.lower().startswith("bytes ")
+                    or "/" not in content_range
+                ):
                     raise RegionHarvestError(
                         "remote Range response omitted Content-Range"
                     )
                 try:
-                    returned = content_range.split(" ", 1)[1].split("/", 1)[0]
-                    returned_start_text, returned_end_text = returned.split("-", 1)
+                    range_part, total_part = (
+                        content_range.split(" ", 1)[1].split("/", 1)
+                    )
+                    returned_start_text, returned_end_text = range_part.split(
+                        "-", 1
+                    )
                     returned_start = int(returned_start_text)
                     returned_end = int(returned_end_text)
+                    total_size = int(total_part)
                 except (ValueError, IndexError) as exc:
                     raise RegionHarvestError(
                         "remote Range response has invalid Content-Range"
                     ) from exc
+                if returned_start != request_start:
+                    raise RegionHarvestError(
+                        "remote Range response starts at an unexpected byte"
+                    )
+                if returned_end < end_exclusive - 1:
+                    raise RegionHarvestError(
+                        "remote Range response ended before the selected region"
+                    )
+                if returned_end > request_end:
+                    raise RegionHarvestError(
+                        "remote Range response exceeded requested byte interval"
+                    )
                 if (
-                    returned_start != request_start
-                    or returned_end != request_end
+                    expected_size is not None
+                    and total_size != expected_size
                 ):
                     raise RegionHarvestError(
-                        "remote Range response does not match requested byte interval"
+                        "remote source size changed after region bounds were established"
                     )
 
                 for chunk in response.iter_raw(chunk_size=64 * 1024):
@@ -299,69 +538,75 @@ class RegionHarvestExecutor:
                                 boundary_ready = True
                                 cursor = start
                         if not boundary_ready:
-                            boundary = buffer.find(b"\n")
+                            core_remaining = end_exclusive - cursor
+                            search = buffer[: max(0, core_remaining)]
+                            boundary = search.find(b"\n")
                             if boundary < 0:
-                                if (
-                                    time.monotonic() - started - downstream_wait
-                                    >= self.policy.max_seconds
-                                ):
-                                    stopped = True
+                                if len(buffer) >= core_remaining:
+                                    # The whole selected region lies inside a
+                                    # record that began before it. Nothing here
+                                    # is owned by this partition.
+                                    completed = True
                                     break
                                 continue
                             buffer = buffer[boundary + 1 :]
                             cursor += boundary + 1
                             boundary_ready = True
+                            if cursor >= end_exclusive:
+                                completed = True
+                                break
 
-                    while boundary_ready:
+                    while boundary_ready and cursor < end_exclusive:
                         boundary = buffer.find(b"\n")
                         if boundary < 0:
+                            if len(buffer) > self.policy.boundary_record_max_bytes:
+                                raise RegionHarvestError(
+                                    "CDX/CDXJ record crossing a region boundary "
+                                    "exceeds boundary_record_max_bytes"
+                                )
                             break
                         raw = buffer[: boundary + 1]
                         buffer = buffer[boundary + 1 :]
                         line_start = cursor
                         cursor += len(raw)
-                        line = raw.decode(
-                            "utf-8",
-                            errors="replace",
-                        ).rstrip("\r\n")
-                        locator = f"{index.locator}:byte:{line_start}"
-                        record = (
-                            parse_cdxj_line(
-                                line,
-                                source_id=index.source_key,
-                                locator=locator,
-                            )
-                            if index.capabilities.format == "CDXJ"
-                            else parse_cdx_line(
-                                line,
-                                source_id=index.source_key,
-                                locator=locator,
-                            )
-                        )
-                        if record is not None:
-                            emit_started = time.monotonic()
-                            emit_record(record)
-                            downstream_wait += (
-                                time.monotonic() - emit_started
-                            )
-                            emitted += 1
+                        emit_raw(raw, line_start=line_start)
+                        if cursor >= end_exclusive:
+                            completed = True
+                            break
                         if emitted >= lease.max_records:
-                            stopped = cursor < end_exclusive
+                            stopped = True
                             break
                         if (
                             time.monotonic() - started - downstream_wait
                             >= self.policy.max_seconds
                         ):
-                            stopped = cursor < end_exclusive
+                            stopped = True
                             break
-                    if stopped:
+                    if completed or stopped:
                         break
 
-        next_cursor = (
-            f"byte:{cursor}"
-            if stopped and cursor < end_exclusive
-            else None
-        )
+                if (
+                    not completed
+                    and not stopped
+                    and boundary_ready
+                    and cursor < end_exclusive
+                ):
+                    assert returned_end is not None
+                    assert total_size is not None
+                    if returned_end == total_size - 1:
+                        # A final line at EOF is valid even without a newline.
+                        if buffer:
+                            line_start = cursor
+                            emit_raw(buffer, line_start=line_start)
+                            cursor += len(buffer)
+                            buffer = b""
+                        completed = True
+                    else:
+                        raise RegionHarvestError(
+                            "selected region ends inside a record larger than "
+                            "boundary_record_max_bytes"
+                        )
+
         return LeaseResult(
             lease_id=lease.lease_id,
             records=emitted,
@@ -371,12 +616,17 @@ class RegionHarvestExecutor:
                 0.0,
                 time.monotonic() - started - downstream_wait,
             ),
-            next_cursor=next_cursor,
+            next_cursor=(
+                f"byte:{cursor}"
+                if stopped and cursor < end_exclusive
+                else None
+            ),
         )
 
     def harvest(self, region_key: str) -> RegionHarvestReport | None:
         """Claim and advance one region; return None when another owner won."""
 
+        harvest_started = time.monotonic()
         ttl = self.policy.max_seconds + self.policy.claim_grace_seconds
         claimed = self.registry.claim_region_for_harvest(
             region_key,
@@ -430,13 +680,21 @@ class RegionHarvestExecutor:
                 direct_capsules_inserted=0,
                 bytes_read=0,
                 requests=0,
-                elapsed_seconds=0.0,
+                elapsed_seconds=max(
+                    0.0,
+                    time.monotonic() - harvest_started,
+                ),
                 resume_cursor=None,
             )
 
-        # One preceding-byte boundary check is permitted for nonzero starts.
+        # The transport may read one preceding byte plus a bounded tail to
+        # complete the last record whose start offset belongs to this region.
         logical_bytes = end_exclusive - start
-        max_bytes = logical_bytes + (1 if start > 0 else 0)
+        max_bytes = (
+            logical_bytes
+            + (1 if start > 0 else 0)
+            + self.policy.boundary_record_max_bytes
+        )
         lease = WorkLease.create(
             reservoir_id=index.source_key,
             cursor_start=f"byte:{start}",
@@ -461,14 +719,35 @@ class RegionHarvestExecutor:
         }
         prior_cursor = start
 
+        activation = self.registry.control_store.get_activation(
+            index.source_key
+        )
+        origin_reservoir_id = (
+            None
+            if activation is None
+            else str(activation["reservoir_id"])
+        )
+
+        def flush_pending() -> None:
+            self._flush_groups(
+                pending,
+                counters=counters,
+                source_key=(
+                    index.source_key
+                    if origin_reservoir_id is not None
+                    else None
+                ),
+                reservoir_id=origin_reservoir_id,
+                origin_unit_id=region_key,
+            )
+
         def emit(record: SourceRecord) -> None:
             group = reducer.feed(record)
             if group is not None:
                 pending.append(group)
                 if len(pending) >= self.policy.baseline_batch_size:
-                    self._flush_groups(pending, counters=counters)
+                    flush_pending()
 
-        adapter: StructuredProductionAdapter | None = None
         try:
             scheme = urlsplit(index.locator).scheme.lower()
             if scheme in {"http", "https"}:
@@ -477,25 +756,20 @@ class RegionHarvestExecutor:
                     lease=lease,
                     emit_record=emit,
                 )
-            else:
-                reservoir = Reservoir(
-                    reservoir_id=index.source_key,
-                    domain_id=index.factory_key,
-                    adapter_id=(
-                        f"structured:region:"
-                        f"{index.capabilities.format.lower()}"
-                    ),
-                    root_locator=index.locator,
-                    enumeration_kind="byte_region",
-                    capacity_lower=0,
-                    evidence_mode="direct_year",
+            elif scheme in {"", "file"}:
+                result = self._execute_local_region(
+                    index=index,
+                    lease=lease,
+                    emit_record=emit,
                 )
-                adapter = StructuredProductionAdapter(reservoir)
-                result = adapter.execute_stream(lease, emit)
+            else:
+                raise RegionHarvestError(
+                    f"unsupported exact region transport: {scheme}"
+                )
             final_group = reducer.finish()
             if final_group is not None:
                 pending.append(final_group)
-            self._flush_groups(pending, counters=counters)
+            flush_pending()
 
             resume_cursor = _cursor_value(result.next_cursor)
             completed = resume_cursor is None
@@ -530,12 +804,13 @@ class RegionHarvestExecutor:
                 direct_capsules_inserted=counters["inserted"],
                 bytes_read=result.bytes_read,
                 requests=result.requests,
-                elapsed_seconds=result.elapsed_seconds,
+                elapsed_seconds=max(
+                    0.0,
+                    time.monotonic() - harvest_started,
+                ),
                 resume_cursor=resume_cursor,
             )
         except BaseException:
-            if adapter is not None:
-                adapter.close()
             # Keep any pre-existing resume cursor. Evidence writes are
             # idempotent, so replay after a hard failure is safe.
             try:
@@ -549,6 +824,3 @@ class RegionHarvestExecutor:
             except (KeyError, ValueError):
                 pass
             raise
-        finally:
-            if adapter is not None:
-                adapter.close()

@@ -88,6 +88,9 @@ class RegionHarvestService:
             max_regions=max_regions,
             byte_budget=byte_budget,
             index_keys=index_keys,
+            per_region_overhead_bytes=(
+                self.harvest_executor.policy.boundary_record_max_bytes + 1
+            ),
         )
         selected = tuple(item.region.region_key for item in plan.selections)
         claim_skipped: list[str] = []
