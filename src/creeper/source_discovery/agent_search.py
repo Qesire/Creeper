@@ -540,13 +540,21 @@ class CommandAgentResearchExecutor:
         actor: str = "research-compiler",
         cwd: Path | None = None,
         timeout_seconds: float = 240.0,
+        termination_grace_seconds: float = 2.0,
+        max_response_bytes: int = 2 * 1024 * 1024,
         context_builder: SourceIntelligenceContextBuilder | None = None,
         compiler: Any | None = None,
         clock=time.monotonic,
     ) -> None:
         if not command or any(not isinstance(item, str) or not item for item in command):
             raise ValueError("research command must contain non-empty arguments")
-        if not backend.strip() or not actor.strip() or timeout_seconds <= 0:
+        if (
+            not backend.strip()
+            or not actor.strip()
+            or timeout_seconds <= 0
+            or termination_grace_seconds <= 0
+            or max_response_bytes < 1
+        ):
             raise ValueError("research executor configuration is invalid")
         self.command = tuple(command)
         self.invocation_root = Path(invocation_root).resolve()
@@ -554,6 +562,8 @@ class CommandAgentResearchExecutor:
         self.actor = actor
         self.cwd = None if cwd is None else Path(cwd).resolve()
         self.timeout_seconds = float(timeout_seconds)
+        self.termination_grace_seconds = float(termination_grace_seconds)
+        self.max_response_bytes = int(max_response_bytes)
         self.context_builder = context_builder
         self.compiler = compiler
         self.clock = clock
@@ -567,7 +577,9 @@ class CommandAgentResearchExecutor:
         except ProcessLookupError:
             return
         try:
-            await asyncio.wait_for(process.wait(), timeout=2.0)
+            await asyncio.wait_for(
+                process.wait(), timeout=self.termination_grace_seconds
+            )
             return
         except TimeoutError:
             pass
@@ -627,25 +639,39 @@ class CommandAgentResearchExecutor:
         payload = self._request_payload(directive, episode_id=episode_id)
         request.write_text(json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2) + "\n", encoding="utf-8")
         started = float(self.clock())
-        process = await asyncio.create_subprocess_exec(
-            *self.command, "--request", str(request), "--response", str(response),
-            cwd=self.cwd, stdin=asyncio.subprocess.DEVNULL,
-            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
-            start_new_session=True,
-        )
-        try:
+        with stderr.open("wb") as stderr_handle:
+            process = await asyncio.create_subprocess_exec(
+                *self.command, "--request", str(request), "--response", str(response),
+                cwd=self.cwd, stdin=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.DEVNULL, stderr=stderr_handle,
+                start_new_session=True,
+            )
             try:
-                returncode = await asyncio.wait_for(process.wait(), timeout=self.timeout_seconds)
-            except TimeoutError:
+                try:
+                    returncode = await asyncio.wait_for(
+                        process.wait(), timeout=self.timeout_seconds
+                    )
+                except TimeoutError:
+                    await self._terminate_group(process)
+                    raise TimeoutError(
+                        f"research agent exceeded {self.timeout_seconds:g}s timeout"
+                    )
+            except asyncio.CancelledError:
                 await self._terminate_group(process)
-                raise TimeoutError(f"research agent exceeded {self.timeout_seconds:g}s timeout")
-            raw_stderr = await process.stderr.read() if process.stderr is not None else b""
-            stderr.write_bytes(raw_stderr)
-        except asyncio.CancelledError:
-            await self._terminate_group(process)
-            raise
+                raise
         if returncode != 0:
             raise RuntimeError(f"research agent failed rc={returncode}")
+        try:
+            response_size = response.stat().st_size
+        except FileNotFoundError as exc:
+            raise SearchAgentProtocolError(
+                "research agent exited without response JSON"
+            ) from exc
+        if response_size > self.max_response_bytes:
+            raise SearchAgentProtocolError(
+                "research agent response exceeds "
+                f"max_response_bytes={self.max_response_bytes}"
+            )
         try:
             data = json.loads(response.read_text(encoding="utf-8"))
         except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
