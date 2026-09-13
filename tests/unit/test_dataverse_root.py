@@ -1,6 +1,6 @@
 import unittest
 
-from creeper.source_research.adapters.base import RootQuery
+from creeper.source_research.adapters.base import RootQuery, SearchCheckpoint
 from creeper.source_research.adapters.dataverse import DataverseAdapter
 
 
@@ -46,6 +46,7 @@ class DataverseRootTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(page.terminal)
         self.assertEqual(page.retry_after, 3.0)
         self.assertEqual(transport.calls[0][1]["start"], 100)
+
 
 if __name__ == "__main__":
     unittest.main()
