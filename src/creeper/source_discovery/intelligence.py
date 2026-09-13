@@ -223,3 +223,30 @@ class SourceIntelligenceContextBuilder:
             separators=(",", ":"),
         ).encode("utf-8")
         return hashlib.sha256(encoded).hexdigest()
+
+
+    def build_research_snapshot(
+        self,
+        directive: SearchDirective,
+        *,
+        frontier: dict[str, Any] | None = None,
+        negative_knowledge_summary: list[dict[str, Any]] | None = None,
+        unknown_blockers: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        """Build the v3 bounded snapshot without exposing authority or paths."""
+        snapshot = self.build(directive)
+        snapshot["frontier"] = dict(frontier or {})
+        snapshot["negative_knowledge_summary"] = list(
+            (negative_knowledge_summary or [])[: self.policy.max_failures]
+        )
+        snapshot["unknown_blockers"] = list(
+            (unknown_blockers or [])[: self.policy.max_failures]
+        )
+        snapshot["constraints"] = {
+            **snapshot.get("constraints", {}),
+            "llm_contract": "creeper.llm-source-intelligence.v3",
+            "active_corpus_exclusions": ["COMMON_CRAWL"],
+            "raw_db_paths_excluded": True,
+            "baseline_and_corpora_excluded": True,
+        }
+        return snapshot
