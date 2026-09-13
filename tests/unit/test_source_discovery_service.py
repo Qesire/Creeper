@@ -70,6 +70,10 @@ scout_parallelism = 2
 search_parallelism = 3
 region_parallelism = 5
 nonblocking_research = true
+research_ready_minutes_threshold = 42.0
+research_stagnation_min_closed_runs = 5
+research_stagnation_zero_tail = 4
+research_stagnation_yield_fraction = 0.2
 failure_retry_seconds = 15.0
 
 [triage]
@@ -123,6 +127,10 @@ same_context_failure_cooldown_seconds = 90.0
         self.assertEqual(config.coordinator.scout_parallelism, 2)
         self.assertEqual(config.coordinator.region_parallelism, 5)
         self.assertTrue(config.coordinator.nonblocking_research)
+        self.assertEqual(config.coordinator.research_ready_minutes_threshold, 42.0)
+        self.assertEqual(config.coordinator.research_stagnation_min_closed_runs, 5)
+        self.assertEqual(config.coordinator.research_stagnation_zero_tail, 4)
+        self.assertEqual(config.coordinator.research_stagnation_yield_fraction, 0.2)
         self.assertEqual(config.agent.max_active_calls, 1)
         self.assertEqual(config.agent.min_seconds_between_starts, 12.0)
         self.assertEqual(
