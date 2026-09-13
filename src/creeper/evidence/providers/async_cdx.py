@@ -36,6 +36,11 @@ from creeper.evidence.policies import (
     EvidenceQueryResult,
     RangeEvidenceQueryResult,
 )
+from creeper.evidence.platform_harvest import (
+    PlatformHarvestState,
+    PlatformYearHarvestResult,
+    PlatformYearHarvestTask,
+)
 from creeper.evidence.providers.cdx import Page, WaybackCDXClient, _exact_hostname
 from creeper.runtime.http import configured_http_proxy
 
@@ -545,6 +550,195 @@ class AsyncWaybackCDXClient:
             ),
             extraction_method=extraction_method,
         )
+
+    def platform_year_request_template_hash(
+        self,
+        subject: str,
+        target_year: int,
+        *,
+        policy_version: str,
+    ) -> str:
+        """Return the immutable identity of one platform-year request template."""
+
+        normalized = normalize_official(subject)
+        if normalized is None:
+            raise ValueError("platform harvest subject must be a valid hostname")
+        if not 1996 <= int(target_year) <= 2001:
+            raise ValueError("platform harvest year must be within 1996-2001")
+        payload = json.dumps(
+            {
+                "template_version": "wayback-platform-year-v1",
+                "provider": self.provider,
+                "endpoint": self.endpoint,
+                "subject": normalized,
+                "target_year": int(target_year),
+                "policy_version": policy_version,
+                "matchType": "domain",
+                "from": f"{int(target_year)}0101000000",
+                "to": f"{int(target_year)}1231235959",
+                "output": "json",
+                "fl": "urlkey,timestamp,original,statuscode,digest,length",
+                "filter": "statuscode:[23][0-9][0-9]",
+                "gzip": "false",
+                "showResumeKey": "true",
+                "limit": str(self.limit),
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        return hashlib.sha256(payload).hexdigest()
+
+    async def harvest_platform_year(
+        self,
+        task: PlatformYearHarvestTask,
+    ) -> PlatformYearHarvestResult:
+        """Consume exactly one resumable domain-scope page for one year.
+
+        Unlike query_domain(), this API is a completeness-capable lane.  It
+        never loops over continuation keys internally: the next resume key is
+        returned to the durable control plane and must be committed before the
+        next page is requested.
+        """
+
+        accounting = _RequestAccounting()
+        rows_seen = 0
+        response_bytes = 0
+
+        def result(
+            state: PlatformHarvestState,
+            *,
+            next_resume_key: str | None = None,
+            capsules: tuple[EvidenceCapsule, ...] = (),
+            exhaustive: bool = False,
+            error: str | None = None,
+        ) -> PlatformYearHarvestResult:
+            return PlatformYearHarvestResult(
+                harvest_id=task.harvest_id,
+                provider=task.provider,
+                subject=task.subject,
+                target_year=task.target_year,
+                request_template_hash=task.request_template_hash,
+                policy_version=task.policy_version,
+                resume_key_used=task.resume_key,
+                state=state,
+                next_resume_key=next_resume_key,
+                capsules=capsules,
+                rows_seen=rows_seen,
+                requests=accounting.requests,
+                bytes=response_bytes,
+                elapsed_seconds=accounting.elapsed_milliseconds / 1000.0,
+                exhaustive=exhaustive,
+                error=error,
+            )
+
+        try:
+            if task.provider != self.provider:
+                raise ValueError("provider mismatch for platform-year harvest")
+            expected_hash = self.platform_year_request_template_hash(
+                task.subject,
+                task.target_year,
+                policy_version=task.policy_version,
+            )
+            if task.request_template_hash != expected_hash:
+                raise ValueError("platform-year request template identity mismatch")
+
+            params = {
+                "url": f"http://{task.subject}/",
+                "matchType": "domain",
+                "from": f"{task.target_year}0101000000",
+                "to": f"{task.target_year}1231235959",
+                "output": "json",
+                "fl": "urlkey,timestamp,original,statuscode,digest,length",
+                "filter": "statuscode:[23][0-9][0-9]",
+                "gzip": "false",
+                "showResumeKey": "true",
+                "limit": str(self.limit),
+            }
+            if task.resume_key is not None:
+                params["resumeKey"] = task.resume_key
+
+            response = await self._get(params, accounting=accounting)
+            response_bytes = len(response.content)
+            rows, next_key = WaybackCDXClient._parse_payload(response.content)
+            capsules: dict[tuple[str, int], EvidenceCapsule] = {}
+            for record_no, row in enumerate(rows, start=1):
+                rows_seen += 1
+                timestamp = str(row.get("timestamp", ""))
+                original = str(row.get("original", ""))
+                status = str(row.get("status", row.get("statuscode", "")))
+                if (
+                    len(timestamp) < 4
+                    or not timestamp[:4].isdigit()
+                    or int(timestamp[:4]) != task.target_year
+                    or status[:1] not in {"2", "3"}
+                ):
+                    continue
+                try:
+                    hostname = normalize_official(urlsplit(original).hostname or "")
+                except ValueError:
+                    hostname = None
+                if hostname is None or not (
+                    hostname == task.subject
+                    or hostname.endswith("." + task.subject)
+                ):
+                    continue
+                identity = (hostname, task.target_year)
+                if identity in capsules:
+                    continue
+                payload = json.dumps(
+                    row,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                ).encode("utf-8")
+                capsules[identity] = EvidenceCapsule(
+                    hostname=hostname,
+                    year=task.target_year,
+                    provider=task.provider,
+                    temporal_semantics="capture_timestamp_year",
+                    evidence_timestamp=timestamp,
+                    source_locator=original,
+                    payload_hash=hashlib.sha256(payload).hexdigest(),
+                    policy_version=task.policy_version,
+                    evidence_type="platform_scope_cdx_capture",
+                    source_id=task.provider,
+                    original_url=original,
+                    record_locator=(
+                        f"{task.provider}:platform:{task.subject}:"
+                        f"{task.target_year}:page={task.page_number}:"
+                        f"record={record_no}"
+                    ),
+                    extraction_method="cdx_harvest_platform_year",
+                )
+
+            ordered = tuple(capsules[item] for item in sorted(capsules))
+            if next_key:
+                if next_key == task.resume_key:
+                    raise ConnectionError("CDX returned a repeated resume key")
+                return result(
+                    PlatformHarvestState.PARTIAL,
+                    next_resume_key=next_key,
+                    capsules=ordered,
+                )
+            return result(
+                PlatformHarvestState.COMPLETE,
+                capsules=ordered,
+                exhaustive=True,
+            )
+        except ValueError as exc:
+            return result(
+                PlatformHarvestState.FAILED_INVALID,
+                error=str(exc),
+            )
+        except (
+            httpx.TimeoutException,
+            httpx.TransportError,
+            httpx.HTTPStatusError,
+            ConnectionError,
+        ) as exc:
+            return result(
+                PlatformHarvestState.RETRYABLE,
+                error=str(exc) or type(exc).__name__,
+            )
 
     async def query_domain(
         self,

@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import sqlite3
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -28,6 +28,12 @@ from creeper.evidence.policies import (
     EvidenceQueryKey,
     EvidenceQueryResult,
     TemporalScope,
+)
+from creeper.evidence.platform_harvest import (
+    PlatformHarvestState,
+    PlatformYearHarvestResult,
+    PlatformYearHarvestTask,
+    platform_year_harvest_id,
 )
 
 
@@ -108,6 +114,51 @@ class ControlStore:
                 ON evidence_tasks(state, retry_at, lease_until);
             CREATE INDEX IF NOT EXISTS idx_evidence_tasks_provider_claim
                 ON evidence_tasks(provider, state, retry_at, lease_until);
+            CREATE TABLE IF NOT EXISTS platform_year_harvests (
+                harvest_id TEXT PRIMARY KEY,
+                provider TEXT NOT NULL,
+                subject TEXT NOT NULL,
+                target_year INTEGER NOT NULL CHECK(target_year BETWEEN 1996 AND 2001),
+                request_template_hash TEXT NOT NULL,
+                policy_version TEXT NOT NULL,
+                resume_key TEXT,
+                page_number INTEGER NOT NULL DEFAULT 0 CHECK(page_number >= 0),
+                state TEXT NOT NULL,
+                attempt INTEGER NOT NULL DEFAULT 0 CHECK(attempt >= 0),
+                retry_at REAL,
+                claimed_by TEXT,
+                lease_expires_at REAL,
+                rows_seen INTEGER NOT NULL DEFAULT 0 CHECK(rows_seen >= 0),
+                unique_host_years_seen INTEGER NOT NULL DEFAULT 0
+                    CHECK(unique_host_years_seen >= 0),
+                requests INTEGER NOT NULL DEFAULT 0 CHECK(requests >= 0),
+                bytes_read INTEGER NOT NULL DEFAULT 0 CHECK(bytes_read >= 0),
+                elapsed_seconds REAL NOT NULL DEFAULT 0 CHECK(elapsed_seconds >= 0),
+                baseline_external_host_years INTEGER NOT NULL DEFAULT 0
+                    CHECK(baseline_external_host_years >= 0),
+                final_eed REAL NOT NULL DEFAULT 0 CHECK(final_eed >= 0),
+                last_error TEXT,
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL,
+                completed_at REAL,
+                UNIQUE(
+                    provider, subject, target_year,
+                    request_template_hash, policy_version
+                )
+            ) WITHOUT ROWID;
+            CREATE INDEX IF NOT EXISTS idx_platform_year_harvest_claim
+                ON platform_year_harvests(
+                    state, retry_at, lease_expires_at, provider, updated_at
+                );
+            CREATE TABLE IF NOT EXISTS platform_year_harvest_host_years (
+                harvest_id TEXT NOT NULL,
+                hostname TEXT NOT NULL,
+                year INTEGER NOT NULL CHECK(year BETWEEN 1996 AND 2001),
+                PRIMARY KEY(harvest_id, hostname, year),
+                FOREIGN KEY(harvest_id)
+                    REFERENCES platform_year_harvests(harvest_id)
+                    ON DELETE CASCADE
+            ) WITHOUT ROWID;
             CREATE TABLE IF NOT EXISTS evidence_task_fanout_reservations (
                 hostname TEXT NOT NULL,
                 year_from INTEGER NOT NULL,
@@ -492,6 +543,34 @@ class ControlStore:
             retry_at=row["retry_at"],
             lease_owner=row["lease_owner"],
             lease_until=row["lease_until"],
+        )
+
+    @staticmethod
+    def _platform_harvest_task(row: sqlite3.Row) -> PlatformYearHarvestTask:
+        return PlatformYearHarvestTask(
+            harvest_id=str(row["harvest_id"]),
+            provider=str(row["provider"]),
+            subject=str(row["subject"]),
+            target_year=int(row["target_year"]),
+            request_template_hash=str(row["request_template_hash"]),
+            policy_version=str(row["policy_version"]),
+            resume_key=row["resume_key"],
+            page_number=int(row["page_number"]),
+            state=PlatformHarvestState(str(row["state"])),
+            attempt=int(row["attempt"]),
+            retry_at=row["retry_at"],
+            claimed_by=row["claimed_by"],
+            lease_expires_at=row["lease_expires_at"],
+            rows_seen=int(row["rows_seen"]),
+            unique_host_years_seen=int(row["unique_host_years_seen"]),
+            requests=int(row["requests"]),
+            bytes=int(row["bytes_read"]),
+            elapsed_seconds=float(row["elapsed_seconds"]),
+            baseline_external_host_years=int(row["baseline_external_host_years"]),
+            final_eed=float(row["final_eed"]),
+            created_at=float(row["created_at"]),
+            updated_at=float(row["updated_at"]),
+            completed_at=row["completed_at"],
         )
 
     def record_domain_fanout_observations(
@@ -2121,6 +2200,390 @@ class ControlStore:
             "SELECT * FROM evidence_tasks ORDER BY hostname, year_from, provider, policy_version"
         ).fetchall()
         return [self._task(row) for row in rows]
+
+    def enqueue_platform_year_harvest(
+        self,
+        *,
+        provider: str,
+        subject: str,
+        target_year: int,
+        request_template_hash: str,
+        policy_version: str,
+    ) -> PlatformYearHarvestTask:
+        """Idempotently register one durable platform/subject/year traversal."""
+
+        harvest_id = platform_year_harvest_id(
+            provider=provider,
+            subject=subject,
+            target_year=target_year,
+            request_template_hash=request_template_hash,
+            policy_version=policy_version,
+        )
+        # Let the dataclass normalize and validate the subject/year before
+        # anything is persisted.
+        seed = PlatformYearHarvestTask(
+            harvest_id=harvest_id,
+            provider=provider,
+            subject=subject,
+            target_year=target_year,
+            request_template_hash=request_template_hash,
+            policy_version=policy_version,
+        )
+        now = float(self.clock())
+        with self.connection:
+            self.connection.execute(
+                """
+                INSERT OR IGNORE INTO platform_year_harvests(
+                    harvest_id, provider, subject, target_year,
+                    request_template_hash, policy_version, resume_key,
+                    page_number, state, attempt, retry_at, claimed_by,
+                    lease_expires_at, rows_seen, unique_host_years_seen,
+                    requests, bytes_read, elapsed_seconds,
+                    baseline_external_host_years, final_eed, last_error,
+                    created_at, updated_at, completed_at
+                ) VALUES (
+                    ?, ?, ?, ?, ?, ?, NULL,
+                    0, ?, 0, NULL, NULL,
+                    NULL, 0, 0,
+                    0, 0, 0,
+                    0, 0, NULL,
+                    ?, ?, NULL
+                )
+                """,
+                (
+                    seed.harvest_id,
+                    seed.provider,
+                    seed.subject,
+                    seed.target_year,
+                    seed.request_template_hash,
+                    seed.policy_version,
+                    PlatformHarvestState.READY.value,
+                    now,
+                    now,
+                ),
+            )
+        stored = self.get_platform_year_harvest(seed.harvest_id)
+        assert stored is not None
+        return stored
+
+    def get_platform_year_harvest(
+        self,
+        harvest_id: str,
+    ) -> PlatformYearHarvestTask | None:
+        row = self.connection.execute(
+            "SELECT * FROM platform_year_harvests WHERE harvest_id = ?",
+            (harvest_id,),
+        ).fetchone()
+        return None if row is None else self._platform_harvest_task(row)
+
+    def list_platform_year_harvests(
+        self,
+        *,
+        state: PlatformHarvestState | None = None,
+    ) -> list[PlatformYearHarvestTask]:
+        if state is None:
+            rows = self.connection.execute(
+                """
+                SELECT * FROM platform_year_harvests
+                ORDER BY provider, subject, target_year, harvest_id
+                """
+            ).fetchall()
+        else:
+            rows = self.connection.execute(
+                """
+                SELECT * FROM platform_year_harvests
+                WHERE state = ?
+                ORDER BY provider, subject, target_year, harvest_id
+                """,
+                (PlatformHarvestState(state).value,),
+            ).fetchall()
+        return [self._platform_harvest_task(row) for row in rows]
+
+    def claim_platform_year_harvests(
+        self,
+        *,
+        owner: str,
+        limit: int,
+        lease_seconds: float | None = None,
+        providers: Iterable[str] | None = None,
+    ) -> list[PlatformYearHarvestTask]:
+        """Claim resumable platform work with compare-and-fence ownership."""
+
+        if not owner:
+            raise ValueError("platform harvest owner is required")
+        if limit < 1:
+            return []
+        if lease_seconds is None:
+            lease_seconds = self.default_lease_seconds
+        if lease_seconds <= 0:
+            raise ValueError("platform harvest lease_seconds must be positive")
+        provider_values = tuple(dict.fromkeys(providers or ()))
+        now = float(self.clock())
+        lease_expires_at = now + float(lease_seconds)
+        params: list[object] = [
+            PlatformHarvestState.READY.value,
+            PlatformHarvestState.PARTIAL.value,
+            PlatformHarvestState.RETRYABLE.value,
+            PlatformHarvestState.RUNNING.value,
+            now,
+            now,
+        ]
+        provider_clause = ""
+        if provider_values:
+            provider_clause = (
+                " AND provider IN ("
+                + ",".join("?" for _ in provider_values)
+                + ")"
+            )
+            params.extend(provider_values)
+        params.append(int(limit))
+        query = (
+            "SELECT * FROM platform_year_harvests WHERE "
+            "((state IN (?, ?, ?)) OR "
+            "(state = ? AND lease_expires_at IS NOT NULL "
+            "AND lease_expires_at <= ?)) "
+            "AND (retry_at IS NULL OR retry_at <= ?)"
+            + provider_clause
+            + " ORDER BY updated_at, harvest_id LIMIT ?"
+        )
+
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            rows = self.connection.execute(query, params).fetchall()
+            claimed: list[PlatformYearHarvestTask] = []
+            for row in rows:
+                task = self._platform_harvest_task(row)
+                self.connection.execute(
+                    """
+                    UPDATE platform_year_harvests
+                    SET state = ?, attempt = attempt + 1,
+                        retry_at = NULL, claimed_by = ?,
+                        lease_expires_at = ?, updated_at = ?
+                    WHERE harvest_id = ?
+                    """,
+                    (
+                        PlatformHarvestState.RUNNING.value,
+                        owner,
+                        lease_expires_at,
+                        now,
+                        task.harvest_id,
+                    ),
+                )
+                claimed.append(
+                    replace(
+                        task,
+                        state=PlatformHarvestState.RUNNING,
+                        attempt=task.attempt + 1,
+                        retry_at=None,
+                        claimed_by=owner,
+                        lease_expires_at=lease_expires_at,
+                        updated_at=now,
+                    )
+                )
+            self.connection.commit()
+            return claimed
+        except BaseException:
+            self.connection.rollback()
+            raise
+
+    def renew_platform_year_harvest(
+        self,
+        harvest_id: str,
+        *,
+        owner: str,
+        lease_seconds: float | None = None,
+    ) -> float:
+        if not owner:
+            raise ValueError("platform harvest owner is required")
+        if lease_seconds is None:
+            lease_seconds = self.default_lease_seconds
+        if lease_seconds <= 0:
+            raise ValueError("platform harvest lease_seconds must be positive")
+        now = float(self.clock())
+        lease_expires_at = now + float(lease_seconds)
+        with self.connection:
+            cursor = self.connection.execute(
+                """
+                UPDATE platform_year_harvests
+                SET lease_expires_at = ?, updated_at = ?
+                WHERE harvest_id = ?
+                  AND state = ?
+                  AND claimed_by = ?
+                  AND lease_expires_at IS NOT NULL
+                  AND lease_expires_at > ?
+                """,
+                (
+                    lease_expires_at,
+                    now,
+                    harvest_id,
+                    PlatformHarvestState.RUNNING.value,
+                    owner,
+                    now,
+                ),
+            )
+        if cursor.rowcount != 1:
+            raise RuntimeError("platform harvest lease is not live for owner")
+        return lease_expires_at
+
+    def finish_platform_year_harvest_page(
+        self,
+        result: PlatformYearHarvestResult,
+        *,
+        owner: str,
+        retry_at: float | None = None,
+    ) -> PlatformYearHarvestTask:
+        """Commit one page outcome and continuation under the live owner fence."""
+
+        if not owner:
+            raise ValueError("platform harvest owner is required")
+        if result.state not in {
+            PlatformHarvestState.PARTIAL,
+            PlatformHarvestState.RETRYABLE,
+            PlatformHarvestState.COMPLETE,
+            PlatformHarvestState.FAILED_INVALID,
+        }:
+            raise ValueError("unsupported platform harvest page state")
+        now = float(self.clock())
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            row = self.connection.execute(
+                """
+                SELECT * FROM platform_year_harvests
+                WHERE harvest_id = ?
+                  AND state = ?
+                  AND claimed_by = ?
+                  AND lease_expires_at IS NOT NULL
+                  AND lease_expires_at > ?
+                """,
+                (
+                    result.harvest_id,
+                    PlatformHarvestState.RUNNING.value,
+                    owner,
+                    now,
+                ),
+            ).fetchone()
+            if row is None:
+                raise KeyError(
+                    "platform harvest not found or live ownership fence was lost"
+                )
+            task = self._platform_harvest_task(row)
+            if (
+                result.provider != task.provider
+                or result.subject != task.subject
+                or result.target_year != task.target_year
+                or result.request_template_hash != task.request_template_hash
+                or result.policy_version != task.policy_version
+                or result.resume_key_used != task.resume_key
+            ):
+                raise ValueError("platform harvest result does not match claimed work")
+
+            if result.state in {
+                PlatformHarvestState.PARTIAL,
+                PlatformHarvestState.COMPLETE,
+            }:
+                self.connection.executemany(
+                    """
+                    INSERT OR IGNORE INTO platform_year_harvest_host_years(
+                        harvest_id, hostname, year
+                    ) VALUES (?, ?, ?)
+                    """,
+                    [
+                        (
+                            task.harvest_id,
+                            str(capsule.hostname),
+                            int(capsule.year),
+                        )
+                        for capsule in result.capsules
+                    ],
+                )
+            unique_row = self.connection.execute(
+                """
+                SELECT COUNT(*) AS n
+                FROM platform_year_harvest_host_years
+                WHERE harvest_id = ?
+                """,
+                (task.harvest_id,),
+            ).fetchone()
+            unique_host_years = int(unique_row["n"])
+
+            page_committed = result.state in {
+                PlatformHarvestState.PARTIAL,
+                PlatformHarvestState.COMPLETE,
+            }
+            if result.state is PlatformHarvestState.PARTIAL:
+                next_resume_key = result.next_resume_key
+            elif result.state is PlatformHarvestState.COMPLETE:
+                next_resume_key = None
+            else:
+                next_resume_key = task.resume_key
+            completed_at = (
+                now
+                if result.state is PlatformHarvestState.COMPLETE
+                else task.completed_at
+            )
+            effective_retry_at = (
+                retry_at
+                if result.state is PlatformHarvestState.RETRYABLE
+                else None
+            )
+            self.connection.execute(
+                """
+                UPDATE platform_year_harvests
+                SET resume_key = ?,
+                    page_number = page_number + ?,
+                    state = ?,
+                    retry_at = ?,
+                    claimed_by = NULL,
+                    lease_expires_at = NULL,
+                    rows_seen = rows_seen + ?,
+                    unique_host_years_seen = ?,
+                    requests = requests + ?,
+                    bytes_read = bytes_read + ?,
+                    elapsed_seconds = elapsed_seconds + ?,
+                    last_error = ?,
+                    updated_at = ?,
+                    completed_at = ?
+                WHERE harvest_id = ?
+                  AND state = ?
+                  AND claimed_by = ?
+                """,
+                (
+                    next_resume_key,
+                    1 if page_committed else 0,
+                    result.state.value,
+                    effective_retry_at,
+                    int(result.rows_seen),
+                    unique_host_years,
+                    int(result.requests),
+                    int(result.bytes),
+                    float(result.elapsed_seconds),
+                    result.error,
+                    now,
+                    completed_at,
+                    task.harvest_id,
+                    PlatformHarvestState.RUNNING.value,
+                    owner,
+                ),
+            )
+            self.connection.commit()
+        except BaseException:
+            self.connection.rollback()
+            raise
+        stored = self.get_platform_year_harvest(result.harvest_id)
+        assert stored is not None
+        return stored
+
+    def platform_year_harvest_state_counts(self) -> dict[str, int]:
+        counts = {state.value: 0 for state in PlatformHarvestState}
+        for row in self.connection.execute(
+            """
+            SELECT state, COUNT(*) AS n
+            FROM platform_year_harvests
+            GROUP BY state
+            """
+        ):
+            counts[str(row["state"])] = int(row["n"])
+        return counts
 
     def evidence_task_state_counts(self) -> dict[str, int]:
         """Aggregate the durable evidence backlog without materializing tasks."""
