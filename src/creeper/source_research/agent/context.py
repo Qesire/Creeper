@@ -33,6 +33,8 @@ class ResearchCompilerContext:
     seed_current_program_exhausted: bool
     equivalent_unexecuted_program: bool
     cooldown_satisfied: bool
+    deterministic_seed_search_available: bool = False
+    metrics_available: bool = False
     recent_query_hashes: tuple[str, ...] = ()
     unclassified_clusters: tuple[str, ...] = ()
     productive_source_families: tuple[str, ...] = ()
@@ -75,6 +77,8 @@ class ResearchCompilerContext:
             "seed_current_program_exhausted": self.seed_current_program_exhausted,
             "equivalent_unexecuted_program": self.equivalent_unexecuted_program,
             "cooldown_satisfied": self.cooldown_satisfied,
+            "deterministic_seed_search_available": self.deterministic_seed_search_available,
+            "metrics_available": self.metrics_available,
             "recent_query_hashes": list(self.recent_query_hashes),
             "unclassified_clusters": list(self.unclassified_clusters),
             "productive_source_families": list(self.productive_source_families),
@@ -98,6 +102,8 @@ class LearningCompilerContext:
     replay_available: bool
     final_reward_available: bool
     policy_snapshot_id: str
+    lineage_available: bool = False
+    rule_persistence_available: bool = False
     successful_reuse_keys: tuple[str, ...] = ()
     failed_reuse_keys: tuple[str, ...] = ()
     productive_families: tuple[str, ...] = ()
@@ -136,6 +142,8 @@ class LearningCompilerContext:
             "replay_available": self.replay_available,
             "final_reward_available": self.final_reward_available,
             "policy_snapshot_id": self.policy_snapshot_id.strip(),
+            "lineage_available": self.lineage_available,
+            "rule_persistence_available": self.rule_persistence_available,
             "successful_reuse_keys": list(self.successful_reuse_keys),
             "failed_reuse_keys": list(self.failed_reuse_keys),
             "productive_families": list(self.productive_families),
