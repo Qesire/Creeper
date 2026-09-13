@@ -271,6 +271,25 @@ class IncrementalReadinessTests(unittest.TestCase):
                     },
                 },
             )
+            self.assertEqual(
+                report.source_contribution,
+                {
+                    "by_source": {},
+                    "direct_annual": {
+                        "novel_host_years": 0,
+                        "novel_eed": "0",
+                    },
+                    "verified_candidate": {
+                        "novel_host_years": 3,
+                        "novel_eed": "2.0",
+                    },
+                    "other_restricted": {
+                        "novel_host_years": 0,
+                        "novel_eed": "0",
+                    },
+                },
+            )
+            self.assertNotIn("candidate", report.source_contribution)
             check_control = ControlStore(runtime_root / "control.sqlite3")
             action_values = check_control.evidence_action_value_summary()
             self.assertEqual(
