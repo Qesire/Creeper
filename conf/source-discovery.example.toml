@@ -32,6 +32,10 @@ suppression_ttl_seconds = 21600.0
 triage_parallelism = 8
 scout_parallelism = 4
 search_parallelism = 3
+region_parallelism = 2
+research_poll_seconds = 0.0
+# Opt into V7 background research; false preserves foreground v2 compatibility.
+nonblocking_research = true
 # Transient executor failures are retried after this process-local backoff.
 failure_retry_seconds = 30.0
 # Completed strategies, including valid empty-result searches, are durably cooled down.
