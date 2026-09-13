@@ -3026,6 +3026,29 @@ class SourceDiscoveryRegistry:
             raise
         return self.get_region(region_id)
 
+    def recover_stranded_regions(self) -> int:
+        """Return durable RUNNING regions to retryable scheduling after restart.
+
+        Region progress and execution_generation are intentionally preserved.
+        The next claim increments the generation, so a stale pre-crash worker
+        remains fenced from checkpoint or terminal-state writes.
+        """
+        now = float(self.clock())
+        with self.connection:
+            return self.connection.execute(
+                """
+                UPDATE source_exploration_regions
+                SET state = ?, state_reason = ?, updated_at = ?
+                WHERE state = ?
+                """,
+                (
+                    RegionState.FAILED_RETRYABLE.value,
+                    "recovered stranded RUNNING region after coordinator restart",
+                    now,
+                    RegionState.RUNNING.value,
+                ),
+            ).rowcount
+
     def claim_region(self, region_id: str) -> int:
         self.connection.execute("BEGIN IMMEDIATE")
         try:
