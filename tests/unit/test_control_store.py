@@ -10,6 +10,10 @@ from creeper.evidence.policies import (
     EvidenceQueryResult,
     TemporalScope,
 )
+from creeper.evidence.platform_harvest import (
+    PlatformHarvestState,
+    PlatformYearHarvestResult,
+)
 from creeper.storage.control_store import ControlStore
 from creeper.scheduler.leases import LeaseState, WorkLease
 from creeper.sources.domains import DomainState, SourceDomain
@@ -1088,6 +1092,251 @@ class ControlStoreTests(unittest.TestCase):
                 ),
                 {("example.com", 1997): "source-a"},
             )
+            store.close()
+
+
+    def test_platform_year_harvest_enqueue_is_idempotent_and_claim_fenced(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            now = {"value": 100.0}
+            store = ControlStore(
+                Path(tmp) / "control.sqlite3",
+                clock=lambda: now["value"],
+            )
+            first = store.enqueue_platform_year_harvest(
+                provider="wayback",
+                subject="example.com",
+                target_year=1997,
+                request_template_hash="template-v1",
+                policy_version="platform-v1",
+            )
+            second = store.enqueue_platform_year_harvest(
+                provider="wayback",
+                subject="EXAMPLE.com",
+                target_year=1997,
+                request_template_hash="template-v1",
+                policy_version="platform-v1",
+            )
+            self.assertEqual(first.harvest_id, second.harvest_id)
+            self.assertEqual(len(store.list_platform_year_harvests()), 1)
+
+            claimed = store.claim_platform_year_harvests(
+                owner="worker-a",
+                limit=1,
+                lease_seconds=10.0,
+            )
+            self.assertEqual(len(claimed), 1)
+            self.assertEqual(claimed[0].state, PlatformHarvestState.RUNNING)
+            self.assertEqual(
+                store.claim_platform_year_harvests(
+                    owner="worker-b",
+                    limit=1,
+                    lease_seconds=10.0,
+                ),
+                [],
+            )
+            store.close()
+
+    def test_platform_year_harvest_partial_commit_persists_resume_and_counters(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ControlStore(Path(tmp) / "control.sqlite3", clock=lambda: 100.0)
+            task = store.enqueue_platform_year_harvest(
+                provider="wayback",
+                subject="example.com",
+                target_year=1997,
+                request_template_hash="template-v1",
+                policy_version="platform-v1",
+            )
+            claimed = store.claim_platform_year_harvests(
+                owner="worker-a",
+                limit=1,
+                lease_seconds=30.0,
+            )[0]
+            result = PlatformYearHarvestResult(
+                harvest_id=claimed.harvest_id,
+                provider=claimed.provider,
+                subject=claimed.subject,
+                target_year=claimed.target_year,
+                request_template_hash=claimed.request_template_hash,
+                policy_version=claimed.policy_version,
+                resume_key_used=None,
+                state=PlatformHarvestState.PARTIAL,
+                next_resume_key="resume-1",
+                rows_seen=10,
+                requests=1,
+                bytes=500,
+                elapsed_seconds=0.25,
+            )
+
+            stored = store.finish_platform_year_harvest_page(
+                result,
+                owner="worker-a",
+            )
+
+            self.assertEqual(stored.state, PlatformHarvestState.PARTIAL)
+            self.assertEqual(stored.resume_key, "resume-1")
+            self.assertEqual(stored.page_number, 1)
+            self.assertEqual(stored.rows_seen, 10)
+            self.assertEqual(stored.requests, 1)
+            self.assertEqual(stored.bytes, 500)
+            self.assertEqual(stored.elapsed_seconds, 0.25)
+            self.assertIsNone(stored.claimed_by)
+            self.assertIsNone(stored.lease_expires_at)
+            store.close()
+
+    def test_platform_year_harvest_retry_preserves_resume_cursor(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            now = {"value": 100.0}
+            store = ControlStore(
+                Path(tmp) / "control.sqlite3",
+                clock=lambda: now["value"],
+            )
+            seed = store.enqueue_platform_year_harvest(
+                provider="wayback",
+                subject="example.com",
+                target_year=1997,
+                request_template_hash="template-v1",
+                policy_version="platform-v1",
+            )
+            first = store.claim_platform_year_harvests(
+                owner="worker-a",
+                limit=1,
+                lease_seconds=30.0,
+            )[0]
+            partial = PlatformYearHarvestResult(
+                harvest_id=seed.harvest_id,
+                provider=seed.provider,
+                subject=seed.subject,
+                target_year=seed.target_year,
+                request_template_hash=seed.request_template_hash,
+                policy_version=seed.policy_version,
+                resume_key_used=None,
+                state=PlatformHarvestState.PARTIAL,
+                next_resume_key="resume-1",
+                rows_seen=1,
+                requests=1,
+            )
+            store.finish_platform_year_harvest_page(partial, owner="worker-a")
+            second = store.claim_platform_year_harvests(
+                owner="worker-b",
+                limit=1,
+                lease_seconds=30.0,
+            )[0]
+            self.assertEqual(second.resume_key, "resume-1")
+            transient = PlatformYearHarvestResult(
+                harvest_id=second.harvest_id,
+                provider=second.provider,
+                subject=second.subject,
+                target_year=second.target_year,
+                request_template_hash=second.request_template_hash,
+                policy_version=second.policy_version,
+                resume_key_used="resume-1",
+                state=PlatformHarvestState.RETRYABLE,
+                requests=1,
+                error="timeout",
+            )
+            stored = store.finish_platform_year_harvest_page(
+                transient,
+                owner="worker-b",
+                retry_at=130.0,
+            )
+            self.assertEqual(stored.state, PlatformHarvestState.RETRYABLE)
+            self.assertEqual(stored.resume_key, "resume-1")
+            self.assertEqual(stored.page_number, 1)
+            self.assertEqual(stored.retry_at, 130.0)
+            store.close()
+
+    def test_platform_year_harvest_stale_worker_cannot_finish_after_transfer(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            now = {"value": 100.0}
+            store = ControlStore(
+                Path(tmp) / "control.sqlite3",
+                clock=lambda: now["value"],
+            )
+            store.enqueue_platform_year_harvest(
+                provider="wayback",
+                subject="example.com",
+                target_year=1997,
+                request_template_hash="template-v1",
+                policy_version="platform-v1",
+            )
+            stale = store.claim_platform_year_harvests(
+                owner="worker-a",
+                limit=1,
+                lease_seconds=10.0,
+            )[0]
+            now["value"] = 111.0
+            fresh = store.claim_platform_year_harvests(
+                owner="worker-b",
+                limit=1,
+                lease_seconds=10.0,
+            )[0]
+            self.assertEqual(stale.harvest_id, fresh.harvest_id)
+            stale_result = PlatformYearHarvestResult(
+                harvest_id=stale.harvest_id,
+                provider=stale.provider,
+                subject=stale.subject,
+                target_year=stale.target_year,
+                request_template_hash=stale.request_template_hash,
+                policy_version=stale.policy_version,
+                resume_key_used=stale.resume_key,
+                state=PlatformHarvestState.PARTIAL,
+                next_resume_key="stale-resume",
+            )
+
+            with self.assertRaises(KeyError):
+                store.finish_platform_year_harvest_page(
+                    stale_result,
+                    owner="worker-a",
+                )
+
+            unchanged = store.get_platform_year_harvest(fresh.harvest_id)
+            self.assertEqual(unchanged.state, PlatformHarvestState.RUNNING)
+            self.assertEqual(unchanged.claimed_by, "worker-b")
+            self.assertIsNone(unchanged.resume_key)
+            store.close()
+
+    def test_platform_year_harvest_page_read_without_commit_keeps_old_resume(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            now = {"value": 100.0}
+            store = ControlStore(
+                Path(tmp) / "control.sqlite3",
+                clock=lambda: now["value"],
+            )
+            store.enqueue_platform_year_harvest(
+                provider="wayback",
+                subject="example.com",
+                target_year=1997,
+                request_template_hash="template-v1",
+                policy_version="platform-v1",
+            )
+            first = store.claim_platform_year_harvests(
+                owner="worker-a",
+                limit=1,
+                lease_seconds=5.0,
+            )[0]
+            # Simulate a provider page already read in memory, including its
+            # continuation, followed by process death before durable finish.
+            _uncommitted = PlatformYearHarvestResult(
+                harvest_id=first.harvest_id,
+                provider=first.provider,
+                subject=first.subject,
+                target_year=first.target_year,
+                request_template_hash=first.request_template_hash,
+                policy_version=first.policy_version,
+                resume_key_used=None,
+                state=PlatformHarvestState.PARTIAL,
+                next_resume_key="resume-after-crash",
+            )
+            now["value"] = 106.0
+            recovered = store.claim_platform_year_harvests(
+                owner="worker-b",
+                limit=1,
+                lease_seconds=5.0,
+            )[0]
+
+            self.assertIsNone(recovered.resume_key)
+            self.assertEqual(recovered.page_number, 0)
+            self.assertEqual(recovered.attempt, 2)
             store.close()
 
 

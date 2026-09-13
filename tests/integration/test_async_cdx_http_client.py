@@ -11,6 +11,11 @@ from creeper.evidence.policies import (
     TemporalScope,
 )
 from creeper.evidence.providers.async_cdx import AsyncWaybackCDXClient
+from creeper.evidence.platform_harvest import (
+    PlatformHarvestState,
+    PlatformYearHarvestTask,
+    platform_year_harvest_id,
+)
 
 
 class AsyncWaybackCDXClientTests(unittest.IsolatedAsyncioTestCase):
@@ -528,6 +533,202 @@ class AsyncWaybackCDXClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(calls, 2)
         self.assertGreater(client.retry_backoff_wait_milliseconds, 0)
         self.assertGreater(client.cooldown_wait_milliseconds, 0)
+
+
+    async def test_platform_year_harvest_is_single_year_one_page_and_resumable(self):
+        seen_query = {}
+
+        async def handler(request):
+            seen_query.update(parse_qs(request.url.query.decode()))
+            payload = [
+                ["urlkey", "timestamp", "original", "statuscode"],
+                ["com,example,a)/", "19970101000000", "http://a.example.com/x", "200"],
+                ["com,example,a)/", "19970102000000", "http://a.example.com/y", "200"],
+                ["com,example,b)/", "19980101000000", "http://b.example.com/", "200"],
+                ["resume-1"],
+            ]
+            return httpx.Response(
+                200,
+                content=json.dumps(payload).encode(),
+                request=request,
+            )
+
+        async with AsyncWaybackCDXClient(
+            transport=httpx.MockTransport(handler),
+            max_retries=0,
+            limit=100,
+        ) as client:
+            template_hash = client.platform_year_request_template_hash(
+                "example.com",
+                1997,
+                policy_version="platform-v1",
+            )
+            task = PlatformYearHarvestTask(
+                harvest_id=platform_year_harvest_id(
+                    provider="wayback",
+                    subject="example.com",
+                    target_year=1997,
+                    request_template_hash=template_hash,
+                    policy_version="platform-v1",
+                ),
+                provider="wayback",
+                subject="example.com",
+                target_year=1997,
+                request_template_hash=template_hash,
+                policy_version="platform-v1",
+            )
+            result = await client.harvest_platform_year(task)
+
+        self.assertEqual(result.state, PlatformHarvestState.PARTIAL)
+        self.assertEqual(result.next_resume_key, "resume-1")
+        self.assertFalse(result.exhaustive)
+        self.assertEqual(result.requests, 1)
+        self.assertEqual(result.rows_seen, 3)
+        self.assertEqual(
+            {(capsule.hostname, capsule.year) for capsule in result.capsules},
+            {("a.example.com", 1997)},
+        )
+        self.assertEqual(seen_query["matchType"], ["domain"])
+        self.assertEqual(seen_query["from"], ["19970101000000"])
+        self.assertEqual(seen_query["to"], ["19971231235959"])
+        self.assertEqual(seen_query["showResumeKey"], ["true"])
+        self.assertNotIn("resumeKey", seen_query)
+
+    async def test_platform_year_harvest_replays_exact_resume_key(self):
+        seen_resume = []
+
+        async def handler(request):
+            query = parse_qs(request.url.query.decode())
+            seen_resume.append(query.get("resumeKey", [None])[0])
+            payload = [
+                ["urlkey", "timestamp", "original", "statuscode"],
+                ["com,example,c)/", "19970101000000", "http://c.example.com/", "200"],
+            ]
+            return httpx.Response(
+                200,
+                content=json.dumps(payload).encode(),
+                request=request,
+            )
+
+        async with AsyncWaybackCDXClient(
+            transport=httpx.MockTransport(handler),
+            max_retries=0,
+            limit=100,
+        ) as client:
+            template_hash = client.platform_year_request_template_hash(
+                "example.com",
+                1997,
+                policy_version="platform-v1",
+            )
+            task = PlatformYearHarvestTask(
+                harvest_id=platform_year_harvest_id(
+                    provider="wayback",
+                    subject="example.com",
+                    target_year=1997,
+                    request_template_hash=template_hash,
+                    policy_version="platform-v1",
+                ),
+                provider="wayback",
+                subject="example.com",
+                target_year=1997,
+                request_template_hash=template_hash,
+                policy_version="platform-v1",
+                resume_key="resume-1",
+                page_number=1,
+            )
+            result = await client.harvest_platform_year(task)
+
+        self.assertEqual(seen_resume, ["resume-1"])
+        self.assertEqual(result.resume_key_used, "resume-1")
+        self.assertEqual(result.state, PlatformHarvestState.COMPLETE)
+        self.assertTrue(result.exhaustive)
+        self.assertIsNone(result.next_resume_key)
+
+    async def test_platform_year_full_page_without_resume_is_not_complete(self):
+        async def handler(request):
+            payload = [
+                ["urlkey", "timestamp", "original", "statuscode"],
+                ["com,example,a)/", "19970101000000", "http://a.example.com/", "200"],
+            ]
+            return httpx.Response(
+                200,
+                content=json.dumps(payload).encode(),
+                request=request,
+            )
+
+        async with AsyncWaybackCDXClient(
+            transport=httpx.MockTransport(handler),
+            max_retries=0,
+            limit=1,
+        ) as client:
+            template_hash = client.platform_year_request_template_hash(
+                "example.com",
+                1997,
+                policy_version="platform-v1",
+            )
+            task = PlatformYearHarvestTask(
+                harvest_id=platform_year_harvest_id(
+                    provider="wayback",
+                    subject="example.com",
+                    target_year=1997,
+                    request_template_hash=template_hash,
+                    policy_version="platform-v1",
+                ),
+                provider="wayback",
+                subject="example.com",
+                target_year=1997,
+                request_template_hash=template_hash,
+                policy_version="platform-v1",
+            )
+            result = await client.harvest_platform_year(task)
+
+        self.assertEqual(result.state, PlatformHarvestState.RETRYABLE)
+        self.assertFalse(result.exhaustive)
+        self.assertIsNone(result.next_resume_key)
+        self.assertEqual(
+            {(capsule.hostname, capsule.year) for capsule in result.capsules},
+            {("a.example.com", 1997)},
+        )
+        self.assertIn("row limit", result.error)
+
+    async def test_platform_year_retryable_http_preserves_resume_state(self):
+        async def handler(request):
+            return httpx.Response(503, request=request)
+
+        async with AsyncWaybackCDXClient(
+            transport=httpx.MockTransport(handler),
+            max_retries=0,
+            backoff=0,
+            throttle_floor_seconds=0,
+        ) as client:
+            template_hash = client.platform_year_request_template_hash(
+                "example.com",
+                1997,
+                policy_version="platform-v1",
+            )
+            task = PlatformYearHarvestTask(
+                harvest_id=platform_year_harvest_id(
+                    provider="wayback",
+                    subject="example.com",
+                    target_year=1997,
+                    request_template_hash=template_hash,
+                    policy_version="platform-v1",
+                ),
+                provider="wayback",
+                subject="example.com",
+                target_year=1997,
+                request_template_hash=template_hash,
+                policy_version="platform-v1",
+                resume_key="resume-7",
+                page_number=7,
+            )
+            result = await client.harvest_platform_year(task)
+
+        self.assertEqual(result.state, PlatformHarvestState.RETRYABLE)
+        self.assertEqual(result.resume_key_used, "resume-7")
+        self.assertIsNone(result.next_resume_key)
+        self.assertFalse(result.exhaustive)
+        self.assertEqual(result.requests, 1)
 
 
 if __name__ == "__main__":
