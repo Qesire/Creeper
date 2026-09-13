@@ -97,6 +97,23 @@ class ArtifactIntakeTests(unittest.TestCase):
         self.assertEqual(result.admission, "HOLD")
         self.assertEqual(result.failure_reason, "UNKNOWN_CONTRACT_FAMILY")
 
+    def test_blank_contract_is_unknown_work_state(self) -> None:
+        result = assess_artifact_intake(
+            TriageResult(
+                TriageDisposition.SCOUT,
+                status_code=200,
+                content_type="text/plain",
+                content_length=1000,
+                range_supported=False,
+            ),
+            url="https://archive.example/hosts.txt",
+            identity=self.strong_remote_identity(),
+            contract_match="   ",
+        )
+
+        self.assertEqual(result.admission, "HOLD")
+        self.assertEqual(result.failure_reason, "UNKNOWN_CONTRACT_FAMILY")
+
     def test_sample_stats_are_scheduling_facts_not_formal_evidence(self) -> None:
         result = assess_artifact_intake(
             TriageResult(
