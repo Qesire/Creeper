@@ -926,7 +926,7 @@ class SourceDiscoveryRegistryTests(unittest.TestCase):
 
         stale = ScoutMeasurement(
             sampled_records=10,
-            unique_hosts=8,
+            unique_hosts=10,
             novel_hosts=9,
             direct_host_years=0,
             requests=1,
