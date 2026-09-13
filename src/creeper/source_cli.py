@@ -8,6 +8,9 @@ EvidenceTask backlog.
 from __future__ import annotations
 
 import argparse
+from collections.abc import Mapping
+from dataclasses import dataclass
+from enum import StrEnum
 import json
 import os
 from pathlib import Path
@@ -17,6 +20,10 @@ import time
 import tomllib
 
 from creeper.authority.baseline_index import BaselineIndex
+from creeper.evidence.contract_registry import (
+    ReviewedContractRegistry,
+    load_reviewed_contract_registry,
+)
 from creeper.evidence.planner import EvidencePlanner
 from creeper.runtime.source_producer import SourceProducer, SourceProducerReport
 from creeper.scheduler.admission import EvidenceBacklogAdmission
@@ -36,6 +43,96 @@ from creeper.source_discovery.registry import SourceDiscoveryRegistry
 from creeper.storage.control_store import ControlStore
 from creeper.storage.evidence_store import EvidenceStore
 from creeper.storage.telemetry_store import RuntimeTelemetryStore
+
+
+class SourceProducerMode(StrEnum):
+    ACTIVATED = "activated"
+    STATIC = "static"
+
+
+@dataclass(frozen=True)
+class SourceProducerIntent:
+    mode: SourceProducerMode
+    explicitly_configured: bool
+
+
+def parse_source_producer_intent(
+    config: Mapping[str, object],
+) -> SourceProducerIntent:
+    """Parse producer topology without heuristic fallback.
+
+    Missing source_mode means activated. A legacy static configuration that
+    still supplies dataset but omits source_mode is rejected so it cannot be
+    silently reinterpreted as autonomous activated production.
+    """
+
+    raw = config.get("source_mode")
+    explicit = raw is not None
+    if raw is None:
+        if "dataset" in config:
+            raise ValueError(
+                "dataset is static-only and requires explicit "
+                "source_mode='static'"
+            )
+        mode = SourceProducerMode.ACTIVATED
+    else:
+        if not isinstance(raw, str):
+            raise ValueError("source_mode must be 'activated' or 'static'")
+        try:
+            mode = SourceProducerMode(raw.strip().lower())
+        except ValueError as exc:
+            raise ValueError(
+                "source_mode must be 'activated' or 'static'"
+            ) from exc
+
+    dataset = config.get("dataset")
+    if mode is SourceProducerMode.STATIC:
+        if not isinstance(dataset, str) or not dataset.strip():
+            raise ValueError(
+                "source_mode='static' requires dataset"
+            )
+    elif dataset is not None:
+        raise ValueError(
+            "dataset is only valid when source_mode='static'"
+        )
+    return SourceProducerIntent(
+        mode=mode,
+        explicitly_configured=explicit,
+    )
+
+
+def load_activation_contract_registry(
+    config_path: Path,
+    config: Mapping[str, object],
+) -> ReviewedContractRegistry:
+    raw = config.get("evidence_contract_registry")
+    if raw is None:
+        return ReviewedContractRegistry()
+    registry_path = _path(
+        raw,
+        config_path=Path(config_path),
+        name="evidence_contract_registry",
+    )
+    return load_reviewed_contract_registry(registry_path)
+
+
+def build_activation_compiler(
+    control_store: ControlStore,
+    registry: SourceDiscoveryRegistry,
+    *,
+    config_path: Path,
+    config: Mapping[str, object],
+) -> SourceActivationCompiler:
+    """Construct the production compiler with immutable reviewed contracts."""
+
+    return SourceActivationCompiler(
+        control_store,
+        registry=registry,
+        reviewed_contracts=load_activation_contract_registry(
+            config_path,
+            config,
+        ),
+    )
 
 
 def _path(value: object, *, config_path: Path, name: str) -> Path:
@@ -418,9 +515,11 @@ class ActivatedSourceRuntime:
         self.control = ControlStore(runtime_root / "control.sqlite3")
         self.evidence = EvidenceStore(runtime_root / "evidence.sqlite3")
         self.registry = SourceDiscoveryRegistry(self.control)
-        self.compiler = SourceActivationCompiler(
+        self.compiler = build_activation_compiler(
             self.control,
-            registry=self.registry,
+            self.registry,
+            config_path=self.config_path,
+            config=config,
         )
         self.adapter_cache: dict[str, object] = {}
         self.producer = SourceProducer(
@@ -609,7 +708,8 @@ def run_once(config_path: Path, *, owner: str) -> dict[str, object]:
     if not isinstance(limits, dict):
         raise ValueError("limits table is required")
 
-    if config.get("source_mode", "static") == "activated":
+    intent = parse_source_producer_intent(config)
+    if intent.mode is SourceProducerMode.ACTIVATED:
         return _run_activated_once(
             config_path,
             config=config,
@@ -817,26 +917,12 @@ def run_watch(
             if telemetry is not None:
                 _record_source_telemetry(telemetry, report)
 
-        if config.get("source_mode", "static") == "activated":
-            runtime_factory = ActivatedSourceRuntime
-        elif all(
-            isinstance(config.get(name), str) and str(config.get(name)).strip()
-            for name in ("runtime_data_root", "baseline_index", "dataset")
-        ):
-            runtime_factory = StaticSourceRuntime
-        else:
-            # Preserve the lightweight mocked/embedded watch contract used by
-            # tests and callers that inject run_once without a full production
-            # configuration. Real static production configs always take the
-            # persistent runtime path above.
-            return _watch_loop(
-                lambda: run_once(config_path, owner=owner),
-                stop_event=stop_event,
-                idle_backoff_seconds=idle_backoff_seconds,
-                max_idle_backoff_seconds=max_idle_backoff_seconds,
-                sleep_fn=sleep_fn,
-                report_observer=observer,
-            )
+        intent = parse_source_producer_intent(config)
+        runtime_factory = (
+            ActivatedSourceRuntime
+            if intent.mode is SourceProducerMode.ACTIVATED
+            else StaticSourceRuntime
+        )
 
         with runtime_factory(
             config_path,
