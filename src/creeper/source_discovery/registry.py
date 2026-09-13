@@ -7,6 +7,7 @@ import sqlite3
 import time
 import uuid
 from collections.abc import Iterable
+from dataclasses import dataclass
 
 from creeper.scheduler.leases import StateTransitionError
 from creeper.source_discovery.models import (
@@ -48,6 +49,44 @@ _TRANSITIONS: dict[SourceState, frozenset[SourceState]] = {
     SourceState.REJECTED: frozenset(),
     SourceState.EXHAUSTED: frozenset(),
 }
+
+
+@dataclass(frozen=True)
+class SourceRunOutcome:
+    source_key: str
+    reservoir_id: str
+    lease_id: str
+    baseline_signature: str
+    model_signature: str
+    read_started: float | None
+    read_finished: float | None
+    source_records: int
+    bytes_read: int
+    source_requests: int
+    evidence_tasks_created: int
+    evidence_tasks_terminal: int
+    direct_capsules_committed: int
+    provider_requests: int
+    provider_elapsed_seconds: float
+    candidate_duplicates: int
+    baseline_duplicates: int
+    accepted_host_years: int
+    final_accepted_eed: float
+    read_complete: bool
+    validation_complete: bool
+    closed: bool
+    closed_at: float | None
+    max_evidence_sequence: int
+    created_at: float
+    updated_at: float
+
+    @property
+    def resource_cost_seconds(self) -> float:
+        read_elapsed = 0.0
+        if self.read_started is not None and self.read_finished is not None:
+            read_elapsed = max(0.0, self.read_finished - self.read_started)
+        return read_elapsed + max(0.0, self.provider_elapsed_seconds)
+
 
 
 class SourceDiscoveryRegistry:
@@ -154,9 +193,54 @@ class SourceDiscoveryRegistry:
                 source_key TEXT PRIMARY KEY,
                 final_accepted_eed REAL NOT NULL,
                 cost_seconds REAL NOT NULL DEFAULT 0,
+                baseline_signature TEXT,
+                model_signature TEXT,
+                closed_runs INTEGER NOT NULL DEFAULT 0,
+                zero_runs INTEGER NOT NULL DEFAULT 0,
                 updated_at REAL NOT NULL,
                 FOREIGN KEY(source_key) REFERENCES source_candidates(source_key)
             ) WITHOUT ROWID;
+
+            CREATE TABLE IF NOT EXISTS source_run_outcomes (
+                source_key TEXT NOT NULL,
+                reservoir_id TEXT NOT NULL,
+                lease_id TEXT NOT NULL,
+                baseline_signature TEXT NOT NULL,
+                model_signature TEXT NOT NULL,
+                read_started REAL,
+                read_finished REAL,
+                source_records INTEGER NOT NULL DEFAULT 0 CHECK(source_records >= 0),
+                bytes_read INTEGER NOT NULL DEFAULT 0 CHECK(bytes_read >= 0),
+                source_requests INTEGER NOT NULL DEFAULT 0 CHECK(source_requests >= 0),
+                evidence_tasks_created INTEGER NOT NULL DEFAULT 0 CHECK(evidence_tasks_created >= 0),
+                evidence_tasks_terminal INTEGER NOT NULL DEFAULT 0 CHECK(evidence_tasks_terminal >= 0),
+                direct_capsules_committed INTEGER NOT NULL DEFAULT 0 CHECK(direct_capsules_committed >= 0),
+                provider_requests INTEGER NOT NULL DEFAULT 0 CHECK(provider_requests >= 0),
+                provider_elapsed_seconds REAL NOT NULL DEFAULT 0 CHECK(provider_elapsed_seconds >= 0),
+                candidate_duplicates INTEGER NOT NULL DEFAULT 0 CHECK(candidate_duplicates >= 0),
+                baseline_duplicates INTEGER NOT NULL DEFAULT 0 CHECK(baseline_duplicates >= 0),
+                accepted_host_years INTEGER NOT NULL DEFAULT 0 CHECK(accepted_host_years >= 0),
+                final_accepted_eed REAL NOT NULL DEFAULT 0 CHECK(final_accepted_eed >= 0),
+                read_complete INTEGER NOT NULL DEFAULT 0 CHECK(read_complete IN (0,1)),
+                validation_complete INTEGER NOT NULL DEFAULT 0 CHECK(validation_complete IN (0,1)),
+                closed INTEGER NOT NULL DEFAULT 0 CHECK(closed IN (0,1)),
+                closed_at REAL,
+                max_evidence_sequence INTEGER NOT NULL DEFAULT 0 CHECK(max_evidence_sequence >= 0),
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL,
+                PRIMARY KEY(
+                    source_key, reservoir_id, lease_id,
+                    baseline_signature, model_signature
+                ),
+                FOREIGN KEY(source_key) REFERENCES source_candidates(source_key)
+            ) WITHOUT ROWID;
+            CREATE INDEX IF NOT EXISTS idx_source_run_outcomes_source_authority
+                ON source_run_outcomes(
+                    source_key, baseline_signature, model_signature,
+                    closed, closed_at
+                );
+            CREATE INDEX IF NOT EXISTS idx_source_run_outcomes_lease
+                ON source_run_outcomes(lease_id, closed);
 
             CREATE TABLE IF NOT EXISTS source_overlap_sketches (
                 source_key TEXT PRIMARY KEY,
@@ -279,6 +363,22 @@ class SourceDiscoveryRegistry:
         }
         for name, statement in scout_migrations.items():
             if name not in scout_columns:
+                self.connection.execute(statement)
+
+        final_reward_columns = {
+            str(row[1])
+            for row in self.connection.execute(
+                "PRAGMA table_info(source_final_rewards)"
+            ).fetchall()
+        }
+        final_reward_migrations = {
+            "baseline_signature": "ALTER TABLE source_final_rewards ADD COLUMN baseline_signature TEXT",
+            "model_signature": "ALTER TABLE source_final_rewards ADD COLUMN model_signature TEXT",
+            "closed_runs": "ALTER TABLE source_final_rewards ADD COLUMN closed_runs INTEGER NOT NULL DEFAULT 0",
+            "zero_runs": "ALTER TABLE source_final_rewards ADD COLUMN zero_runs INTEGER NOT NULL DEFAULT 0",
+        }
+        for name, statement in final_reward_migrations.items():
+            if name not in final_reward_columns:
                 self.connection.execute(statement)
 
         attribution_columns = {
