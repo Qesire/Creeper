@@ -73,6 +73,7 @@ class SourceDiscoveryRegistry:
         self.max_graph_hops = max_graph_hops
         self.clock = clock
         self._ensure_schema()
+        self._scout_authority = self._load_scout_authority()
 
     def _ensure_schema(self) -> None:
         self.connection.executescript(
@@ -224,6 +225,8 @@ class SourceDiscoveryRegistry:
                 singleton_observations INTEGER NOT NULL DEFAULT 0,
                 doubleton_observations INTEGER NOT NULL DEFAULT 0,
                 estimated_unseen_fraction REAL NOT NULL DEFAULT 0,
+                baseline_signature TEXT,
+                model_signature TEXT,
                 measured_at REAL NOT NULL,
                 FOREIGN KEY(source_key) REFERENCES source_candidates(source_key)
             ) WITHOUT ROWID;
@@ -232,9 +235,19 @@ class SourceDiscoveryRegistry:
                 source_key TEXT PRIMARY KEY,
                 episode_id TEXT NOT NULL,
                 credited_eed REAL NOT NULL DEFAULT 0,
+                reward_kind TEXT NOT NULL DEFAULT 'legacy',
+                baseline_signature TEXT,
+                model_signature TEXT,
                 FOREIGN KEY(source_key) REFERENCES source_candidates(source_key),
                 FOREIGN KEY(episode_id) REFERENCES source_search_episodes(episode_id)
             ) WITHOUT ROWID;
+
+            CREATE TABLE IF NOT EXISTS source_scout_authority (
+                singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+                baseline_signature TEXT NOT NULL,
+                model_signature TEXT NOT NULL,
+                updated_at REAL NOT NULL
+            );
 
             CREATE TABLE IF NOT EXISTS source_suppressions (
                 scope_type TEXT NOT NULL,
@@ -248,13 +261,13 @@ class SourceDiscoveryRegistry:
                 ON source_suppressions(expires_at);
             """
         )
-        columns = {
+        scout_columns = {
             str(row[1])
             for row in self.connection.execute(
                 "PRAGMA table_info(source_scout_metrics)"
             ).fetchall()
         }
-        migrations = {
+        scout_migrations = {
             "measurement_mode": "ALTER TABLE source_scout_metrics ADD COLUMN measurement_mode TEXT NOT NULL DEFAULT 'HOST_ONLY'",
             "observed_host_year_pairs": "ALTER TABLE source_scout_metrics ADD COLUMN observed_host_year_pairs INTEGER NOT NULL DEFAULT 0",
             "novel_host_year_pairs": "ALTER TABLE source_scout_metrics ADD COLUMN novel_host_year_pairs INTEGER NOT NULL DEFAULT 0",
@@ -262,9 +275,26 @@ class SourceDiscoveryRegistry:
             "singleton_observations": "ALTER TABLE source_scout_metrics ADD COLUMN singleton_observations INTEGER NOT NULL DEFAULT 0",
             "doubleton_observations": "ALTER TABLE source_scout_metrics ADD COLUMN doubleton_observations INTEGER NOT NULL DEFAULT 0",
             "estimated_unseen_fraction": "ALTER TABLE source_scout_metrics ADD COLUMN estimated_unseen_fraction REAL NOT NULL DEFAULT 0",
+            "baseline_signature": "ALTER TABLE source_scout_metrics ADD COLUMN baseline_signature TEXT",
+            "model_signature": "ALTER TABLE source_scout_metrics ADD COLUMN model_signature TEXT",
         }
-        for name, statement in migrations.items():
-            if name not in columns:
+        for name, statement in scout_migrations.items():
+            if name not in scout_columns:
+                self.connection.execute(statement)
+
+        attribution_columns = {
+            str(row[1])
+            for row in self.connection.execute(
+                "PRAGMA table_info(source_search_reward_attribution)"
+            ).fetchall()
+        }
+        attribution_migrations = {
+            "reward_kind": "ALTER TABLE source_search_reward_attribution ADD COLUMN reward_kind TEXT NOT NULL DEFAULT 'legacy'",
+            "baseline_signature": "ALTER TABLE source_search_reward_attribution ADD COLUMN baseline_signature TEXT",
+            "model_signature": "ALTER TABLE source_search_reward_attribution ADD COLUMN model_signature TEXT",
+        }
+        for name, statement in attribution_migrations.items():
+            if name not in attribution_columns:
                 self.connection.execute(statement)
         self.connection.commit()
 
@@ -288,6 +318,134 @@ class SourceDiscoveryRegistry:
             confidence=float(row["confidence"]),
             state=SourceState(str(row["state"])),
         )
+
+    def _load_scout_authority(self) -> tuple[str, str] | None:
+        row = self.connection.execute(
+            """
+            SELECT baseline_signature, model_signature
+            FROM source_scout_authority
+            WHERE singleton = 1
+            """
+        ).fetchone()
+        if row is None:
+            return None
+        return (
+            str(row["baseline_signature"]),
+            str(row["model_signature"]),
+        )
+
+    @property
+    def current_scout_authority(self) -> tuple[str, str] | None:
+        return self._scout_authority
+
+    def set_scout_authority(
+        self,
+        *,
+        baseline_signature: str,
+        model_signature: str,
+    ) -> bool:
+        """Install current scout authority and invalidate stale proxy credit.
+
+        Historical measurements remain durable. Only proxy reward credit is
+        removed, and the potentially non-constant scan occurs strictly when the
+        authority tuple actually changes.
+        """
+        if (
+            not isinstance(baseline_signature, str)
+            or not baseline_signature.strip()
+            or not isinstance(model_signature, str)
+            or not model_signature.strip()
+        ):
+            raise ValueError("scout authority signatures must be non-empty")
+        authority = (baseline_signature, model_signature)
+        persisted = self._load_scout_authority()
+        if persisted == authority:
+            self._scout_authority = authority
+            return False
+
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            stale = self.connection.execute(
+                """
+                SELECT a.episode_id, SUM(a.credited_eed) AS credited_eed
+                FROM source_search_reward_attribution a
+                WHERE (
+                    a.reward_kind = 'scout_proxy'
+                    AND (
+                        COALESCE(a.baseline_signature, '') != ?
+                        OR COALESCE(a.model_signature, '') != ?
+                    )
+                ) OR (
+                    a.reward_kind = 'legacy'
+                    AND NOT EXISTS (
+                        SELECT 1
+                        FROM source_final_rewards f
+                        WHERE f.source_key = a.source_key
+                    )
+                )
+                GROUP BY a.episode_id
+                """,
+                authority,
+            ).fetchall()
+            for row in stale:
+                credit = float(row["credited_eed"] or 0.0)
+                if credit <= 0:
+                    continue
+                self.connection.execute(
+                    """
+                    UPDATE source_search_episodes
+                    SET accepted_novel_eed = MAX(
+                        0,
+                        accepted_novel_eed - ?
+                    )
+                    WHERE episode_id = ?
+                    """,
+                    (credit, str(row["episode_id"])),
+                )
+            self.connection.execute(
+                """
+                UPDATE source_search_reward_attribution
+                SET credited_eed = 0
+                WHERE (
+                    reward_kind = 'scout_proxy'
+                    AND (
+                        COALESCE(baseline_signature, '') != ?
+                        OR COALESCE(model_signature, '') != ?
+                    )
+                ) OR (
+                    reward_kind = 'legacy'
+                    AND NOT EXISTS (
+                        SELECT 1
+                        FROM source_final_rewards f
+                        WHERE f.source_key =
+                            source_search_reward_attribution.source_key
+                    )
+                )
+                """,
+                authority,
+            )
+            self.connection.execute(
+                """
+                INSERT INTO source_scout_authority(
+                    singleton, baseline_signature, model_signature, updated_at
+                ) VALUES (1, ?, ?, ?)
+                ON CONFLICT(singleton) DO UPDATE SET
+                    baseline_signature = excluded.baseline_signature,
+                    model_signature = excluded.model_signature,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    baseline_signature,
+                    model_signature,
+                    float(self.clock()),
+                ),
+            )
+            self.connection.commit()
+        except BaseException:
+            self.connection.rollback()
+            raise
+        self._scout_authority = authority
+        return True
 
     def _measurement_from_row(self, row: sqlite3.Row) -> ScoutMeasurement:
         return ScoutMeasurement(
@@ -871,12 +1029,25 @@ class SourceDiscoveryRegistry:
                 )
             if target in {SourceState.WARM, SourceState.ACTIVE}:
                 measured = self.connection.execute(
-                    "SELECT 1 FROM source_scout_metrics WHERE source_key = ?",
+                    """
+                    SELECT baseline_signature, model_signature
+                    FROM source_scout_metrics
+                    WHERE source_key = ?
+                    """,
                     (source_key,),
                 ).fetchone()
-                if measured is None:
+                eligible = measured is not None
+                if eligible and self._scout_authority is not None:
+                    eligible = (
+                        str(measured["baseline_signature"] or "")
+                        == self._scout_authority[0]
+                        and str(measured["model_signature"] or "")
+                        == self._scout_authority[1]
+                    )
+                if not eligible:
                     raise StateTransitionError(
-                        "measured scout evidence is required before warm/active promotion"
+                        "current-authority measured scout evidence is required "
+                        "before warm/active promotion"
                     )
             self.connection.execute(
                 "UPDATE source_candidates SET state = ?, updated_at = ? WHERE source_key = ?",
@@ -895,6 +1066,9 @@ class SourceDiscoveryRegistry:
         source_key: str,
         *,
         accepted_novel_eed: float,
+        reward_kind: str = "final",
+        baseline_signature: str | None = None,
+        model_signature: str | None = None,
     ) -> None:
         """Idempotently attribute proxy/final yield to one originating search.
 
@@ -911,6 +1085,9 @@ class SourceDiscoveryRegistry:
         ).fetchone()
         if final_row is not None:
             accepted_novel_eed = float(final_row["final_accepted_eed"])
+            reward_kind = "final"
+            baseline_signature = None
+            model_signature = None
         attribution = self.connection.execute(
             """
             SELECT episode_id, credited_eed
@@ -937,10 +1114,18 @@ class SourceDiscoveryRegistry:
             self.connection.execute(
                 """
                 INSERT INTO source_search_reward_attribution(
-                    source_key, episode_id, credited_eed
-                ) VALUES (?, ?, ?)
+                    source_key, episode_id, credited_eed, reward_kind,
+                    baseline_signature, model_signature
+                ) VALUES (?, ?, ?, ?, ?, ?)
                 """,
-                (source_key, episode_id, float(accepted_novel_eed)),
+                (
+                    source_key,
+                    episode_id,
+                    float(accepted_novel_eed),
+                    reward_kind,
+                    baseline_signature,
+                    model_signature,
+                ),
             )
         else:
             episode_id = str(attribution["episode_id"])
@@ -948,10 +1133,19 @@ class SourceDiscoveryRegistry:
             self.connection.execute(
                 """
                 UPDATE source_search_reward_attribution
-                SET credited_eed = ?
+                SET credited_eed = ?,
+                    reward_kind = ?,
+                    baseline_signature = ?,
+                    model_signature = ?
                 WHERE source_key = ?
                 """,
-                (float(accepted_novel_eed), source_key),
+                (
+                    float(accepted_novel_eed),
+                    reward_kind,
+                    baseline_signature,
+                    model_signature,
+                    source_key,
+                ),
             )
         delta = float(accepted_novel_eed) - old_credit
         if delta:
@@ -1036,9 +1230,26 @@ class SourceDiscoveryRegistry:
         self,
         source_key: str,
         measurement: ScoutMeasurement,
+        *,
+        baseline_signature: str | None = None,
+        model_signature: str | None = None,
     ) -> None:
         if self.get_candidate(source_key) is None:
             raise KeyError(f"unknown source: {source_key}")
+        if (baseline_signature is None) != (model_signature is None):
+            raise ValueError(
+                "baseline_signature and model_signature must be provided together"
+            )
+        measurement_authority = (
+            self._scout_authority
+            if baseline_signature is None
+            else (baseline_signature, model_signature)
+        )
+        if measurement_authority is not None and (
+            not measurement_authority[0]
+            or not measurement_authority[1]
+        ):
+            raise ValueError("scout authority signatures must be non-empty")
         now = float(self.clock())
         with self.connection:
             self.connection.execute(
@@ -1049,8 +1260,9 @@ class SourceDiscoveryRegistry:
                     novel_eed, measurement_mode, observed_host_year_pairs,
                     novel_host_year_pairs, novel_pair_eed,
                     singleton_observations, doubleton_observations,
-                    estimated_unseen_fraction, measured_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    estimated_unseen_fraction, baseline_signature,
+                    model_signature, measured_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(source_key) DO UPDATE SET
                     sampled_records = excluded.sampled_records,
                     unique_hosts = excluded.unique_hosts,
@@ -1067,6 +1279,8 @@ class SourceDiscoveryRegistry:
                     singleton_observations = excluded.singleton_observations,
                     doubleton_observations = excluded.doubleton_observations,
                     estimated_unseen_fraction = excluded.estimated_unseen_fraction,
+                    baseline_signature = excluded.baseline_signature,
+                    model_signature = excluded.model_signature,
                     measured_at = excluded.measured_at
                 """,
                 (
@@ -1086,6 +1300,16 @@ class SourceDiscoveryRegistry:
                     measurement.singleton_observations,
                     measurement.doubleton_observations,
                     measurement.estimated_unseen_fraction,
+                    (
+                        None
+                        if measurement_authority is None
+                        else measurement_authority[0]
+                    ),
+                    (
+                        None
+                        if measurement_authority is None
+                        else measurement_authority[1]
+                    ),
                     now,
                 ),
             )
@@ -1110,17 +1334,54 @@ class SourceDiscoveryRegistry:
                         now,
                     ),
                 )
-            self._attribute_search_reward_locked(
-                source_key,
-                accepted_novel_eed=measurement.novel_eed_for_ranking,
-            )
+            if (
+                self._scout_authority is None
+                or measurement_authority == self._scout_authority
+            ):
+                self._attribute_search_reward_locked(
+                    source_key,
+                    accepted_novel_eed=measurement.novel_eed_for_ranking,
+                    reward_kind="scout_proxy",
+                    baseline_signature=(
+                        None
+                        if measurement_authority is None
+                        else measurement_authority[0]
+                    ),
+                    model_signature=(
+                        None
+                        if measurement_authority is None
+                        else measurement_authority[1]
+                    ),
+                )
 
-    def get_scout_measurement(self, source_key: str) -> ScoutMeasurement | None:
+    def get_scout_measurement(
+        self,
+        source_key: str,
+        *,
+        baseline_signature: str | None = None,
+        model_signature: str | None = None,
+    ) -> ScoutMeasurement | None:
+        if (baseline_signature is None) != (model_signature is None):
+            raise ValueError(
+                "baseline_signature and model_signature must be provided together"
+            )
+        required_authority = (
+            self._scout_authority
+            if baseline_signature is None
+            else (baseline_signature, model_signature)
+        )
         row = self.connection.execute(
             "SELECT * FROM source_scout_metrics WHERE source_key = ?",
             (source_key,),
         ).fetchone()
-        return None if row is None else self._measurement_from_row(row)
+        if row is None:
+            return None
+        if required_authority is not None and (
+            str(row["baseline_signature"] or "") != required_authority[0]
+            or str(row["model_signature"] or "") != required_authority[1]
+        ):
+            return None
+        return self._measurement_from_row(row)
 
     def rank_scout_candidates(self, *, limit: int) -> list[SourceCandidate]:
         if limit < 1:

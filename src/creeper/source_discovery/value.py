@@ -58,6 +58,15 @@ class InterpretableSourceValueModel:
         family: str,
     ) -> tuple[float, float, int]:
         """Return P(final>0), conditional final/scout conversion, sample count."""
+        authority = self.registry.current_scout_authority
+        authority_clause = ""
+        params: tuple[object, ...] = (family,)
+        if authority is not None:
+            authority_clause = (
+                " AND m.baseline_signature = ?"
+                " AND m.model_signature = ?"
+            )
+            params += authority
         row = self.registry.connection.execute(
             """
             SELECT
@@ -86,8 +95,8 @@ class InterpretableSourceValueModel:
             JOIN source_scout_metrics m ON m.source_key = c.source_key
             JOIN source_final_rewards f ON f.source_key = c.source_key
             WHERE c.source_family = ?
-            """,
-            (family,),
+            """ + authority_clause,
+            params,
         ).fetchone()
         n = int(row["n"] or 0)
         if n == 0:

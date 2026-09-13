@@ -476,5 +476,323 @@ class SourceDiscoveryRegistryTests(unittest.TestCase):
         self.assertEqual(inventory[SourceState.ACTIVE], 0)
 
 
+    def test_scout_measurement_is_authority_bound(self) -> None:
+        candidate = self._to_scout_ready(self.candidate("authority-bound/"))
+        self.registry.transition(candidate.source_key, SourceState.SCOUTING)
+        self.registry.set_scout_authority(
+            baseline_signature="baseline-a",
+            model_signature="model-a",
+        )
+        measurement = ScoutMeasurement(
+            sampled_records=20,
+            unique_hosts=10,
+            novel_hosts=5,
+            direct_host_years=0,
+            requests=1,
+            bytes_read=512,
+            elapsed_seconds=1.0,
+            novel_eed=5.0,
+        )
+
+        self.registry.record_scout_measurement(
+            candidate.source_key,
+            measurement,
+        )
+
+        row = self.registry.connection.execute(
+            """
+            SELECT baseline_signature, model_signature
+            FROM source_scout_metrics
+            WHERE source_key = ?
+            """,
+            (candidate.source_key,),
+        ).fetchone()
+        self.assertEqual(
+            (row["baseline_signature"], row["model_signature"]),
+            ("baseline-a", "model-a"),
+        )
+        self.assertEqual(
+            self.registry.get_scout_measurement(candidate.source_key),
+            measurement,
+        )
+
+    def test_legacy_scout_measurement_is_stale(self) -> None:
+        candidate = self._to_scout_ready(self.candidate("legacy-stale/"))
+        self.registry.transition(candidate.source_key, SourceState.SCOUTING)
+        measurement = ScoutMeasurement(
+            sampled_records=20,
+            unique_hosts=10,
+            novel_hosts=4,
+            direct_host_years=0,
+            requests=1,
+            bytes_read=512,
+            elapsed_seconds=1.0,
+            novel_eed=4.0,
+        )
+        self.registry.record_scout_measurement(
+            candidate.source_key,
+            measurement,
+        )
+        self.assertIsNotNone(
+            self.registry.get_scout_measurement(candidate.source_key)
+        )
+
+        self.registry.set_scout_authority(
+            baseline_signature="baseline-current",
+            model_signature="model-current",
+        )
+
+        self.assertIsNone(
+            self.registry.get_scout_measurement(candidate.source_key)
+        )
+        row = self.registry.connection.execute(
+            """
+            SELECT baseline_signature, model_signature
+            FROM source_scout_metrics
+            WHERE source_key = ?
+            """,
+            (candidate.source_key,),
+        ).fetchone()
+        self.assertIsNotNone(row)
+        self.assertIsNone(row["baseline_signature"])
+        self.assertIsNone(row["model_signature"])
+
+    def test_model_change_marks_scout_measurement_stale(self) -> None:
+        candidate = self._to_scout_ready(self.candidate("model-stale/"))
+        self.registry.transition(candidate.source_key, SourceState.SCOUTING)
+        self.registry.set_scout_authority(
+            baseline_signature="baseline-a",
+            model_signature="model-a",
+        )
+        self.registry.record_scout_measurement(
+            candidate.source_key,
+            ScoutMeasurement(
+                sampled_records=20,
+                unique_hosts=10,
+                novel_hosts=4,
+                direct_host_years=0,
+                requests=1,
+                bytes_read=512,
+                elapsed_seconds=1.0,
+                novel_eed=4.0,
+            ),
+        )
+
+        self.registry.set_scout_authority(
+            baseline_signature="baseline-a",
+            model_signature="model-b",
+        )
+
+        self.assertIsNone(
+            self.registry.get_scout_measurement(candidate.source_key)
+        )
+
+    def test_stale_scout_proxy_does_not_credit_current_search_strategy(self) -> None:
+        self.registry.set_scout_authority(
+            baseline_signature="baseline-a",
+            model_signature="model-a",
+        )
+        episode = self.registry.begin_search_episode(
+            strategy="AUTHORITY_TEST",
+            backend="test",
+            query="find source",
+            actor="agent:test",
+            episode_id="search:authority-stale",
+        )
+        candidate = self.candidate("authority-reward/")
+        self.registry.register_proposal(
+            candidate,
+            episode_id=episode.episode_id,
+            proposal_id="proposal:authority-reward",
+        )
+        self.registry.finish_search_episode(
+            episode.episode_id,
+            search_cost_seconds=2.0,
+        )
+        self.registry.record_scout_measurement(
+            candidate.source_key,
+            ScoutMeasurement(
+                sampled_records=20,
+                unique_hosts=10,
+                novel_hosts=8,
+                direct_host_years=0,
+                requests=1,
+                bytes_read=512,
+                elapsed_seconds=1.0,
+                novel_eed=8.0,
+            ),
+        )
+        self.assertEqual(
+            self.registry.get_search_episode(
+                episode.episode_id
+            ).accepted_novel_eed,
+            8.0,
+        )
+
+        self.registry.set_scout_authority(
+            baseline_signature="baseline-b",
+            model_signature="model-a",
+        )
+
+        self.assertEqual(
+            self.registry.get_search_episode(
+                episode.episode_id
+            ).accepted_novel_eed,
+            0.0,
+        )
+        rewards = self.registry.strategy_rewards()
+        reward = next(
+            item for item in rewards if item.strategy == "AUTHORITY_TEST"
+        )
+        self.assertEqual(reward.accepted_novel_eed, 0.0)
+        self.assertIsNone(
+            self.registry.get_scout_measurement(candidate.source_key)
+        )
+
+    def test_remeasurement_under_new_authority_restores_eligibility(self) -> None:
+        self.registry.set_scout_authority(
+            baseline_signature="baseline-a",
+            model_signature="model-a",
+        )
+        episode = self.registry.begin_search_episode(
+            strategy="AUTHORITY_REMEASURE",
+            backend="test",
+            query="find source",
+            actor="agent:test",
+            episode_id="search:authority-remeasure",
+        )
+        candidate = self.candidate("authority-remeasure/")
+        self.registry.register_proposal(
+            candidate,
+            episode_id=episode.episode_id,
+            proposal_id="proposal:authority-remeasure",
+        )
+        self.registry.finish_search_episode(
+            episode.episode_id,
+            search_cost_seconds=2.0,
+        )
+        self.registry.record_scout_measurement(
+            candidate.source_key,
+            ScoutMeasurement(
+                sampled_records=20,
+                unique_hosts=10,
+                novel_hosts=8,
+                direct_host_years=0,
+                requests=1,
+                bytes_read=512,
+                elapsed_seconds=1.0,
+                novel_eed=8.0,
+            ),
+        )
+        self.registry.set_scout_authority(
+            baseline_signature="baseline-b",
+            model_signature="model-a",
+        )
+        replacement = ScoutMeasurement(
+            sampled_records=20,
+            unique_hosts=10,
+            novel_hosts=5,
+            direct_host_years=0,
+            requests=1,
+            bytes_read=512,
+            elapsed_seconds=1.0,
+            novel_eed=5.0,
+        )
+
+        self.registry.record_scout_measurement(
+            candidate.source_key,
+            replacement,
+        )
+
+        self.assertEqual(
+            self.registry.get_scout_measurement(candidate.source_key),
+            replacement,
+        )
+        self.assertEqual(
+            self.registry.get_search_episode(
+                episode.episode_id
+            ).accepted_novel_eed,
+            5.0,
+        )
+        row = self.registry.connection.execute(
+            """
+            SELECT reward_kind, baseline_signature, model_signature, credited_eed
+            FROM source_search_reward_attribution
+            WHERE source_key = ?
+            """,
+            (candidate.source_key,),
+        ).fetchone()
+        self.assertEqual(row["reward_kind"], "scout_proxy")
+        self.assertEqual(row["baseline_signature"], "baseline-b")
+        self.assertEqual(row["model_signature"], "model-a")
+        self.assertEqual(float(row["credited_eed"]), 5.0)
+
+    def test_authority_migration_retains_legacy_scout_row_as_stale(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            control = ControlStore(Path(tmp) / "control.sqlite3")
+            try:
+                control.connection.execute(
+                    """
+                    CREATE TABLE source_scout_metrics (
+                        source_key TEXT PRIMARY KEY,
+                        sampled_records INTEGER NOT NULL,
+                        unique_hosts INTEGER NOT NULL,
+                        novel_hosts INTEGER NOT NULL,
+                        direct_host_years INTEGER NOT NULL,
+                        requests INTEGER NOT NULL,
+                        bytes_read INTEGER NOT NULL,
+                        elapsed_seconds REAL NOT NULL,
+                        novel_eed REAL NOT NULL,
+                        measurement_mode TEXT NOT NULL DEFAULT 'HOST_ONLY',
+                        observed_host_year_pairs INTEGER NOT NULL DEFAULT 0,
+                        novel_host_year_pairs INTEGER NOT NULL DEFAULT 0,
+                        novel_pair_eed REAL NOT NULL DEFAULT 0,
+                        singleton_observations INTEGER NOT NULL DEFAULT 0,
+                        doubleton_observations INTEGER NOT NULL DEFAULT 0,
+                        estimated_unseen_fraction REAL NOT NULL DEFAULT 0,
+                        measured_at REAL NOT NULL
+                    ) WITHOUT ROWID
+                    """
+                )
+                control.connection.execute(
+                    """
+                    INSERT INTO source_scout_metrics(
+                        source_key, sampled_records, unique_hosts, novel_hosts,
+                        direct_host_years, requests, bytes_read,
+                        elapsed_seconds, novel_eed, measured_at
+                    ) VALUES ('legacy-source', 1, 1, 1, 0, 1, 1, 1, 1, 1)
+                    """
+                )
+                control.connection.commit()
+
+                registry = SourceDiscoveryRegistry(control)
+                columns = {
+                    str(row[1])
+                    for row in control.connection.execute(
+                        "PRAGMA table_info(source_scout_metrics)"
+                    )
+                }
+                self.assertIn("baseline_signature", columns)
+                self.assertIn("model_signature", columns)
+                registry.set_scout_authority(
+                    baseline_signature="baseline-new",
+                    model_signature="model-new",
+                )
+
+                self.assertIsNone(
+                    registry.get_scout_measurement("legacy-source")
+                )
+                retained = control.connection.execute(
+                    """
+                    SELECT COUNT(*) AS n
+                    FROM source_scout_metrics
+                    WHERE source_key = 'legacy-source'
+                    """
+                ).fetchone()
+                self.assertEqual(int(retained["n"]), 1)
+            finally:
+                control.close()
+
+
 if __name__ == "__main__":
     unittest.main()

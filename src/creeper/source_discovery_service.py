@@ -20,6 +20,10 @@ import httpx
 
 from creeper.authority.baseline_index import BaselineIndex
 from creeper.authority.eed import load_english_weights
+from creeper.authority.identity import (
+    baseline_authority_signature,
+    eed_model_authority_signature,
+)
 from creeper.source_discovery.admission import SearchAdmissionPolicy
 from creeper.source_discovery.agent_search import (
     CommandAgentSearchExecutor,
@@ -419,6 +423,14 @@ async def _open_runtime(config: SourceDiscoveryServiceConfig):
         try:
             registry = SourceDiscoveryRegistry(control)
             if config.measurement is not None:
+                registry.set_scout_authority(
+                    baseline_signature=baseline_authority_signature(
+                        config.measurement.baseline_index
+                    ),
+                    model_signature=eed_model_authority_signature(
+                        config.measurement.eed_model
+                    ),
+                )
                 # Curated direct-evidence catalogs are only useful when the
                 # deterministic baseline/EED scout authority is configured.
                 ensure_curated_direct_catalogs(registry)
