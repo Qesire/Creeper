@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from threading import Event, Lock, Thread
 from typing import TYPE_CHECKING
 
-from creeper.authority.baseline_index import BaselineIndex, YEAR_BITS
+from creeper.authority.baseline_index import ALL_YEAR_MASK, BaselineIndex, YEAR_BITS
 from creeper.evidence.planner import EvidencePlanner
 from creeper.evidence.router import EvidenceRouter
 from creeper.evidence.rdap_candidates import rdap_parent_candidate
@@ -498,8 +498,79 @@ class SourceProducer:
                     candidate.reservoir is not None
                     and candidate.reservoir.evidence_mode == "direct_year"
                 )
+
+                # Direct evidence is planned and committed before any remote
+                # fallback is admitted. This makes timestamp-bearing CDX/CDXJ
+                # rows authoritative for their exact years regardless of
+                # observation order inside the batch. Wayback (or another
+                # external provider) only sees the still-uncovered year mask.
+                if allow_direct:
+                    planned_local_masks = dict(local_masks)
+                    for item in planning_pending:
+                        annual_mask, _candidate = resolved.get(
+                            item.hostname, (0, False)
+                        )
+                        direct_plan = self.evidence_planner.plan(
+                            item,
+                            official_mask=annual_mask,
+                            local_mask=planned_local_masks.get(
+                                item.hostname, 0
+                            ),
+                            provider=provider,
+                            policy_version=self.evidence_policy_version,
+                            allow_direct=True,
+                            # First pass is direct-only. External planning is
+                            # repeated after proof is durable.
+                            external_covered_mask=ALL_YEAR_MASK,
+                            range_first_fraction=0.0,
+                        )
+                        for capsule in direct_plan.direct_capsules:
+                            bit = YEAR_BITS.get(capsule.year, 0)
+                            if planned_local_masks.get(
+                                capsule.hostname, 0
+                            ) & bit:
+                                continue
+                            batch_direct_capsules.append(capsule)
+                            planned_local_masks[capsule.hostname] = (
+                                planned_local_masks.get(capsule.hostname, 0)
+                                | bit
+                            )
+
+                    if batch_direct_capsules:
+                        # Proof first, then control-plane attribution. If either
+                        # step fails the source lease is replayable; no remote
+                        # fallback is suppressed by merely planned evidence.
+                        direct_committed += self.evidence_store.put_many(
+                            batch_direct_capsules
+                        )
+                        self.control_store.attribute_direct_host_years(
+                            (
+                                (
+                                    capsule.hostname,
+                                    capsule.year,
+                                    capsule.provider,
+                                )
+                                for capsule in batch_direct_capsules
+                            ),
+                            source_key=origin_source_key,
+                            reservoir_id=candidate.reservoir_id,
+                            lease_id=running.lease_id,
+                        )
+                        if self.candidate_store is not None:
+                            self.candidate_store.mark_annual_evidence_obtained_many(
+                                capsule.hostname
+                                for capsule in batch_direct_capsules
+                            )
+                    local_masks = planned_local_masks
+
+                # Second pass is fallback-only in effect: every direct year
+                # planned above is now present in local_masks, so the planner
+                # cannot emit an external task for it. This also handles an
+                # undated observation that appeared before its CDXJ witness.
                 for item in planning_pending:
-                    annual_mask, _candidate = resolved.get(item.hostname, (0, False))
+                    annual_mask, _candidate = resolved.get(
+                        item.hostname, (0, False)
+                    )
                     plan = self.evidence_planner.plan(
                         item,
                         official_mask=annual_mask,
@@ -513,14 +584,9 @@ class SourceProducer:
                         range_first_fraction=effective_range_first_fraction,
                     )
                     if plan.direct_capsules:
-                        for capsule in plan.direct_capsules:
-                            bit = YEAR_BITS.get(capsule.year, 0)
-                            if local_masks.get(item.hostname, 0) & bit:
-                                continue
-                            batch_direct_capsules.append(capsule)
-                            local_masks[item.hostname] = (
-                                local_masks.get(item.hostname, 0) | bit
-                            )
+                        raise RuntimeError(
+                            "direct-first planning left an uncommitted direct year"
+                        )
                     if plan.external_keys:
                         enqueue_external_keys(plan.external_keys)
                         scheduled_mask = provider_coverage_masks.get(
@@ -576,28 +642,6 @@ class SourceProducer:
                         # side table or enqueue flag.
                         enqueue_auxiliary_keys("rdap", rdap_keys)
 
-                if batch_direct_capsules:
-                    # Commit evidence proof first. Incremental readiness can
-                    # recover direct source identity from persisted capsules if
-                    # this process dies before ControlStore attribution commits.
-                    # This avoids orphan first-touch credit with no evidence.
-                    direct_committed += self.evidence_store.put_many(
-                        batch_direct_capsules
-                    )
-                    self.control_store.attribute_direct_host_years(
-                        (
-                            (capsule.hostname, capsule.year, capsule.provider)
-                            for capsule in batch_direct_capsules
-                        ),
-                        source_key=origin_source_key,
-                        reservoir_id=candidate.reservoir_id,
-                        lease_id=running.lease_id,
-                    )
-                    if self.candidate_store is not None:
-                        self.candidate_store.mark_annual_evidence_obtained_many(
-                            capsule.hostname
-                            for capsule in batch_direct_capsules
-                        )
                 planning_commit_ms += max(
                     0,
                     int(round((time.monotonic() - planning_started) * 1000.0)),
