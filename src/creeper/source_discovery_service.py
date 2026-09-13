@@ -83,6 +83,10 @@ class CoordinatorConfig:
     search_parallelism: int = 3
     region_parallelism: int = 2
     nonblocking_research: bool = False
+    research_ready_minutes_threshold: float = 30.0
+    research_stagnation_min_closed_runs: int = 3
+    research_stagnation_zero_tail: int = 3
+    research_stagnation_yield_fraction: float = 0.25
     failure_retry_seconds: float = 30.0
     search_cooldown_seconds: float = 30.0
     search_ucb_exploration: float = 0.35
@@ -219,6 +223,13 @@ def _unit_float(value: Any, *, name: str) -> float:
     return value
 
 
+def _positive_unit_float(value: Any, *, name: str) -> float:
+    value = _unit_float(value, name=name)
+    if value <= 0.0:
+        raise ValueError(f"{name} must be within (0, 1]")
+    return value
+
+
 def _strict_bool(value: Any, *, name: str) -> bool:
     if not isinstance(value, bool):
         raise ValueError(f"{name} must be a boolean")
@@ -275,6 +286,22 @@ def load_source_discovery_config(config_path: Path) -> SourceDiscoveryServiceCon
         nonblocking_research=_strict_bool(
             coordinator_raw.get("nonblocking_research", False),
             name="coordinator.nonblocking_research",
+        ),
+        research_ready_minutes_threshold=_positive_float(
+            coordinator_raw.get("research_ready_minutes_threshold", 30.0),
+            name="coordinator.research_ready_minutes_threshold",
+        ),
+        research_stagnation_min_closed_runs=_positive_int(
+            coordinator_raw.get("research_stagnation_min_closed_runs", 3),
+            name="coordinator.research_stagnation_min_closed_runs",
+        ),
+        research_stagnation_zero_tail=_positive_int(
+            coordinator_raw.get("research_stagnation_zero_tail", 3),
+            name="coordinator.research_stagnation_zero_tail",
+        ),
+        research_stagnation_yield_fraction=_positive_unit_float(
+            coordinator_raw.get("research_stagnation_yield_fraction", 0.25),
+            name="coordinator.research_stagnation_yield_fraction",
         ),
         failure_retry_seconds=_positive_float(
             coordinator_raw.get("failure_retry_seconds", 30.0), name="coordinator.failure_retry_seconds"
@@ -973,6 +1000,18 @@ async def _open_runtime(config: SourceDiscoveryServiceConfig):
                     ),
                     same_context_failure_cooldown_seconds=(
                         config.agent.same_context_failure_cooldown_seconds
+                    ),
+                    ready_minutes_threshold=(
+                        config.coordinator.research_ready_minutes_threshold
+                    ),
+                    stagnation_min_closed_runs=(
+                        config.coordinator.research_stagnation_min_closed_runs
+                    ),
+                    stagnation_zero_tail=(
+                        config.coordinator.research_stagnation_zero_tail
+                    ),
+                    stagnation_yield_fraction=(
+                        config.coordinator.research_stagnation_yield_fraction
                     ),
                 ),
             )
