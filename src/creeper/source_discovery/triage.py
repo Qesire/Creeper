@@ -53,18 +53,30 @@ class HttpSourceTriageExecutor:
         self.policy = policy or HttpTriagePolicy()
 
     @staticmethod
+    def _response_object_length(response: httpx.Response) -> int | None:
+        """Return total object length, not merely a partial-response body size."""
+
+        content_range = response.headers.get("content-range")
+        if content_range:
+            text = content_range.strip().lower()
+            if text.startswith("bytes ") and "/" in text:
+                total_raw = text.rsplit("/", 1)[1]
+                if total_raw.isdigit():
+                    return int(total_raw)
+
+        raw_length = response.headers.get("content-length")
+        if raw_length is not None and raw_length.isdigit():
+            return int(raw_length)
+        return None
+
+    @staticmethod
     def _result_for_response(
         response: httpx.Response,
         *,
         method: str,
     ) -> TriageResult:
         status = int(response.status_code)
-        raw_length = response.headers.get("content-length")
-        content_length = (
-            int(raw_length)
-            if raw_length is not None and raw_length.isdigit()
-            else None
-        )
+        content_length = HttpSourceTriageExecutor._response_object_length(response)
         range_supported = (
             response.status_code == 206
             or response.headers.get("accept-ranges", "").lower() == "bytes"
