@@ -695,28 +695,29 @@ def _region_runtime_adapters(
     async def execute_region(region: object) -> object:
         region_id = str(getattr(region, "region_id"))
         generation = registry.claim_region(region_id)
-        raw_checkpoint = registry.get_region_checkpoint(region_id)
-        checkpoint = (
-            None
-            if raw_checkpoint is None
-            else RegionExecutionCheckpoint(**raw_checkpoint)
-        )
-        plan = compile_region(region)
-
-        def commit_batch(batch, next_checkpoint) -> None:
-            for candidate in batch:
-                registry.register_proposal(candidate)
-                registry.add_region_source_edge(
-                    region_id,
-                    candidate.source_key,
-                )
-            registry.checkpoint_region(
-                region_id,
-                generation,
-                next_checkpoint.as_dict(),
-            )
 
         try:
+            raw_checkpoint = registry.get_region_checkpoint(region_id)
+            checkpoint = (
+                None
+                if raw_checkpoint is None
+                else RegionExecutionCheckpoint(**raw_checkpoint)
+            )
+            plan = compile_region(region)
+
+            def commit_batch(batch, next_checkpoint) -> None:
+                for candidate in batch:
+                    registry.register_proposal(candidate)
+                    registry.add_region_source_edge(
+                        region_id,
+                        candidate.source_key,
+                    )
+                registry.checkpoint_region(
+                    region_id,
+                    generation,
+                    next_checkpoint.as_dict(),
+                )
+
             result = await executor.execute(
                 plan,
                 checkpoint=checkpoint,
