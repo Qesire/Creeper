@@ -70,7 +70,7 @@ class ControlStore:
         if default_lease_seconds < 0:
             raise ValueError("default_lease_seconds must be non-negative")
         path.parent.mkdir(parents=True, exist_ok=True)
-        self.connection = sqlite3.connect(path)
+        self.connection = sqlite3.connect(path, timeout=30.0)
         self.connection.row_factory = sqlite3.Row
         self.connection.create_function(
             "creeper_tld",
@@ -85,6 +85,8 @@ class ControlStore:
         self.default_lease_seconds = default_lease_seconds
         self.clock = clock
         self.connection.execute("PRAGMA journal_mode=WAL")
+        self.connection.execute("PRAGMA synchronous=NORMAL")
+        self.connection.execute("PRAGMA busy_timeout=30000")
         self.connection.execute("PRAGMA foreign_keys=ON")
         self.connection.executescript(
             """
@@ -120,16 +122,6 @@ class ControlStore:
                     hostname, year_from, year_to, provider, policy_version
                 )
             ) WITHOUT ROWID;
-            INSERT OR IGNORE INTO evidence_task_fanout_reservations(
-                hostname, year_from, year_to, provider, policy_version, amount
-            )
-            SELECT hostname, year_from, year_to, provider, policy_version,
-                   (year_to - year_from)
-            FROM evidence_tasks
-            WHERE year_to > year_from
-              AND policy_version NOT LIKE 'cdx-domain-%'
-              AND provider <> 'rdap'
-              AND state IN ('pending', 'incomplete', 'transient_error');
             CREATE TABLE IF NOT EXISTS runtime_checkpoints (
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
@@ -364,6 +356,35 @@ class ControlStore:
         self.connection.commit()
         self.connection.execute("BEGIN IMMEDIATE")
         try:
+            range_fanout_marker = (
+                "migration:evidence-range-fanout-reservations-v1"
+            )
+            if self.connection.execute(
+                "SELECT 1 FROM runtime_checkpoints WHERE key = ?",
+                (range_fanout_marker,),
+            ).fetchone() is None:
+                self.connection.execute(
+                    """
+                    INSERT OR IGNORE INTO evidence_task_fanout_reservations(
+                        hostname, year_from, year_to, provider,
+                        policy_version, amount
+                    )
+                    SELECT hostname, year_from, year_to, provider,
+                           policy_version, (year_to - year_from)
+                    FROM evidence_tasks
+                    WHERE year_to > year_from
+                      AND policy_version NOT LIKE 'cdx-domain-%'
+                      AND provider <> 'rdap'
+                      AND state IN (
+                          'pending', 'incomplete', 'transient_error'
+                      )
+                    """
+                )
+                self.connection.execute(
+                    "INSERT INTO runtime_checkpoints(key, value) VALUES (?, ?)",
+                    (range_fanout_marker, "complete"),
+                )
+
             fanout_marker = (
                 "migration:domain-fanout-fixed-sketch-cleanup-v1"
             )
@@ -881,7 +902,11 @@ class ControlStore:
             raise
 
     def enqueue_evidence_tasks(self, keys: Iterable[EvidenceQueryKey]) -> int:
-        rows = [(*self._values(key), CDXQueryState.PENDING.value) for key in keys]
+        key_list = list(dict.fromkeys(keys))
+        rows = [
+            (*self._values(key), CDXQueryState.PENDING.value)
+            for key in key_list
+        ]
         if not rows:
             return 0
         with self.connection:
@@ -893,9 +918,41 @@ class ControlStore:
                 """,
                 rows,
             )
+            range_keys = [
+                key
+                for key in key_list
+                if (
+                    key.temporal_scope.year_to
+                    > key.temporal_scope.year_from
+                    and not key.policy_version.startswith("cdx-domain-")
+                    and key.provider != "rdap"
+                )
+            ]
+            self.connection.executemany(
+                """
+                INSERT OR IGNORE INTO evidence_task_fanout_reservations(
+                    hostname, year_from, year_to, provider,
+                    policy_version, amount
+                )
+                SELECT hostname, year_from, year_to, provider,
+                       policy_version, (year_to - year_from)
+                FROM evidence_tasks
+                WHERE hostname = ? AND year_from = ? AND year_to = ?
+                  AND provider = ? AND policy_version = ?
+                  AND state IN (?, ?, ?)
+                """,
+                [
+                    (
+                        *self._values(key),
+                        CDXQueryState.PENDING.value,
+                        CDXQueryState.INCOMPLETE.value,
+                        CDXQueryState.TRANSIENT_ERROR.value,
+                    )
+                    for key in range_keys
+                ],
+            )
         # rowcount reflects direct task inserts only; total_changes would also
-        # include the operational EED-weight trigger and break this API's
-        # long-standing "number of new tasks" contract.
+        # include the operational EED-weight trigger and fanout reservations.
         return max(0, int(cursor.rowcount))
 
 
