@@ -5,12 +5,12 @@
 Creeper vNext separates source acquisition into three layers:
 
 1. a deterministic data plane for HTTP triage, parsing, baseline reconciliation, evidence, and submission authority;
-2. a Codex intelligence plane for bounded source hypotheses and structure reasoning;
+2. an opencode intelligence plane for bounded source hypotheses and structure reasoning;
 3. a statistical control plane for value estimation, exploration, and resource allocation.
 
-The parent process always owns authority. Codex is a child process with proposal-only authority.
+The parent process always owns authority. opencode is a child process with proposal-only authority.
 
-## Parent process -> Codex child process
+## Parent process -> opencode child process
 
 SourceDiscoveryService creates SourceReservoirManager and CommandAgentSearchExecutor. The manager decides whether an intelligence call is useful. The executor then launches a fresh child command:
 
@@ -18,7 +18,7 @@ SourceDiscoveryService creates SourceReservoirManager and CommandAgentSearchExec
 <agent.command...> --request REQUEST.json --response RESPONSE.json
 ~~~
 
-The default example uses scripts/creeper_codex_subagent.py. That wrapper launches a fresh non-interactive Codex CLI process in read-only sandbox mode with approval disabled and live web search enabled.
+The default example uses scripts/creeper_opencode_subagent.py. That wrapper runs opencode run non-interactively in an isolated temporary working directory with a proposal-only prompt policy and live web access. The wrapper enforces the JSON schema by parsing the final assistant message from the opencode JSON event stream and validating/normalizing it before writing response.json.
 
 The child cannot access the registry connection, baseline index, EvidenceStore, or submission authority through the Creeper protocol.
 
@@ -45,7 +45,7 @@ The request is a bounded state snapshot, not a database dump. It contains:
 - objective: maximize marginal FINAL Accepted Novel EED per total resource cost;
 - inventory counts by source state;
 - recent search-strategy reward/cost aggregates;
-- Codex task reward/cost aggregates;
+- opencode task reward/cost aggregates;
 - top measured sources;
 - recent terminal sources;
 - subject-specific local source context;
@@ -89,7 +89,7 @@ A conceptual request looks like:
 
 ## Child output
 
-Codex must return structured hypotheses matching conf/codex-source-intelligence.schema.json.
+opencode must return structured hypotheses matching conf/codex-source-intelligence.schema.json.
 
 Allowed actions are:
 
@@ -139,11 +139,11 @@ Example:
 }
 ~~~
 
-Codex never returns an authoritative novelty, evidence, WARM/ACTIVE, or submission decision. Every candidate still passes deterministic admission, triage, scout, baseline reconciliation, and evidence rules.
+opencode never returns an authoritative novelty, evidence, WARM/ACTIVE, or submission decision. Every candidate still passes deterministic admission, triage, scout, baseline reconciliation, and evidence rules.
 
 ## Deterministic exploitation before another LLM call
 
-Successful annual resources are also passed through the year-sibling motif inference. For example, one proven 2001 resource can deterministically produce bounded 1996-2000 siblings without another Codex call. Generated siblings are tagged so they cannot recursively fan out.
+Successful annual resources are also passed through the year-sibling motif inference. For example, one proven 2001 resource can deterministically produce bounded 1996-2000 siblings without another opencode call. Generated siblings are tagged so they cannot recursively fan out.
 
 This implements the policy:
 
@@ -197,14 +197,14 @@ The deterministic link-promotion score remains only a bounded bootstrap/noise fi
 The lineage is:
 
 ~~~text
-Codex episode
+opencode episode
   -> hypothesis
   -> SourceCandidate
   -> measured scout proxy reward
   -> production/evidence
   -> incremental readiness
   -> FINAL Accepted Novel EED by source
-  -> originating search strategy and Codex hypothesis
+  -> originating search strategy and opencode hypothesis
 ~~~
 
 Scout EED is only a temporary proxy. SourceDiscoveryRegistry.record_final_reward supersedes it when formal readiness attribution is available.
@@ -240,9 +240,9 @@ early_accept_multiplier = 4.0
 early_reject_unseen_fraction = 0.01
 
 [agent]
-command = ["python", "../scripts/creeper_codex_subagent.py"]
-backend = "codex-cli-subagent"
-actor = "codex:source-intelligence"
+command = ["python", "../scripts/creeper_opencode_subagent.py"]
+backend = "opencode-cli-subagent"
+actor = "opencode:source-intelligence"
 timeout_seconds = 180.0
 max_returned_hypotheses = 128
 max_motif_expansions = 256
@@ -250,7 +250,7 @@ max_motif_expansions = 256
 
 Path-like command arguments are resolved relative to the TOML file, so daemon behavior does not depend on shell working directory.
 
-The Codex wrapper also accepts CODEX_BIN and optional model/effort arguments when used directly.
+The opencode wrapper also accepts OPENCODE_BIN, CREEPER_OPENCODE_MODEL, and optional --model, --variant, and --agent arguments when used directly.
 
 ## Validation
 
