@@ -161,9 +161,11 @@ class SourcePortfolioRecoveryIntegrationTests(unittest.IsolatedAsyncioTestCase):
             catalog_calls.append(url)
             return ArquivoCatalogFetch(
                 body=(
-                    b'<a href="one.cdxj">one</a> '
-                    b'<a href="two.cdxj">two</a> '
-                    b'<a href="three.cdxj">three</a>'
+                    b'<pre>'
+                    b'<a href="one.cdxj">one.cdxj</a> 1M\n'
+                    b'<a href="two.cdxj">two.cdxj</a> 2M\n'
+                    b'<a href="three.cdxj">three.cdxj</a> 3M\n'
+                    b'</pre>'
                 ),
                 status_code=200,
                 final_url=AUDITED_ARQUIVO_CATALOG_URL,
