@@ -30,6 +30,8 @@ def research_context(**overrides):
         "seed_current_program_exhausted": True,
         "equivalent_unexecuted_program": False,
         "cooldown_satisfied": True,
+        "deterministic_seed_search_available": True,
+        "metrics_available": True,
         "recent_query_hashes": (),
     }
     values.update(overrides)
@@ -43,6 +45,8 @@ def learning_context(**overrides):
         "replay_available": True,
         "final_reward_available": True,
         "policy_snapshot_id": "policy:1",
+        "lineage_available": True,
+        "rule_persistence_available": True,
     }
     values.update(overrides)
     return LearningCompilerContext(**values)
@@ -190,6 +194,18 @@ class UnifiedCompilerTests(unittest.TestCase):
                 context=context,
             )
 
+    def test_unified_root_query_requires_metrics_and_seed_runtime(self):
+        for context in (
+            research_context(deterministic_seed_search_available=False),
+            research_context(metrics_available=False),
+        ):
+            with self.assertRaises(CompilerGateError):
+                UnifiedResearchCompiler().compile(
+                    query_program_payload(),
+                    task_type=UnifiedLLMTask.COMPILE_ROOT_QUERY_PROGRAM,
+                    context=context,
+                )
+
     def test_unsupported_root_native_filter_is_rejected(self):
         payload = query_program_payload()
         payload["proposals"][0]["queries"][0]["filters"] = {"publisher": "x"}
@@ -222,6 +238,18 @@ class UnifiedCompilerTests(unittest.TestCase):
             learning_context(final_reward_available=False),
             learning_context(learning_epoch_ready=False),
             learning_context(minimum_batch_satisfied=False),
+        ):
+            with self.assertRaises(CompilerGateError):
+                UnifiedResearchCompiler().compile(
+                    negative_rule_payload(),
+                    task_type=UnifiedLLMTask.DISTILL_NEGATIVE_CLUSTER,
+                    context=context,
+                )
+
+    def test_learning_requires_lineage_and_rule_persistence(self):
+        for context in (
+            learning_context(lineage_available=False),
+            learning_context(rule_persistence_available=False),
         ):
             with self.assertRaises(CompilerGateError):
                 UnifiedResearchCompiler().compile(
