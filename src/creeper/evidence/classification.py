@@ -32,7 +32,15 @@ _DIRECT_CONTRACTS = {
     for contract in (CDX_DIRECT_CONTRACT, CDXJ_DIRECT_CONTRACT)
 }
 _CONTRACT_RE = re.compile(r"(?:^|;)contract=([^@;]+)@([^;]+)")
-_CAPTURE_TYPES = frozenset({"exact_host_cdx_capture", "archive_capture"})
+_CAPTURE_TYPES = frozenset(
+    {
+        "exact_host_cdx_capture",
+        "archive_capture",
+        # Complete platform-year CDX enumeration is still provider-verified
+        # capture evidence, not reviewed direct-source evidence.
+        "platform_scope_cdx_capture",
+    }
+)
 _CAPTURE_SEMANTICS = frozenset(
     {"capture_timestamp_year", "archive_capture_timestamp"}
 )
