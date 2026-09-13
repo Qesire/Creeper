@@ -14,7 +14,10 @@ from creeper.source_discovery.coordinator import (
     TriageResult,
 )
 from creeper.source_discovery.manager import SourcePoolTargets, SourceReservoirManager
-from creeper.source_discovery.research_trigger import ResearchTriggerSnapshot
+from creeper.source_discovery.research_trigger import (
+    ResearchTriggerGate,
+    ResearchTriggerSnapshot,
+)
 from creeper.source_discovery.registry import SourceDiscoveryRegistry
 from creeper.storage.control_store import ControlStore
 
@@ -102,6 +105,57 @@ class L8NonblockingRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(third.research_started, 0)
         self.assertFalse(third.research_active)
         self.assertEqual(third.agent_hot_path_block_seconds, 0.0)
+
+    async def test_completed_context_is_not_relaunched_when_cooldown_is_zero(self) -> None:
+        manager = SourceReservoirManager(
+            self.registry,
+            targets=SourcePoolTargets(
+                active_min=0,
+                active_target=0,
+                warm_min=0,
+                warm_target=0,
+                cold_min=0,
+                cold_target=0,
+                triage_batch=1,
+                scout_parallelism=1,
+                max_search_directives=1,
+            ),
+            trigger_gate=ResearchTriggerGate(
+                min_seconds_between_llm_starts=0.0,
+                same_context_failure_cooldown_seconds=0.0,
+            ),
+        )
+        invocations = 0
+
+        async def research(_directive):
+            nonlocal invocations
+            invocations += 1
+            return {"proposal": invocations}
+
+        coordinator = SourceDiscoveryCoordinator(
+            self.registry,
+            manager,
+            lock_path=self.root / "coordinator.lock",
+            triage_executor=self._triage,
+            scout_executor=self._scout,
+            search_executor=self._search,
+            research_snapshot_provider=lambda: ResearchTriggerSnapshot(
+                context_hash="stable-context",
+            ),
+            research_executor=research,
+            research_result_committer=lambda *_args: None,
+        )
+
+        first = await coordinator.run_once()
+        self.assertEqual(first.research_started, 1)
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+        second = await coordinator.run_once()
+        self.assertEqual(second.research_completed, 1)
+        self.assertEqual(second.research_started, 0)
+        self.assertEqual(second.research_suppressed, 1)
+        self.assertEqual(invocations, 1)
 
     async def test_operator_request_waits_for_deterministic_frontier(self) -> None:
         executable = 1
