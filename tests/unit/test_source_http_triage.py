@@ -49,6 +49,26 @@ class HttpSourceTriageExecutorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.disposition, TriageDisposition.SCOUT)
         self.assertEqual(requests, [("HEAD", None), ("GET", "bytes=0-0")])
 
+    async def test_range_fallback_reports_total_object_length(self) -> None:
+        async def handler(request: httpx.Request) -> httpx.Response:
+            if request.method == "HEAD":
+                return httpx.Response(405, request=request)
+            return httpx.Response(
+                206,
+                request=request,
+                content=b"x",
+                headers={
+                    "Content-Length": "1",
+                    "Content-Range": "bytes 0-0/987654",
+                },
+            )
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            result = await HttpSourceTriageExecutor(client)(self.candidate())
+
+        self.assertEqual(result.content_length, 987654)
+        self.assertTrue(result.range_supported)
+
     async def test_permanent_missing_entrypoint_is_held_not_rejected(self) -> None:
         async def handler(request: httpx.Request) -> httpx.Response:
             return httpx.Response(404, request=request)
