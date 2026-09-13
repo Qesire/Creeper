@@ -166,6 +166,180 @@ class ResearchStateKernelTests(unittest.TestCase):
             }.issubset(scopes)
         )
 
+    def test_final_scope_materialization_does_not_multiply_arm_reward(self):
+        self.reg.enqueue_frontier(
+            FrontierTask("t-lineage", "PATH", "path:1", policy_version="p-lineage")
+        )
+        decisions = (
+            DecisionRecord(
+                "d0", "t-lineage", "arm:l0", "p-lineage", "snap:1",
+                0.5, "ctx0", 100.0,
+                metadata={"context_features": {"parent_decision_ids": ()}},
+            ),
+            DecisionRecord(
+                "d1", "t-lineage", "arm:l1", "p-lineage", "snap:1",
+                0.5, "ctx1", 100.0,
+                metadata={"context_features": {"parent_decision_ids": ("d0",)}},
+            ),
+            DecisionRecord(
+                "d2", "t-lineage", "arm:l2", "p-lineage", "snap:1",
+                0.5, "ctx2", 100.0,
+                metadata={
+                    "context_features": {
+                        "parent_decision_ids": ("d0", "d1"),
+                    }
+                },
+            ),
+            DecisionRecord(
+                "d3", "t-lineage", "arm:l3", "p-lineage", "snap:1",
+                0.5, "ctx3", 100.0,
+                metadata={
+                    "context_features": {
+                        "parent_decision_ids": ("d0", "d1", "d2"),
+                    }
+                },
+            ),
+        )
+        for decision in decisions:
+            self.assertTrue(self.reg.record_decision(decision))
+
+        node = self.reg.upsert_hit(
+            SearchHit(
+                "datacite", self.query.query_id, "10.777/lineage",
+                "https://doi.org/10.777/lineage", "DOI",
+            )
+        )
+        lead = ArtifactLead(
+            "datacite", "lineage-file",
+            "https://repo.example/lineage.cdx.gz",
+            checksum="sha256:lineage",
+            query_id=self.query.query_id,
+            program_id=self.program.program_id,
+            source_node_id=node.node_id,
+            pivot_id="pivot:lineage",
+            decision_id="d3",
+        )
+        artifact_id, _, _ = self.reg.register_artifact_lead(lead)
+        self.assertEqual(
+            self.reg.bind_artifact_source(
+                artifact_id,
+                source_key="src:lineage",
+                source_exposure_id="exp:lineage",
+            ),
+            1,
+        )
+
+        lineage = self.reg.get_decision_lineage("d3")
+        self.assertEqual(
+            tuple(decision.decision_id for decision in lineage),
+            ("d0", "d1", "d2", "d3"),
+        )
+        self.assertEqual(
+            self.reg.get_decision("d3").parent_decision_ids,
+            ("d0", "d1", "d2"),
+        )
+
+        written = self.reg.close_final_reward(
+            source_key="src:lineage",
+            exposure_id="exp:lineage",
+            final_eed=2.5,
+            validation_closed=True,
+            idempotency_token="outcome:lineage",
+        )
+        self.assertGreaterEqual(written, 10)
+        self.assertEqual(
+            self.reg.close_final_reward(
+                source_key="src:lineage",
+                exposure_id="exp:lineage",
+                final_eed=2.5,
+                validation_closed=True,
+                idempotency_token="outcome:lineage",
+            ),
+            0,
+        )
+
+        decision_rewards = [
+            reward
+            for reward in self.reg.rewards(kind=RewardKind.FINAL)
+            if reward.scope is RewardScope.DECISION
+            and reward.source_key == "src:lineage"
+        ]
+        self.assertEqual(len(decision_rewards), 4)
+        self.assertEqual(
+            {reward.decision_id for reward in decision_rewards},
+            {"d0", "d1", "d2", "d3"},
+        )
+        self.assertTrue(
+            all(reward.amount == 2.5 for reward in decision_rewards)
+        )
+
+        stats = self.reg.rebuild_arm_stats(
+            policy_version="p-lineage", schema_version=2
+        )
+        self.assertEqual(len(stats), 4)
+        by_arm = {item.arm_id: item for item in stats}
+        for arm_id in ("arm:l0", "arm:l1", "arm:l2", "arm:l3"):
+            self.assertEqual(by_arm[arm_id].final_reward, 2.5)
+            self.assertEqual(
+                by_arm[arm_id].final_observation_count, 1
+            )
+
+    def test_closed_zero_final_never_falls_back_to_proxy(self):
+        self.reg.enqueue_frontier(
+            FrontierTask("t-zero", "PATH", "path:zero", policy_version="p-zero")
+        )
+        self.reg.record_decision(
+            DecisionRecord(
+                "d-zero", "t-zero", "arm:zero", "p-zero", "snap:zero",
+                1.0, "ctx-zero", 100.0,
+            )
+        )
+        self.reg.record_reward(
+            RewardRecord(
+                "proxy-zero", "PROXY", "QUERY", "query:zero", 9.0,
+                decision_id="d-zero", policy_version="p-zero",
+                idempotency_key="proxy-zero",
+            )
+        )
+        node = self.reg.upsert_hit(
+            SearchHit(
+                "datacite", self.query.query_id, "10.777/zero",
+                "https://doi.org/10.777/zero", "DOI",
+            )
+        )
+        lead = ArtifactLead(
+            "datacite", "zero-file",
+            "https://repo.example/zero.cdx.gz",
+            checksum="sha256:zero",
+            query_id=self.query.query_id,
+            program_id=self.program.program_id,
+            source_node_id=node.node_id,
+            decision_id="d-zero",
+        )
+        artifact_id, _, _ = self.reg.register_artifact_lead(lead)
+        self.reg.bind_artifact_source(
+            artifact_id,
+            source_key="src:zero",
+            source_exposure_id="exp:zero",
+        )
+        self.reg.close_final_reward(
+            source_key="src:zero",
+            exposure_id="exp:zero",
+            final_eed=0.0,
+            validation_closed=True,
+            idempotency_token="outcome:zero",
+        )
+
+        stats = self.reg.rebuild_arm_stats(
+            policy_version="p-zero", schema_version=2
+        )[0]
+        self.assertEqual(stats.proxy_reward, 9.0)
+        self.assertEqual(stats.final_reward, 0.0)
+        self.assertEqual(stats.final_observation_count, 1)
+        self.assertTrue(stats.has_final)
+        self.assertEqual(stats.authoritative_reward, 0.0)
+        self.assertEqual(stats.decayed_reward, 0.0)
+
     def test_final_reward_requires_validation_closed(self):
         with self.assertRaises(ValueError):
             self.reg.close_final_reward(
@@ -191,7 +365,7 @@ class ResearchStateKernelTests(unittest.TestCase):
         )
         self.reg.record_reward(
             RewardRecord(
-                "r2", "FINAL", "QUERY", "q1", 3.0,
+                "r2", "FINAL", "DECISION", "d1", 3.0,
                 decision_id="d1", policy_version="p1",
                 validation_closed=True, idempotency_key="r2",
             )
@@ -202,6 +376,8 @@ class ResearchStateKernelTests(unittest.TestCase):
         self.assertEqual(stats[0].pulls, 1)
         self.assertEqual(stats[0].proxy_reward, 2.0)
         self.assertEqual(stats[0].final_reward, 3.0)
+        self.assertEqual(stats[0].final_observation_count, 1)
+        self.assertTrue(stats[0].has_final)
         self.assertEqual(stats[0].schema_version, 2)
         self.assertEqual(len(self.reg.rewards(policy_version="p1")), 2)
 
