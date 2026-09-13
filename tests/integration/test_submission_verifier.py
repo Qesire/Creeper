@@ -324,6 +324,28 @@ class SubmissionVerifierTests(unittest.TestCase):
             self.assertEqual(report.recomputed_novel_eed, "1")
             self.assertEqual(report.recomputed_growth_rate, "0.1")
 
+    def test_platform_year_capture_is_verified_candidate_not_unknown(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            authority, authority_path, index_path, model_path = _authority_fixture(root)
+            record = _candidate_record("platform-child.com", year=1999)
+            record["evidence_type"] = "platform_scope_cdx_capture"
+            record["extraction_method"] = "cdx_harvest_platform_year"
+            capsule = EvidenceCapsule(**record)
+            self.assertEqual(
+                classify_acquisition_lane(capsule),
+                AcquisitionLane.VERIFIED_CANDIDATE,
+            )
+            entries = _entries([record])
+            archive = _write_archive(
+                root, _package_manifest(authority, entries), entries
+            )
+
+            report = self._verify(archive, authority_path, index_path, model_path)
+
+            self.assertTrue(report.ready, report.errors)
+            self.assertEqual(report.recomputed_novel_eed, "1")
+
     def test_baseline_overlap_fails_independent_verifier(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
