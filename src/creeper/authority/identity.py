@@ -124,6 +124,23 @@ class AuthoritySnapshot:
         }
 
 
+def baseline_authority_digest(
+    *,
+    baseline_id: str,
+    annual_file_hashes: Mapping[str, str],
+    candidate_file_hash: str,
+) -> str:
+    """Hash baseline content identity independent of model/denominator policy."""
+    payload = {
+        "baseline_id": baseline_id,
+        "annual_file_hashes": dict(sorted(annual_file_hashes.items())),
+        "candidate_file_hash": candidate_file_hash,
+    }
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
 def authority_digest(
     *,
     baseline_id: str,

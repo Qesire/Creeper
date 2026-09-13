@@ -56,6 +56,8 @@ def _entries() -> dict[str, bytes]:
             "extraction_method": "cdx_query_year",
         }).encode() + b"\n",
         "reports/eed.json": b'{"equivalent_english_domains":"0"}',
+        "reports/baseline_reconciliation.json": b"{}",
+        "reports/source_contribution.json": b"{}",
         "cdx_audit.json": b"[]",
         "source_reports.json": b"[]",
         "method_failure_summary.json": b'{"incomplete_query_count":0}',

@@ -15,7 +15,11 @@ import json
 import sqlite3
 from pathlib import Path
 
-from .identity import AuthoritySnapshot
+from .identity import (
+    AuthoritySnapshot,
+    baseline_authority_digest,
+    sha256_file,
+)
 from .normalizer import normalize_official
 from .paths import find_baseline_dir
 
@@ -37,18 +41,48 @@ def _coerce_authority(
     return AuthoritySnapshot.from_manifest(value)
 
 
-def _authority_metadata(authority: AuthoritySnapshot) -> dict[str, str]:
+def _baseline_metadata(
+    *,
+    baseline_id: str,
+    annual_file_hashes: dict[str, str],
+    candidate_file_hash: str,
+) -> dict[str, str]:
     return {
         "index_schema_version": BASELINE_INDEX_SCHEMA_VERSION,
-        "baseline_id": authority.baseline_id,
-        "authority_digest": authority.authority_digest,
-        "annual_file_hashes": json.dumps(
-            authority.annual_file_hashes, sort_keys=True, separators=(",", ":")
+        "baseline_id": baseline_id,
+        "authority_digest": baseline_authority_digest(
+            baseline_id=baseline_id,
+            annual_file_hashes=annual_file_hashes,
+            candidate_file_hash=candidate_file_hash,
         ),
-        "candidate_file_hash": authority.candidate_file_hash,
-        "model_hash": authority.model_hash,
-        "baseline_eed": authority.baseline_eed,
+        "annual_file_hashes": json.dumps(
+            annual_file_hashes,
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        "candidate_file_hash": candidate_file_hash,
     }
+
+
+def _authority_metadata(authority: AuthoritySnapshot) -> dict[str, str]:
+    return _baseline_metadata(
+        baseline_id=authority.baseline_id,
+        annual_file_hashes=authority.annual_file_hashes,
+        candidate_file_hash=authority.candidate_file_hash,
+    )
+
+
+def _baseline_metadata_from_dir(baseline_dir: Path) -> dict[str, str]:
+    annual = {
+        f"{year}.txt": sha256_file(baseline_dir / f"{year}.txt")
+        for year in YEAR_BITS
+    }
+    candidate = sha256_file(baseline_dir / "candidate_pool.txt")
+    return _baseline_metadata(
+        baseline_id=baseline_dir.name,
+        annual_file_hashes=annual,
+        candidate_file_hash=candidate,
+    )
 
 
 def novel_year_mask(evidence_mask: int, baseline_mask: int, target_mask: int = ALL_YEAR_MASK) -> int:
@@ -169,22 +203,23 @@ class BaselineIndex:
             raise ValueError("output_path is required")
         if baseline_dir is None and task_root is None:
             raise ValueError("task_root or baseline_dir is required")
-        baseline_dir = (
-            Path(baseline_dir)
-            if baseline_dir is not None
-            else find_baseline_dir(Path(task_root))
-        )
         authority = _coerce_authority(authority_manifest)
-        if authority is None:
-            raise ValueError(
-                "authority_manifest is required for baseline index construction"
-            )
-        if baseline_dir is None:
-            assert task_root is not None
-            baseline_dir = Path(task_root) / authority.baseline_id
-        else:
+        if baseline_dir is not None:
             baseline_dir = Path(baseline_dir)
-        authority.verify_baseline_dir(baseline_dir)
+        elif authority is not None and task_root is not None:
+            authority_dir = Path(task_root) / authority.baseline_id
+            baseline_dir = (
+                authority_dir
+                if authority_dir.is_dir()
+                else find_baseline_dir(Path(task_root))
+            )
+        else:
+            baseline_dir = find_baseline_dir(Path(task_root))
+        if authority is not None:
+            authority.verify_baseline_dir(baseline_dir)
+            expected_metadata = _authority_metadata(authority)
+        else:
+            expected_metadata = _baseline_metadata_from_dir(baseline_dir)
 
         output_path = Path(output_path)
         if not resume and output_path.exists() and output_path.stat().st_size > 0:
@@ -234,7 +269,6 @@ class BaselineIndex:
                 "SELECT key, value FROM authority_metadata"
             )
         }
-        expected_metadata = _authority_metadata(authority)
         has_work = any(
             connection.execute(f"SELECT 1 FROM {table} LIMIT 1").fetchone()
             is not None
