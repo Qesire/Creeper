@@ -475,6 +475,8 @@ class SourceReservoirManagerTests(unittest.TestCase):
             novel_eed=20.0,
             elapsed_seconds=1.0,
         )
+        candidate = self.registry.get_candidate(candidate.source_key)
+        assert candidate is not None
         manager = SourceReservoirManager(
             self.registry,
             targets=SourcePoolTargets(
