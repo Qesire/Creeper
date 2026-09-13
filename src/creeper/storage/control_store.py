@@ -8,6 +8,7 @@ import time
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Iterable
+from uuid import uuid4
 
 from creeper.authority.baseline_index import YEAR_BITS
 from creeper.authority.normalizer import normalize_official
@@ -35,6 +36,7 @@ from creeper.evidence.platform_harvest import (
     PlatformYearHarvestTask,
     platform_year_harvest_id,
 )
+from creeper.runtime.exposure import ProductionExposure, ProductionExposureState
 
 
 TERMINAL_STATES = frozenset({
@@ -233,6 +235,51 @@ class ControlStore:
             ) WITHOUT ROWID;
             CREATE INDEX IF NOT EXISTS idx_work_leases_recovery
                 ON work_leases(state, expires_at);
+            CREATE TABLE IF NOT EXISTS production_exposures (
+                exposure_id TEXT PRIMARY KEY,
+                source_key TEXT NOT NULL,
+                reservoir_id TEXT NOT NULL,
+                lease_id TEXT NOT NULL DEFAULT '',
+                task_id TEXT NOT NULL DEFAULT '',
+                lane TEXT NOT NULL,
+                baseline_signature TEXT NOT NULL,
+                model_signature TEXT NOT NULL,
+                source_records INTEGER NOT NULL DEFAULT 0
+                    CHECK(source_records >= 0),
+                source_requests INTEGER NOT NULL DEFAULT 0
+                    CHECK(source_requests >= 0),
+                source_bytes INTEGER NOT NULL DEFAULT 0
+                    CHECK(source_bytes >= 0),
+                provider_requests INTEGER NOT NULL DEFAULT 0
+                    CHECK(provider_requests >= 0),
+                provider_bytes INTEGER NOT NULL DEFAULT 0
+                    CHECK(provider_bytes >= 0),
+                source_elapsed_seconds REAL NOT NULL DEFAULT 0
+                    CHECK(source_elapsed_seconds >= 0),
+                provider_elapsed_seconds REAL NOT NULL DEFAULT 0
+                    CHECK(provider_elapsed_seconds >= 0),
+                evidence_frontier INTEGER NOT NULL DEFAULT 0
+                    CHECK(evidence_frontier >= 0),
+                accepted_host_years INTEGER NOT NULL DEFAULT 0
+                    CHECK(accepted_host_years >= 0),
+                final_accepted_eed REAL NOT NULL DEFAULT 0
+                    CHECK(final_accepted_eed >= 0),
+                state TEXT NOT NULL,
+                terminal_reason TEXT,
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL,
+                closed_at REAL,
+                UNIQUE(
+                    source_key, reservoir_id, lease_id, task_id, lane,
+                    baseline_signature, model_signature
+                )
+            ) WITHOUT ROWID;
+            CREATE INDEX IF NOT EXISTS idx_production_exposures_source_authority
+                ON production_exposures(
+                    source_key, baseline_signature, model_signature, state
+                );
+            CREATE INDEX IF NOT EXISTS idx_production_exposures_lease
+                ON production_exposures(lease_id, state);
             CREATE TABLE IF NOT EXISTS evidence_task_origins (
                 hostname TEXT NOT NULL,
                 year_from INTEGER NOT NULL,
@@ -572,6 +619,444 @@ class ControlStore:
             updated_at=float(row["updated_at"]),
             completed_at=row["completed_at"],
         )
+
+    @staticmethod
+    def _production_exposure_from_row(row: sqlite3.Row) -> ProductionExposure:
+        return ProductionExposure(
+            exposure_id=str(row["exposure_id"]),
+            source_key=str(row["source_key"]),
+            reservoir_id=str(row["reservoir_id"]),
+            lease_id=str(row["lease_id"]) or None,
+            task_id=str(row["task_id"]) or None,
+            lane=str(row["lane"]),
+            baseline_signature=str(row["baseline_signature"]),
+            model_signature=str(row["model_signature"]),
+            source_records=int(row["source_records"]),
+            source_requests=int(row["source_requests"]),
+            source_bytes=int(row["source_bytes"]),
+            provider_requests=int(row["provider_requests"]),
+            provider_bytes=int(row["provider_bytes"]),
+            source_elapsed_seconds=float(row["source_elapsed_seconds"]),
+            provider_elapsed_seconds=float(row["provider_elapsed_seconds"]),
+            evidence_frontier=int(row["evidence_frontier"]),
+            accepted_host_years=int(row["accepted_host_years"]),
+            final_accepted_eed=float(row["final_accepted_eed"]),
+            state=ProductionExposureState(str(row["state"])),
+            terminal_reason=row["terminal_reason"],
+            created_at=float(row["created_at"]),
+            updated_at=float(row["updated_at"]),
+            closed_at=(
+                None if row["closed_at"] is None else float(row["closed_at"])
+            ),
+        )
+
+    @staticmethod
+    def _exposure_authority(
+        *,
+        authority: tuple[str, str] | None = None,
+        baseline_signature: str | None = None,
+        model_signature: str | None = None,
+    ) -> tuple[str, str]:
+        if authority is not None:
+            if len(authority) != 2:
+                raise ValueError("authority must contain baseline and model signatures")
+            if baseline_signature is not None or model_signature is not None:
+                if (baseline_signature, model_signature) != authority:
+                    raise ValueError("conflicting exposure authority arguments")
+            baseline_signature, model_signature = authority
+        if (baseline_signature is None) != (model_signature is None):
+            raise ValueError(
+                "baseline_signature and model_signature must be provided together"
+            )
+        if (
+            not isinstance(baseline_signature, str)
+            or not baseline_signature.strip()
+            or not isinstance(model_signature, str)
+            or not model_signature.strip()
+        ):
+            raise ValueError("exposure authority signatures are required")
+        return baseline_signature, model_signature
+
+    @staticmethod
+    def _validate_exposure_counters(values: Iterable[object]) -> None:
+        if any(float(value) < 0 for value in values):
+            raise ValueError("production exposure counters must be non-negative")
+
+    def get_production_exposure(self, exposure_id: str) -> ProductionExposure | None:
+        row = self.connection.execute(
+            "SELECT * FROM production_exposures WHERE exposure_id = ?",
+            (exposure_id,),
+        ).fetchone()
+        return None if row is None else self._production_exposure_from_row(row)
+
+    def begin_production_exposure(
+        self,
+        *,
+        source_key: str,
+        reservoir_id: str,
+        lane: str,
+        baseline_signature: str | None = None,
+        model_signature: str | None = None,
+        authority: tuple[str, str] | None = None,
+        lease_id: str | None = None,
+        task_id: str | None = None,
+        exposure_id: str | None = None,
+    ) -> ProductionExposure:
+        if not source_key.strip() or not reservoir_id.strip() or not lane.strip():
+            raise ValueError("source_key, reservoir_id, and lane are required")
+        baseline_signature, model_signature = self._exposure_authority(
+            authority=authority,
+            baseline_signature=baseline_signature,
+            model_signature=model_signature,
+        )
+        lease_value = "" if lease_id is None else str(lease_id)
+        task_value = "" if task_id is None else str(task_id)
+        if not lease_value and not task_value:
+            raise ValueError("lease_id or task_id is required")
+        now = float(self.clock())
+        exposure_id = str(exposure_id or uuid4())
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            self.connection.execute(
+                """
+                INSERT OR IGNORE INTO production_exposures(
+                    exposure_id, source_key, reservoir_id, lease_id, task_id,
+                    lane, baseline_signature, model_signature, state,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    exposure_id,
+                    source_key,
+                    reservoir_id,
+                    lease_value,
+                    task_value,
+                    lane,
+                    baseline_signature,
+                    model_signature,
+                    ProductionExposureState.RUNNING.value,
+                    now,
+                    now,
+                ),
+            )
+            row = self.connection.execute(
+                """
+                SELECT * FROM production_exposures
+                WHERE source_key = ? AND reservoir_id = ?
+                  AND lease_id = ? AND task_id = ? AND lane = ?
+                  AND baseline_signature = ? AND model_signature = ?
+                """,
+                (
+                    source_key,
+                    reservoir_id,
+                    lease_value,
+                    task_value,
+                    lane,
+                    baseline_signature,
+                    model_signature,
+                ),
+            ).fetchone()
+            if row is None:
+                raise RuntimeError("production exposure was not persisted")
+            self.connection.commit()
+            return self._production_exposure_from_row(row)
+        except BaseException:
+            self.connection.rollback()
+            raise
+
+    def record_production_exposure_progress(
+        self,
+        exposure_id: str,
+        *,
+        state: ProductionExposureState | str,
+        source_records: int | None = None,
+        source_requests: int | None = None,
+        source_bytes: int | None = None,
+        bytes_read: int | None = None,
+        provider_requests: int | None = None,
+        provider_bytes: int | None = None,
+        source_elapsed_seconds: float | None = None,
+        provider_elapsed_seconds: float | None = None,
+        elapsed_seconds: float | None = None,
+        evidence_frontier: int | None = None,
+        accepted_host_years: int | None = None,
+        authority: tuple[str, str] | None = None,
+        baseline_signature: str | None = None,
+        model_signature: str | None = None,
+    ) -> ProductionExposure:
+        target = ProductionExposureState(state)
+        if target in {
+            ProductionExposureState.FINAL_CLOSED,
+            ProductionExposureState.ABORTED,
+            ProductionExposureState.EXPIRED,
+        }:
+            raise ValueError("terminal exposure states use terminal transitions")
+        if bytes_read is not None and source_bytes is not None:
+            raise ValueError("bytes_read and source_bytes are aliases")
+        if bytes_read is not None:
+            source_bytes = bytes_read
+        if elapsed_seconds is not None:
+            if (
+                source_elapsed_seconds is not None
+                or provider_elapsed_seconds is not None
+            ):
+                raise ValueError("elapsed_seconds conflicts with split elapsed counters")
+            provider_elapsed_seconds = elapsed_seconds
+        values = [
+            value for value in (
+                source_records,
+                source_requests,
+                source_bytes,
+                provider_requests,
+                provider_bytes,
+                source_elapsed_seconds,
+                provider_elapsed_seconds,
+                evidence_frontier,
+                accepted_host_years,
+            ) if value is not None
+        ]
+        self._validate_exposure_counters(values)
+        requested_authority = None
+        if authority is not None or baseline_signature is not None or model_signature is not None:
+            requested_authority = self._exposure_authority(
+                authority=authority,
+                baseline_signature=baseline_signature,
+                model_signature=model_signature,
+            )
+        now = float(self.clock())
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            row = self.connection.execute(
+                "SELECT * FROM production_exposures WHERE exposure_id = ?",
+                (exposure_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"unknown production exposure: {exposure_id}")
+            current = self._production_exposure_from_row(row)
+            if requested_authority is not None and current.authority != requested_authority:
+                raise ValueError("production exposure authority mismatch")
+            if current.terminal:
+                if target == current.state:
+                    self.connection.commit()
+                    return current
+                raise ValueError("production exposure is terminal")
+            order = {
+                ProductionExposureState.RUNNING: 0,
+                ProductionExposureState.READ_COMPLETE: 1,
+                ProductionExposureState.VALIDATING: 2,
+            }
+            if order[target] < order[current.state]:
+                raise ValueError(
+                    f"invalid production exposure transition: {current.state} -> {target}"
+                )
+            updated = {
+                "source_records": current.source_records if source_records is None else int(source_records),
+                "source_requests": current.source_requests if source_requests is None else int(source_requests),
+                "source_bytes": current.source_bytes if source_bytes is None else int(source_bytes),
+                "provider_requests": current.provider_requests if provider_requests is None else int(provider_requests),
+                "provider_bytes": current.provider_bytes if provider_bytes is None else int(provider_bytes),
+                "source_elapsed_seconds": current.source_elapsed_seconds if source_elapsed_seconds is None else float(source_elapsed_seconds),
+                "provider_elapsed_seconds": current.provider_elapsed_seconds if provider_elapsed_seconds is None else float(provider_elapsed_seconds),
+                "evidence_frontier": current.evidence_frontier if evidence_frontier is None else int(evidence_frontier),
+                "accepted_host_years": current.accepted_host_years if accepted_host_years is None else int(accepted_host_years),
+            }
+            changed = self.connection.execute(
+                """
+                UPDATE production_exposures
+                SET source_records = ?, source_requests = ?, source_bytes = ?,
+                    provider_requests = ?, provider_bytes = ?,
+                    source_elapsed_seconds = ?, provider_elapsed_seconds = ?,
+                    evidence_frontier = ?, accepted_host_years = ?,
+                    state = ?, updated_at = ?
+                WHERE exposure_id = ? AND state = ?
+                """,
+                (
+                    updated["source_records"], updated["source_requests"],
+                    updated["source_bytes"], updated["provider_requests"],
+                    updated["provider_bytes"], updated["source_elapsed_seconds"],
+                    updated["provider_elapsed_seconds"], updated["evidence_frontier"],
+                    updated["accepted_host_years"], target.value, now,
+                    exposure_id, current.state.value,
+                ),
+            ).rowcount
+            if changed != 1:
+                raise RuntimeError("production exposure changed while recording progress")
+            self.connection.commit()
+        except BaseException:
+            self.connection.rollback()
+            raise
+        stored = self.get_production_exposure(exposure_id)
+        assert stored is not None
+        return stored
+
+    def finalize_production_exposure(
+        self,
+        exposure_id: str,
+        *,
+        final_accepted_eed: float,
+        accepted_host_years: int,
+        evidence_frontier: int,
+        authority: tuple[str, str],
+    ) -> bool:
+        if final_accepted_eed < 0 or accepted_host_years < 0 or evidence_frontier < 0:
+            raise ValueError("production exposure final counters must be non-negative")
+        requested_authority = self._exposure_authority(authority=authority)
+        now = float(self.clock())
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            row = self.connection.execute(
+                "SELECT * FROM production_exposures WHERE exposure_id = ?",
+                (exposure_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"unknown production exposure: {exposure_id}")
+            current = self._production_exposure_from_row(row)
+            if current.authority != requested_authority:
+                self.connection.commit()
+                return False
+            if current.state is ProductionExposureState.FINAL_CLOSED:
+                same = (
+                    current.final_accepted_eed == float(final_accepted_eed)
+                    and current.accepted_host_years == int(accepted_host_years)
+                    and current.evidence_frontier == int(evidence_frontier)
+                )
+                self.connection.commit()
+                return same
+            if current.terminal or current.state is not ProductionExposureState.VALIDATING:
+                self.connection.commit()
+                return False
+            if int(evidence_frontier) < current.evidence_frontier:
+                raise ValueError("final evidence frontier cannot move backwards")
+            if int(accepted_host_years) < current.accepted_host_years:
+                raise ValueError("final accepted host-years cannot move backwards")
+            changed = self.connection.execute(
+                """
+                UPDATE production_exposures
+                SET state = ?, accepted_host_years = ?, evidence_frontier = ?,
+                    final_accepted_eed = ?, terminal_reason = ?,
+                    updated_at = ?, closed_at = ?
+                WHERE exposure_id = ? AND state = ?
+                """,
+                (
+                    ProductionExposureState.FINAL_CLOSED.value,
+                    int(accepted_host_years), int(evidence_frontier),
+                    float(final_accepted_eed), "finalized", now, now,
+                    exposure_id, ProductionExposureState.VALIDATING.value,
+                ),
+            ).rowcount
+            if changed != 1:
+                self.connection.rollback()
+                return False
+            self.connection.commit()
+            return True
+        except BaseException:
+            self.connection.rollback()
+            raise
+
+    def abort_production_exposure(
+        self,
+        exposure_id: str,
+        *,
+        state: ProductionExposureState | str,
+        reason: str,
+        authority: tuple[str, str] | None = None,
+    ) -> bool:
+        target = ProductionExposureState(state)
+        if target not in {
+            ProductionExposureState.ABORTED,
+            ProductionExposureState.EXPIRED,
+        }:
+            raise ValueError("abort state must be ABORTED or EXPIRED")
+        if not reason.strip():
+            raise ValueError("terminal reason is required")
+        requested_authority = (
+            None if authority is None else self._exposure_authority(authority=authority)
+        )
+        now = float(self.clock())
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            row = self.connection.execute(
+                "SELECT * FROM production_exposures WHERE exposure_id = ?",
+                (exposure_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"unknown production exposure: {exposure_id}")
+            current = self._production_exposure_from_row(row)
+            if requested_authority is not None and current.authority != requested_authority:
+                self.connection.commit()
+                return False
+            if current.terminal:
+                self.connection.commit()
+                return current.state is target and current.terminal_reason == reason
+            changed = self.connection.execute(
+                """
+                UPDATE production_exposures
+                SET state = ?, terminal_reason = ?, updated_at = ?, closed_at = ?
+                WHERE exposure_id = ? AND state IN (?, ?, ?)
+                """,
+                (
+                    target.value, reason, now, now, exposure_id,
+                    ProductionExposureState.RUNNING.value,
+                    ProductionExposureState.READ_COMPLETE.value,
+                    ProductionExposureState.VALIDATING.value,
+                ),
+            ).rowcount
+            if changed != 1:
+                self.connection.rollback()
+                return False
+            self.connection.commit()
+            return True
+        except BaseException:
+            self.connection.rollback()
+            raise
+
+    def recover_open_production_exposures(self) -> int:
+        now = float(self.clock())
+        self.recover_expired_leases(now=now)
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            rows = self.connection.execute(
+                """
+                SELECT pe.exposure_id, wl.state
+                FROM production_exposures AS pe
+                JOIN work_leases AS wl ON wl.lease_id = pe.lease_id
+                WHERE pe.state IN (?, ?, ?)
+                  AND wl.state IN (?, ?)
+                """,
+                (
+                    ProductionExposureState.RUNNING.value,
+                    ProductionExposureState.READ_COMPLETE.value,
+                    ProductionExposureState.VALIDATING.value,
+                    "ABORTED",
+                    "EXPIRED",
+                ),
+            ).fetchall()
+            for row in rows:
+                state = (
+                    ProductionExposureState.EXPIRED
+                    if row["state"] == "EXPIRED"
+                    else ProductionExposureState.ABORTED
+                )
+                self.connection.execute(
+                    """
+                    UPDATE production_exposures
+                    SET state = ?, terminal_reason = ?, updated_at = ?, closed_at = ?
+                    WHERE exposure_id = ? AND state IN (?, ?, ?)
+                    """,
+                    (
+                        state.value,
+                        "lease expired" if state is ProductionExposureState.EXPIRED else "lease aborted",
+                        now, now, row["exposure_id"],
+                        ProductionExposureState.RUNNING.value,
+                        ProductionExposureState.READ_COMPLETE.value,
+                        ProductionExposureState.VALIDATING.value,
+                    ),
+                )
+            self.connection.commit()
+            return len(rows)
+        except BaseException:
+            self.connection.rollback()
+            raise
 
     def record_domain_fanout_observations(
         self,

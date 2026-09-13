@@ -79,6 +79,7 @@ class SourceRunOutcome:
     max_evidence_sequence: int
     created_at: float
     updated_at: float
+    exposure_id: str | None = None
 
     @property
     def resource_cost_seconds(self) -> float:
@@ -344,6 +345,16 @@ class SourceDiscoveryRegistry:
                 ON source_suppressions(expires_at);
             """
         )
+        source_run_columns = {
+            str(row[1])
+            for row in self.connection.execute(
+                "PRAGMA table_info(source_run_outcomes)"
+            ).fetchall()
+        }
+        if "exposure_id" not in source_run_columns:
+            self.connection.execute(
+                "ALTER TABLE source_run_outcomes ADD COLUMN exposure_id TEXT"
+            )
         scout_columns = {
             str(row[1])
             for row in self.connection.execute(
@@ -855,6 +866,11 @@ class SourceDiscoveryRegistry:
             max_evidence_sequence=int(row["max_evidence_sequence"]),
             created_at=float(row["created_at"]),
             updated_at=float(row["updated_at"]),
+            exposure_id=(
+                None
+                if "exposure_id" not in row.keys() or row["exposure_id"] is None
+                else str(row["exposure_id"])
+            ),
         )
 
     def begin_source_run(
@@ -880,24 +896,46 @@ class SourceDiscoveryRegistry:
             raise ValueError("source-run identity and authority are required")
         now = float(self.clock())
         started = now if read_started is None else float(read_started)
+        exposure = self.control_store.begin_production_exposure(
+            source_key=source_key,
+            reservoir_id=reservoir_id,
+            lease_id=lease_id,
+            lane="sequential",
+            baseline_signature=baseline_signature,
+            model_signature=model_signature,
+        )
         with self.connection:
             self.connection.execute(
                 """
                 INSERT OR IGNORE INTO source_run_outcomes(
-                    source_key, reservoir_id, lease_id,
+                    source_key, reservoir_id, lease_id, exposure_id,
                     baseline_signature, model_signature,
                     read_started, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     source_key,
                     reservoir_id,
                     lease_id,
+                    exposure.exposure_id,
                     baseline_signature,
                     model_signature,
                     started,
                     now,
                     now,
+                ),
+            )
+            self.connection.execute(
+                """
+                UPDATE source_run_outcomes
+                SET exposure_id = ?
+                WHERE source_key = ? AND reservoir_id = ? AND lease_id = ?
+                  AND baseline_signature = ? AND model_signature = ?
+                  AND exposure_id IS NULL
+                """,
+                (
+                    exposure.exposure_id, source_key, reservoir_id, lease_id,
+                    baseline_signature, model_signature,
                 ),
             )
         row = self.get_source_run_outcome(
@@ -954,22 +992,29 @@ class SourceDiscoveryRegistry:
         clauses: list[str] = []
         params: list[object] = []
         if source_key is not None:
-            clauses.append("source_key = ?")
+            clauses.append("sro.source_key = ?")
             params.append(source_key)
         if baseline_signature is not None:
             clauses.extend(
-                ["baseline_signature = ?", "model_signature = ?"]
+                ["sro.baseline_signature = ?", "sro.model_signature = ?"]
             )
             params.extend((baseline_signature, model_signature))
         if closed_only:
-            clauses.append("closed = 1")
+            clauses.extend(
+                [
+                    "sro.closed = 1",
+                    "pe.state = 'FINAL_CLOSED'",
+                ]
+            )
         where = "" if not clauses else "WHERE " + " AND ".join(clauses)
         rows = self.connection.execute(
             f"""
-            SELECT *
-            FROM source_run_outcomes
+            SELECT sro.*
+            FROM source_run_outcomes AS sro
+            LEFT JOIN production_exposures AS pe
+              ON pe.exposure_id = sro.exposure_id
             {where}
-            ORDER BY COALESCE(closed_at, updated_at), source_key, lease_id
+            ORDER BY COALESCE(sro.closed_at, sro.updated_at), sro.source_key, sro.lease_id
             """,
             params,
         ).fetchall()
@@ -1048,6 +1093,21 @@ class SourceDiscoveryRegistry:
         except BaseException:
             self.connection.rollback()
             raise
+        run = self.get_source_run_outcome(
+            source_key,
+            reservoir_id=reservoir_id,
+            lease_id=lease_id,
+            baseline_signature=baseline_signature,
+            model_signature=model_signature,
+        )
+        if run is not None and run.exposure_id is not None:
+            self.control_store.record_production_exposure_progress(
+                run.exposure_id,
+                state=("READ_COMPLETE" if read_complete else "RUNNING"),
+                source_records=source_records,
+                source_bytes=bytes_read,
+                source_requests=source_requests,
+            )
         row = self.get_source_run_outcome(
             source_key,
             reservoir_id=reservoir_id,
@@ -1137,6 +1197,22 @@ class SourceDiscoveryRegistry:
         except BaseException:
             self.connection.rollback()
             raise
+        run = self.get_source_run_outcome(
+            source_key,
+            reservoir_id=reservoir_id,
+            lease_id=lease_id,
+            baseline_signature=baseline_signature,
+            model_signature=model_signature,
+        )
+        if run is not None and run.exposure_id is not None:
+            self.control_store.record_production_exposure_progress(
+                run.exposure_id,
+                state="VALIDATING",
+                provider_requests=provider_requests,
+                provider_elapsed_seconds=provider_elapsed_seconds,
+                accepted_host_years=accepted_host_years,
+                evidence_frontier=max_evidence_sequence,
+            )
         row = self.get_source_run_outcome(
             source_key,
             reservoir_id=reservoir_id,
@@ -1240,6 +1316,29 @@ class SourceDiscoveryRegistry:
         authority = (baseline_signature, model_signature)
         if current is not None and current != authority:
             return False
+
+        run = self.get_source_run_outcome(
+            source_key,
+            reservoir_id=reservoir_id,
+            lease_id=lease_id,
+            baseline_signature=baseline_signature,
+            model_signature=model_signature,
+        )
+        if run is None:
+            raise KeyError("unknown source run")
+        if run.exposure_id is not None:
+            if not run.read_complete or not run.validation_complete:
+                return False
+            if run.evidence_tasks_terminal != run.evidence_tasks_created:
+                return False
+            if not self.control_store.finalize_production_exposure(
+                run.exposure_id,
+                final_accepted_eed=run.final_accepted_eed,
+                accepted_host_years=run.accepted_host_years,
+                evidence_frontier=run.max_evidence_sequence,
+                authority=authority,
+            ):
+                return False
 
         self.connection.execute("BEGIN IMMEDIATE")
         try:
