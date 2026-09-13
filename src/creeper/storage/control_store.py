@@ -70,7 +70,7 @@ class ControlStore:
         if default_lease_seconds < 0:
             raise ValueError("default_lease_seconds must be non-negative")
         path.parent.mkdir(parents=True, exist_ok=True)
-        self.connection = sqlite3.connect(path)
+        self.connection = sqlite3.connect(path, timeout=30.0)
         self.connection.row_factory = sqlite3.Row
         self.connection.create_function(
             "creeper_tld",
@@ -85,6 +85,8 @@ class ControlStore:
         self.default_lease_seconds = default_lease_seconds
         self.clock = clock
         self.connection.execute("PRAGMA journal_mode=WAL")
+        self.connection.execute("PRAGMA synchronous=NORMAL")
+        self.connection.execute("PRAGMA busy_timeout=30000")
         self.connection.execute("PRAGMA foreign_keys=ON")
         self.connection.executescript(
             """
@@ -120,16 +122,6 @@ class ControlStore:
                     hostname, year_from, year_to, provider, policy_version
                 )
             ) WITHOUT ROWID;
-            INSERT OR IGNORE INTO evidence_task_fanout_reservations(
-                hostname, year_from, year_to, provider, policy_version, amount
-            )
-            SELECT hostname, year_from, year_to, provider, policy_version,
-                   (year_to - year_from)
-            FROM evidence_tasks
-            WHERE year_to > year_from
-              AND policy_version NOT LIKE 'cdx-domain-%'
-              AND provider <> 'rdap'
-              AND state IN ('pending', 'incomplete', 'transient_error');
             CREATE TABLE IF NOT EXISTS runtime_checkpoints (
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
@@ -364,6 +356,35 @@ class ControlStore:
         self.connection.commit()
         self.connection.execute("BEGIN IMMEDIATE")
         try:
+            range_fanout_marker = (
+                "migration:evidence-range-fanout-reservations-v1"
+            )
+            if self.connection.execute(
+                "SELECT 1 FROM runtime_checkpoints WHERE key = ?",
+                (range_fanout_marker,),
+            ).fetchone() is None:
+                self.connection.execute(
+                    """
+                    INSERT OR IGNORE INTO evidence_task_fanout_reservations(
+                        hostname, year_from, year_to, provider,
+                        policy_version, amount
+                    )
+                    SELECT hostname, year_from, year_to, provider,
+                           policy_version, (year_to - year_from)
+                    FROM evidence_tasks
+                    WHERE year_to > year_from
+                      AND policy_version NOT LIKE 'cdx-domain-%'
+                      AND provider <> 'rdap'
+                      AND state IN (
+                          'pending', 'incomplete', 'transient_error'
+                      )
+                    """
+                )
+                self.connection.execute(
+                    "INSERT INTO runtime_checkpoints(key, value) VALUES (?, ?)",
+                    (range_fanout_marker, "complete"),
+                )
+
             fanout_marker = (
                 "migration:domain-fanout-fixed-sketch-cleanup-v1"
             )
@@ -881,7 +902,11 @@ class ControlStore:
             raise
 
     def enqueue_evidence_tasks(self, keys: Iterable[EvidenceQueryKey]) -> int:
-        rows = [(*self._values(key), CDXQueryState.PENDING.value) for key in keys]
+        key_list = list(dict.fromkeys(keys))
+        rows = [
+            (*self._values(key), CDXQueryState.PENDING.value)
+            for key in key_list
+        ]
         if not rows:
             return 0
         with self.connection:
@@ -893,9 +918,41 @@ class ControlStore:
                 """,
                 rows,
             )
+            range_keys = [
+                key
+                for key in key_list
+                if (
+                    key.temporal_scope.year_to
+                    > key.temporal_scope.year_from
+                    and not key.policy_version.startswith("cdx-domain-")
+                    and key.provider != "rdap"
+                )
+            ]
+            self.connection.executemany(
+                """
+                INSERT OR IGNORE INTO evidence_task_fanout_reservations(
+                    hostname, year_from, year_to, provider,
+                    policy_version, amount
+                )
+                SELECT hostname, year_from, year_to, provider,
+                       policy_version, (year_to - year_from)
+                FROM evidence_tasks
+                WHERE hostname = ? AND year_from = ? AND year_to = ?
+                  AND provider = ? AND policy_version = ?
+                  AND state IN (?, ?, ?)
+                """,
+                [
+                    (
+                        *self._values(key),
+                        CDXQueryState.PENDING.value,
+                        CDXQueryState.INCOMPLETE.value,
+                        CDXQueryState.TRANSIENT_ERROR.value,
+                    )
+                    for key in range_keys
+                ],
+            )
         # rowcount reflects direct task inserts only; total_changes would also
-        # include the operational EED-weight trigger and break this API's
-        # long-standing "number of new tasks" contract.
+        # include the operational EED-weight trigger and fanout reservations.
         return max(0, int(cursor.rowcount))
 
 
@@ -982,6 +1039,22 @@ class ControlStore:
                 )
         return inserted
 
+    def invalidate_evidence_action_final_rewards(self) -> None:
+        """Remove formal action reward authority while readiness is rebuilding.
+
+        Historical provider cost remains durable because it will be paired with
+        a full historical reward again once readiness catches up. Schedulers
+        must ignore that cost until a new complete authority snapshot exists.
+        """
+
+        with self.connection:
+            self.connection.execute(
+                "DELETE FROM evidence_action_final_rewards"
+            )
+            self.connection.execute(
+                "DELETE FROM evidence_action_reward_authority"
+            )
+
     def publish_evidence_action_final_rewards(
         self,
         attribution: dict[str, dict[str, object]],
@@ -1064,6 +1137,18 @@ class ControlStore:
             self.connection.rollback()
             raise
         return changed_authority
+
+    def evidence_action_reward_authoritative(self) -> bool:
+        return (
+            self.connection.execute(
+                """
+                SELECT 1
+                FROM evidence_action_reward_authority
+                WHERE singleton = 1
+                """
+            ).fetchone()
+            is not None
+        )
 
     def recommended_range_first_fraction(
         self,
@@ -1310,6 +1395,31 @@ class ControlStore:
                 ],
             )
         return self.connection.total_changes - before
+
+    def primary_evidence_task_origin(
+        self,
+        key: EvidenceQueryKey,
+    ) -> tuple[str, str, str] | None:
+        """Return the deterministic first source/reservoir/lease for a task."""
+
+        row = self.connection.execute(
+            """
+            SELECT source_key, reservoir_id, lease_id
+            FROM evidence_task_origins
+            WHERE hostname = ? AND year_from = ? AND year_to = ?
+              AND provider = ? AND policy_version = ?
+            ORDER BY first_observed_at, source_key, reservoir_id, lease_id
+            LIMIT 1
+            """,
+            self._values(key),
+        ).fetchone()
+        if row is None:
+            return None
+        return (
+            str(row["source_key"]),
+            str(row["reservoir_id"]),
+            str(row["lease_id"]),
+        )
 
     def attribute_task_host_years(
         self,
@@ -1761,16 +1871,22 @@ class ControlStore:
             "ON cost.task_kind = eligible.action_kind "
             "LEFT JOIN evidence_action_final_rewards reward "
             "ON reward.task_kind = eligible.action_kind "
+            "LEFT JOIN evidence_action_reward_authority authority "
+            "ON authority.singleton = 1 "
             "ORDER BY "
             "(eligible.eed_weight * "
-            "(COALESCE(reward.final_novel_host_years, 0) + "
+            "(CASE WHEN authority.singleton IS NULL THEN 0 "
+            "ELSE COALESCE(reward.final_novel_host_years, 0) END + "
             f"{ACTION_PRIOR_STRENGTH} * CASE eligible.action_kind "
             f"WHEN 'domain' THEN {action_prior_yield(EvidenceActionKind.DOMAIN)} "
             f"WHEN 'rdap' THEN {action_prior_yield(EvidenceActionKind.RDAP)} "
             f"WHEN 'range' THEN {action_prior_yield(EvidenceActionKind.RANGE)} "
             f"ELSE {action_prior_yield(EvidenceActionKind.EXACT)} END) "
-            "/ (MAX(COALESCE(cost.provider_requests, 0), "
-            "COALESCE(cost.attempts, 0)) + "
+            "/ (MAX("
+            "CASE WHEN authority.singleton IS NULL THEN 0 "
+            "ELSE COALESCE(cost.provider_requests, 0) END, "
+            "CASE WHEN authority.singleton IS NULL THEN 0 "
+            "ELSE COALESCE(cost.attempts, 0) END) + "
             f"{ACTION_PRIOR_STRENGTH}) "
             f"/ (1.0 + {ACTION_RETRY_PENALTY} * eligible.attempt)) DESC, "
             "CASE eligible.action_kind "

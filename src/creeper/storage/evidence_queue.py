@@ -130,6 +130,8 @@ class DurableEvidenceQueue:
               ON cost.task_kind = eligible.action_kind
             LEFT JOIN evidence_action_final_rewards reward
               ON reward.task_kind = eligible.action_kind
+            LEFT JOIN evidence_action_reward_authority authority
+              ON authority.singleton = 1
             -- Empirical-Bayes competition-value order:
             -- posterior final novel host-years/request, scaled by this task's
             -- official TLD EED weight and discounted after repeated attempts.
@@ -137,7 +139,10 @@ class DurableEvidenceQueue:
                 (
                     eligible.eed_weight
                     * (
-                        COALESCE(reward.final_novel_host_years, 0)
+                        CASE
+                            WHEN authority.singleton IS NULL THEN 0
+                            ELSE COALESCE(reward.final_novel_host_years, 0)
+                        END
                         + {ACTION_PRIOR_STRENGTH}
                           * CASE eligible.action_kind
                                 WHEN 'domain' THEN {
@@ -156,8 +161,14 @@ class DurableEvidenceQueue:
                     )
                     / (
                         MAX(
-                            COALESCE(cost.provider_requests, 0),
-                            COALESCE(cost.attempts, 0)
+                            CASE
+                                WHEN authority.singleton IS NULL THEN 0
+                                ELSE COALESCE(cost.provider_requests, 0)
+                            END,
+                            CASE
+                                WHEN authority.singleton IS NULL THEN 0
+                                ELSE COALESCE(cost.attempts, 0)
+                            END
                         )
                         + {ACTION_PRIOR_STRENGTH}
                     )

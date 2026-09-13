@@ -532,52 +532,95 @@ class IncrementalReadinessRuntime:
             self.control.set_eed_tld_weights(self.weights)
         return self.control
 
-    def _task_kinds(
+    def _resolved_attribution(
         self,
         rows: list[EvidenceHostYear],
-    ) -> dict[tuple[str, int], str]:
+    ) -> tuple[
+        dict[tuple[str, int], str],
+        dict[tuple[str, int], str],
+    ]:
+        """Resolve final-reward lineage from proof first, cache second.
+
+        Existing host-years at the provenance migration cutover retain their
+        legacy ControlStore attribution. Every host-year first inserted after
+        the cutover must have proof-side provider provenance before provider
+        task/source credit is accepted.
+        """
+
         pairs = [(row.hostname, row.year) for row in rows]
         direct_sources = self.evidence.resolve_direct_source_origins(pairs)
+        provider_provenance = self.evidence.resolve_provider_task_provenance(
+            pairs
+        )
+        cutover = self.evidence.provider_task_provenance_cutover_sequence()
         control = self._control_store()
-        kinds = (
+        control_kinds = (
             {}
             if control is None
             else control.resolve_host_year_task_kinds(pairs)
         )
-        for pair in pairs:
-            kind = kinds.get(pair)
-            has_direct_proof = pair in direct_sources
-            if kind == "direct" and not has_direct_proof:
-                # A pre-evidence ControlStore commit can survive a crash.
-                # Never let that orphan metadata turn later provider evidence
-                # into direct-source reward.
-                kinds.pop(pair, None)
-            elif kind is None and has_direct_proof:
-                kinds[pair] = "direct"
-        return kinds
-
-    def _source_origins(
-        self,
-        rows: list[EvidenceHostYear],
-    ) -> dict[tuple[str, int], str]:
-        pairs = [(row.hostname, row.year) for row in rows]
-        direct_sources = self.evidence.resolve_direct_source_origins(pairs)
-        control = self._control_store()
-        origins = (
+        control_origins = (
             {}
             if control is None
             else control.resolve_primary_source_origins(pairs)
         )
-        for pair, sources in direct_sources.items():
-            existing = origins.get(pair)
-            if existing in sources:
+
+        kinds: dict[tuple[str, int], str] = {}
+        origins: dict[tuple[str, int], str] = {}
+        for row in rows:
+            pair = (row.hostname, row.year)
+            direct = direct_sources.get(pair, ())
+            provider = provider_provenance.get(pair)
+            cached_kind = control_kinds.get(pair)
+            post_cutover = row.sequence > cutover
+
+            selected_kind: str | None = None
+            if cached_kind == "direct":
+                if direct:
+                    selected_kind = "direct"
+            elif cached_kind is not None:
+                if not post_cutover:
+                    selected_kind = cached_kind
+                elif provider is not None and provider.task_kind == cached_kind:
+                    selected_kind = cached_kind
+
+            if selected_kind is None:
+                if direct:
+                    selected_kind = "direct"
+                elif provider is not None:
+                    selected_kind = provider.task_kind
+
+            if selected_kind is None:
                 continue
-            # Persisted direct evidence is stronger than an orphan/missing
-            # cross-database attribution row. Multiple direct proofs are
-            # resolved deterministically; reward remains first-proof-agnostic
-            # when the exact cross-DB commit order is unrecoverable.
-            origins[pair] = sources[0]
-        return origins
+            kinds[pair] = selected_kind
+
+            cached_origin = control_origins.get(pair)
+            if selected_kind == "direct":
+                if direct:
+                    origins[pair] = (
+                        cached_origin
+                        if cached_origin in direct
+                        else direct[0]
+                    )
+                continue
+
+            if not post_cutover:
+                if cached_origin is not None:
+                    origins[pair] = cached_origin
+                elif provider is not None and provider.source_key:
+                    origins[pair] = provider.source_key
+                continue
+
+            # New provider evidence is credited only from the provenance row
+            # that shares its transaction with the proof capsule.
+            if (
+                provider is not None
+                and provider.task_kind == selected_kind
+                and provider.source_key
+            ):
+                origins[pair] = provider.source_key
+
+        return kinds, origins
 
     def _publish_evidence_action_rewards(
         self,
@@ -593,6 +636,15 @@ class IncrementalReadinessRuntime:
             baseline_signature=report.baseline_signature,
             model_signature=report.model_signature,
         )
+
+    def _invalidate_learning_rewards(self) -> None:
+        """Fail cold while a changed baseline/model authority is rebuilding."""
+
+        control = self._control_store()
+        if control is None:
+            return
+        control.invalidate_evidence_action_final_rewards()
+        SourceDiscoveryRegistry(control).reset_final_rewards()
 
     def _publish_source_rewards(
         self,
@@ -620,6 +672,12 @@ class IncrementalReadinessRuntime:
 
     def sync_once(self) -> IncrementalReadinessReport:
         authority_changed = self._refresh_authority()
+        if authority_changed:
+            # A prefix of a full authority rebuild is not a final reward. Drop
+            # the old formal policy immediately and stay on bootstrap behavior
+            # until every durable host-year has been re-evaluated.
+            self._invalidate_learning_rewards()
+
         cursor = self.ledger.cursor()
         rows = self.evidence.host_years_after(
             cursor,
@@ -627,22 +685,27 @@ class IncrementalReadinessRuntime:
         )
         if rows:
             assert self.baseline is not None
+            task_kinds, source_origins = self._resolved_attribution(rows)
             self.ledger.apply_batch(
                 rows,
                 baseline=self.baseline,
                 weights=self.weights,
-                source_origins=self._source_origins(rows),
-                task_kinds=self._task_kinds(rows),
+                source_origins=source_origins,
+                task_kinds=task_kinds,
             )
         report = self.ledger.report(
             latest_evidence_sequence=self.evidence.max_host_year_sequence(),
             baseline_eed=self.baseline_eed,
         )
-        self._publish_source_rewards(
-            report,
-            reset=authority_changed,
-        )
-        self._publish_evidence_action_rewards(report)
+        if report.evidence_cursor >= report.latest_evidence_sequence:
+            # Only a complete snapshot may train source/action allocation. On
+            # ordinary incremental lag, retain the previous coherent snapshot;
+            # after an authority reset, the invalidation above keeps policy cold.
+            self._publish_source_rewards(
+                report,
+                reset=False,
+            )
+            self._publish_evidence_action_rewards(report)
         return report
 
     def sync_until_current(

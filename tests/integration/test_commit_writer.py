@@ -18,11 +18,17 @@ class RecordingEvidenceStore:
     def __init__(self, store):
         self.store = store
         self.put_many_calls = []
+        self.put_many_with_task_provenance_calls = []
 
     def put_many(self, capsules):
         batch = list(capsules)
         self.put_many_calls.append(batch)
         return self.store.put_many(batch)
+
+    def put_many_with_task_provenance(self, items):
+        batch = list(items)
+        self.put_many_with_task_provenance_calls.append(batch)
+        return self.store.put_many_with_task_provenance(batch)
 
 
 class RecordingControlStore:
@@ -77,8 +83,15 @@ class CommitWriterTests(unittest.TestCase):
             writer.flush()
             writer.flush()
 
-            self.assertEqual(len(recording.put_many_calls), 1)
-            self.assertEqual(len(recording.put_many_calls[0]), 2)
+            self.assertEqual(len(recording.put_many_calls), 0)
+            self.assertEqual(
+                len(recording.put_many_with_task_provenance_calls),
+                1,
+            )
+            self.assertEqual(
+                len(recording.put_many_with_task_provenance_calls[0]),
+                2,
+            )
             self.assertEqual(evidence.count(), 2)
             self.assertEqual(writer.inserted_capsules, 2)
             self.assertEqual(writer.finished_tasks, 2)
@@ -91,6 +104,67 @@ class CommitWriterTests(unittest.TestCase):
                 for task in control.list_evidence_tasks()
             ))
             writer.close()
+            control.close()
+            evidence.close()
+
+    def test_proof_provenance_survives_crash_before_control_attribution(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            evidence = EvidenceStore(root / "evidence.sqlite3")
+            control = ControlStore(root / "control.sqlite3")
+            key = EvidenceQueryKey(
+                "crash.example.com",
+                TemporalScope(1997, 1997),
+                "wayback",
+                "v1",
+            )
+            capsule = EvidenceCapsule(
+                key.hostname,
+                1997,
+                key.provider,
+                "capture_timestamp_year",
+                "19970101000000",
+                "http://crash.example.com/",
+                "c" * 64,
+                key.policy_version,
+            )
+            result = EvidenceQueryResult(
+                key.hostname,
+                1997,
+                CDXQueryState.PASS,
+                capsule=capsule,
+                key=key,
+            )
+            control.enqueue_evidence_tasks([key])
+            control.claim_evidence_tasks(owner="worker-crash", limit=1)
+
+            def fail_attribution(*_args, **_kwargs):
+                raise RuntimeError("simulated control-store crash")
+
+            control.attribute_task_host_years = fail_attribution
+            writer = CommitWriter(
+                evidence,
+                control,
+                owner="worker-crash",
+                flush_count=100,
+            )
+            writer.submit(capsule, result)
+
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "simulated control-store crash",
+            ):
+                writer.flush()
+
+            provenance = evidence.resolve_provider_task_provenance(
+                [(key.hostname, 1997)]
+            )
+            self.assertEqual(provenance[(key.hostname, 1997)].task_kind, "exact")
+            self.assertEqual(
+                control.resolve_host_year_task_kinds([(key.hostname, 1997)]),
+                {},
+            )
+            self.assertEqual(evidence.count(), 1)
             control.close()
             evidence.close()
 
