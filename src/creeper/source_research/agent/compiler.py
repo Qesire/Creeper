@@ -666,9 +666,12 @@ class RootQueryCompiler:
         self, context: ResearchCompilerContext
     ) -> Mapping[str, Any]:
         payload = self._mapping(self.model_call(context), "model response")
-        UnifiedResearchCompiler._reject_forbidden_keys(
-            payload, "model response"
-        )
+        try:
+            UnifiedResearchCompiler._reject_forbidden_keys(
+                payload, "model response"
+            )
+        except UnifiedCompilerError as exc:
+            raise RootQueryCompilerError(str(exc)) from exc
         return payload
 
     def _query(
