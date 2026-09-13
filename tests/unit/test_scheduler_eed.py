@@ -90,6 +90,25 @@ class SchedulerEEDTests(unittest.TestCase):
 
         self.assertEqual(scheduler.score(clean), scheduler.score(stale))
 
+    def test_final_production_value_score_overrides_scout_proxy_ranking(self):
+        scheduler = GlobalScheduler(CreditLedger({"wayback": 10}))
+        scout_high_final_zero = LeaseCandidate(
+            "scout-high",
+            1000,
+            ResourceCost(1, 1, 1, 1),
+            production_value_score=0.01,
+        )
+        scout_low_final_positive = LeaseCandidate(
+            "scout-low",
+            1,
+            ResourceCost(1, 1, 1, 1),
+            production_value_score=0.5,
+        )
+
+        ranked = scheduler.rank([scout_high_final_zero, scout_low_final_positive])
+
+        self.assertEqual(ranked[0].reservoir_id, "scout-low")
+
     def test_rank_breaks_equal_scores_by_reservoir_id(self):
         scheduler = GlobalScheduler(CreditLedger({"wayback": 10}))
         candidates = [
