@@ -134,16 +134,19 @@ def build_runtime_snapshot(
     snapshot_id: str,
 ) -> SubmissionSnapshot:
     """Build a snapshot from durable runtime stores using the canonical builder."""
-    authority = None
-    if context.baseline_manifest.get("baseline_eed") is not None:
-        authority = AuthoritySnapshot.from_manifest(context.baseline_manifest)
-        baseline.assert_authority(authority)
-        if context.baseline_eed != "0" and Decimal(str(context.baseline_eed)) != Decimal(authority.baseline_eed):
-            raise ValueError("submission baseline_eed conflicts with authority manifest")
-        if context.eed_model_path is not None and eed_model_authority_signature(
-            context.eed_model_path
-        ) != authority.model_hash:
-            raise ValueError("submission EED model does not match authority manifest")
+    authority = AuthoritySnapshot.from_manifest(context.baseline_manifest)
+    baseline.assert_authority(authority)
+    if (
+        context.baseline_eed != "0"
+        and Decimal(str(context.baseline_eed)) != Decimal(authority.baseline_eed)
+    ):
+        raise ValueError("submission baseline_eed conflicts with authority manifest")
+    if (
+        context.eed_model_path is not None
+        and eed_model_authority_signature(context.eed_model_path)
+        != authority.model_hash
+    ):
+        raise ValueError("submission EED model does not match authority manifest")
     novel_capsules = [
         capsule
         for capsule in evidence_store.canonical_host_year_capsules()
@@ -164,9 +167,7 @@ def build_runtime_snapshot(
             Path(context.eed_model_path),
         )
         novel_eed = str(eed_report["equivalent_english_domains"])
-        baseline_eed = Decimal(
-            authority.baseline_eed if authority is not None else str(context.baseline_eed)
-        )
+        baseline_eed = Decimal(authority.baseline_eed)
         growth_rate = (
             format(Decimal(novel_eed) / baseline_eed, "f")
             if baseline_eed > 0

@@ -30,11 +30,11 @@ def build_snapshot(
     growth_rate: str = "0",
     source_contribution: dict[str, object] | None = None,
 ) -> SubmissionSnapshot:
-    if baseline_manifest.get("baseline_eed") is not None:
-        baseline.assert_authority(AuthoritySnapshot.from_manifest(baseline_manifest))
+    authority = AuthoritySnapshot.from_manifest(baseline_manifest)
+    index.assert_authority(authority)
     baseline_hashes = {
         name.removesuffix(".txt"): value
-        for name, value in baseline_manifest.get("annual_file_hashes", {}).items()
+        for name, value in authority.annual_file_hashes.items()
     }
     novel: list[EvidenceCapsule] = []
     seen: set[tuple[str, int]] = set()
@@ -73,7 +73,7 @@ def build_snapshot(
     snapshot = SubmissionSnapshot(
         submission_snapshot_id=snapshot_id,
         created_at=datetime.now(timezone.utc).isoformat(),
-        baseline_id=baseline_manifest.get("baseline_id", ""),
+        baseline_id=authority.baseline_id,
         baseline_hashes=baseline_hashes,
         normalizer_version="official-calculator-regex-v1",
         evidence_policy_version="evidence-v1",
@@ -92,10 +92,10 @@ def build_snapshot(
         isc_reference=isc_reference,
         unparsed=unparsed,
         eed_report=eed_report,
-        candidate_file_hash=str(baseline_manifest.get("candidate_file_hash", "")),
-        model_hash=str(baseline_manifest.get("model_hash", "")),
-        baseline_eed=str(baseline_manifest.get("baseline_eed", "0")),
-        authority_digest=str(baseline_manifest.get("authority_digest", "")),
+        candidate_file_hash=authority.candidate_file_hash,
+        model_hash=authority.model_hash,
+        baseline_eed=authority.baseline_eed,
+        authority_digest=authority.authority_digest,
         source_contribution=source_contribution,
         within_year_duplicates=duplicate_count,
     )
