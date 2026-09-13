@@ -127,7 +127,7 @@ class CoordinatorCycleReport:
     suppressions_pruned: int = 0
     saturated_origins: int = 0
     saturation_updates: int = 0
-    raw_cold_count: int = 0
+    usable_cold_count: int = 0
     effective_cold_count: int = 0
     search_directives_planned: int = 0
     activated: int = 0
@@ -634,7 +634,7 @@ class SourceDiscoveryCoordinator:
                     for decision in saturation_decisions
                 ),
                 "saturation_updates": saturation_updates,
-                "raw_cold_count": plan.cold_count,
+                "usable_cold_count": plan.cold_count,
                 "effective_cold_count": plan.effective_cold_count,
                 "search_directives_planned": len(plan.search_directives),
                 "activated": 0,
