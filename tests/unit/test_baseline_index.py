@@ -1,8 +1,10 @@
+import hashlib
 import tempfile
 import unittest
 from pathlib import Path
 
 from creeper.authority.baseline_index import BaselineIndex, novel_year_mask
+from creeper.authority.identity import authority_digest
 
 
 

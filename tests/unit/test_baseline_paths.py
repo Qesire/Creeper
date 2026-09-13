@@ -8,7 +8,11 @@ from creeper.authority.baseline_index import (
     BASELINE_INDEX_SCHEMA_VERSION,
     BaselineIndex,
 )
-from creeper.authority.identity import AuthoritySnapshot, authority_digest
+from creeper.authority.identity import (
+    AuthoritySnapshot,
+    authority_digest,
+    baseline_authority_digest,
+)
 
 
 def _authority(baseline: Path, *, baseline_eed: str = "10") -> AuthoritySnapshot:
@@ -81,7 +85,11 @@ class BaselinePathTests(unittest.TestCase):
                 )
                 self.assertEqual(
                     metadata["authority_digest"],
-                    authority.authority_digest,
+                    baseline_authority_digest(
+                        baseline_id=authority.baseline_id,
+                        annual_file_hashes=authority.annual_file_hashes,
+                        candidate_file_hash=authority.candidate_file_hash,
+                    ),
                 )
             finally:
                 index.close()
@@ -139,7 +147,11 @@ class BaselinePathTests(unittest.TestCase):
                 authority_manifest=authority,
             ).close()
 
-            replacement = _authority(baseline, baseline_eed="11")
+            (baseline / "2001.txt").write_text(
+                "replacement.example\n",
+                encoding="utf-8",
+            )
+            replacement = _authority(baseline, baseline_eed="10")
             with self.assertRaisesRegex(ValueError, "authority mismatch"):
                 BaselineIndex.build(
                     baseline_dir=baseline,
