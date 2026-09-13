@@ -480,7 +480,7 @@ class SourceDiscoveryRegistry:
                 SELECT a.episode_id, SUM(a.credited_eed) AS credited_eed
                 FROM source_search_reward_attribution a
                 WHERE (
-                    a.reward_kind = 'scout_proxy'
+                    a.reward_kind IN ('scout_proxy', 'final')
                     AND (
                         COALESCE(a.baseline_signature, '') != ?
                         OR COALESCE(a.model_signature, '') != ?
@@ -517,7 +517,7 @@ class SourceDiscoveryRegistry:
                 UPDATE source_search_reward_attribution
                 SET credited_eed = 0
                 WHERE (
-                    reward_kind = 'scout_proxy'
+                    reward_kind IN ('scout_proxy', 'final')
                     AND (
                         COALESCE(baseline_signature, '') != ?
                         OR COALESCE(model_signature, '') != ?
@@ -530,6 +530,19 @@ class SourceDiscoveryRegistry:
                         WHERE f.source_key =
                             source_search_reward_attribution.source_key
                     )
+                )
+                """,
+                authority,
+            )
+            self.connection.execute(
+                """
+                UPDATE source_llm_source_attribution
+                SET credited_eed = 0
+                WHERE source_key IN (
+                    SELECT source_key
+                    FROM source_final_rewards
+                    WHERE COALESCE(baseline_signature, '') != ?
+                       OR COALESCE(model_signature, '') != ?
                 )
                 """,
                 authority,
