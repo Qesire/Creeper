@@ -14,10 +14,12 @@ from creeper.source_research.agent.compiler import (
 from creeper.source_research.agent.context import (
     LearningCompilerContext,
     ResearchCompilerContext,
+    UnifiedCompilerRequest,
 )
 from creeper.source_research.agent.protocol import (
     ExplorationRegionProposal,
     NegativeRuleProposal,
+    ProposalPlane,
     ProposalType,
     UnifiedLLMTask,
 )
@@ -321,6 +323,26 @@ class UnifiedCompilerTests(unittest.TestCase):
             ProposalType.NEGATIVE_RULE,
         )
         self.assertFalse(hasattr(envelope.proposals[0], "active"))
+
+    def test_same_task_and_context_have_same_call_identity(self):
+        context = research_context()
+        first = UnifiedCompilerRequest(
+            task_type=UnifiedLLMTask.COMPILE_ROOT_QUERY_PROGRAM,
+            plane=ProposalPlane.RESEARCH,
+            trigger_reason="unknown high-value structure",
+            objective="compile reusable finite root queries",
+            context=context.as_prompt_payload(),
+            context_hash=context.context_hash,
+        )
+        second = UnifiedCompilerRequest(
+            task_type=UnifiedLLMTask.COMPILE_ROOT_QUERY_PROGRAM,
+            plane=ProposalPlane.RESEARCH,
+            trigger_reason="different prose does not affect dedupe identity",
+            objective="same task",
+            context=context.as_prompt_payload(),
+            context_hash=context.context_hash,
+        )
+        self.assertEqual(first.call_identity, second.call_identity)
 
     def test_context_hash_is_deterministic(self):
         first = research_context()
