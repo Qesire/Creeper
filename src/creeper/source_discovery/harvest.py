@@ -279,6 +279,7 @@ class RegionHarvestExecutor:
         source_key: str | None = None,
         reservoir_id: str | None = None,
         origin_unit_id: str | None = None,
+        assert_object_identity: Callable[[], None] | None = None,
         assert_claim_owned: Callable[[], None] | None = None,
     ) -> None:
         if not groups:
@@ -335,9 +336,13 @@ class RegionHarvestExecutor:
 
         counters["planned"] += len(capsules)
         if capsules:
-            # A heartbeat failure is an ownership fence, not merely telemetry.
-            # Re-check immediately before the authoritative EvidenceStore write
-            # so a stale worker cannot commit proof after recovery/reclaim.
+            # Exact-region proof is authoritative only while both the bound
+            # source object and the region claim still match this worker.
+            # Local identity verification is bounded (stat + sampled bytes);
+            # remote identity remains bound to the already-validated Range
+            # response so this does not add a request per batch.
+            if assert_object_identity is not None:
+                assert_object_identity()
             if assert_claim_owned is not None:
                 assert_claim_owned()
             # Evidence is the stronger authority. Commit proof first; readiness
@@ -398,6 +403,26 @@ class RegionHarvestExecutor:
         except (HistoricalIndexIdentityError, ValueError) as exc:
             raise RegionHarvestError(str(exc)) from exc
         return expected
+
+    def _assert_current_local_object_identity(self, index) -> None:
+        """Fail closed if a local index changed after the transport check.
+
+        This is intentionally local-only: it reuses the bounded sampled local
+        identity and avoids adding a remote request to every evidence batch.
+        """
+        parsed = urlsplit(index.locator)
+        if parsed.scheme not in {"", "file"}:
+            return
+        path = (
+            Path(unquote(parsed.path))
+            if parsed.scheme == "file"
+            else Path(index.locator)
+        )
+        try:
+            observed = capture_local_identity(path)
+        except HistoricalIndexIdentityError as exc:
+            raise RegionHarvestError(str(exc)) from exc
+        self._verify_or_bind_object_identity(index, observed)
 
     @staticmethod
     def _parse_region_record(index, raw: bytes, *, line_start: int) -> SourceRecord | None:
@@ -935,6 +960,9 @@ class RegionHarvestExecutor:
                 ),
                 reservoir_id=origin_reservoir_id,
                 origin_unit_id=region_key,
+                assert_object_identity=(
+                    lambda: self._assert_current_local_object_identity(index)
+                ),
                 assert_claim_owned=heartbeat.assert_owned,
             )
 

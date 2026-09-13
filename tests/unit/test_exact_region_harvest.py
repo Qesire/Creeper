@@ -722,6 +722,47 @@ class ExactRegionHarvestTests(unittest.TestCase):
         )
         self.assertEqual(self.evidence.host_year_count(), 1)
 
+    def test_local_identity_rechecked_immediately_before_evidence_flush(self) -> None:
+        path = self.root / "flush-drift.cdxj"
+        original = self._line("alpha", 1998, "0101000000")
+        changed = self._line("bravo", 1998, "0101000000")
+        self.assertEqual(
+            len(original.encode("utf-8")),
+            len(changed.encode("utf-8")),
+        )
+        path.write_text(original, encoding="utf-8")
+        compiled = self._compiled_local(path)
+        region = self._register_ready(compiled)
+        executor = RegionHarvestExecutor(
+            registry=self.registry,
+            baseline=self.baseline,
+            evidence_store=self.evidence,
+        )
+        original_execute = executor._execute_local_region
+
+        def mutate_after_read(*, index, lease, emit_record):
+            result = original_execute(
+                index=index,
+                lease=lease,
+                emit_record=emit_record,
+            )
+            path.write_text(changed, encoding="utf-8")
+            return result
+
+        executor._execute_local_region = mutate_after_read  # type: ignore[method-assign]
+
+        with self.assertRaisesRegex(
+            RegionHarvestError,
+            "historical index object identity changed after tomography",
+        ):
+            executor.harvest(region.region_key)
+
+        self.assertEqual(self.evidence.host_year_count(), 0)
+        self.assertEqual(
+            self.registry.get_region(region.region_key).state,
+            RegionState.HARVEST_READY,
+        )
+
     def test_remote_same_length_changed_strong_etag_fails_closed(self) -> None:
         payload = self._line("alpha", 1998, "0101000000").encode("utf-8")
         compiled = self._compiled_remote(len(payload))
