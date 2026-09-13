@@ -17,7 +17,12 @@ from creeper.source_discovery.enumerators import (
     IntegerPaginationEnumerator,
     StaticListEnumerator,
 )
-from creeper.source_discovery.models import SourceCandidate, SourceLevel, SourceState
+from creeper.source_discovery.models import (
+    SourceCandidate,
+    SourceLevel,
+    SourceState,
+    is_common_crawl_provenance,
+)
 from creeper.source_discovery.region_compilation import CompiledScoutPlan
 
 
@@ -115,9 +120,14 @@ class ExplorationExecutor:
                         await outcome
                 candidates.extend(batch_candidates)
                 cp = next_cp
+                final_single_query = (
+                    batch.terminal
+                    and len(batch.artifacts) == 1
+                    and index == len(queries) - 1
+                )
                 if (
                     (stop_after_pages is not None and pages_this_run >= stop_after_pages)
-                    or cp.requests >= plan.hard_bounds.max_requests
+                    or (cp.requests >= plan.hard_bounds.max_requests and not final_single_query)
                     or self.clock() - started >= plan.hard_bounds.max_wall_seconds
                 ):
                     search_exhausted = False
@@ -156,12 +166,16 @@ class ExplorationExecutor:
         for url in urls:
             if not predicate(url):
                 continue
+            # The parent executor remains authoritative for the excluded
+            # current Common Crawl corpus, even if a region predicate is broad.
+            if is_common_crawl_provenance(url, plan.source_family, plan.region_id, plan.region_key):
+                continue
             candidate = SourceCandidate(
                 canonical_entrypoint=url,
                 source_family=plan.source_family,
                 level=SourceLevel.SOURCE,
                 discovered_by=f"region:{plan.region_id}",
-                discovery_strategy=f"DETERMINISTIC_REGION:{plan.region_key}",
+                discovery_strategy=f"DETERMINISTIC_REGION:region:{plan.region_id}:{plan.region_key}",
                 expected_year_from=None,
                 expected_year_to=None,
                 confidence=1.0,
