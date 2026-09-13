@@ -257,20 +257,18 @@ class ResearchTriggerGate:
         sustained_collapse = (
             snapshot.closed_source_runs >= self.stagnation_min_closed_runs
             and snapshot.recent_zero_reward_tail >= self.stagnation_zero_tail
-            and (snapshot.final_eed_per_hour_60m or 0.0) <= 0.0
-            and (
-                snapshot.final_eed_per_hour_60m is None
-                or snapshot.final_eed_per_hour_60m
-                <= self.stagnation_yield_fraction
-                * max(snapshot.final_eed_per_hour_15m or 0.0, 1e-12)
-            )
+            and snapshot.final_eed_per_hour_15m is not None
+            and snapshot.final_eed_per_hour_60m is not None
+            and snapshot.final_eed_per_hour_15m
+            <= self.stagnation_yield_fraction
+            * max(snapshot.final_eed_per_hour_60m, 1e-12)
         )
         if sustained_collapse:
             return self._decision(
                 snapshot,
                 ResearchTriggerReason.SUSTAINED_FINAL_YIELD_COLLAPSE,
                 "RECOVER_STAGNATION",
-                "FINAL reward is zero across a sustained closed-run tail",
+                "recent FINAL yield rate collapsed below its 60-minute baseline",
             )
 
         # 7. Explicit operator request is still bounded and does not override
