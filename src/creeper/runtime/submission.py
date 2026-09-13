@@ -13,10 +13,14 @@ from creeper.evidence.classification import (
     classify_acquisition_lane,
     contribution_bucket,
 )
+from creeper.storage.candidate_store import CandidateStore
 from creeper.storage.evidence_store import EvidenceStore
+from creeper.submission.artifact_manifest import ArtifactSpec
 from creeper.submission.builder import build_snapshot
 from creeper.submission.precheck import format_growth_rate
 from creeper.submission.snapshot import SubmissionSnapshot
+from creeper.submission.streaming_exporter import build_streaming_submission_zip
+from creeper.submission.verify import VerificationReport, verify_submission_archive
 
 
 @dataclass(frozen=True)
@@ -195,3 +199,71 @@ def build_runtime_snapshot(
             else None
         ),
     )
+
+
+def export_runtime_submission(
+    *,
+    snapshot: SubmissionSnapshot,
+    evidence_store: EvidenceStore,
+    candidate_store: CandidateStore,
+    baseline_manifest_path: Path,
+    baseline_index_path: Path,
+    eed_model_path: Path,
+    name: str,
+    output_dir: Path,
+    source_root: Path,
+    documentation_path: Path,
+    artifact_specs: tuple[ArtifactSpec, ...],
+    artifact_allowed_roots: tuple[Path, ...] = (),
+) -> tuple[Path, VerificationReport]:
+    """Stream the formal runtime package and independently verify it.
+
+    The export path never materializes all evidence host-years. Baseline
+    exclusion is applied lazily against the frozen V4 index, the streaming
+    exporter writes bounded temporary files/ZIP entries, and D's verifier then
+    recomputes semantic validity, novelty, EED, and growth from the archive.
+    A package that fails independent verification is removed.
+    """
+    authority = AuthoritySnapshot.from_manifest_path(Path(baseline_manifest_path))
+    if eed_model_authority_signature(Path(eed_model_path)) != authority.model_hash:
+        raise ValueError("submission EED model does not match authority manifest")
+
+    baseline = BaselineIndex(Path(baseline_index_path), authority=authority)
+    try:
+        def novel_records():
+            for capsule in evidence_store.iter_canonical_host_year_capsules():
+                bit = YEAR_BITS.get(int(capsule.year))
+                if bit is None:
+                    continue
+                if baseline.year_mask(capsule.hostname) & bit:
+                    continue
+                yield capsule
+
+        archive = build_streaming_submission_zip(
+            snapshot,
+            name,
+            Path(output_dir),
+            source_root=Path(source_root),
+            documentation_path=Path(documentation_path),
+            evidence_records=novel_records(),
+            candidate_store=candidate_store,
+            artifact_specs=artifact_specs,
+            artifact_allowed_roots=artifact_allowed_roots,
+            require_production_config=True,
+        )
+    finally:
+        baseline.close()
+
+    verification = verify_submission_archive(
+        archive,
+        baseline_manifest_path=Path(baseline_manifest_path),
+        baseline_index_path=Path(baseline_index_path),
+        eed_model_path=Path(eed_model_path),
+    )
+    if not verification.ready:
+        archive.unlink(missing_ok=True)
+        raise ValueError(
+            "independent submission verification failed: "
+            + "; ".join(verification.errors)
+        )
+    return archive, verification
