@@ -800,11 +800,6 @@ def _region_runtime_adapters(
             "integer pagination response must be a JSON object or array"
         )
 
-    executor = ExplorationExecutor(
-        html_fetcher=html_fetcher,
-        api_fetcher=api_fetcher,
-    )
-
     def plan_regions() -> tuple[object, ...]:
         scheduled: dict[str, object] = {}
         for region in registry.list_regions():
@@ -827,6 +822,54 @@ def _region_runtime_adapters(
                 else RegionExecutionCheckpoint(**raw_checkpoint)
             )
             plan = compile_region(region)
+            initial_bytes = 0 if checkpoint is None else checkpoint.bytes_read
+            remaining_bytes = max(
+                0,
+                plan.hard_bounds.max_bytes - initial_bytes,
+            )
+
+            def request_byte_cap(requested: int) -> int:
+                requested = int(requested)
+                if remaining_bytes <= 0:
+                    return 0
+                if requested > 0:
+                    return min(requested, remaining_bytes)
+                return remaining_bytes
+
+            async def region_html_fetcher(url: str, max_bytes: int = 0):
+                nonlocal remaining_bytes
+                cap = request_byte_cap(max_bytes)
+                if cap <= 0:
+                    raise ValueError("region cumulative byte budget is exhausted")
+                raw = await html_fetcher(url, cap)
+                remaining_bytes = max(
+                    0,
+                    remaining_bytes - int(raw.get("bytes", 0)),
+                )
+                return raw
+
+            async def region_api_fetcher(
+                endpoint: str,
+                page_or_params: object,
+                max_bytes: int = 0,
+            ):
+                nonlocal remaining_bytes
+                cap = request_byte_cap(max_bytes)
+                if cap <= 0:
+                    raise ValueError("region cumulative byte budget is exhausted")
+                raw = await api_fetcher(endpoint, page_or_params, cap)
+                consumed = (
+                    int(raw.get("bytes", 0))
+                    if isinstance(raw, Mapping)
+                    else 0
+                )
+                remaining_bytes = max(0, remaining_bytes - consumed)
+                return raw
+
+            executor = ExplorationExecutor(
+                html_fetcher=region_html_fetcher,
+                api_fetcher=region_api_fetcher,
+            )
 
             def commit_batch(batch, next_checkpoint) -> None:
                 for candidate in batch:
