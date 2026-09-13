@@ -68,6 +68,12 @@ suppression_ttl_seconds = 1800.0
 triage_parallelism = 6
 scout_parallelism = 2
 search_parallelism = 3
+region_parallelism = 5
+nonblocking_research = true
+research_ready_minutes_threshold = 42.0
+research_stagnation_min_closed_runs = 5
+research_stagnation_zero_tail = 4
+research_stagnation_yield_fraction = 0.2
 failure_retry_seconds = 15.0
 
 [triage]
@@ -95,6 +101,9 @@ timeout_seconds = 11.0
 termination_grace_seconds = 1.0
 max_response_bytes = 4096
 max_returned_candidates = 17
+max_active_calls = 1
+min_seconds_between_starts = 12.0
+same_context_failure_cooldown_seconds = 90.0
 ''',
             encoding="utf-8",
         )
@@ -116,6 +125,18 @@ max_returned_candidates = 17
         self.assertEqual(config.saturation.suppression_ttl_seconds, 1800.0)
         self.assertEqual(config.coordinator.triage_parallelism, 6)
         self.assertEqual(config.coordinator.scout_parallelism, 2)
+        self.assertEqual(config.coordinator.region_parallelism, 5)
+        self.assertTrue(config.coordinator.nonblocking_research)
+        self.assertEqual(config.coordinator.research_ready_minutes_threshold, 42.0)
+        self.assertEqual(config.coordinator.research_stagnation_min_closed_runs, 5)
+        self.assertEqual(config.coordinator.research_stagnation_zero_tail, 4)
+        self.assertEqual(config.coordinator.research_stagnation_yield_fraction, 0.2)
+        self.assertEqual(config.agent.max_active_calls, 1)
+        self.assertEqual(config.agent.min_seconds_between_starts, 12.0)
+        self.assertEqual(
+            config.agent.same_context_failure_cooldown_seconds,
+            90.0,
+        )
         self.assertEqual(config.scrapy.max_pages, 20)
         self.assertFalse(config.scrapy.follow_query)
         self.assertEqual(
@@ -126,6 +147,32 @@ max_returned_candidates = 17
         self.assertEqual(config.agent.admission.min_expected_volume, 123456)
         self.assertEqual(config.agent.admission.direct_min_expected_volume, 12345)
         self.assertEqual(config.agent.admission.min_enumerability_prior, 0.6)
+
+    def test_stagnation_thresholds_fail_closed_below_two(self) -> None:
+        path = self.write_config()
+        text = path.read_text(encoding="utf-8").replace(
+            "research_stagnation_zero_tail = 4",
+            "research_stagnation_zero_tail = 1",
+        )
+        path.write_text(text, encoding="utf-8")
+        with self.assertRaisesRegex(
+            ValueError,
+            "coordinator.research_stagnation_zero_tail must be at least 2",
+        ):
+            load_source_discovery_config(path)
+
+    def test_multiple_active_llm_calls_fail_closed(self) -> None:
+        path = self.write_config()
+        text = path.read_text(encoding="utf-8").replace(
+            "max_active_calls = 1",
+            "max_active_calls = 2",
+        )
+        path.write_text(text, encoding="utf-8")
+        with self.assertRaisesRegex(
+            ValueError,
+            "agent.max_active_calls = 1",
+        ):
+            load_source_discovery_config(path)
 
     def test_follow_query_rejects_string_truthiness(self) -> None:
         with self.assertRaisesRegex(ValueError, "scrapy.follow_query must be a boolean"):

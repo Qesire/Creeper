@@ -15,6 +15,16 @@ from creeper.source_discovery.registry import SourceDiscoveryRegistry, SourceRun
 
 
 @dataclass(frozen=True)
+class ProductionResearchSignals:
+    """FINAL-only runtime signals used by the L8 research gate."""
+
+    final_eed_per_hour_15m: float | None
+    final_eed_per_hour_60m: float | None
+    recent_zero_reward_tail: int
+    closed_source_runs: int
+
+
+@dataclass(frozen=True)
 class ProductionValueEstimate:
     expected_final_eed: float
     expected_cost: float
@@ -105,6 +115,80 @@ class ProductionValueModel:
         return (
             max(0.0, float(measurement.novel_eed_for_ranking)),
             max(1e-3, float(measurement.elapsed_seconds)),
+        )
+
+    def ready_inventory_minutes(
+        self,
+        candidates: list[SourceCandidate] | tuple[SourceCandidate, ...],
+    ) -> float | None:
+        """Estimate queued production capacity without treating it as reward."""
+        if not candidates:
+            return None
+        total_seconds = sum(
+            max(0.0, self.estimate(candidate).expected_cost)
+            for candidate in candidates
+        )
+        return total_seconds / 60.0
+
+    def research_signals(
+        self,
+        *,
+        now: float | None = None,
+    ) -> ProductionResearchSignals:
+        """Aggregate recent FINAL_CLOSED outcomes under the current authority.
+
+        Proxy scout/search observations are intentionally excluded.  Rates are
+        normalized to an hourly basis so 15-minute and 60-minute windows remain
+        comparable while zero-tail length retains discrete closed-run evidence.
+        """
+        authority = self.registry.current_scout_authority
+        if authority is None:
+            return ProductionResearchSignals(
+                final_eed_per_hour_15m=None,
+                final_eed_per_hour_60m=None,
+                recent_zero_reward_tail=0,
+                closed_source_runs=0,
+            )
+
+        current = float(self.registry.clock() if now is None else now)
+        runs = self.registry.list_source_run_outcomes(
+            baseline_signature=authority[0],
+            model_signature=authority[1],
+            closed_only=True,
+        )
+        recent_60m = [
+            run
+            for run in runs
+            if run.closed_at is not None
+            and 0.0 <= current - float(run.closed_at) <= 3600.0
+        ]
+        if not recent_60m:
+            return ProductionResearchSignals(
+                final_eed_per_hour_15m=None,
+                final_eed_per_hour_60m=None,
+                recent_zero_reward_tail=0,
+                closed_source_runs=0,
+            )
+
+        recent_15m = [
+            run
+            for run in recent_60m
+            if current - float(run.closed_at) <= 900.0
+        ]
+        eed_60m = sum(max(0.0, run.final_accepted_eed) for run in recent_60m)
+        eed_15m = sum(max(0.0, run.final_accepted_eed) for run in recent_15m)
+
+        zero_tail = 0
+        for run in reversed(recent_60m):
+            if run.final_accepted_eed > 0.0:
+                break
+            zero_tail += 1
+
+        return ProductionResearchSignals(
+            final_eed_per_hour_15m=4.0 * eed_15m,
+            final_eed_per_hour_60m=eed_60m,
+            recent_zero_reward_tail=zero_tail,
+            closed_source_runs=len(recent_60m),
         )
 
     def estimate(

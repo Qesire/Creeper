@@ -13,6 +13,11 @@ from creeper.source_discovery.models import (
 )
 from creeper.source_discovery.overlap import MinHashSketch
 from creeper.source_discovery.registry import SourceDiscoveryRegistry
+from creeper.source_discovery.research_trigger import (
+    ResearchDirective,
+    ResearchTriggerGate,
+    ResearchTriggerSnapshot,
+)
 from creeper.source_discovery.value import InterpretableSourceValueModel
 
 
@@ -22,15 +27,17 @@ class SearchDirectiveKind(StrEnum):
     EXPLOIT_SOURCE_FAMILY = "EXPLOIT_SOURCE_FAMILY"
     DISCOVER_NEW_FAMILY = "DISCOVER_NEW_FAMILY"
     INTERPRET_STRUCTURE = "INTERPRET_STRUCTURE"
+    INTERPRET_EVIDENCE_CONTRACT = "INTERPRET_EVIDENCE_CONTRACT"
     RECOVER_STAGNATION = "RECOVER_STAGNATION"
 
 
 class SourceIntelligenceTask(StrEnum):
-    """Finite Codex subagent roles requested by the deterministic parent."""
+    """Finite bounded child-agent roles requested by the deterministic parent."""
 
     DISCOVER_NEW_SOURCE = "DISCOVER_NEW_SOURCE"
     EXPLOIT_SUCCESS_PATTERN = "EXPLOIT_SUCCESS_PATTERN"
     INTERPRET_STRUCTURE = "INTERPRET_STRUCTURE"
+    INTERPRET_EVIDENCE_CONTRACT = "INTERPRET_EVIDENCE_CONTRACT"
     RECOVER_STAGNATION = "RECOVER_STAGNATION"
 
 
@@ -133,6 +140,7 @@ class SourceReservoirManager:
         search_cooldown_seconds: float = 0.0,
         search_ucb_exploration: float = 0.35,
         stagnation_window: int = 6,
+        trigger_gate: ResearchTriggerGate | None = None,
     ) -> None:
         if search_cooldown_seconds < 0:
             raise ValueError("search_cooldown_seconds must be non-negative")
@@ -146,6 +154,7 @@ class SourceReservoirManager:
         self.search_ucb_exploration = float(search_ucb_exploration)
         self.stagnation_window = int(stagnation_window)
         self.value_model = InterpretableSourceValueModel(registry)
+        self.trigger_gate = trigger_gate or ResearchTriggerGate()
 
     def _usable(self, candidates: list[SourceCandidate]) -> list[SourceCandidate]:
         return [
@@ -620,6 +629,38 @@ class SourceReservoirManager:
                 task_type=task_type,
             )
             for kind, strategy, subject, reason, task_type in selected
+        )
+
+    def plan_research(
+        self,
+        snapshot: ResearchTriggerSnapshot,
+    ) -> ResearchDirective | None:
+        """Return one proposal-only research directive, or no directive.
+
+        The manager does not create an LLM episode, launch a child, or mutate
+        registry state here.  L8 runtime wiring owns those side effects only
+        after this pure gate accepts the snapshot.
+        """
+        decision = self.trigger_gate.decide(snapshot)
+        if not decision.allow:
+            return None
+        assert decision.reason is not None
+        assert decision.task_type is not None
+        strategy = {
+            "DISCOVER_NEW_SOURCE": "META_SOURCE_SEARCH",
+            "EXPLOIT_SUCCESS_PATTERN": "EXPLOIT_SUCCESS",
+            "INTERPRET_STRUCTURE": "INTERPRET_STRUCTURE",
+            "INTERPRET_EVIDENCE_CONTRACT": "INTERPRET_EVIDENCE_CONTRACT",
+            "RECOVER_STAGNATION": "RECOVER_STAGNATION",
+        }.get(decision.task_type, "META_SOURCE_SEARCH")
+        return ResearchDirective(
+            task_type=decision.task_type,
+            trigger_reason=decision.reason,
+            strategy=strategy,
+            subject=decision.subject,
+            desired_regions=decision.desired_regions,
+            reason=decision.explanation,
+            context_key=decision.context_key,
         )
 
     def plan(self) -> ReservoirPlan:

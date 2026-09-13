@@ -10,7 +10,7 @@ import os
 import signal
 import time
 import tomllib
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -40,14 +40,26 @@ from creeper.source_discovery.coordinator import (
 )
 from creeper.source_discovery.curated_seeds import ensure_curated_direct_catalogs
 from creeper.source_discovery.intelligence import SourceIntelligenceContextBuilder
-from creeper.source_discovery.manager import SourcePoolTargets, SourceReservoirManager
+from creeper.source_discovery.manager import (
+    SearchDirective,
+    SearchDirectiveKind,
+    SourceIntelligenceTask,
+    SourcePoolTargets,
+    SourceReservoirManager,
+)
 from creeper.source_discovery.measured_scout import (
     MeasuredYieldScoutExecutor,
     MeasuredYieldScoutPolicy,
 )
 from creeper.source_discovery.models import SourceState
 from creeper.source_discovery.models import is_direct_evidence_entrypoint
+from creeper.source_discovery.production_value import ProductionValueModel
 from creeper.source_discovery.registry import SourceDiscoveryRegistry
+from creeper.source_discovery.research_trigger import (
+    ResearchDirective,
+    ResearchTriggerGate,
+    ResearchTriggerSnapshot,
+)
 from creeper.source_discovery.saturation import (
     SaturationPolicy,
     SourceSaturationController,
@@ -69,6 +81,12 @@ class CoordinatorConfig:
     triage_parallelism: int = 4
     scout_parallelism: int = 4
     search_parallelism: int = 3
+    region_parallelism: int = 2
+    nonblocking_research: bool = False
+    research_ready_minutes_threshold: float = 30.0
+    research_stagnation_min_closed_runs: int = 3
+    research_stagnation_zero_tail: int = 3
+    research_stagnation_yield_fraction: float = 0.25
     failure_retry_seconds: float = 30.0
     search_cooldown_seconds: float = 30.0
     search_ucb_exploration: float = 0.35
@@ -83,6 +101,19 @@ class AgentConfig:
     cwd: Path | None
     policy: CommandAgentSearchPolicy
     admission: SearchAdmissionPolicy
+    max_active_calls: int = 1
+    min_seconds_between_starts: float = 120.0
+    same_context_failure_cooldown_seconds: float = 600.0
+
+    def __post_init__(self) -> None:
+        if self.max_active_calls != 1:
+            raise ValueError("integrated L8 requires agent.max_active_calls = 1")
+        if self.min_seconds_between_starts < 0:
+            raise ValueError("agent.min_seconds_between_starts must be non-negative")
+        if self.same_context_failure_cooldown_seconds < 0:
+            raise ValueError(
+                "agent.same_context_failure_cooldown_seconds must be non-negative"
+            )
 
 
 @dataclass(frozen=True)
@@ -170,6 +201,13 @@ def _positive_int(value: Any, *, name: str) -> int:
     return value
 
 
+def _min_int(value: Any, *, name: str, minimum: int) -> int:
+    value = _nonnegative_int(value, name=name)
+    if value < minimum:
+        raise ValueError(f"{name} must be at least {minimum}")
+    return value
+
+
 def _nonnegative_float(value: Any, *, name: str) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
         raise ValueError(f"{name} must be a non-negative number")
@@ -189,6 +227,13 @@ def _unit_float(value: Any, *, name: str) -> float:
     value = float(value)
     if not 0.0 <= value <= 1.0:
         raise ValueError(f"{name} must be within [0, 1]")
+    return value
+
+
+def _positive_unit_float(value: Any, *, name: str) -> float:
+    value = _unit_float(value, name=name)
+    if value <= 0.0:
+        raise ValueError(f"{name} must be within (0, 1]")
     return value
 
 
@@ -241,6 +286,32 @@ def load_source_discovery_config(config_path: Path) -> SourceDiscoveryServiceCon
             coordinator_raw.get("scout_parallelism", pool.scout_parallelism), name="coordinator.scout_parallelism"
         ),
         search_parallelism=_positive_int(coordinator_raw.get("search_parallelism", 3), name="coordinator.search_parallelism"),
+        region_parallelism=_positive_int(
+            coordinator_raw.get("region_parallelism", 2),
+            name="coordinator.region_parallelism",
+        ),
+        nonblocking_research=_strict_bool(
+            coordinator_raw.get("nonblocking_research", False),
+            name="coordinator.nonblocking_research",
+        ),
+        research_ready_minutes_threshold=_positive_float(
+            coordinator_raw.get("research_ready_minutes_threshold", 30.0),
+            name="coordinator.research_ready_minutes_threshold",
+        ),
+        research_stagnation_min_closed_runs=_min_int(
+            coordinator_raw.get("research_stagnation_min_closed_runs", 3),
+            name="coordinator.research_stagnation_min_closed_runs",
+            minimum=2,
+        ),
+        research_stagnation_zero_tail=_min_int(
+            coordinator_raw.get("research_stagnation_zero_tail", 3),
+            name="coordinator.research_stagnation_zero_tail",
+            minimum=2,
+        ),
+        research_stagnation_yield_fraction=_positive_unit_float(
+            coordinator_raw.get("research_stagnation_yield_fraction", 0.25),
+            name="coordinator.research_stagnation_yield_fraction",
+        ),
         failure_retry_seconds=_positive_float(
             coordinator_raw.get("failure_retry_seconds", 30.0), name="coordinator.failure_retry_seconds"
         ),
@@ -364,6 +435,18 @@ def load_source_discovery_config(config_path: Path) -> SourceDiscoveryServiceCon
             ),
         ),
         admission=admission,
+        max_active_calls=_positive_int(
+            agent_raw.get("max_active_calls", 1),
+            name="agent.max_active_calls",
+        ),
+        min_seconds_between_starts=_nonnegative_float(
+            agent_raw.get("min_seconds_between_starts", 120.0),
+            name="agent.min_seconds_between_starts",
+        ),
+        same_context_failure_cooldown_seconds=_nonnegative_float(
+            agent_raw.get("same_context_failure_cooldown_seconds", 600.0),
+            name="agent.same_context_failure_cooldown_seconds",
+        ),
     )
 
     measurement: MeasurementConfig | None = None
@@ -517,6 +600,363 @@ def _requeue_unexpanded_audited_arquivo_catalog(
     return requeued
 
 
+def _research_snapshot(
+    registry: SourceDiscoveryRegistry,
+    production_value: ProductionValueModel,
+) -> ResearchTriggerSnapshot:
+    """Build a bounded scheduler snapshot without exposing authority handles."""
+
+    live_states = (
+        SourceState.DISCOVERED,
+        SourceState.TRIAGED,
+        SourceState.SCOUT_READY,
+        SourceState.SCOUTING,
+    )
+    inventory = registry.inventory()
+    deterministic_backlog = sum(inventory[state] for state in live_states)
+    ready_candidates = registry.list_candidates_in_states(
+        (SourceState.WARM, SourceState.ACTIVE)
+    )
+    productive_direct = sum(
+        1
+        for candidate in ready_candidates
+        if candidate.direct_evidence_prior >= 0.5
+    )
+    ready_minutes = production_value.ready_inventory_minutes(ready_candidates)
+
+    executable_regions = 0
+    pending_regions = 0
+    list_executable = getattr(registry, "list_executable_regions", None)
+    if callable(list_executable):
+        executable_regions = len(list_executable(limit=10_000))
+    list_regions = getattr(registry, "list_regions", None)
+    if callable(list_regions):
+        pending_regions = sum(
+            len(list_regions(state))
+            for state in ("PROPOSED", "VALIDATED", "RUNNING")
+        )
+
+    contract_blockers: list[object] = []
+    structure_blockers: list[object] = []
+    for candidate in registry.list_candidates(state=SourceState.HOLD):
+        reason = candidate.state_reason.upper()
+        if "UNKNOWN_CONTRACT" in reason or "UNKNOWN_EVIDENCE_CONTRACT" in reason:
+            contract_blockers.append(candidate)
+        elif "UNKNOWN_STRUCTURE" in reason:
+            structure_blockers.append(candidate)
+    contract_blockers.sort(
+        key=lambda item: (-item.scout_priority, item.source_key)
+    )
+    structure_blockers.sort(
+        key=lambda item: (-item.scout_priority, item.source_key)
+    )
+
+    final = production_value.research_signals()
+    subject_candidate = (
+        contract_blockers[0]
+        if contract_blockers
+        else structure_blockers[0] if structure_blockers else None
+    )
+    subject = (
+        None
+        if subject_candidate is None
+        else subject_candidate.canonical_entrypoint
+    )
+
+    context_payload = {
+        "deterministic_backlog": deterministic_backlog,
+        "executable_regions": executable_regions,
+        "pending_regions": pending_regions,
+        "productive_direct": productive_direct,
+        "ready_minutes": ready_minutes,
+        "unknown_contract_blockers": len(contract_blockers),
+        "unknown_structure_blockers": len(structure_blockers),
+        "closed_source_runs": final.closed_source_runs,
+        "recent_zero_reward_tail": final.recent_zero_reward_tail,
+        "final_eed_per_hour_15m": final.final_eed_per_hour_15m,
+        "final_eed_per_hour_60m": final.final_eed_per_hour_60m,
+        "subject": subject,
+    }
+    context_hash = __import__("hashlib").sha256(
+        json.dumps(context_payload, sort_keys=True).encode("utf-8")
+    ).hexdigest()
+    return ResearchTriggerSnapshot(
+        executable_regions=executable_regions,
+        pending_region_count=pending_regions,
+        deterministic_candidate_backlog=deterministic_backlog,
+        productive_direct_inventory=productive_direct,
+        ready_minutes=ready_minutes,
+        final_eed_per_hour_15m=final.final_eed_per_hour_15m,
+        final_eed_per_hour_60m=final.final_eed_per_hour_60m,
+        recent_zero_reward_tail=final.recent_zero_reward_tail,
+        closed_source_runs=final.closed_source_runs,
+        unknown_structure_blockers=len(structure_blockers),
+        unknown_contract_blockers=len(contract_blockers),
+        context_hash=context_hash,
+        subject=subject,
+    )
+
+
+def _legacy_background_research_executor(
+    search: CommandAgentSearchExecutor,
+    *,
+    desired_candidates: int,
+):
+    """Compatibility adapter until L6 unified proposal envelopes are merged."""
+
+    async def execute(directive: ResearchDirective) -> object:
+        task = SourceIntelligenceTask(directive.task_type)
+        kind = {
+            SourceIntelligenceTask.DISCOVER_NEW_SOURCE:
+                SearchDirectiveKind.DISCOVER_NEW_FAMILY,
+            SourceIntelligenceTask.EXPLOIT_SUCCESS_PATTERN:
+                SearchDirectiveKind.EXPLOIT_SOURCE_FAMILY,
+            SourceIntelligenceTask.INTERPRET_STRUCTURE:
+                SearchDirectiveKind.INTERPRET_STRUCTURE,
+            SourceIntelligenceTask.INTERPRET_EVIDENCE_CONTRACT:
+                SearchDirectiveKind.INTERPRET_STRUCTURE,
+            SourceIntelligenceTask.RECOVER_STAGNATION:
+                SearchDirectiveKind.RECOVER_STAGNATION,
+        }[task]
+        return await search(
+            SearchDirective(
+                kind=kind,
+                strategy=directive.strategy,
+                desired_candidates=desired_candidates,
+                subject=directive.subject,
+                reason=directive.reason,
+                task_type=task,
+            )
+        )
+
+    return execute
+
+
+def _region_runtime_adapters(
+    registry: SourceDiscoveryRegistry,
+    client: httpx.AsyncClient,
+):
+    """Bind L1 through its public API when that lane is present.
+
+    The imports are intentionally lazy so L8 remains independently mergeable
+    before L1.  After L1 lands, RUNNING regions are included in planning so a
+    process restart reclaims them with a new generation fence.
+    """
+    try:
+        from creeper.source_discovery.exploration_executor import (
+            ExplorationExecutor,
+            RegionExecutionCheckpoint,
+        )
+        from creeper.source_discovery.region_compilation import compile_region
+        from creeper.source_discovery.research_models import RegionState
+    except ImportError:
+        return None, None
+
+    required = (
+        "list_executable_regions",
+        "list_regions",
+        "claim_region",
+        "get_region_checkpoint",
+        "register_proposal",
+        "add_region_source_edge",
+        "checkpoint_region",
+        "finish_region",
+    )
+    if any(not hasattr(registry, name) for name in required):
+        return None, None
+
+    async def bounded_get(
+        url: str,
+        *,
+        params: Mapping[str, object] | None = None,
+        max_bytes: int = 0,
+    ) -> tuple[int, bytes]:
+        limit = int(max_bytes) if int(max_bytes) > 0 else 1024 * 1024
+        body = bytearray()
+        async with client.stream("GET", url, params=params) as response:
+            async for chunk in response.aiter_bytes():
+                if len(body) + len(chunk) > limit:
+                    raise ValueError(
+                        f"region response exceeds per-request byte bound {limit}"
+                    )
+                body.extend(chunk)
+            return response.status_code, bytes(body)
+
+    async def html_fetcher(url: str, max_bytes: int = 0):
+        status, body = await bounded_get(url, max_bytes=max_bytes)
+        return {
+            "body": body,
+            "bytes": len(body),
+            "requests": 1,
+            "status": status,
+        }
+
+    async def api_fetcher(
+        endpoint: str,
+        page_or_params: object,
+        max_bytes: int = 0,
+    ):
+        params = page_or_params if isinstance(page_or_params, Mapping) else None
+        status, body = await bounded_get(
+            endpoint,
+            params=params,
+            max_bytes=max_bytes,
+        )
+        if status == 404:
+            payload: object = [] if params is None else {}
+        else:
+            try:
+                payload = json.loads(body.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise ValueError(
+                    f"region API response is not valid JSON: {exc}"
+                ) from exc
+
+        if params is not None:
+            # CURSOR_API performs its own record/cursor selectors.
+            return {
+                "payload": payload,
+                "bytes": len(body),
+                "requests": 1,
+                "status": status,
+            }
+        if isinstance(payload, Mapping):
+            normalized = dict(payload)
+            normalized.setdefault("bytes", len(body))
+            normalized.setdefault("requests", 1)
+            normalized.setdefault("status", status)
+            return normalized
+        if isinstance(payload, list):
+            return {
+                "items": payload,
+                "bytes": len(body),
+                "requests": 1,
+                "status": status,
+            }
+        raise ValueError(
+            "integer pagination response must be a JSON object or array"
+        )
+
+    def plan_regions() -> tuple[object, ...]:
+        scheduled: dict[str, object] = {}
+        for region in registry.list_regions():
+            state = getattr(region.state, "value", str(region.state))
+            if state == "RUNNING":
+                scheduled[region.region_id] = region
+        for region in registry.list_executable_regions(limit=10_000):
+            scheduled.setdefault(region.region_id, region)
+        return tuple(scheduled.values())
+
+    async def execute_region(region: object) -> object:
+        region_id = str(getattr(region, "region_id"))
+        generation = registry.claim_region(region_id)
+
+        try:
+            raw_checkpoint = registry.get_region_checkpoint(region_id)
+            checkpoint = (
+                None
+                if raw_checkpoint is None
+                else RegionExecutionCheckpoint(**raw_checkpoint)
+            )
+            plan = compile_region(region)
+            initial_bytes = 0 if checkpoint is None else checkpoint.bytes_read
+            remaining_bytes = max(
+                0,
+                plan.hard_bounds.max_bytes - initial_bytes,
+            )
+
+            def request_byte_cap(requested: int) -> int:
+                requested = int(requested)
+                if remaining_bytes <= 0:
+                    return 0
+                if requested > 0:
+                    return min(requested, remaining_bytes)
+                return remaining_bytes
+
+            async def region_html_fetcher(url: str, max_bytes: int = 0):
+                nonlocal remaining_bytes
+                cap = request_byte_cap(max_bytes)
+                if cap <= 0:
+                    raise ValueError("region cumulative byte budget is exhausted")
+                raw = await html_fetcher(url, cap)
+                remaining_bytes = max(
+                    0,
+                    remaining_bytes - int(raw.get("bytes", 0)),
+                )
+                return raw
+
+            async def region_api_fetcher(
+                endpoint: str,
+                page_or_params: object,
+                max_bytes: int = 0,
+            ):
+                nonlocal remaining_bytes
+                cap = request_byte_cap(max_bytes)
+                if cap <= 0:
+                    raise ValueError("region cumulative byte budget is exhausted")
+                raw = await api_fetcher(endpoint, page_or_params, cap)
+                consumed = (
+                    int(raw.get("bytes", 0))
+                    if isinstance(raw, Mapping)
+                    else 0
+                )
+                remaining_bytes = max(0, remaining_bytes - consumed)
+                return raw
+
+            executor = ExplorationExecutor(
+                html_fetcher=region_html_fetcher,
+                api_fetcher=region_api_fetcher,
+            )
+
+            def commit_batch(batch, next_checkpoint) -> None:
+                for candidate in batch:
+                    registry.register_proposal(candidate)
+                    registry.add_region_source_edge(
+                        region_id,
+                        candidate.source_key,
+                    )
+                registry.checkpoint_region(
+                    region_id,
+                    generation,
+                    next_checkpoint.as_dict(),
+                )
+
+            result = await executor.execute(
+                plan,
+                checkpoint=checkpoint,
+                commit_batch=commit_batch,
+            )
+        except asyncio.CancelledError:
+            # Leave RUNNING durable.  The next process includes RUNNING regions
+            # in plan_regions() and claim_region() advances the generation fence.
+            raise
+        except Exception as exc:
+            latest = registry.get_region_checkpoint(region_id)
+            registry.finish_region(
+                region_id,
+                generation,
+                RegionState.FAILED_RETRYABLE,
+                checkpoint=latest,
+                reason=f"{type(exc).__name__}: {exc}"[:1000],
+            )
+            raise
+
+        registry.finish_region(
+            region_id,
+            generation,
+            RegionState.EXHAUSTED if result.terminal else RegionState.HOLD,
+            checkpoint=result.checkpoint.as_dict(),
+            reason=(
+                "deterministic region exhausted"
+                if result.terminal
+                else "bounded region execution stopped before exhaustion"
+            ),
+        )
+        return result
+
+    return plan_regions, execute_region
+
+
 @asynccontextmanager
 async def _open_runtime(config: SourceDiscoveryServiceConfig):
     root = config.runtime_data_root
@@ -528,6 +968,7 @@ async def _open_runtime(config: SourceDiscoveryServiceConfig):
         control = ControlStore(root / "control.sqlite3")
         baseline: BaselineIndex | None = None
         scout_authority: tuple[str, str] | None = None
+        coordinator: SourceDiscoveryCoordinator | None = None
         try:
             registry = SourceDiscoveryRegistry(control)
             if config.measurement is not None:
@@ -556,14 +997,39 @@ async def _open_runtime(config: SourceDiscoveryServiceConfig):
                 registry,
                 policy=config.saturation,
             )
+            production_value = ProductionValueModel(registry)
             manager = SourceReservoirManager(
                 registry,
                 targets=config.pool,
                 search_cooldown_seconds=config.coordinator.search_cooldown_seconds,
                 search_ucb_exploration=config.coordinator.search_ucb_exploration,
                 stagnation_window=config.coordinator.stagnation_window,
+                trigger_gate=ResearchTriggerGate(
+                    min_seconds_between_llm_starts=(
+                        config.agent.min_seconds_between_starts
+                    ),
+                    same_context_failure_cooldown_seconds=(
+                        config.agent.same_context_failure_cooldown_seconds
+                    ),
+                    ready_minutes_threshold=(
+                        config.coordinator.research_ready_minutes_threshold
+                    ),
+                    stagnation_min_closed_runs=(
+                        config.coordinator.research_stagnation_min_closed_runs
+                    ),
+                    stagnation_zero_tail=(
+                        config.coordinator.research_stagnation_zero_tail
+                    ),
+                    stagnation_yield_fraction=(
+                        config.coordinator.research_stagnation_yield_fraction
+                    ),
+                ),
             )
-            max_io = max(config.coordinator.triage_parallelism, config.coordinator.scout_parallelism)
+            max_io = max(
+                config.coordinator.triage_parallelism,
+                config.coordinator.scout_parallelism,
+                config.coordinator.region_parallelism,
+            )
             limits = httpx.Limits(
                 max_connections=max(4, max_io * 2),
                 max_keepalive_connections=max(2, max_io),
@@ -615,6 +1081,18 @@ async def _open_runtime(config: SourceDiscoveryServiceConfig):
                     admission_policy=config.agent.admission,
                     context_builder=intelligence_context,
                 )
+                background_research = (
+                    _legacy_background_research_executor(
+                        search,
+                        desired_candidates=config.agent.policy.max_returned_candidates,
+                    )
+                    if config.coordinator.nonblocking_research
+                    else None
+                )
+                region_planner, region_executor = _region_runtime_adapters(
+                    registry,
+                    client,
+                )
                 coordinator = SourceDiscoveryCoordinator(
                     registry,
                     manager,
@@ -627,10 +1105,21 @@ async def _open_runtime(config: SourceDiscoveryServiceConfig):
                     triage_parallelism=config.coordinator.triage_parallelism,
                     scout_parallelism=config.coordinator.scout_parallelism,
                     search_parallelism=config.coordinator.search_parallelism,
+                    region_planner=region_planner,
+                    region_executor=region_executor,
+                    region_parallelism=config.coordinator.region_parallelism,
                     failure_retry_seconds=config.coordinator.failure_retry_seconds,
+                    research_snapshot_provider=(
+                        (lambda: _research_snapshot(registry, production_value))
+                        if background_research is not None
+                        else None
+                    ),
+                    research_executor=background_research,
                 )
                 yield registry, coordinator
         finally:
+            if coordinator is not None:
+                await coordinator.shutdown()
             if baseline is not None:
                 baseline.close()
             control.close()
@@ -652,6 +1141,9 @@ def _report_has_progress(report: dict[str, object]) -> bool:
         "scout_edges_added",
         "search_episodes",
         "search_candidates_registered",
+        "regions_completed",
+        "region_candidates_registered",
+        "research_completed",
     )
     return any(int(report.get(name, 0)) > 0 for name in progress_fields)
 
@@ -674,6 +1166,14 @@ _DISCOVERY_COUNTER_FIELDS = {
     "scout_edges_added": "discovery_scout_edges_added",
     "production_exhausted": "discovery_production_exhausted",
     "activated": "discovery_activations_started",
+    "regions_started": "discovery_regions_started",
+    "regions_completed": "discovery_regions_completed",
+    "regions_exhausted": "discovery_regions_exhausted",
+    "region_candidates_registered": "discovery_region_candidates_registered",
+    "research_started": "discovery_research_started",
+    "research_completed": "discovery_research_completed",
+    "research_failures": "discovery_research_failures",
+    "research_suppressed": "discovery_research_suppressed",
 }
 
 
@@ -776,6 +1276,31 @@ def _publish_discovery_telemetry(
         str(state): int(count)
         for state, count in registry.control_store.platform_year_harvest_state_counts().items()
     }
+    source_gauges["research_child_active"] = int(
+        bool(report.get("research_active", False))
+    )
+    region_states = _durable_state_counts(
+        registry,
+        table="source_exploration_regions",
+        column="state",
+        states=(
+            "PROPOSED",
+            "VALIDATED",
+            "READY",
+            "RUNNING",
+            "EXHAUSTED",
+            "HOLD",
+            "FAILED_RETRYABLE",
+            "REJECTED",
+        ),
+    )
+    source_gauges.update(
+        {
+            f"exploration_region_{state.lower()}": count
+            for state, count in region_states.items()
+        }
+    )
+
     source_gauges["platform_year_total"] = sum(platform_states.values())
     source_gauges.update(
         {
@@ -792,6 +1317,14 @@ def _publish_discovery_telemetry(
         counters[telemetry_name] = value
     elapsed_ms = max(0, int(round(float(report.get("elapsed_seconds", 0.0)) * 1000.0)))
     counters["discovery_wall_milliseconds"] = elapsed_ms
+    hot_path_block_seconds = float(
+        report.get("agent_hot_path_block_seconds", 0.0)
+    )
+    if hot_path_block_seconds < 0:
+        raise ValueError("agent_hot_path_block_seconds must be non-negative")
+    counters["agent_hot_path_block_milliseconds"] = int(
+        round(hot_path_block_seconds * 1000.0)
+    )
 
     with RuntimeTelemetryStore(_runtime_telemetry_path(registry)) as telemetry:
         telemetry.add_counters(counters)
@@ -817,12 +1350,16 @@ async def run_source_discovery_cycles(
     config: SourceDiscoveryServiceConfig,
     *,
     cycles: int = 1,
+    research_once: bool = False,
+    research_subject: str | None = None,
 ) -> list[dict[str, object]]:
     """Run a finite number of discovery ticks without artificial sleeps."""
     if cycles < 1:
         raise ValueError("cycles must be positive")
     reports: list[dict[str, object]] = []
     async with _open_runtime(config) as (registry, coordinator):
+        if research_once:
+            coordinator.request_research_once(subject=research_subject)
         for cycle in range(1, cycles + 1):
             reports.append(await _run_cycle(registry, coordinator, cycle=cycle))
     return reports
@@ -835,6 +1372,8 @@ async def run_source_discovery_watch(
     busy_sleep_seconds: float = 0.1,
     idle_sleep_seconds: float = 5.0,
     max_cycles: int | None = None,
+    research_once: bool = False,
+    research_subject: str | None = None,
     sleep: Callable[[float], Any] = asyncio.sleep,
 ) -> None:
     """Run a paced long-lived discovery service with one persistent runtime."""
@@ -844,6 +1383,8 @@ async def run_source_discovery_watch(
         raise ValueError("max_cycles must be positive when provided")
 
     async with _open_runtime(config) as (registry, coordinator):
+        if research_once:
+            coordinator.request_research_once(subject=research_subject)
         cycle = 0
         while max_cycles is None or cycle < max_cycles:
             cycle += 1
@@ -860,6 +1401,8 @@ async def _run_watch_cli(
     *,
     busy_sleep_seconds: float,
     idle_sleep_seconds: float,
+    research_once: bool = False,
+    research_subject: str | None = None,
 ) -> int:
     """Run watch mode with signal-driven asyncio cancellation.
 
@@ -897,6 +1440,8 @@ async def _run_watch_cli(
             emit=emit,
             busy_sleep_seconds=busy_sleep_seconds,
             idle_sleep_seconds=idle_sleep_seconds,
+            research_once=research_once,
+            research_subject=research_subject,
         )
         return 0
     except asyncio.CancelledError:
@@ -916,20 +1461,42 @@ def main(argv: list[str] | None = None) -> int:
     mode.add_argument("--watch", action="store_true")
     parser.add_argument("--busy-sleep-seconds", type=float, default=0.1)
     parser.add_argument("--idle-sleep-seconds", type=float, default=5.0)
+    parser.add_argument(
+        "--research-once",
+        action="store_true",
+        help="request one bounded research child when the deterministic gate permits",
+    )
+    parser.add_argument(
+        "--research-subject",
+        help="optional subject for --research-once",
+    )
     args = parser.parse_args(argv)
 
     try:
         config = load_source_discovery_config(args.config)
+        if args.research_once and not config.coordinator.nonblocking_research:
+            raise ValueError(
+                "--research-once requires coordinator.nonblocking_research = true"
+            )
         if args.watch:
             return asyncio.run(
                 _run_watch_cli(
                     config,
                     busy_sleep_seconds=args.busy_sleep_seconds,
                     idle_sleep_seconds=args.idle_sleep_seconds,
+                    research_once=args.research_once,
+                    research_subject=args.research_subject,
                 )
             )
         else:
-            reports = asyncio.run(run_source_discovery_cycles(config, cycles=args.cycles or 1))
+            reports = asyncio.run(
+                run_source_discovery_cycles(
+                    config,
+                    cycles=args.cycles or 1,
+                    research_once=args.research_once,
+                    research_subject=args.research_subject,
+                )
+            )
             print(json.dumps(reports, ensure_ascii=False, indent=2))
     except KeyboardInterrupt:
         return 130
