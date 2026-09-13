@@ -14,6 +14,10 @@ from datetime import datetime
 from pathlib import Path
 
 from creeper.authority.normalizer import normalize_official
+from creeper.evidence.classification import (
+    classify_acquisition_lane,
+    contribution_bucket,
+)
 from creeper.evidence.policies import EvidenceCapsule
 from creeper.storage.candidate_store import CandidateStore
 from creeper.submission.artifact_manifest import (
@@ -240,7 +244,11 @@ def _stage_evidence(
         for year, path in annual_paths.items()
     }
     count = 0
-    direct_count = 0
+    lane_counts = {
+        "direct_annual": 0,
+        "verified_candidate": 0,
+        "other_restricted": 0,
+    }
     duplicate_count = 0
     last_key: tuple[str, int] | None = None
     try:
@@ -278,8 +286,8 @@ def _stage_evidence(
                 )
                 annual_files[year].write(hostname + "\n")
                 count += 1
-                if capsule.evidence_type == "source_direct_year":
-                    direct_count += 1
+                bucket = contribution_bucket(classify_acquisition_lane(capsule))
+                lane_counts[bucket] += 1
     finally:
         for output in annual_files.values():
             output.close()
@@ -287,7 +295,7 @@ def _stage_evidence(
         "evidence_path": evidence_path,
         "annual_paths": annual_paths,
         "count": count,
-        "direct_count": direct_count,
+        "lane_counts": lane_counts,
         "duplicate_count": duplicate_count,
     }
 
@@ -321,25 +329,32 @@ def _iter_source_files(
 def _source_contribution(
     snapshot: SubmissionSnapshot,
     *,
-    total_records: int,
-    direct_records: int,
+    lane_records: dict[str, int],
 ) -> dict[str, object]:
     if snapshot.source_contribution is not None:
         return snapshot.source_contribution
+    # The streaming fallback can report exact host-year counts without retaining
+    # an in-memory evidence map. EED attribution remains zero unless supplied by
+    # the authoritative runtime readiness/EED report; never assign total EED to
+    # one lane heuristically.
     return {
         "by_source": {},
         "direct_annual": {
-            "novel_host_years": direct_records,
+            "novel_host_years": int(lane_records["direct_annual"]),
             "novel_eed": "0",
         },
-        "candidate": {
-            "novel_host_years": total_records - direct_records,
-            "novel_eed": snapshot.novel_eed,
+        "verified_candidate": {
+            "novel_host_years": int(lane_records["verified_candidate"]),
+            "novel_eed": "0",
+        },
+        "other_restricted": {
+            "novel_host_years": int(lane_records["other_restricted"]),
+            "novel_eed": "0",
         },
         "note": (
-            "Per-source EED attribution was not supplied by the readiness "
-            "ledger; exporter intentionally does not retain a full in-memory "
-            "per-source evidence map."
+            "Per-lane EED attribution was not supplied by the authoritative "
+            "readiness report; streaming export preserves exact classifier "
+            "host-year counts and does not invent EED allocation."
         ),
     }
 
@@ -495,8 +510,7 @@ def build_streaming_submission_zip(
                     json.dumps(
                         _source_contribution(
                             snapshot,
-                            total_records=streamed_count,
-                            direct_records=int(evidence_stage["direct_count"]),
+                            lane_records=dict(evidence_stage["lane_counts"]),
                         ),
                         indent=2,
                         sort_keys=True,
