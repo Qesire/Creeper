@@ -31,6 +31,15 @@ from creeper.submission.snapshot import SubmissionSnapshot
 
 
 _CHUNK_SIZE = 1024 * 1024
+def _record_peak(metrics: dict[str, int] | None, size: int) -> None:
+    if metrics is None:
+        return
+    metrics["submission_stream_peak_buffer_bytes"] = max(
+        int(metrics.get("submission_stream_peak_buffer_bytes", 0)),
+        int(size),
+    )
+
+
 _EXCLUDED_SOURCE_PARTS = {
     ".git",
     ".venv",
@@ -72,7 +81,9 @@ def _write_bytes(
     *,
     created_at: str,
     hashes: dict[str, str],
+    metrics: dict[str, int] | None = None,
 ) -> None:
+    _record_peak(metrics, len(payload))
     digest = hashlib.sha256(payload).hexdigest()
     with bundle.open(_zip_info(name, created_at), "w") as target:
         target.write(payload)
@@ -88,6 +99,7 @@ def _write_file(
     hashes: dict[str, str],
     expected: ResolvedArtifact | None = None,
     chunk_size: int = _CHUNK_SIZE,
+    metrics: dict[str, int] | None = None,
 ) -> tuple[str, int]:
     digest = hashlib.sha256()
     size = 0
@@ -97,6 +109,7 @@ def _write_file(
                 chunk = source.read(chunk_size)
                 if not chunk:
                     break
+                _record_peak(metrics, len(chunk))
                 digest.update(chunk)
                 size += len(chunk)
                 target.write(chunk)
@@ -123,6 +136,8 @@ def _stage_candidates(
     directory: Path,
     snapshot: SubmissionSnapshot,
     candidate_store: CandidateStore | None,
+    *,
+    metrics: dict[str, int] | None = None,
 ) -> dict[str, object]:
     active_txt = directory / "active_candidates.txt"
     active_jsonl = directory / "candidate_active.jsonl"
@@ -147,7 +162,9 @@ def _stage_candidates(
         if candidate_store is not None:
             last_active = None
             for entry in candidate_store.iter_active_candidates():
-                active_audit.write(_candidate_json(entry))
+                candidate_line = _candidate_json(entry)
+                _record_peak(metrics, len(candidate_line.encode("utf-8")))
+                active_audit.write(candidate_line)
                 active_scopes.add(entry.scope.value)
                 if entry.hostname != last_active:
                     active_out.write(entry.hostname + "\n")
@@ -158,7 +175,9 @@ def _stage_candidates(
             first = True
             last_isc = None
             for entry in candidate_store.iter_isc_reference():
-                isc_audit.write(_candidate_json(entry))
+                candidate_line = _candidate_json(entry)
+                _record_peak(metrics, len(candidate_line.encode("utf-8")))
+                isc_audit.write(candidate_line)
                 if entry.hostname == last_isc:
                     continue
                 if not first:
@@ -170,8 +189,12 @@ def _stage_candidates(
             isc_out.write("]}\n")
 
             for entry in candidate_store.iter_unparsed():
-                unparsed_out.write(entry.raw_value + "\n")
-                unparsed_audit.write(_candidate_json(entry))
+                raw_line = entry.raw_value + "\n"
+                candidate_line = _candidate_json(entry)
+                _record_peak(metrics, len(raw_line.encode("utf-8")))
+                _record_peak(metrics, len(candidate_line.encode("utf-8")))
+                unparsed_out.write(raw_line)
+                unparsed_audit.write(candidate_line)
                 unparsed_count += 1
         else:
             pairs = sorted(set(zip(
@@ -233,6 +256,8 @@ def _stage_candidates(
 def _stage_evidence(
     directory: Path,
     records: Iterable[EvidenceCapsule],
+    *,
+    metrics: dict[str, int] | None = None,
 ) -> dict[str, object]:
     evidence_path = directory / "evidence.jsonl"
     annual_paths = {
@@ -276,7 +301,7 @@ def _stage_evidence(
                 row = capsule.__dict__.copy()
                 row["hostname"] = hostname
                 row["year"] = year
-                evidence.write(
+                evidence_line = (
                     json.dumps(
                         row,
                         sort_keys=True,
@@ -284,7 +309,11 @@ def _stage_evidence(
                     )
                     + "\n"
                 )
-                annual_files[year].write(hostname + "\n")
+                annual_line = hostname + "\n"
+                _record_peak(metrics, len(evidence_line.encode("utf-8")))
+                _record_peak(metrics, len(annual_line.encode("utf-8")))
+                evidence.write(evidence_line)
+                annual_files[year].write(annual_line)
                 count += 1
                 bucket = contribution_bucket(classify_acquisition_lane(capsule))
                 lane_counts[bucket] += 1
@@ -371,6 +400,7 @@ def build_streaming_submission_zip(
     artifact_specs: Iterable[ArtifactSpec] = (),
     artifact_allowed_roots: Iterable[Path] = (),
     require_production_config: bool = True,
+    metrics_out: dict[str, int] | None = None,
 ) -> Path:
     """Build a deterministic formal archive without O(total-evidence) memory.
 
@@ -426,8 +456,20 @@ def build_streaming_submission_zip(
             dir=output_dir,
         ) as tmp:
             staging = Path(tmp)
-            evidence_stage = _stage_evidence(staging, evidence_records)
-            candidate_stage = _stage_candidates(staging, snapshot, candidate_store)
+            stream_metrics = {
+                "submission_stream_peak_buffer_bytes": _CHUNK_SIZE,
+            }
+            evidence_stage = _stage_evidence(
+                staging,
+                evidence_records,
+                metrics=stream_metrics,
+            )
+            candidate_stage = _stage_candidates(
+                staging,
+                snapshot,
+                candidate_store,
+                metrics=stream_metrics,
+            )
 
             hashes: dict[str, str] = {}
             source_files: list[str] = []
@@ -444,6 +486,7 @@ def build_streaming_submission_zip(
                         evidence_stage["annual_paths"][year],
                         created_at=snapshot.created_at,
                         hashes=hashes,
+                        metrics=stream_metrics,
                     )
                 _write_file(
                     bundle,
@@ -459,6 +502,7 @@ def build_streaming_submission_zip(
                         path,
                         created_at=snapshot.created_at,
                         hashes=hashes,
+                                            metrics=stream_metrics,
                     )
 
                 _write_bytes(
@@ -471,6 +515,7 @@ def build_streaming_submission_zip(
                     ).encode(),
                     created_at=snapshot.created_at,
                     hashes=hashes,
+                    metrics=stream_metrics,
                 )
                 streamed_count = int(evidence_stage["count"])
                 reconciliation = {
@@ -503,6 +548,7 @@ def build_streaming_submission_zip(
                     ).encode(),
                     created_at=snapshot.created_at,
                     hashes=hashes,
+                    metrics=stream_metrics,
                 )
                 _write_bytes(
                     bundle,
@@ -517,6 +563,7 @@ def build_streaming_submission_zip(
                     ).encode(),
                     created_at=snapshot.created_at,
                     hashes=hashes,
+                    metrics=stream_metrics,
                 )
                 _write_bytes(
                     bundle,
@@ -527,6 +574,7 @@ def build_streaming_submission_zip(
                     ).encode(),
                     created_at=snapshot.created_at,
                     hashes=hashes,
+                    metrics=stream_metrics,
                 )
                 _write_bytes(
                     bundle,
@@ -537,6 +585,7 @@ def build_streaming_submission_zip(
                     ).encode(),
                     created_at=snapshot.created_at,
                     hashes=hashes,
+                    metrics=stream_metrics,
                 )
                 _write_bytes(
                     bundle,
@@ -549,6 +598,7 @@ def build_streaming_submission_zip(
                     ).encode(),
                     created_at=snapshot.created_at,
                     hashes=hashes,
+                    metrics=stream_metrics,
                 )
 
                 documentation_archive = f"documentation/{documentation_path.name}"
@@ -558,6 +608,7 @@ def build_streaming_submission_zip(
                     documentation_path,
                     created_at=snapshot.created_at,
                     hashes=hashes,
+                                    metrics=stream_metrics,
                 )
 
                 for path, relative in _iter_source_files(
@@ -570,6 +621,7 @@ def build_streaming_submission_zip(
                         path,
                         created_at=snapshot.created_at,
                         hashes=hashes,
+                                            metrics=stream_metrics,
                     )
                     source_files.append(relative)
 
@@ -584,6 +636,7 @@ def build_streaming_submission_zip(
                     ).encode(),
                     created_at=snapshot.created_at,
                     hashes=hashes,
+                    metrics=stream_metrics,
                 )
                 for artifact in resolved_artifacts:
                     _write_file(
@@ -593,6 +646,7 @@ def build_streaming_submission_zip(
                         created_at=snapshot.created_at,
                         hashes=hashes,
                         expected=artifact,
+                                            metrics=stream_metrics,
                     )
 
                 manifest = {
@@ -643,4 +697,7 @@ def build_streaming_submission_zip(
             # external artifacts) has been copied and re-verified successfully.
             os.replace(archive_tmp, archive)
         cleanup.pop_all()
+    if metrics_out is not None:
+        metrics_out.clear()
+        metrics_out.update(stream_metrics)
     return archive
