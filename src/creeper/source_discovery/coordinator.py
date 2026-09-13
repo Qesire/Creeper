@@ -796,21 +796,39 @@ class SourceDiscoveryCoordinator:
         counts["research_started"] += 1
 
     async def shutdown(self, grace_seconds: float = 2.0) -> None:
-        """Bound shutdown of one slow child without turning cancellation into success."""
+        """Bound shutdown while preserving any result that already completed."""
         if grace_seconds <= 0:
             raise ValueError("grace_seconds must be positive")
         task = self._research_task
         if task is None:
             return
+
+        cancelled = False
         if not task.done():
             try:
                 await asyncio.wait_for(asyncio.shield(task), timeout=grace_seconds)
             except TimeoutError:
+                cancelled = True
                 task.cancel()
                 try:
                     await task
                 except asyncio.CancelledError:
                     pass
+
+        if not cancelled and task.done():
+            # A child that completes during the shutdown grace window still
+            # crosses the normal parent-side commit path instead of disappearing.
+            counts: dict[str, int | bool | float] = {
+                "research_failures": 0,
+                "research_completed": 0,
+                "search_failures": 0,
+                "search_episodes": 0,
+                "search_candidates_registered": 0,
+                "search_candidates_dropped": 0,
+            }
+            await self._poll_background_research(counts)
+            return
+
         self._research_task = None
         self._research_directive = None
         self._research_started_at = None
