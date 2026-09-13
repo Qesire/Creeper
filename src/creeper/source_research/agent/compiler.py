@@ -435,6 +435,7 @@ class UnifiedResearchCompiler:
             "purpose",
             "query_family",
             "enumerator",
+            "enumerator_config",
             "artifact_predicate",
             "hard_bounds",
             "stop_conditions",
@@ -459,6 +460,9 @@ class UnifiedResearchCompiler:
             )
         for name in ("query_family", "artifact_predicate", "validation"):
             self._mapping(raw[name], name)
+        enumerator_config = self._mapping(
+            raw.get("enumerator_config", {}), "enumerator_config"
+        )
         return ExplorationRegionProposal(
             proposal_id=self._text(raw["proposal_id"], "proposal_id"),
             surface_kind=self._text(raw["surface_kind"], "surface_kind"),
@@ -482,6 +486,7 @@ class UnifiedResearchCompiler:
             reuse_key=self._text(raw["reuse_key"], "reuse_key"),
             confidence=self._confidence(raw["confidence"]),
             validation=dict(raw["validation"]),
+            enumerator_config=dict(enumerator_config),
         )
 
     def _contract(self, raw: Mapping[str, Any]) -> ContractFamilyProposal:
