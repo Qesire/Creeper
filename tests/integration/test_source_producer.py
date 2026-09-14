@@ -198,10 +198,11 @@ class SourceProducerTests(unittest.TestCase):
         reservoir = self.control.get_reservoir("fixture-reservoir")
         self.assertEqual(reservoir.state, ReservoirState.READY)
         self.assertEqual(reservoir.cursor, "0")
-        row = self.control.connection.execute(
-            "SELECT state FROM work_leases ORDER BY rowid DESC LIMIT 1"
-        ).fetchone()
-        self.assertEqual(row["state"], "ABORTED")
+        rows = self.control.connection.execute(
+            "SELECT state FROM work_leases"
+        ).fetchall()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["state"], "ABORTED")
 
     def test_rejects_adapter_record_underreport_before_cursor_commit(self):
         runtime, adapter = self.build_runtime(backlog_capacity=1)
@@ -225,10 +226,11 @@ class SourceProducerTests(unittest.TestCase):
         reservoir = self.control.get_reservoir("fixture-reservoir")
         self.assertEqual(reservoir.state, ReservoirState.READY)
         self.assertEqual(reservoir.cursor, "0")
-        row = self.control.connection.execute(
-            "SELECT state FROM work_leases ORDER BY rowid DESC LIMIT 1"
-        ).fetchone()
-        self.assertEqual(row["state"], "ABORTED")
+        rows = self.control.connection.execute(
+            "SELECT state FROM work_leases"
+        ).fetchall()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["state"], "ABORTED")
 
     def test_final_source_commit_revalidates_lease_ownership(self):
         runtime, _adapter = self.build_runtime(backlog_capacity=1)
