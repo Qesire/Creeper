@@ -85,6 +85,7 @@ class DistributedProviderGate:
         token: object,
         status_code: int | None,
         headers: httpx.Headers | None,
+        response_bytes: int,
     ) -> None:
         if not isinstance(token, ProviderPermit):
             raise TypeError("distributed provider gate received invalid permit token")
@@ -99,4 +100,5 @@ class DistributedProviderGate:
             token.permit_id,
             status_code=status_code,
             cooldown_seconds=cooldown,
+            response_bytes=int(response_bytes),
         )
