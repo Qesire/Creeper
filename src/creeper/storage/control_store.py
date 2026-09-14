@@ -183,6 +183,20 @@ class ControlStore:
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
             ) WITHOUT ROWID;
+            CREATE TABLE IF NOT EXISTS cdx_service_registry (
+                service_name TEXT PRIMARY KEY,
+                endpoint TEXT NOT NULL UNIQUE,
+                requests_per_second REAL NOT NULL
+                    CHECK(requests_per_second >= 0),
+                max_inflight INTEGER NOT NULL CHECK(max_inflight > 0),
+                weight REAL NOT NULL CHECK(weight > 0),
+                active INTEGER NOT NULL DEFAULT 0 CHECK(active IN (0,1)),
+                provenance TEXT NOT NULL,
+                verified_at REAL,
+                updated_at REAL NOT NULL
+            ) WITHOUT ROWID;
+            CREATE INDEX IF NOT EXISTS idx_cdx_service_registry_active
+                ON cdx_service_registry(active, service_name);
             CREATE TABLE IF NOT EXISTS source_domains (
                 domain_id TEXT PRIMARY KEY,
                 family TEXT NOT NULL,
@@ -3448,6 +3462,93 @@ class ControlStore:
                 "SELECT state, COUNT(*) AS count FROM work_leases GROUP BY state"
             )
         }
+
+    def register_cdx_service(
+        self,
+        *,
+        service_name: str,
+        endpoint: str,
+        requests_per_second: float,
+        max_inflight: int,
+        weight: float,
+        provenance: str,
+        active: bool,
+        verified_at: float | None = None,
+        overwrite: bool = True,
+    ) -> bool:
+        """Persist one CDX Server endpoint for production loading.
+
+        Discovery may register candidates inactive. Only a verified/approved
+        caller should set active=True. Bootstrap callers use overwrite=False so
+        operator tuning in the durable registry is never reset at restart.
+        """
+        name = str(service_name).strip().lower()
+        url = str(endpoint).strip()
+        source = str(provenance).strip()
+        if not name or not url or not source:
+            raise ValueError("CDX service name, endpoint and provenance are required")
+        rps = float(requests_per_second)
+        inflight = int(max_inflight)
+        service_weight = float(weight)
+        if rps < 0 or inflight < 1 or service_weight <= 0:
+            raise ValueError("invalid CDX service limits")
+        when = float(self.clock())
+        verified = (
+            None if verified_at is None else float(verified_at)
+        )
+        with self.connection:
+            if overwrite:
+                cursor = self.connection.execute(
+                    """
+                    INSERT INTO cdx_service_registry(
+                        service_name,endpoint,requests_per_second,max_inflight,
+                        weight,active,provenance,verified_at,updated_at
+                    ) VALUES (?,?,?,?,?,?,?,?,?)
+                    ON CONFLICT(service_name) DO UPDATE SET
+                        endpoint=excluded.endpoint,
+                        requests_per_second=excluded.requests_per_second,
+                        max_inflight=excluded.max_inflight,
+                        weight=excluded.weight,
+                        active=excluded.active,
+                        provenance=excluded.provenance,
+                        verified_at=excluded.verified_at,
+                        updated_at=excluded.updated_at
+                    """,
+                    (
+                        name, url, rps, inflight, service_weight,
+                        int(bool(active)), source, verified, when,
+                    ),
+                )
+            else:
+                cursor = self.connection.execute(
+                    """
+                    INSERT OR IGNORE INTO cdx_service_registry(
+                        service_name,endpoint,requests_per_second,max_inflight,
+                        weight,active,provenance,verified_at,updated_at
+                    ) VALUES (?,?,?,?,?,?,?,?,?)
+                    """,
+                    (
+                        name, url, rps, inflight, service_weight,
+                        int(bool(active)), source, verified, when,
+                    ),
+                )
+        return int(cursor.rowcount or 0) == 1
+
+    def list_cdx_services(
+        self,
+        *,
+        active_only: bool = True,
+    ) -> tuple[sqlite3.Row, ...]:
+        query = """
+            SELECT service_name,endpoint,requests_per_second,max_inflight,
+                   weight,active,provenance,verified_at,updated_at
+            FROM cdx_service_registry
+        """
+        params: tuple[object, ...] = ()
+        if active_only:
+            query += " WHERE active=1"
+        query += " ORDER BY service_name"
+        return tuple(self.connection.execute(query, params).fetchall())
 
     def set_checkpoint(self, key: str, value: str) -> None:
         with self.connection:
