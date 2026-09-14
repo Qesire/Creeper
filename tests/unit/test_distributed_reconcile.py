@@ -69,6 +69,12 @@ class DistributedReconcileTests(unittest.TestCase):
                         "parser_kind": "",
                         "referrer_url": "https://sources.test/index.html",
                     },
+                    {
+                        "kind": "HOST_CANDIDATE",
+                        "hostname": "host-only.example",
+                        "source": "fixture-search",
+                        "locator": "https://result.test/host-only",
+                    },
                 ),
                 cursor_after="EOF",
             ),
@@ -107,6 +113,48 @@ class DistributedReconcileTests(unittest.TestCase):
         page = rows["https://data.test/more.html"]
         self.assertEqual(page["state"], "DISCOVERED")
         self.assertIsNone(page["admitted_task_id"])
+
+    def test_hostname_candidate_promotes_without_year_metadata(self) -> None:
+        self._commit_candidates()
+        report = AuthorityReconciler(
+            self.store,
+            promotion_batch_size=16,
+            include_source_pages=False,
+            host_promotion_batch_size=16,
+            host_physical_providers=(
+                "internet_archive",
+                "arquivo_pt",
+            ),
+            host_coverage_provider=(
+                "cdx-pool:internet_archive+arquivo_pt"
+            ),
+            host_resolver_version="fabric-host-v1",
+        ).run_once()
+
+        self.assertEqual(report.host_promoted, 1)
+        host = self.store.host_candidate_rows()[0]
+        self.assertEqual(host["hostname"], "host-only.example")
+        self.assertEqual(host["state"], "ADMITTED")
+
+        tasks = self.store.connection.execute(
+            """
+            SELECT producer, input_identity, coverage_json
+            FROM distributed_work
+            WHERE producer = 'HistoricalQueryProducer'
+              AND input_identity = 'host-only.example'
+            """
+        ).fetchall()
+        self.assertEqual(len(tasks), 1)
+        import json
+        coverage = json.loads(str(tasks[0]["coverage_json"]))
+        self.assertEqual(
+            (coverage["year_from"], coverage["year_to"]),
+            (1996, 2001),
+        )
+        self.assertEqual(
+            coverage["providers"],
+            ["internet_archive", "arquivo_pt"],
+        )
 
     def test_explicit_page_promotion_is_idempotent(self) -> None:
         self._commit_candidates()
