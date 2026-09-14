@@ -190,6 +190,7 @@ RegionExecutor = Callable[[object], Awaitable[object]]
 RootQueryPlanner = Callable[[], tuple[object, ...]]
 RootQueryExecutor = Callable[[object], Awaitable[object]]
 ResearchSnapshotProvider = Callable[[], ResearchTriggerSnapshot]
+ResearchDirectiveProvider = Callable[[ResearchTriggerSnapshot], ResearchDirective | None]
 ResearchExecutor = Callable[[ResearchDirective], Awaitable[object]]
 ResearchResultCommitter = Callable[[ResearchDirective, object, float], None]
 ResearchFailureRecorder = Callable[[ResearchDirective, Exception, float], None]
@@ -250,6 +251,7 @@ class SourceDiscoveryCoordinator:
         root_query_executor: RootQueryExecutor | None = None,
         root_query_parallelism: int = 1,
         research_snapshot_provider: ResearchSnapshotProvider | None = None,
+        research_directive_provider: ResearchDirectiveProvider | None = None,
         research_executor: ResearchExecutor | None = None,
         research_result_committer: ResearchResultCommitter | None = None,
         research_failure_recorder: ResearchFailureRecorder | None = None,
@@ -311,6 +313,7 @@ class SourceDiscoveryCoordinator:
         self.root_query_executor = root_query_executor
         self.root_query_parallelism = int(root_query_parallelism)
         self.research_snapshot_provider = research_snapshot_provider
+        self.research_directive_provider = research_directive_provider
         self.research_executor = research_executor
         self.research_result_committer = research_result_committer
         self.research_failure_recorder = research_failure_recorder
@@ -942,11 +945,15 @@ class SourceDiscoveryCoordinator:
         snapshot = self._current_research_snapshot()
         if snapshot is None:
             return
-        if snapshot.context_hash in self._research_completed_contexts:
-            counts["research_suppressed"] += 1
-            return
-        directive = self.manager.plan_research(snapshot)
+        directive = (
+            self.research_directive_provider(snapshot)
+            if self.research_directive_provider is not None
+            else self.manager.plan_research(snapshot)
+        )
         if directive is None:
+            return
+        if directive.context_key in self._research_completed_contexts:
+            counts["research_suppressed"] += 1
             return
         started_at = float(self.retry_clock())
         self._research_directive = directive
