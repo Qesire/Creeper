@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import argparse
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from decimal import Decimal, InvalidOperation
 import fcntl
 import json
@@ -37,6 +37,7 @@ from creeper.runtime.resource_governor import (
     StabilizedResourceGovernor,
 )
 from creeper.source_discovery_service import load_source_discovery_config
+from creeper.evidence.providers.multi_cdx import CDXProviderConfig
 from creeper.storage.telemetry_store import RuntimeTelemetryStore
 
 
@@ -67,6 +68,9 @@ class EvidenceServicePolicy:
     retry_max_seconds: float = 3600.0
     poll_min_seconds: float = 0.25
     poll_max_seconds: float = 10.0
+    # Physical CDX endpoints are independently throttled and routed behind the
+    # logical "wayback" evidence lane.
+    cdx_providers: tuple[CDXProviderConfig, ...] = ()
     # Complete platform-year enumeration is an independent lane and therefore
     # has its own claim/network budget rather than borrowing exact/range CDX.
     platform_harvest_enabled: bool = False
@@ -440,6 +444,59 @@ def load_autopilot_config(config_path: Path) -> AutopilotConfig:
         raise ValueError(
             "evidence.poll_max_seconds must be >= poll_min_seconds"
         )
+
+    provider_defaults = CDXProviderConfig(
+        name="internet_archive",
+        endpoint=evidence.endpoint,
+        requests_per_second=evidence.requests_per_second,
+        max_inflight=evidence.max_inflight,
+        max_connections=evidence.max_connections,
+        max_keepalive_connections=evidence.max_keepalive_connections,
+        keepalive_expiry_seconds=evidence.keepalive_expiry_seconds,
+        throttle_floor_seconds=evidence.throttle_floor_seconds,
+        timeout=evidence.timeout,
+        max_retries=evidence.max_retries,
+        weight=max(0.1, evidence.requests_per_second),
+    )
+    raw_cdx_providers = ev_raw.get("cdx_providers")
+    if raw_cdx_providers is None:
+        cdx_providers = (
+            provider_defaults,
+            CDXProviderConfig(
+                name="arquivo_pt",
+                endpoint="https://arquivo.pt/wayback/cdx",
+                requests_per_second=1.0,
+                max_inflight=evidence.max_inflight,
+                max_connections=evidence.max_connections,
+                max_keepalive_connections=evidence.max_keepalive_connections,
+                keepalive_expiry_seconds=evidence.keepalive_expiry_seconds,
+                throttle_floor_seconds=evidence.throttle_floor_seconds,
+                timeout=evidence.timeout,
+                max_retries=evidence.max_retries,
+                weight=1.0,
+            ),
+        )
+    else:
+        if (
+            not isinstance(raw_cdx_providers, list)
+            or not raw_cdx_providers
+            or any(not isinstance(item, dict) for item in raw_cdx_providers)
+        ):
+            raise ValueError(
+                "evidence.cdx_providers must be a non-empty array of tables"
+            )
+        cdx_providers = tuple(
+            CDXProviderConfig.from_mapping(
+                item,
+                defaults=provider_defaults,
+            )
+            for item in raw_cdx_providers
+        )
+    names = [provider.name for provider in cdx_providers]
+    if len(names) != len(set(names)):
+        raise ValueError("evidence.cdx_providers names must be unique")
+    evidence = replace(evidence, cdx_providers=cdx_providers)
+
     readiness = None
     readiness_raw = root.get("readiness")
     if readiness_raw is not None:
@@ -710,6 +767,18 @@ def build_child_specs(config: AutopilotConfig) -> tuple[ChildSpec, ...]:
                 str(evidence.poll_min_seconds),
                 "--poll-max-seconds",
                 str(evidence.poll_max_seconds),
+                *tuple(
+                    argument
+                    for provider in evidence.cdx_providers
+                    for argument in (
+                        "--cdx-provider-json",
+                        json.dumps(
+                            provider.as_dict(),
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ),
+                    )
+                ),
             ),
         )
     )
