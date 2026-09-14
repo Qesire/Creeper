@@ -2902,6 +2902,86 @@ class DistributedAuthorityStore:
             "cooldown_until": float(row["cooldown_until"]),
         }
 
+    def fabric_status_snapshot(self) -> dict[str, object]:
+        """Compact local-only operational snapshot for deployment health."""
+
+        task_states = {
+            str(row["state"]): int(row["count"])
+            for row in self.connection.execute(
+                """
+                SELECT state, COUNT(*) AS count
+                FROM distributed_work
+                GROUP BY state
+                ORDER BY state
+                """
+            ).fetchall()
+        }
+        producer_states = {
+            f"{row['producer']}:{row['state']}": int(row["count"])
+            for row in self.connection.execute(
+                """
+                SELECT producer, state, COUNT(*) AS count
+                FROM distributed_work
+                GROUP BY producer, state
+                ORDER BY producer, state
+                """
+            ).fetchall()
+        }
+        candidate_states = {
+            str(row["state"]): int(row["count"])
+            for row in self.connection.execute(
+                """
+                SELECT state, COUNT(*) AS count
+                FROM distributed_source_candidates
+                GROUP BY state
+                ORDER BY state
+                """
+            ).fetchall()
+        }
+        workers = [
+            {
+                "worker_id": str(row["worker_id"]),
+                "runtime_class": str(row["runtime_class"]),
+                "region": str(row["region"]),
+                "last_heartbeat": float(row["last_heartbeat"]),
+                "revoked": bool(row["revoked"]),
+            }
+            for row in self.connection.execute(
+                """
+                SELECT worker_id, runtime_class, region,
+                       last_heartbeat, revoked
+                FROM distributed_workers
+                ORDER BY worker_id
+                """
+            ).fetchall()
+        ]
+        providers = [
+            {
+                "provider": str(row["provider"]),
+                "requests_per_second": float(row["requests_per_second"]),
+                "max_global_inflight": int(row["max_global_inflight"]),
+                "require_qualified_region": bool(
+                    row["require_qualified_region"]
+                ),
+                "next_request_at": float(row["next_request_at"]),
+                "cooldown_until": float(row["cooldown_until"]),
+            }
+            for row in self.connection.execute(
+                """
+                SELECT * FROM distributed_provider_budgets
+                ORDER BY provider
+                """
+            ).fetchall()
+        ]
+        return {
+            "tasks_by_state": task_states,
+            "tasks_by_producer_state": producer_states,
+            "accepted_host_years": self.accepted_host_year_count(),
+            "source_candidates_by_state": candidate_states,
+            "workers": workers,
+            "provider_budgets": providers,
+        }
+
     def task_row(self, task_id: str) -> sqlite3.Row | None:
         return self.connection.execute(
             "SELECT * FROM distributed_work WHERE task_id = ?",
