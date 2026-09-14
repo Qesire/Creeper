@@ -109,9 +109,59 @@ class ArquivoDialectTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(params["from"], "1998")
         self.assertEqual(params["to"], "1998")
         self.assertEqual(params["matchType"], "host")
-        self.assertIn("fields", params)
-        self.assertNotIn("fl", params)
+        self.assertIn("fl", params)
+        self.assertNotIn("fields", params)
         self.assertNotIn("showResumeKey", params)
+
+    async def test_arquivo_accepts_wayback_style_header_rows(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                json=[
+                    [
+                        "urlkey",
+                        "timestamp",
+                        "url",
+                        "mime",
+                        "status",
+                        "digest",
+                        "length",
+                    ],
+                    [
+                        "example,arquivo)/",
+                        "19990102030405",
+                        "http://arquivo.example/path",
+                        "text/html",
+                        "200",
+                        "sha1:test",
+                        "123",
+                    ],
+                ],
+            )
+
+        client = AsyncArquivoCDXClient(
+            endpoint="https://arquivo.example/wayback/cdx",
+            provider="wayback",
+            source_id="arquivo_pt",
+            limit=100,
+            requests_per_second=0.0,
+            transport=httpx.MockTransport(handler),
+        )
+        key = EvidenceQueryKey(
+            "arquivo.example",
+            TemporalScope(1999, 1999),
+            "wayback",
+            "cdx-v1",
+        )
+        try:
+            result = await client.query_key(key)
+        finally:
+            await client.aclose()
+
+        self.assertEqual(result.state, CDXQueryState.PASS)
+        assert result.capsule is not None
+        self.assertEqual(result.capsule.original_url, "http://arquivo.example/path")
+        self.assertEqual(result.capsule.source_id, "arquivo_pt")
 
     async def test_arquivo_host_range_queries_all_target_years_at_once(self) -> None:
         seen: list[httpx.Request] = []
