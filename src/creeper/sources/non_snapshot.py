@@ -48,8 +48,8 @@ _DMOZ_EXTERNAL_PAGE_RE = re.compile(
 )
 
 
-def mailbox_year_from_locator(locator: str) -> int | None:
-    """Return target year for an exact monthly mailbox shard, if encoded."""
+def mailbox_period_from_locator(locator: str) -> str | None:
+    """Return YYYY-MM for an exact target-period mailbox shard, if encoded."""
     path = urlsplit(locator).path.rstrip("/")
     name = path.rsplit("/", 1)[-1].lower()
     for suffix in (".mbox.gz", ".mbox"):
@@ -59,7 +59,13 @@ def mailbox_year_from_locator(locator: str) -> int | None:
     match = _TARGET_YEAR_RE.fullmatch(name)
     if match is None:
         return None
-    return int(match.group(1))
+    return name
+
+
+def mailbox_year_from_locator(locator: str) -> int | None:
+    """Return target year for an exact monthly mailbox shard, if encoded."""
+    period = mailbox_period_from_locator(locator)
+    return None if period is None else int(period[:4])
 
 
 def is_mailbox_url_locator(locator: str) -> bool:
