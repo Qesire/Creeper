@@ -171,6 +171,42 @@ class StructuredProductionAdapterTests(unittest.TestCase):
         self.assertEqual(record.direct_year_mask, 0)
         self.assertEqual(record.year_hint_mask, YEAR_BITS[1999])
 
+    def test_ircache_sanitized_access_locator_uses_squid_semantics(self):
+        reservoir = Reservoir(
+            reservoir_id="reservoir:ircache",
+            domain_id="domain:ircache",
+            adapter_id="structured:ircache",
+            root_locator=(
+                "https://mirror.example/Traces/"
+                "uc.sanitized-access.20000312.gz"
+            ),
+            enumeration_kind="structured_records",
+            capacity_lower=0,
+            evidence_mode="discovery_only",
+            state=ReservoirState.READY,
+        )
+        adapter = StructuredProductionAdapter(
+            reservoir,
+            temporal_scope=(1996, 2001),
+        )
+
+        self.assertEqual(adapter.kind, "squid_access")
+        record = adapter._generic_record(
+            (
+                "952214400.000 42 192.0.2.9 TCP_MISS/200 1234 GET "
+                "http://old.example/path - DIRECT/203.0.113.8 text/html"
+            ),
+            locator="fixture:1",
+        )
+        self.assertIsNotNone(record)
+        assert record is not None
+        record = adapter._apply_contract_authority(record)
+
+        self.assertEqual(record.payload, "http://old.example/path")
+        self.assertEqual(record.source_year, 2000)
+        self.assertEqual(record.direct_year_mask, 0)
+        self.assertEqual(record.year_hint_mask, YEAR_BITS[2000])
+
     def test_non_range_http_source_reopens_as_stream_and_skips_cursor(self):
         payload = b"ignored.example\nkept.example\n"
         files = []
