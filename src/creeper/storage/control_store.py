@@ -2710,6 +2710,17 @@ class ControlStore:
             ):
                 raise ValueError("range follow-up key does not match parent range")
 
+        if not isinstance(owner, str) or not owner.strip():
+            raise ValueError("owner is required")
+        now_raw = self.clock()
+        if (
+            isinstance(now_raw, bool)
+            or not isinstance(now_raw, (int, float))
+            or not math.isfinite(float(now_raw))
+            or now_raw < 0
+        ):
+            raise ValueError("evidence finish clock must be finite and non-negative")
+        now = float(now_raw)
         self.connection.execute("BEGIN IMMEDIATE")
         try:
             row = self.connection.execute(
@@ -2717,8 +2728,9 @@ class ControlStore:
                 SELECT state FROM evidence_tasks
                 WHERE hostname = ? AND year_from = ? AND year_to = ?
                   AND provider = ? AND policy_version = ? AND lease_owner = ?
+                  AND lease_until IS NOT NULL AND lease_until > ?
                 """,
-                (*self._values(key), owner),
+                (*self._values(key), owner, now),
             ).fetchone()
             if row is None:
                 raise KeyError("range task not found or not owned by caller")
@@ -2728,8 +2740,9 @@ class ControlStore:
                 SET state = ?, retry_at = NULL, lease_owner = NULL, lease_until = NULL
                 WHERE hostname = ? AND year_from = ? AND year_to = ?
                   AND provider = ? AND policy_version = ? AND lease_owner = ?
+                  AND lease_until IS NOT NULL AND lease_until > ?
                 """,
-                (value, *self._values(key), owner),
+                (value, *self._values(key), owner, now),
             )
             cursor = self.connection.executemany(
                 """
@@ -2786,6 +2799,28 @@ class ControlStore:
         keyed_results = [result for result in results if result.key is not None]
         if not keyed_results:
             return 0
+        if retry_at is not None and (
+            isinstance(retry_at, bool)
+            or not isinstance(retry_at, (int, float))
+            or not math.isfinite(float(retry_at))
+            or retry_at < 0
+        ):
+            raise ValueError("evidence retry_at must be finite and non-negative")
+        finish_now: float | None = None
+        if owner is not None:
+            if not isinstance(owner, str) or not owner.strip():
+                raise ValueError("owner must be a non-empty string")
+            now_raw = self.clock()
+            if (
+                isinstance(now_raw, bool)
+                or not isinstance(now_raw, (int, float))
+                or not math.isfinite(float(now_raw))
+                or now_raw < 0
+            ):
+                raise ValueError(
+                    "evidence finish clock must be finite and non-negative"
+                )
+            finish_now = float(now_raw)
         updates: list[tuple[str, None, object, ...]] = []
         seen: set[EvidenceQueryKey] = set()
         for result in keyed_results:
@@ -2804,8 +2839,15 @@ class ControlStore:
             for result in keyed_results:
                 key = result.key
                 assert key is not None
-                ownership = " AND lease_owner = ?" if owner is not None else ""
-                params = (*self._values(key), owner) if owner is not None else self._values(key)
+                ownership = ""
+                params: tuple[object, ...] = self._values(key)
+                if owner is not None:
+                    ownership = (
+                        " AND lease_owner = ? AND lease_until IS NOT NULL "
+                        "AND lease_until > ?"
+                    )
+                    assert finish_now is not None
+                    params = (*self._values(key), owner, finish_now)
                 row = self.connection.execute(
                     """
                     SELECT 1 FROM evidence_tasks
@@ -2816,7 +2858,17 @@ class ControlStore:
                 ).fetchone()
                 if row is None:
                     raise KeyError("evidence task not found or not owned by caller")
-            ownership = " AND lease_owner = ?" if owner is not None else ""
+            ownership = ""
+            update_rows: list[tuple[object, ...]] = list(updates)
+            if owner is not None:
+                ownership = (
+                    " AND lease_owner = ? AND lease_until IS NOT NULL "
+                    "AND lease_until > ?"
+                )
+                assert finish_now is not None
+                update_rows = [
+                    (*update, owner, finish_now) for update in updates
+                ]
             self.connection.executemany(
                 """
                 UPDATE evidence_tasks
@@ -2824,7 +2876,7 @@ class ControlStore:
                 WHERE hostname = ? AND year_from = ? AND year_to = ?
                   AND provider = ? AND policy_version = ?
                 """ + ownership,
-                [(*update, owner) if owner is not None else update for update in updates],
+                update_rows,
             )
             # Legacy runtimes pre-reserved exact-year fanout for range tasks.
             # Host-first execution no longer uses those tokens; clear them on
