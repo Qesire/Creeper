@@ -11,6 +11,7 @@ from aiohttp import web
 
 from creeper.distributed.auth import AuthenticationError, HMACRequestAuthenticator
 from creeper.distributed.authority_store import (
+    AuthorityNotReadyError,
     BatchConflictError,
     DistributedAuthorityStore,
     StaleLeaseError,
@@ -68,6 +69,11 @@ async def _error_middleware(request: web.Request, handler):
         return web.json_response(
             {"error": "WORKER_REJECTED", "detail": str(exc)},
             status=403,
+        )
+    except AuthorityNotReadyError as exc:
+        return web.json_response(
+            {"error": "AUTHORITY_NOT_READY", "detail": str(exc)},
+            status=503,
         )
     except StaleLeaseError as exc:
         return web.json_response(
