@@ -261,6 +261,9 @@ class DistributedAuthorityAPITests(unittest.IsolatedAsyncioTestCase):
             "cpu_count": 1,
             "network_class": "public",
             "capabilities": [Capability.ONLINE_QUERY.value],
+            "allowed_providers": ["internet_archive"],
+            "protocol_version": FABRIC_PROTOCOL_VERSION,
+            "edition_version": FABRIC_EDITION_VERSION,
         }
         nonce = "fixed-nonce"
         first = await self.post(
