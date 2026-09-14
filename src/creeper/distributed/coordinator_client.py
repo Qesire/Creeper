@@ -149,6 +149,7 @@ class CoordinatorClient:
                 "capabilities": list(descriptor.capabilities),
                 "producers": list(descriptor.producers),
                 "allowed_providers": list(descriptor.allowed_providers),
+                "daily_egress_budget_bytes": descriptor.daily_egress_budget_bytes,
                 "protocol_version": descriptor.protocol_version,
                 "edition_version": descriptor.edition_version,
             },
@@ -401,6 +402,7 @@ class CoordinatorClient:
         *,
         status_code: int | None = None,
         cooldown_seconds: float = 0.0,
+        response_bytes: int = 0,
     ) -> None:
         await self._post(
             "/v1/providers/report",
@@ -408,5 +410,6 @@ class CoordinatorClient:
                 "permit_id": permit_id,
                 "status_code": status_code,
                 "cooldown_seconds": float(cooldown_seconds),
+                "response_bytes": int(response_bytes),
             },
         )
