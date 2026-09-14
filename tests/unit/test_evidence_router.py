@@ -116,6 +116,27 @@ class EvidenceRouterTests(unittest.TestCase):
         self.assertEqual(router.pending_count(provider="wayback"), 0)
         self.assertIsNotNone(self.control.get_evidence_task(wanted))
 
+    def test_multi_year_host_range_costs_one_router_slot(self) -> None:
+        router = self.router({"wayback": 1})
+        host_range = self.key(
+            "range.example",
+            year_from=1996,
+            year_to=2001,
+        )
+
+        result = self.enqueue(router, [host_range])
+
+        self.assertEqual(result.enqueued, 1)
+        self.assertEqual(result.staged, 0)
+        self.assertIsNotNone(self.control.get_evidence_task(host_range))
+        self.assertEqual(
+            self.admission.available_capacity(
+                provider="wayback",
+                capacity=1,
+            ),
+            0,
+        )
+
     def test_wayback_saturation_does_not_block_rdap_lane(self) -> None:
         occupied = self.key("occupied.example")
         self.control.enqueue_evidence_tasks([occupied])
