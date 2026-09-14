@@ -25,15 +25,19 @@ class EvidencePlanner:
 
     A record-level ``direct_year_mask`` is only a temporal claim. It becomes
     accepted direct evidence when the control plane explicitly authorizes the
-    owning Reservoir for direct-year evidence. ISC/Network Wizards reference
-    records and Common Crawl corpus records are never eligible for that
-    authorization; their claimed years are conservatively demoted to external
-    evidence hints.
+    owning Reservoir for direct-year evidence.
 
-    Over the six competition years, any unresolved-year bit mask can contain at
-    most three disjoint contiguous runs (for example 1996/1998/2000). This is
-    the hard external-task expansion bound for one HostObservation and is used
-    by source admission to reserve queue capacity safely.
+    Remote archive verification is deliberately narrower: only a hostname with
+    *no temporal information at all* may create external archive work. Dated
+    metadata, year hints, or unauthorized direct-year claims remain discovery
+    signals and never spend Wayback capacity. This keeps bulk CDX/CDXJ evidence
+    authoritative and reserves rate-limited fallback for undated candidate
+    pools and bare hostname lists.
+
+    Over the six competition years, an undated hostname's unresolved-year mask
+    can contain at most three disjoint contiguous runs (for example
+    1996/1998/2000). This is the hard external-task expansion bound for one
+    HostObservation and is used by source admission to reserve queue capacity.
     """
 
     MAX_EXTERNAL_TASKS_PER_OBSERVATION = 3
@@ -68,39 +72,29 @@ class EvidencePlanner:
             CandidateSourceScope.COMMON_CRAWL_CORPUS_EXCLUDED,
         }
         direct_mask = claimed_direct_mask if allow_direct and not restricted_source else 0
-        hint_mask = observation.year_hint_mask
-        if observation.source_year in YEAR_BITS:
-            hint_mask |= YEAR_BITS[observation.source_year]
-        if not allow_direct or restricted_source:
-            hint_mask |= claimed_direct_mask
         has_temporal_claim = bool(
             observation.year_hint_mask
             or observation.direct_year_mask
             or observation.source_year in YEAR_BITS
         )
-        if not has_temporal_claim:
-            # An undated hostname is still a valid discovery candidate.
-            hint_mask = ALL_YEAR_MASK
-        elif (
-            (not allow_direct or restricted_source)
-            and self._range_first_selected(hostname, range_first_fraction)
-        ):
-            # Deterministic exploration bucket: discover every unresolved
-            # competition year for a small fraction of externally verified
-            # hostnames. The provider executes this as a one-page bounded range
-            # probe, so exploration cannot silently turn into unbounded archive
-            # pagination.
-            hint_mask = ALL_YEAR_MASK
-        hint_mask &= ~suppressed_mask
-        hint_mask &= ~direct_mask
-        hint_mask &= ~external_covered_mask
+
+        # Wayback / external archive work is fallback for undated hostname
+        # records only. Temporal hints are useful for discovery/ranking, but
+        # using them to trigger remote verification would spend rate-limited
+        # requests on objects that already carry a date-bearing provenance path.
+        # range_first_fraction is retained as an ABI/config compatibility input;
+        # it cannot widen a dated observation into remote archive work.
+        external_mask = 0 if has_temporal_claim else ALL_YEAR_MASK
+        external_mask &= ~suppressed_mask
+        external_mask &= ~direct_mask
+        external_mask &= ~external_covered_mask
 
         direct_capsules = tuple(
             self._direct_capsule(observation, hostname, year, policy_version)
             for year, bit in YEAR_BITS.items()
             if direct_mask & bit
         )
-        years = [year for year, bit in YEAR_BITS.items() if hint_mask & bit]
+        years = [year for year, bit in YEAR_BITS.items() if external_mask & bit]
         ranges: list[tuple[int, int]] = []
         for year in years:
             if not ranges or year != ranges[-1][1] + 1:
