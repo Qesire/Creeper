@@ -109,7 +109,101 @@ def extract_http_urls(
     return tuple(result)
 
 
-def iter_mbox_messages(\n    payload: bytes,\n    *,\n    include_truncated_tail: bool = True,\n):\n    """Yield complete Unix-mbox messages from one bounded byte buffer.\n\n    A mbox message begins at a line whose first five bytes are b"From ".\n    Quoted body lines use >From and therefore do not create boundaries.\n    When a network sample is known to end mid-file, callers can set\n    include_truncated_tail=False so the final partial message is ignored.\n    """\n    if not payload:\n        return\n    starts = [\n        match.start()\n        for match in re.finditer(br"(?m)^From ", payload)\n    ]\n    if not starts:\n        return\n    for index, start in enumerate(starts):\n        if index + 1 < len(starts):\n            end = starts[index + 1]\n        else:\n            if not include_truncated_tail:\n                break\n            end = len(payload)\n        if end > start:\n            yield start, payload[start:end]\n\n\ndef parse_mbox_message(\n    message: bytes,\n    *,\n    max_urls: int = 64,\n) -> tuple[tuple[str, ...], int | None, str | None]:\n    """Extract body URLs and the message-level observation timestamp.\n\n    Only text message bodies are inspected; envelope/header addresses and\n    attachment payloads are excluded. The returned timestamp is normalized\n    to UTC ISO-8601. A missing or malformed Date header leaves the URLs\n    usable for discovery but grants no direct annual evidence.\n    """\n    if max_urls < 1:\n        raise ValueError("max_urls must be positive")\n    try:\n        parsed = BytesParser(policy=email_policy.default).parsebytes(message)\n    except (TypeError, ValueError):\n        return (), None, None\n\n    raw_date = parsed.get("Date")\n    year: int | None = None\n    source_time: str | None = None\n    if raw_date is not None:\n        try:\n            observed_at = parsedate_to_datetime(str(raw_date))\n        except (TypeError, ValueError, OverflowError):\n            observed_at = None\n        if observed_at is not None:\n            if observed_at.tzinfo is None:\n                observed_at = observed_at.replace(tzinfo=timezone.utc)\n            observed_at = observed_at.astimezone(timezone.utc)\n            if 1996 <= observed_at.year <= 2001:\n                year = observed_at.year\n                source_time = observed_at.isoformat()\n\n    bodies: list[str] = []\n    parts = parsed.walk() if parsed.is_multipart() else (parsed,)\n    for part in parts:\n        if part.is_multipart():\n            continue\n        if part.get_content_maintype() != "text":\n            continue\n        disposition = (part.get_content_disposition() or "").lower()\n        if disposition == "attachment":\n            continue\n        raw = part.get_payload(decode=True)\n        if raw is None:\n            value = part.get_payload()\n            if isinstance(value, str):\n                bodies.append(value)\n            continue\n        charset = part.get_content_charset() or "utf-8"\n        try:\n            bodies.append(raw.decode(charset, errors="replace"))\n        except LookupError:\n            bodies.append(raw.decode("utf-8", errors="replace"))\n\n    urls = extract_http_urls(\n        html.unescape("\\n".join(bodies)),\n        max_urls=max_urls,\n    )\n    return urls, year, source_time\n\n\ndef is_dmoz_content_locator(locator: str) -> bool:
+def iter_mbox_messages(
+    payload: bytes,
+    *,
+    include_truncated_tail: bool = True,
+):
+    """Yield complete Unix-mbox messages from one bounded byte buffer.
+
+    A mbox message begins at a line whose first five bytes are b"From ".
+    Quoted body lines use >From and therefore do not create boundaries.
+    When a network sample is known to end mid-file, callers can set
+    include_truncated_tail=False so the final partial message is ignored.
+    """
+    if not payload:
+        return
+    starts = [
+        match.start()
+        for match in re.finditer(br"(?m)^From ", payload)
+    ]
+    if not starts:
+        return
+    for index, start in enumerate(starts):
+        if index + 1 < len(starts):
+            end = starts[index + 1]
+        else:
+            if not include_truncated_tail:
+                break
+            end = len(payload)
+        if end > start:
+            yield start, payload[start:end]
+
+
+def parse_mbox_message(
+    message: bytes,
+    *,
+    max_urls: int = 64,
+) -> tuple[tuple[str, ...], int | None, str | None]:
+    """Extract body URLs and the message-level observation timestamp.
+
+    Only text message bodies are inspected; envelope/header addresses and
+    attachment payloads are excluded. The returned timestamp is normalized
+    to UTC ISO-8601. A missing or malformed Date header leaves the URLs
+    usable for discovery but grants no direct annual evidence.
+    """
+    if max_urls < 1:
+        raise ValueError("max_urls must be positive")
+    try:
+        parsed = BytesParser(policy=email_policy.default).parsebytes(message)
+    except (TypeError, ValueError):
+        return (), None, None
+
+    raw_date = parsed.get("Date")
+    year: int | None = None
+    source_time: str | None = None
+    if raw_date is not None:
+        try:
+            observed_at = parsedate_to_datetime(str(raw_date))
+        except (TypeError, ValueError, OverflowError):
+            observed_at = None
+        if observed_at is not None:
+            if observed_at.tzinfo is None:
+                observed_at = observed_at.replace(tzinfo=timezone.utc)
+            observed_at = observed_at.astimezone(timezone.utc)
+            if 1996 <= observed_at.year <= 2001:
+                year = observed_at.year
+                source_time = observed_at.isoformat()
+
+    bodies: list[str] = []
+    parts = parsed.walk() if parsed.is_multipart() else (parsed,)
+    for part in parts:
+        if part.is_multipart():
+            continue
+        if part.get_content_maintype() != "text":
+            continue
+        disposition = (part.get_content_disposition() or "").lower()
+        if disposition == "attachment":
+            continue
+        raw = part.get_payload(decode=True)
+        if raw is None:
+            value = part.get_payload()
+            if isinstance(value, str):
+                bodies.append(value)
+            continue
+        charset = part.get_content_charset() or "utf-8"
+        try:
+            bodies.append(raw.decode(charset, errors="replace"))
+        except LookupError:
+            bodies.append(raw.decode("utf-8", errors="replace"))
+
+    urls = extract_http_urls(
+        html.unescape("\n".join(bodies)),
+        max_urls=max_urls,
+    )
+    return urls, year, source_time
+
+def is_dmoz_content_locator(locator: str) -> bool:
     """Recognize DMOZ/ODP content dumps without claiming generic RDF files."""
     path = urlsplit(locator).path.lower().rstrip("/")
     if not path:
