@@ -16,3 +16,10 @@ require_qualified_region = true
 requests_per_second = 1.0
 max_global_inflight = 4
 require_qualified_region = true
+
+# Generic bounded discovery requests. This is intentionally much lower volume
+# than bulk-index processing and remains separate from evidence providers.
+[provider_budgets.web_discovery]
+requests_per_second = 2.0
+max_global_inflight = 4
+require_qualified_region = false
