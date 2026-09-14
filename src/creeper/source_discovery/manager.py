@@ -46,7 +46,7 @@ class SourcePoolTargets:
     max_cold_credit_per_origin: int = 12
     triage_batch: int = 16
     scout_parallelism: int = 4
-    max_search_directives: int = 3
+    max_search_directives: int = 2
 
     def __post_init__(self) -> None:
         values = (
