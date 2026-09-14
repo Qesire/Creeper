@@ -72,6 +72,15 @@ def source_id(
     )
 
 
+def source_candidate_id(canonical_url: str) -> str:
+    if not canonical_url.strip():
+        raise ValueError("canonical source URL is required")
+    return stable_identity(
+        "source-candidate",
+        {"url": canonical_url.strip()},
+    )
+
+
 def evidence_id(
     *,
     hostname: str,
