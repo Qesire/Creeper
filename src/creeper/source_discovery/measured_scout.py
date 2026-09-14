@@ -35,6 +35,12 @@ from creeper.source_discovery.models import (
 from creeper.sources.archive.cdxj import parse_cdxj_line
 from creeper.sources.archive.cdx import parse_cdx_line
 from creeper.sources.archive.warc import WarcFormatError, iter_warc_target_records
+from creeper.sources.non_snapshot import (
+    extract_http_urls,
+    is_mailbox_url_locator,
+    is_squid_access_locator,
+    parse_squid_access_line,
+)
 
 
 @dataclass(frozen=True)
@@ -484,6 +490,50 @@ def _extract_hosts(
             observation_keys=tuple(observations),
         )
 
+    if is_mailbox_url_locator(url):
+        for line in lines:
+            urls = extract_http_urls(line)
+            if not urls:
+                continue
+            sampled += 1
+            if sampled > policy.max_records:
+                break
+            for observed_url in urls:
+                hostname = _hostname_from_scalar(observed_url)
+                if hostname is not None:
+                    hosts.add(hostname)
+                    observations.append(hostname)
+        return ParsedHostSample(
+            sampled_records=min(sampled, policy.max_records),
+            hosts=hosts,
+            host_year_pairs=set(),
+            measurement_mode=MeasurementMode.HOST_ONLY,
+            observation_keys=tuple(observations),
+        )
+
+    if is_squid_access_locator(url):
+        for line in lines:
+            parsed_access = parse_squid_access_line(line)
+            if parsed_access is None:
+                continue
+            sampled += 1
+            if sampled > policy.max_records:
+                break
+            observed_url, year = parsed_access
+            hostname = _hostname_from_scalar(observed_url)
+            if hostname is None:
+                continue
+            hosts.add(hostname)
+            host_year_pairs.add((hostname, year))
+            observations.append(f"{hostname}\t{year}")
+        return ParsedHostSample(
+            sampled_records=min(sampled, policy.max_records),
+            hosts=hosts,
+            host_year_pairs=host_year_pairs,
+            measurement_mode=MeasurementMode.HOST_YEAR,
+            observation_keys=tuple(observations),
+        )
+
     if suffix in {".jsonl", ".ndjson"} or "ndjson" in lower_type:
         for line in lines:
             if sampled >= policy.max_records:
@@ -672,6 +722,8 @@ class MeasuredYieldScoutExecutor:
     @staticmethod
     def _windowable_line_resource(url: str) -> bool:
         suffix, compressed = _suffix(urlsplit(url).path)
+        if is_mailbox_url_locator(url) or is_squid_access_locator(url):
+            return not compressed
         return (not compressed) and suffix in {
             ".cdx",
             ".cdxj",

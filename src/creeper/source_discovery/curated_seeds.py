@@ -148,10 +148,80 @@ def curated_research_roots() -> tuple[SourceCandidate, ...]:
     )
 
 
+def curated_non_snapshot_roots() -> tuple[SourceCandidate, ...]:
+    """Audited contemporaneous URL reservoirs outside generic Web snapshots.
+
+    These roots enumerate monthly raw mailbox shards.  Message timestamps are
+    discovery/year hints only: mailbox URLs still require the normal Creeper
+    evidence path before a hostname-year can become accepted.
+    """
+
+    return (
+        SourceCandidate(
+            canonical_entrypoint="https://lists.gnu.org/archive/mbox/lynx-dev/",
+            source_family="HISTORICAL_MAILBOX_CATALOG",
+            level=SourceLevel.METASOURCE,
+            discovered_by="curated-live-research",
+            discovery_strategy="CURATED_NON_SNAPSHOT_SEARCH",
+            expected_year_from=1996,
+            expected_year_to=2001,
+            expected_volume=None,
+            temporal_semantics_prior=0.90,
+            enumerability_prior=1.0,
+            direct_evidence_prior=0.0,
+            baseline_overlap_prior=0.50,
+            access_cost_prior=0.05,
+            adapter_cost_prior=0.05,
+            confidence=1.0,
+            state=SourceState.DISCOVERED,
+        ),
+        SourceCandidate(
+            canonical_entrypoint="https://lists.gnu.org/archive/mbox/emacs-devel/",
+            source_family="HISTORICAL_MAILBOX_CATALOG",
+            level=SourceLevel.METASOURCE,
+            discovered_by="curated-live-research",
+            discovery_strategy="CURATED_NON_SNAPSHOT_SEARCH",
+            expected_year_from=2000,
+            expected_year_to=2001,
+            expected_volume=None,
+            temporal_semantics_prior=0.90,
+            enumerability_prior=1.0,
+            direct_evidence_prior=0.0,
+            baseline_overlap_prior=0.50,
+            access_cost_prior=0.05,
+            adapter_cost_prior=0.05,
+            confidence=1.0,
+            state=SourceState.DISCOVERED,
+        ),
+        SourceCandidate(
+            canonical_entrypoint="https://lists.gnu.org/archive/mbox/bug-findutils/",
+            source_family="HISTORICAL_MAILBOX_CATALOG",
+            level=SourceLevel.METASOURCE,
+            discovered_by="curated-live-research",
+            discovery_strategy="CURATED_NON_SNAPSHOT_SEARCH",
+            expected_year_from=2000,
+            expected_year_to=2001,
+            expected_volume=None,
+            temporal_semantics_prior=0.90,
+            enumerability_prior=1.0,
+            direct_evidence_prior=0.0,
+            baseline_overlap_prior=0.50,
+            access_cost_prior=0.05,
+            adapter_cost_prior=0.05,
+            confidence=1.0,
+            state=SourceState.DISCOVERED,
+        ),
+    )
+
+
 def curated_source_seeds() -> tuple[SourceCandidate, ...]:
     """Return all audited bootstrap roots without granting evidence authority."""
 
-    return curated_direct_catalogs() + curated_research_roots()
+    return (
+        curated_direct_catalogs()
+        + curated_research_roots()
+        + curated_non_snapshot_roots()
+    )
 
 
 def ensure_curated_source_seeds(

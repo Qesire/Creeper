@@ -18,6 +18,10 @@ from creeper.source_discovery.models import (
     is_direct_evidence_entrypoint,
 )
 from creeper.source_discovery.scrapy_sidecar import ScrapyLinkDiscovery
+from creeper.sources.non_snapshot import (
+    is_squid_access_locator,
+    is_target_mailbox_shard,
+)
 
 
 _BULK_SUFFIXES = (
@@ -94,6 +98,8 @@ def _tokens(value: str) -> frozenset[str]:
 
 
 def _is_bulk(url: str) -> bool:
+    if is_target_mailbox_shard(url) or is_squid_access_locator(url):
+        return True
     path = urlsplit(url).path.lower()
     return any(path.endswith(suffix) for suffix in _BULK_SUFFIXES)
 
@@ -233,7 +239,21 @@ class LinkPromotionAccumulator:
         ranked.sort(key=lambda item: (-item[0], item[1]))
         result: list[PromotedSource] = []
         for score, url, aggregate in ranked[: self.policy.max_promotions]:
-            if aggregate.bulk_artifact:
+            mailbox_shard = is_target_mailbox_shard(url)
+            squid_trace = is_squid_access_locator(url)
+            if mailbox_shard:
+                family = "HISTORICAL_MAILBOX_URL_CORPUS"
+                level = SourceLevel.SOURCE
+                enumerability = 1.0
+                direct = False
+                temporal = 0.9
+            elif squid_trace:
+                family = "HISTORICAL_PROXY_URL_TRACE"
+                level = SourceLevel.SOURCE
+                enumerability = 1.0
+                direct = False
+                temporal = 0.9
+            elif aggregate.bulk_artifact:
                 family = "BULK_ARTIFACT"
                 level = SourceLevel.SOURCE
                 enumerability = 0.95
@@ -274,8 +294,24 @@ class LinkPromotionAccumulator:
                     1.0 if is_direct_evidence_entrypoint(url) else 0.0
                 ),
                 baseline_overlap_prior=0.5,
-                access_cost_prior=0.5 if aggregate.bulk_artifact else 1.0,
-                adapter_cost_prior=0.75 if aggregate.bulk_artifact else 1.0,
+                access_cost_prior=(
+                    0.10
+                    if mailbox_shard
+                    else 0.20
+                    if squid_trace
+                    else 0.5
+                    if aggregate.bulk_artifact
+                    else 1.0
+                ),
+                adapter_cost_prior=(
+                    0.10
+                    if mailbox_shard
+                    else 0.10
+                    if squid_trace
+                    else 0.75
+                    if aggregate.bulk_artifact
+                    else 1.0
+                ),
                 confidence=confidence,
             )
             evidence = PromotionEvidence(
