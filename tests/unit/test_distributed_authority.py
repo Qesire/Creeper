@@ -382,6 +382,64 @@ class DistributedAuthorityTests(unittest.TestCase):
         assert claimed is not None
         self.assertEqual(claimed.work.task_class, TaskClass.SOURCE_SHARD)
 
+    def test_cloudflare_worker_claims_only_thin_contract_work(self) -> None:
+        edge = WorkerDescriptor(
+            worker_id="edge-cf",
+            runtime_class="cloudflare_worker",
+            region="cf-global",
+            architecture="wasm",
+            memory_bytes=128 * 1024**2,
+            cpu_count=1,
+            network_class="edge",
+            capabilities=(Capability.THIN_QUERY.value,),
+            producers=("ThinHistoricalQueryProducer",),
+            allowed_providers=("internet_archive",),
+        )
+        self.store.register_worker(edge)
+        self.store.configure_provider_budget(
+            "internet_archive",
+            requests_per_second=100.0,
+            max_global_inflight=2,
+            require_qualified_region=False,
+        )
+
+        malformed = WorkDefinition(
+            producer="ThinHistoricalQueryProducer",
+            task_class=TaskClass.HOST_BATCH,
+            input_identity="large.example",
+            coverage={
+                "provider": "internet_archive",
+                "year_from": 1997,
+                "year_to": 1997,
+                "thin_eligible": False,
+                "max_provider_requests": 1,
+                "estimated_response_bytes": 1024,
+            },
+            partition="bad",
+            algorithm_version="thin-v1",
+            required_capabilities=(Capability.THIN_QUERY.value,),
+            priority=10.0,
+        )
+        malformed_id = self.store.admit_work(malformed)
+        thin_id = self.store.admit_thin_host_probe(
+            hostname="thin.example",
+            provider="internet_archive",
+            year=1997,
+            priority=1.0,
+        )
+
+        lease = self.store.claim_work(edge.worker_id)
+
+        self.assertIsNotNone(lease)
+        assert lease is not None
+        self.assertEqual(lease.task_id, thin_id)
+        self.assertNotEqual(lease.task_id, malformed_id)
+        self.assertEqual(
+            lease.work.coverage["max_provider_requests"],
+            1,
+        )
+        self.assertTrue(lease.work.coverage["thin_eligible"])
+
     def test_worker_provider_allowlist_blocks_claim_and_permit(self) -> None:
         restricted = WorkerDescriptor(
             worker_id="worker-restricted-provider",
