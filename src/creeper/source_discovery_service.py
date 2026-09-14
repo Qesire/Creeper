@@ -1556,11 +1556,21 @@ def _root_query_runtime_adapters(
             raise
         except Exception as exc:
             row = research.get_query_row(query_id)
+            query_state = QueryState(str(row["state"]))
+            if query_state in {QueryState.COMPLETE, QueryState.EXHAUSTED}:
+                frontier_state = FrontierState.DONE
+                retry_at = None
+            elif query_state is QueryState.BLOCKED:
+                frontier_state = FrontierState.BLOCKED
+                retry_at = None
+            else:
+                frontier_state = FrontierState.RETRYABLE
+                retry_at = row["retry_at"]
             research.finish_frontier(
                 task_id,
-                state=FrontierState.RETRYABLE,
+                state=frontier_state,
                 checkpoint=checkpoint,
-                retry_at=row["retry_at"],
+                retry_at=retry_at,
                 last_error=f"{type(exc).__name__}: {exc}"[:1000],
             )
             raise
