@@ -85,8 +85,8 @@ def extract_http_urls(
     max_urls: int = 64,
 ) -> tuple[str, ...]:
     """Extract bounded HTTP(S) URLs without retaining surrounding text."""
-    if max_urls < 1:
-        raise ValueError("max_urls must be positive")
+    if isinstance(max_urls, bool) or not isinstance(max_urls, int) or max_urls < 1:
+        raise ValueError("max_urls must be a positive integer")
     result: list[str] = []
     seen: set[str] = set()
     for match in _HTTP_URL_RE.finditer(text):

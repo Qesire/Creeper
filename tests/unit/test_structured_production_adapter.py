@@ -53,6 +53,10 @@ class _OpenFile:
 
 
 class StructuredProductionAdapterTests(unittest.TestCase):
+    def test_cursor_parser_rejects_non_string_cursor(self):
+        with self.assertRaisesRegex(ValueError, "expected byte"):
+            StructuredProductionAdapter._cursor_value(1)
+
     def test_mailbox_adapter_persists_only_urls_and_year_hints(self):
         reservoir = Reservoir(
             reservoir_id="reservoir:mbox",

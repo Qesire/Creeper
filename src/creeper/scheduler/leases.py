@@ -32,6 +32,23 @@ class LeaseResult:
     elapsed_seconds: float = 0.0
     next_cursor: str | None = None
 
+    def __post_init__(self) -> None:
+        if not isinstance(self.lease_id, str) or not self.lease_id.strip():
+            raise ValueError("lease_id is required")
+        for name in ("records", "requests", "bytes_read"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError(f"{name} must be a non-negative integer")
+        if (
+            isinstance(self.elapsed_seconds, bool)
+            or not isinstance(self.elapsed_seconds, (int, float))
+            or not math.isfinite(float(self.elapsed_seconds))
+            or self.elapsed_seconds < 0
+        ):
+            raise ValueError("elapsed_seconds must be finite and non-negative")
+        if self.next_cursor is not None and not isinstance(self.next_cursor, str):
+            raise ValueError("next_cursor must be a string when provided")
+
 
 @dataclass(frozen=True)
 class WorkLease:
@@ -89,6 +106,10 @@ class WorkLease:
             not isinstance(self.owner, str) or not self.owner.strip()
         ):
             raise ValueError("owner must be non-empty when provided")
+        for name in ("cursor_start", "cursor_end"):
+            value = getattr(self, name)
+            if value is not None and not isinstance(value, str):
+                raise ValueError(f"{name} must be a string when provided")
 
     @classmethod
     def create(cls, *, reservoir_id: str, max_records: int, max_requests: int,
@@ -96,8 +117,23 @@ class WorkLease:
                expires_at: float | None = None, cursor_start: str | None = None,
                cursor_end: str | None = None, resource_class: str = "default",
                expected_evidence_tasks: int = 0, expected_novel_eed: float = 0.0) -> "WorkLease":
+        if now is not None and (
+            isinstance(now, bool)
+            or not isinstance(now, (int, float))
+            or not math.isfinite(float(now))
+            or now < 0
+        ):
+            raise ValueError("now must be finite and non-negative")
         if expires_at is None and now is not None:
-            expires_at = now + max_seconds
+            expires_at = float(now) + float(max_seconds)
+        elif expires_at is not None and now is not None:
+            if (
+                isinstance(expires_at, bool)
+                or not isinstance(expires_at, (int, float))
+                or not math.isfinite(float(expires_at))
+                or expires_at < now
+            ):
+                raise ValueError("expires_at must be finite and not precede now")
         return cls(str(uuid4()), reservoir_id, cursor_start, cursor_end, max_records,
                    max_requests, max_bytes, max_seconds, resource_class,
                    expected_evidence_tasks, expected_novel_eed, None, expires_at)
@@ -112,7 +148,7 @@ class WorkLease:
         return replace(self, state=target, **changes)
 
     def grant(self, *, owner: str) -> "WorkLease":
-        if not owner.strip():
+        if not isinstance(owner, str) or not owner.strip():
             raise ValueError("owner is required")
         return self._move(LeaseState.CREATED, LeaseState.GRANTED, owner=owner)
 
@@ -147,17 +183,49 @@ class WorkLease:
             raise StateTransitionError(f"invalid lease transition: {self.state} -> {LeaseState.EXPIRED}")
         return LeaseState.EXPIRED
 
-    def expired(self) -> "WorkLease":
-        if self.state is not LeaseState.EXPIRED:
-            return replace(self, state=LeaseState.EXPIRED)
-        return self
+    def expired(self, *, now: float) -> "WorkLease":
+        if self.state is LeaseState.EXPIRED:
+            return self
+        self.expire(now)
+        return replace(self, state=LeaseState.EXPIRED)
 
     def resume(self) -> "WorkLease":
         if self.state not in {LeaseState.PAUSED, LeaseState.PREEMPTED}:
             raise StateTransitionError(f"invalid lease transition: {self.state} -> {LeaseState.GRANTED}")
         return replace(self, state=LeaseState.GRANTED)
 
-    def retry(self) -> "WorkLease":
+    def retry(
+        self,
+        *,
+        now: float,
+        expires_at: float | None = None,
+    ) -> "WorkLease":
         if self.state not in {LeaseState.EXPIRED, LeaseState.ABORTED, LeaseState.PREEMPTED}:
             raise StateTransitionError("only ended leases can be retried")
-        return replace(self, lease_id=str(uuid4()), state=LeaseState.CREATED, owner=None)
+        if (
+            isinstance(now, bool)
+            or not isinstance(now, (int, float))
+            or not math.isfinite(float(now))
+            or now < 0
+        ):
+            raise ValueError("retry time must be finite and non-negative")
+        if expires_at is None:
+            new_expiry = float(now) + float(self.max_seconds)
+        else:
+            if (
+                isinstance(expires_at, bool)
+                or not isinstance(expires_at, (int, float))
+                or not math.isfinite(float(expires_at))
+                or expires_at < now
+            ):
+                raise ValueError(
+                    "retry expires_at must be finite and not precede retry time"
+                )
+            new_expiry = float(expires_at)
+        return replace(
+            self,
+            lease_id=str(uuid4()),
+            state=LeaseState.CREATED,
+            owner=None,
+            expires_at=new_expiry,
+        )

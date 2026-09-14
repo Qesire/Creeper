@@ -6,11 +6,44 @@ from unittest.mock import patch
 from creeper.sources.archive.warc import WarcMetadataLease, WarcTargetRecord
 from creeper.sources.archive.warc_source import (
     WarcSourceLeaseExecutor,
+    WarcSourceLeaseResult,
     WarcSourceObservation,
 )
 
 
 class WarcSourceLeaseExecutorTests(unittest.TestCase):
+    def test_models_reject_lossy_year_and_accounting_values(self) -> None:
+        with self.assertRaisesRegex(ValueError, "year_hint"):
+            WarcSourceObservation(
+                source_id="archive-1",
+                locator="warc-byte:0:1",
+                target_uri="https://example.org/",
+                year_hint=1999.5,
+                record_type="response",
+            )
+        with self.assertRaisesRegex(ValueError, "scanned_records"):
+            WarcSourceLeaseResult(
+                observations=(),
+                next_cursor=None,
+                exhausted=True,
+                scanned_records=1.5,
+                bytes_advanced=0,
+            )
+        with self.assertRaisesRegex(ValueError, "exhausted"):
+            WarcSourceLeaseResult(
+                observations=(),
+                next_cursor=None,
+                exhausted=1,
+                scanned_records=0,
+                bytes_advanced=0,
+            )
+        with self.assertRaisesRegex(ValueError, "target_year_from"):
+            WarcSourceLeaseExecutor(
+                "fixture.warc",
+                source_id="archive-1",
+                target_year_from=1996.5,
+            )
+
     def test_observation_exposes_hint_but_never_direct_authority(self) -> None:
         observation = WarcSourceObservation(
             source_id="archive-1",

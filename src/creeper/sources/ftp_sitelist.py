@@ -44,6 +44,22 @@ class FtpSitelistRecord:
     member_name: str
     record_index: int
 
+    def __post_init__(self) -> None:
+        if not isinstance(self.hostname, str) or not self.hostname.strip():
+            raise ValueError("hostname is required")
+        if not isinstance(self.source_time, str) or not self.source_time.strip():
+            raise ValueError("source_time is required")
+        if isinstance(self.year, bool) or not isinstance(self.year, int):
+            raise ValueError("year must be an integer")
+        if not isinstance(self.member_name, str):
+            raise ValueError("member_name must be a string")
+        if (
+            isinstance(self.record_index, bool)
+            or not isinstance(self.record_index, int)
+            or self.record_index < 0
+        ):
+            raise ValueError("record_index must be a non-negative integer")
+
 
 def is_ftp_sitelist_locator(locator: str) -> bool:
     path = urlsplit(locator).path
@@ -138,8 +154,14 @@ def parse_ftp_sitelist_zip(
     max_decompressed_bytes: int = 32 * 1024 * 1024,
 ) -> tuple[FtpSitelistRecord, ...]:
     """Extract dated site records from one complete, bounded ZIP artifact."""
-    if max_decompressed_bytes < 1:
-        raise ValueError("max_decompressed_bytes must be positive")
+    if (
+        isinstance(max_decompressed_bytes, bool)
+        or not isinstance(max_decompressed_bytes, int)
+        or max_decompressed_bytes < 1
+    ):
+        raise ValueError("max_decompressed_bytes must be a positive integer")
+    if not isinstance(payload, bytes):
+        raise ValueError("payload must be bytes")
 
     total_uncompressed = 0
     result: list[FtpSitelistRecord] = []

@@ -1,6 +1,6 @@
 import unittest
 
-from creeper.scheduler.leases import LeaseState, StateTransitionError, WorkLease
+from creeper.scheduler.leases import LeaseResult, LeaseState, StateTransitionError, WorkLease
 
 
 class WorkLeaseTests(unittest.TestCase):
@@ -65,11 +65,76 @@ class WorkLeaseTests(unittest.TestCase):
                 max_seconds=30,
                 expires_at=float("nan"),
             )
+        with self.assertRaisesRegex(ValueError, "not precede now"):
+            WorkLease.create(
+                reservoir_id="arquivo:demo",
+                max_records=10,
+                max_requests=2,
+                max_bytes=4096,
+                max_seconds=30,
+                now=100.0,
+                expires_at=99.0,
+            )
+
+    def test_lease_result_rejects_lossy_accounting(self):
+        with self.assertRaisesRegex(ValueError, "records"):
+            LeaseResult("lease", records=1.5)
+        with self.assertRaisesRegex(ValueError, "elapsed_seconds"):
+            LeaseResult("lease", elapsed_seconds=float("nan"))
+        with self.assertRaisesRegex(ValueError, "next_cursor"):
+            LeaseResult("lease", next_cursor=123)
+
+    def test_create_and_grant_reject_invalid_identity_time(self):
+        with self.assertRaisesRegex(ValueError, "now must be finite"):
+            WorkLease.create(
+                reservoir_id="arquivo:demo",
+                max_records=1,
+                max_requests=1,
+                max_bytes=1,
+                max_seconds=1,
+                now=True,
+            )
+        with self.assertRaisesRegex(ValueError, "owner"):
+            self._lease().grant(owner=123)
 
     def test_expire_rejects_nonfinite_clock_value(self):
         lease = self._lease().grant(owner="worker-1")
         with self.assertRaisesRegex(ValueError, "now must be finite"):
             lease.expire(float("nan"))
+
+    def test_retry_requires_fresh_valid_deadline(self):
+        expired = self._lease().grant(owner="worker").expired(now=130.1)
+        with self.assertRaises(TypeError):
+            expired.retry()
+        with self.assertRaisesRegex(ValueError, "retry time"):
+            expired.retry(now=float("nan"))
+        with self.assertRaisesRegex(ValueError, "not precede retry time"):
+            expired.retry(now=200.0, expires_at=199.0)
+        retry = expired.retry(now=200.0, expires_at=260.0)
+        self.assertEqual(retry.expires_at, 260.0)
+
+    def test_expired_helper_cannot_bypass_lifecycle_or_deadline(self):
+        with self.assertRaises(StateTransitionError):
+            self._lease().expired(now=130.1)
+        granted = self._lease().grant(owner="worker")
+        with self.assertRaises(StateTransitionError):
+            granted.expired(now=129.9)
+        succeeded = granted.start().complete()
+        with self.assertRaises(StateTransitionError):
+            succeeded.expired(now=130.1)
+        expired = granted.expired(now=130.1)
+        self.assertEqual(expired.state, LeaseState.EXPIRED)
+
+    def test_cursor_types_are_explicit(self):
+        with self.assertRaisesRegex(ValueError, "cursor_start"):
+            WorkLease.create(
+                reservoir_id="arquivo:demo",
+                max_records=1,
+                max_requests=1,
+                max_bytes=1,
+                max_seconds=1,
+                cursor_start=0,
+            )
 
     def test_state_transitions_are_guarded_and_immutable(self):
         created = self._lease()
@@ -85,13 +150,17 @@ class WorkLeaseTests(unittest.TestCase):
     def test_expiry_and_retry_do_not_resume_terminal_lease(self):
         lease = self._lease().grant(owner="worker-1")
         self.assertEqual(lease.expire(130.1), LeaseState.EXPIRED)
-        expired = lease.expired()
+        expired = lease.expired(now=130.1)
         with self.assertRaises(StateTransitionError):
             expired.resume()
 
-        retry = expired.retry()
+        retry = expired.retry(now=200.0)
         self.assertNotEqual(retry.lease_id, expired.lease_id)
         self.assertEqual(retry.state, LeaseState.CREATED)
+        self.assertIsNone(retry.owner)
+        self.assertEqual(retry.expires_at, 230.0)
+        granted = retry.grant(owner="worker-2")
+        self.assertEqual(granted.expires_at, 230.0)
 
 
 if __name__ == "__main__":

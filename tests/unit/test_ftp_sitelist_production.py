@@ -55,6 +55,10 @@ def _lease(reservoir: Reservoir, *, cursor: str | None = None) -> WorkLease:
 
 
 class FtpSitelistProductionAdapterTests(unittest.TestCase):
+    def test_cursor_parser_rejects_non_string_cursor(self) -> None:
+        with self.assertRaisesRegex(ValueError, "invalid FTP sitelist cursor"):
+            FtpSitelistProductionAdapter._cursor_index(1)
+
     def test_audited_sitelist_emits_direct_year_and_resumable_cursor(self) -> None:
         reservoir = Reservoir(
             reservoir_id="reservoir:ftp-list",
