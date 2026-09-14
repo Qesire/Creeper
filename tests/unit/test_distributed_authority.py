@@ -462,7 +462,7 @@ class DistributedAuthorityTests(unittest.TestCase):
             "internet_archive",
             requests_per_second=100.0,
             max_global_inflight=2,
-            require_qualified_region=False,
+            require_qualified_region=True,
         )
 
         malformed = WorkDefinition(
@@ -501,6 +501,16 @@ class DistributedAuthorityTests(unittest.TestCase):
             1,
         )
         self.assertTrue(lease.work.coverage["thin_eligible"])
+        permit = self.store.issue_provider_permit(
+            "internet_archive",
+            worker_id=lease.worker_id,
+            task_id=lease.task_id,
+            generation=lease.generation,
+            request_id="cf-thin-request-1",
+        )
+        self.assertIsNotNone(permit)
+        assert permit is not None
+        self.assertEqual(permit.request_id, "cf-thin-request-1")
 
     def test_worker_provider_allowlist_blocks_claim_and_permit(self) -> None:
         restricted = WorkerDescriptor(
