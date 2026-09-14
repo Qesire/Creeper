@@ -58,6 +58,59 @@ class EvidenceServiceCliTests(unittest.IsolatedAsyncioTestCase):
                 0.0,
             )
 
+    async def test_pre_registered_active_cdx_service_is_loaded_with_bootstrap_pool(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            control = ControlStore(root / "control.sqlite3")
+            try:
+                control.register_cdx_service(
+                    service_name="discovered",
+                    endpoint="https://discovered.example/cdx",
+                    requests_per_second=0.75,
+                    max_inflight=3,
+                    weight=2.0,
+                    provenance="verified-discovery-test",
+                    active=True,
+                )
+            finally:
+                control.close()
+
+            report = await run_service(
+                root,
+                owner="test-worker-discovered",
+                once=True,
+                endpoint="https://example.invalid/cdx",
+                claim_batch_size=4,
+                lease_seconds=30.0,
+                max_inflight=2,
+                requests_per_second=0.0,
+                max_connections=4,
+                max_keepalive_connections=2,
+                throttle_floor_seconds=0.0,
+                timeout=1.0,
+                max_retries=0,
+                retry_base_seconds=1.0,
+                retry_max_seconds=10.0,
+                poll_min_seconds=0.01,
+                poll_max_seconds=0.1,
+            )
+            self.assertEqual(report.claimed, 0)
+
+            telemetry = RuntimeTelemetryStore(root / "telemetry.sqlite3")
+            try:
+                snapshot = telemetry.snapshot()
+            finally:
+                telemetry.close()
+            self.assertEqual(snapshot.gauges["cdx_loaded_services"], 6.0)
+            self.assertEqual(
+                snapshot.gauges["cdx_discovered_configured_rps"],
+                0.75,
+            )
+            self.assertEqual(
+                snapshot.gauges["cdx_discovered_max_inflight"],
+                3.0,
+            )
+
     async def test_invalid_idle_backoff_is_rejected_before_worker_loop(self):
         with tempfile.TemporaryDirectory() as tmp:
             with self.assertRaisesRegex(ValueError, "poll bounds"):
