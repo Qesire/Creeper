@@ -6,6 +6,7 @@ ControlStore.connection, preserving the existing SQLite-WAL authority.
 from __future__ import annotations
 
 import json
+import math
 import sqlite3
 import time
 from collections.abc import Iterable
@@ -62,6 +63,8 @@ class ResearchRegistry:
                 compiler_version TEXT NOT NULL,
                 context_hash TEXT NOT NULL,
                 hard_max_requests INTEGER NOT NULL CHECK(hard_max_requests > 0),
+                requests_started INTEGER NOT NULL DEFAULT 0
+                    CHECK(requests_started >= 0),
                 stop_conditions_json TEXT NOT NULL,
                 source TEXT NOT NULL,
                 state TEXT NOT NULL,
@@ -88,6 +91,8 @@ class ResearchRegistry:
                 checkpoint_json TEXT NOT NULL,
                 pages_completed INTEGER NOT NULL DEFAULT 0,
                 attempts INTEGER NOT NULL DEFAULT 0,
+                wall_seconds_used REAL NOT NULL DEFAULT 0
+                    CHECK(wall_seconds_used >= 0),
                 retry_at REAL,
                 last_error TEXT NOT NULL DEFAULT '',
                 created_at REAL NOT NULL,
@@ -303,7 +308,37 @@ class ResearchRegistry:
                 ON research_learning_epochs(policy_version, state, started_at);
             """
         )
-        # Additive migration for databases created by the first L3 revision.
+        # Additive migrations for databases created by earlier L3 revisions.
+        program_columns = {
+            str(row["name"])
+            for row in self.connection.execute(
+                "PRAGMA table_info(research_query_programs)"
+            ).fetchall()
+        }
+        if "requests_started" not in program_columns:
+            self.connection.execute(
+                """
+                ALTER TABLE research_query_programs
+                ADD COLUMN requests_started INTEGER NOT NULL DEFAULT 0
+                CHECK(requests_started >= 0)
+                """
+            )
+
+        query_columns = {
+            str(row["name"])
+            for row in self.connection.execute(
+                "PRAGMA table_info(research_queries)"
+            ).fetchall()
+        }
+        if "wall_seconds_used" not in query_columns:
+            self.connection.execute(
+                """
+                ALTER TABLE research_queries
+                ADD COLUMN wall_seconds_used REAL NOT NULL DEFAULT 0
+                CHECK(wall_seconds_used >= 0)
+                """
+            )
+
         arm_columns = {
             str(row["name"])
             for row in self.connection.execute(
@@ -405,6 +440,97 @@ class ResearchRegistry:
         with self.connection:
             return self._register_query_locked(program_id, query, now)
 
+    def reserve_program_request(self, program_id: str) -> bool:
+        """Atomically reserve one provider request from a program hard budget.
+
+        Reservation happens before any network I/O. Failed, retryable and
+        timed-out provider calls intentionally still consume a reservation:
+        hard_max_requests is a cost/safety ceiling, not a success counter.
+        """
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            row = self.connection.execute(
+                """
+                SELECT state, hard_max_requests, requests_started
+                FROM research_query_programs
+                WHERE program_id=?
+                """,
+                (program_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(program_id)
+            if (
+                str(row["state"]) != "READY"
+                or int(row["requests_started"]) >= int(row["hard_max_requests"])
+            ):
+                self.connection.commit()
+                return False
+            changed = self.connection.execute(
+                """
+                UPDATE research_query_programs
+                SET requests_started=requests_started+1
+                WHERE program_id=?
+                  AND state='READY'
+                  AND requests_started<hard_max_requests
+                """,
+                (program_id,),
+            ).rowcount
+            self.connection.commit()
+            return changed == 1
+        except BaseException:
+            self.connection.rollback()
+            raise
+
+    def program_request_budget(self, program_id: str) -> tuple[int, int]:
+        row = self.connection.execute(
+            """
+            SELECT requests_started, hard_max_requests
+            FROM research_query_programs
+            WHERE program_id=?
+            """,
+            (program_id,),
+        ).fetchone()
+        if row is None:
+            raise KeyError(program_id)
+        return int(row["requests_started"]), int(row["hard_max_requests"])
+
+    def exhaust_program_budget(self, program_id: str) -> None:
+        """Close unstarted work after the immutable request ceiling is spent."""
+        with self.connection:
+            row = self.connection.execute(
+                """
+                SELECT hard_max_requests, requests_started
+                FROM research_query_programs
+                WHERE program_id=?
+                """,
+                (program_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(program_id)
+            if int(row["requests_started"]) < int(row["hard_max_requests"]):
+                return
+            self.connection.execute(
+                """
+                UPDATE research_query_programs
+                SET state='EXHAUSTED'
+                WHERE program_id=? AND state='READY'
+                """,
+                (program_id,),
+            )
+            self.connection.execute(
+                """
+                UPDATE research_queries
+                SET state='EXHAUSTED', retry_at=NULL,
+                    last_error=CASE
+                        WHEN last_error='' THEN 'program hard request budget exhausted'
+                        ELSE last_error
+                    END,
+                    updated_at=?
+                WHERE program_id=? AND state IN ('READY','RETRYABLE')
+                """,
+                (self.clock(), program_id),
+            )
+
     def get_root(self, root_id: str) -> RootSurface:
         row = self.connection.execute(
             "SELECT * FROM research_roots WHERE root_id=? AND active=1",
@@ -505,12 +631,16 @@ class ResearchRegistry:
         checkpoint: SearchCheckpoint | None,
         state: QueryState | str,
         pages_delta: int = 0,
+        wall_seconds_delta: float = 0.0,
         retry_at: float | None = None,
         last_error: str = "",
     ) -> None:
         state = QueryState(state)
         if pages_delta < 0:
             raise ValueError("pages_delta must be non-negative")
+        wall_seconds_delta = float(wall_seconds_delta)
+        if not math.isfinite(wall_seconds_delta) or wall_seconds_delta < 0:
+            raise ValueError("wall_seconds_delta must be finite and non-negative")
         now = self.clock()
         with self.connection:
             changed = self.connection.execute(
@@ -519,13 +649,14 @@ class ResearchRegistry:
                     checkpoint_json=?, state=?,
                     pages_completed=pages_completed+?,
                     attempts=attempts+CASE WHEN ? IN ('RUNNING','RETRYABLE','FAILED') THEN 1 ELSE 0 END,
+                    wall_seconds_used=wall_seconds_used+?,
                     retry_at=?, last_error=?, updated_at=?
                 WHERE query_id=?
                 """,
                 (
                     _dump(checkpoint.as_dict() if checkpoint else {}),
-                    state.value, pages_delta, state.value, retry_at,
-                    last_error, now, query_id,
+                    state.value, pages_delta, state.value, wall_seconds_delta,
+                    retry_at, last_error, now, query_id,
                 ),
             ).rowcount
         if changed != 1:
