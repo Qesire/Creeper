@@ -57,6 +57,23 @@ class EvidenceBacklogAdmissionTests(unittest.TestCase):
             4,
         )
 
+    def test_nonfinite_reservation_timing_is_rejected_before_persistence(self):
+        with self.assertRaisesRegex(ValueError, "finite and positive"):
+            self.admission.try_reserve(
+                provider="wayback",
+                amount=1,
+                capacity=1,
+                ttl_seconds=float("nan"),
+            )
+        self.assertEqual(self.admission.reserved("wayback"), 0)
+
+        self.now = float("nan")
+        with self.assertRaisesRegex(ValueError, "clock must be finite"):
+            self.admission.available_capacity(
+                provider="wayback",
+                capacity=1,
+            )
+
     def test_concurrent_connections_cannot_oversubscribe_capacity(self):
         second_control = ControlStore(self.path, clock=lambda: self.now)
         second = EvidenceBacklogAdmission(second_control)
