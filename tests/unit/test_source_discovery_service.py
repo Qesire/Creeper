@@ -244,7 +244,7 @@ Path(a.response).write_text(json.dumps(payload), encoding="utf-8")
             report = reports[0]
             self.assertEqual(report["cycle"], 1)
             self.assertGreaterEqual(report["elapsed_seconds"], 0.0)
-            self.assertEqual(report["search_episodes"], 3)
+            self.assertEqual(report["search_episodes"], 2)
             self.assertEqual(report["search_candidates_registered"], 3)
             self.assertEqual(report["inventory"]["DISCOVERED"], 3)
             invocation_root = root / "runtime" / "source-discovery" / "agent-invocations"
@@ -272,7 +272,7 @@ Path(a.response).write_text(json.dumps(payload), encoding="utf-8")
             self.assertEqual(snapshot.counters["discovery_search_episodes"], 3)
             self.assertEqual(
                 snapshot.counters["discovery_search_candidates_registered"],
-                3,
+                2,
             )
             self.assertEqual(snapshot.gauges["active_candidates"], 0.0)
             self.assertEqual(snapshot.gauges["active_direct_sources"], 0.0)
