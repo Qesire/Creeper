@@ -303,7 +303,11 @@ Path(a.response).write_text(json.dumps(payload), encoding="utf-8")
                 )
                 self.assertEqual(request["admission"]["min_expected_volume"], 100000)
                 self.assertEqual(request["admission"]["direct_min_expected_volume"], 10000)
-                self.assertTrue(request["requirements"]["prefer_direct_evidence_bulk"])
+                self.assertFalse(request["requirements"]["prefer_direct_evidence_bulk"])
+                self.assertIn(
+                    "do not collapse search",
+                    request["requirements"]["source_portfolio"],
+                )
                 audit = __import__("json").loads(
                     (invocation / "admission.json").read_text(encoding="utf-8")
                 )
