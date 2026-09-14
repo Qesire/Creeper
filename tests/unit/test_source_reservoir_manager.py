@@ -165,6 +165,49 @@ class SourceReservoirManagerTests(unittest.TestCase):
             (direct.source_key,),
         )
 
+    def test_arquivo_cdx_catalog_is_background_but_loc_root_stays_foreground(self) -> None:
+        arquivo = SourceCandidate(
+            canonical_entrypoint="https://arquivo.pt/datasets/cdxj/",
+            source_family="PUBLIC_ARCHIVE_INDEX_CATALOG",
+            level=SourceLevel.METASOURCE,
+            discovered_by="curated-official-seed",
+            discovery_strategy="CURATED_DIRECT_CATALOG",
+            confidence=1.0,
+        )
+        loc = SourceCandidate(
+            canonical_entrypoint=(
+                "https://data.labs.loc.gov/us-elections/"
+                "by-year/2000/manifest.html"
+            ),
+            source_family="PUBLIC_ARCHIVE_INDEX_CATALOG",
+            level=SourceLevel.METASOURCE,
+            discovered_by="curated-official-seed",
+            discovery_strategy="CURATED_DIRECT_CATALOG",
+            confidence=1.0,
+        )
+        self.registry.register_proposal(arquivo)
+        self.registry.register_proposal(loc)
+        manager = SourceReservoirManager(
+            self.registry,
+            targets=SourcePoolTargets(
+                active_min=0,
+                active_target=0,
+                warm_min=0,
+                warm_target=0,
+                cold_min=0,
+                cold_target=0,
+                triage_batch=1,
+            ),
+        )
+
+        plan = manager.plan()
+
+        self.assertEqual(plan.triage_source_keys, (loc.source_key,))
+        self.assertEqual(
+            plan.background_triage_source_keys,
+            (arquivo.source_key,),
+        )
+
     def test_existing_cold_reserve_is_consumed_before_agent_search(self) -> None:
         first = self.candidate("cold-a", confidence=0.9)
         second = self.candidate("cold-b", confidence=0.4)
