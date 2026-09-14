@@ -20,7 +20,7 @@ from creeper.storage.control_store import ControlStore
 class CuratedSourceSeedTests(unittest.TestCase):
     def test_research_roots_are_target_period_discovery_only(self):
         roots = curated_research_roots()
-        self.assertEqual(len(roots), 8)
+        self.assertEqual(len(roots), 4)
         self.assertTrue(
             any(item.canonical_entrypoint == "https://archive95.net/sources" for item in roots)
         )
@@ -77,7 +77,7 @@ class CuratedSourceSeedTests(unittest.TestCase):
     def test_direct_record_seed_is_live_ftp_sitelist_artifact(self):
         roots = curated_direct_record_sources()
 
-        self.assertEqual(len(roots), 4)
+        self.assertEqual(len(roots), 8)
         self.assertEqual(
             {root.source_family for root in roots},
             {
