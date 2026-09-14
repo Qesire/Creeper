@@ -101,7 +101,7 @@ max_keepalive_connections = 4
             with self.assertRaises(RuntimeError):
                 config.load_secret()
 
-    def test_search_only_worker_does_not_require_cdx_configuration(self) -> None:
+    def test_search_only_worker_is_rejected_in_production_fabric(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             config_path = root / "search-worker.toml"
@@ -122,13 +122,11 @@ allowed_providers = ["web_search"]
                 encoding="utf-8",
             )
 
-            config = load_worker_config(config_path)
-
-        self.assertEqual(config.cdx_providers, ())
-        self.assertEqual(
-            config.descriptor.capabilities,
-            ("SEARCH_QUERY",),
-        )
+            with self.assertRaisesRegex(
+                ValueError,
+                "production workers require ONLINE_QUERY",
+            ):
+                load_worker_config(config_path)
 
     def test_online_query_worker_without_cdx_configuration_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -153,7 +151,7 @@ allowed_providers = ["internet_archive"]
 
             with self.assertRaisesRegex(
                 ValueError,
-                "ONLINE_QUERY/THIN_QUERY workers require CDX providers",
+                "archive-aware production workers require CDX providers",
             ):
                 load_worker_config(config_path)
 
