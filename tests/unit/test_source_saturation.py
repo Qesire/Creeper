@@ -117,6 +117,14 @@ class SourceSaturationControllerTests(unittest.TestCase):
             )
         return candidates
 
+    def test_policy_rejects_nonfinite_or_fractional_thresholds(self) -> None:
+        with self.assertRaisesRegex(ValueError, "min_measured_siblings"):
+            SaturationPolicy(min_measured_siblings=1.5)
+        with self.assertRaisesRegex(ValueError, "finite and non-negative"):
+            SaturationPolicy(max_total_novel_eed_for_zero_class=float("nan"))
+        with self.assertRaisesRegex(ValueError, "finite and positive"):
+            SaturationPolicy(suppression_ttl_seconds=float("inf"))
+
     def test_31_zero_yield_siblings_do_not_suppress_origin(self) -> None:
         origin = "https://data.labs.loc.gov"
         self._measure_origin(origin, 31)
