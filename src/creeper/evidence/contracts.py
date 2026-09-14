@@ -29,6 +29,7 @@ _PARSER_KINDS = frozenset(
         "cdx",
         "cdxj",
         "jsonl",
+        "rdf_links",
         "delimited",
         "lines",
         "warc_arc",
@@ -183,6 +184,8 @@ def parser_kind_from_locator(locator: str) -> str:
         return "cdx"
     if path.endswith((".jsonl", ".jsonl.gz")):
         return "jsonl"
+    if path.endswith((".rdf", ".rdf.gz", ".rdf.u8", ".rdf.u8.gz")):
+        return "rdf_links"
     if path.endswith((".csv", ".csv.gz", ".tsv", ".tsv.gz")):
         return "delimited"
     return "lines"
