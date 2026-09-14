@@ -50,12 +50,19 @@ class CDXProviderConfig:
     max_retries: int = 3
     weight: float = 1.0
     dialect: str = "wayback"
+    row_limit: int = 150_000
 
     def __post_init__(self) -> None:
         if not self.name.strip() or not self.endpoint.strip():
             raise ValueError("CDX provider name and endpoint are required")
         if self.requests_per_second < 0:
             raise ValueError("CDX provider requests_per_second must be non-negative")
+        if (
+            not isinstance(self.row_limit, int)
+            or isinstance(self.row_limit, bool)
+            or self.row_limit < 1
+        ):
+            raise ValueError("CDX provider row_limit must be a positive integer")
         if self.max_inflight < 1 or self.max_connections < 1:
             raise ValueError("CDX provider inflight/connections must be positive")
         if (
@@ -116,6 +123,7 @@ class CDXProviderConfig:
             max_retries=int(item("max_retries", base.max_retries)),
             weight=float(item("weight", base.weight)),
             dialect=str(item("dialect", base.dialect)),
+            row_limit=int(item("row_limit", base.row_limit)),
         )
 
     def as_dict(self) -> dict[str, object]:
@@ -132,6 +140,7 @@ class CDXProviderConfig:
             "max_retries": self.max_retries,
             "weight": self.weight,
             "dialect": self.dialect,
+            "row_limit": self.row_limit,
         }
 
 
@@ -282,6 +291,7 @@ class AsyncCDXProviderPool:
                 endpoint=config.endpoint,
                 provider=logical_provider,
                 source_id=config.name,
+                limit=config.row_limit,
                 timeout=config.timeout,
                 max_retries=config.max_retries,
                 requests_per_second=config.requests_per_second,
@@ -439,6 +449,7 @@ class AsyncCDXProviderPool:
                     client.requests_per_second
                 ),
                 "max_inflight": int(self._inflight[name]),
+                "row_limit": int(client.limit),
             }
         return result
 
