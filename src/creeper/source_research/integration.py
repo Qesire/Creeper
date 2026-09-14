@@ -340,6 +340,11 @@ class ResearchIntegrationBridge:
                     "reuse_key": plan.reuse_key,
                     "confidence": plan.confidence,
                     "validation": plan.validation,
+                    "blocked_subject": directive.subject or "",
+                    "trigger_reason": directive.trigger_reason.value,
+                    "research_strategy": directive.strategy,
+                    "call_identity": result.call_identity,
+                    "authority": "proposal_only",
                 }
                 self.research.upsert_rule(
                     RuleRecord(
