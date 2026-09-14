@@ -21,6 +21,11 @@ from types import MappingProxyType
 from typing import Mapping
 from urllib.parse import urlsplit
 
+from creeper.sources.non_snapshot import (
+    is_mailbox_url_locator,
+    is_squid_access_locator,
+)
+
 
 _CONTRACT_MARKER = ":evc1:"
 _CONTRACT_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,127}$")
@@ -31,6 +36,8 @@ _PARSER_KINDS = frozenset(
         "jsonl",
         "delimited",
         "lines",
+        "mbox_urls",
+        "squid_access",
         "warc_arc",
     }
 )
@@ -175,6 +182,10 @@ CDXJ_DIRECT_CONTRACT = SourceEvidenceContract(
 
 def parser_kind_from_locator(locator: str) -> str:
     path = urlsplit(locator).path.lower()
+    if is_mailbox_url_locator(locator):
+        return "mbox_urls"
+    if is_squid_access_locator(locator):
+        return "squid_access"
     if path.endswith((".warc.gz", ".arc.gz", ".warc", ".arc")):
         return "warc_arc"
     if path.endswith((".cdxj", ".cdxj.gz")):
