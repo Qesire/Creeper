@@ -72,14 +72,19 @@ class WorkerRuntimeConfig:
     descriptor: WorkerDescriptor
     secret_env: str
     poll_seconds: float
+    claim_wait_seconds: float
     lease_seconds: float
     cdx_providers: tuple[CDXProviderConfig, ...]
 
     def __post_init__(self) -> None:
         if not self.coordinator_url.strip() or not self.secret_env.strip():
             raise ValueError("worker coordinator_url and secret_env are required")
-        if self.poll_seconds <= 0 or self.lease_seconds <= 0:
-            raise ValueError("worker polling/lease intervals must be positive")
+        if (
+            self.poll_seconds <= 0
+            or not 0 <= self.claim_wait_seconds <= 25
+            or self.lease_seconds <= 0
+        ):
+            raise ValueError("worker polling/claim/lease intervals are invalid")
         capabilities = set(self.descriptor.capabilities)
         exploration_caps = {"WEB_DISCOVERY", "SEARCH_QUERY"} & capabilities
         if exploration_caps and "ONLINE_QUERY" not in capabilities:
@@ -240,6 +245,7 @@ def load_worker_config(path: Path) -> WorkerRuntimeConfig:
         descriptor=descriptor,
         secret_env=str(section.get("secret_env", "CREEPER_WORKER_SECRET")),
         poll_seconds=float(section.get("poll_seconds", 1.0)),
+        claim_wait_seconds=float(section.get("claim_wait_seconds", 0.0)),
         lease_seconds=float(section.get("lease_seconds", 300.0)),
         cdx_providers=providers,
     )
