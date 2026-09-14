@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import time
 from dataclasses import dataclass
 from enum import StrEnum
@@ -56,14 +57,21 @@ def platform_year_harvest_id(
     normalized = normalize_official(subject)
     if normalized is None:
         raise ValueError("platform harvest subject must be a valid hostname")
-    if not 1996 <= int(target_year) <= 2001:
-        raise ValueError("platform harvest year must be within 1996-2001")
-    if not provider.strip() or not request_template_hash.strip() or not policy_version.strip():
+    if (
+        isinstance(target_year, bool)
+        or not isinstance(target_year, int)
+        or not 1996 <= target_year <= 2001
+    ):
+        raise ValueError("platform harvest year must be an integer within 1996-2001")
+    if any(
+        not isinstance(value, str) or not value.strip()
+        for value in (provider, request_template_hash, policy_version)
+    ):
         raise ValueError("platform harvest identity fields must be non-empty")
     identity = {
         "provider": provider,
         "subject": normalized,
-        "target_year": int(target_year),
+        "target_year": target_year,
         "request_template_hash": request_template_hash,
         "policy_version": policy_version,
     }
@@ -146,27 +154,36 @@ def platform_year_request_template_hash(
     normalized = normalize_official(subject)
     if normalized is None:
         raise ValueError("platform harvest subject must be a valid hostname")
-    if not 1996 <= int(target_year) <= 2001:
-        raise ValueError("platform harvest year must be within 1996-2001")
-    if not endpoint.strip() or not provider.strip() or not policy_version.strip():
+    if (
+        isinstance(target_year, bool)
+        or not isinstance(target_year, int)
+        or not 1996 <= target_year <= 2001
+    ):
+        raise ValueError("platform harvest year must be an integer within 1996-2001")
+    if any(
+        not isinstance(value, str) or not value.strip()
+        for value in (endpoint, provider, policy_version)
+    ):
         raise ValueError("platform request identity fields must be non-empty")
+    if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+        raise ValueError("platform request limit must be a positive integer")
     payload = json.dumps(
         {
             "template_version": "wayback-platform-year-v1",
             "provider": provider,
             "endpoint": endpoint,
             "subject": normalized,
-            "target_year": int(target_year),
+            "target_year": target_year,
             "policy_version": policy_version,
             "matchType": "domain",
-            "from": f"{int(target_year)}0101000000",
-            "to": f"{int(target_year)}1231235959",
+            "from": f"{target_year}0101000000",
+            "to": f"{target_year}1231235959",
             "output": "json",
             "fl": "urlkey,timestamp,original,statuscode,digest,length",
             "filter": "statuscode:[23][0-9][0-9]",
             "gzip": "false",
             "showResumeKey": "true",
-            "limit": str(int(limit)),
+            "limit": str(limit),
         },
         sort_keys=True,
         separators=(",", ":"),
@@ -213,8 +230,14 @@ class PlatformYearHarvestTask:
             raise ValueError("platform harvest subject must be a valid hostname")
         object.__setattr__(self, "subject", normalized)
         object.__setattr__(self, "state", PlatformHarvestState(self.state))
-        if not 1996 <= int(self.target_year) <= 2001:
-            raise ValueError("platform harvest year must be within 1996-2001")
+        if (
+            isinstance(self.target_year, bool)
+            or not isinstance(self.target_year, int)
+            or not 1996 <= self.target_year <= 2001
+        ):
+            raise ValueError(
+                "platform harvest year must be an integer within 1996-2001"
+            )
         expected = platform_year_harvest_id(
             provider=self.provider,
             subject=normalized,
@@ -228,8 +251,46 @@ class PlatformYearHarvestTask:
         )
         if self.harvest_id != expected:
             raise ValueError("platform harvest id does not match durable identity")
-        if self.page_number < 0 or self.attempt < 0:
-            raise ValueError("platform harvest counters must be non-negative")
+        integer_counters = (
+            self.page_number,
+            self.attempt,
+            self.rows_seen,
+            self.unique_host_years_seen,
+            self.requests,
+            self.bytes,
+            self.baseline_external_host_years,
+            self.evidence_frontier,
+        )
+        if any(
+            isinstance(value, bool)
+            or not isinstance(value, int)
+            or value < 0
+            for value in integer_counters
+        ):
+            raise ValueError(
+                "platform harvest counters must be non-negative integers"
+            )
+        for value in (self.elapsed_seconds, self.final_eed):
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(float(value))
+                or value < 0
+            ):
+                raise ValueError(
+                    "platform harvest floating accounting must be finite and non-negative"
+                )
+        for name in (
+            "retry_at", "lease_expires_at", "created_at", "updated_at", "completed_at"
+        ):
+            value = getattr(self, name)
+            if value is not None and (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(float(value))
+                or value < 0
+            ):
+                raise ValueError(f"{name} must be finite and non-negative")
         lineage = (
             self.source_key,
             self.reservoir_id,
@@ -238,21 +299,6 @@ class PlatformYearHarvestTask:
         )
         if any(lineage) and not all(value.strip() for value in lineage):
             raise ValueError("platform harvest lineage must be complete")
-        if self.evidence_frontier < 0:
-            raise ValueError("platform harvest evidence frontier must be non-negative")
-        if any(
-            value < 0
-            for value in (
-                self.rows_seen,
-                self.unique_host_years_seen,
-                self.requests,
-                self.bytes,
-                self.elapsed_seconds,
-                self.baseline_external_host_years,
-                self.final_eed,
-            )
-        ):
-            raise ValueError("platform harvest accounting must be non-negative")
 
 
 @dataclass(frozen=True)
@@ -279,6 +325,17 @@ class PlatformYearHarvestResult:
         if normalized is None:
             raise ValueError("platform harvest result subject must be valid")
         object.__setattr__(self, "subject", normalized)
+        object.__setattr__(self, "capsules", tuple(self.capsules))
+        if (
+            isinstance(self.target_year, bool)
+            or not isinstance(self.target_year, int)
+            or not 1996 <= self.target_year <= 2001
+        ):
+            raise ValueError(
+                "platform harvest result year must be an integer within 1996-2001"
+            )
+        if not isinstance(self.exhaustive, bool):
+            raise ValueError("platform harvest exhaustive must be a boolean")
         state = PlatformHarvestState(self.state)
         object.__setattr__(self, "state", state)
         if state not in {
@@ -297,11 +354,20 @@ class PlatformYearHarvestResult:
                 )
         elif self.exhaustive:
             raise ValueError("only COMPLETE may claim provider exhaustion")
-        if any(
-            value < 0
-            for value in (self.rows_seen, self.requests, self.bytes, self.elapsed_seconds)
+        for value in (self.rows_seen, self.requests, self.bytes):
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError(
+                    "platform harvest result counts must be non-negative integers"
+                )
+        if (
+            isinstance(self.elapsed_seconds, bool)
+            or not isinstance(self.elapsed_seconds, (int, float))
+            or not math.isfinite(float(self.elapsed_seconds))
+            or self.elapsed_seconds < 0
         ):
-            raise ValueError("platform harvest result accounting must be non-negative")
+            raise ValueError(
+                "platform harvest result elapsed_seconds must be finite and non-negative"
+            )
         seen: set[tuple[str, int]] = set()
         for capsule in self.capsules:
             if capsule.provider != self.provider:
@@ -367,11 +433,29 @@ class PlatformYearHarvestWorker:
     ) -> None:
         if not owner:
             raise ValueError("platform harvest owner is required")
-        if claim_batch_size < 1:
-            raise ValueError("claim_batch_size must be positive")
-        if lease_seconds <= 0:
-            raise ValueError("lease_seconds must be positive")
-        if retry_base_seconds < 0 or retry_max_seconds < retry_base_seconds:
+        if (
+            isinstance(claim_batch_size, bool)
+            or not isinstance(claim_batch_size, int)
+            or claim_batch_size < 1
+        ):
+            raise ValueError("claim_batch_size must be a positive integer")
+        if (
+            isinstance(lease_seconds, bool)
+            or not isinstance(lease_seconds, (int, float))
+            or not math.isfinite(float(lease_seconds))
+            or lease_seconds <= 0
+        ):
+            raise ValueError("lease_seconds must be finite and positive")
+        if (
+            isinstance(retry_base_seconds, bool)
+            or not isinstance(retry_base_seconds, (int, float))
+            or isinstance(retry_max_seconds, bool)
+            or not isinstance(retry_max_seconds, (int, float))
+            or not math.isfinite(float(retry_base_seconds))
+            or not math.isfinite(float(retry_max_seconds))
+            or retry_base_seconds < 0
+            or retry_max_seconds < retry_base_seconds
+        ):
             raise ValueError("invalid retry policy")
         self.control_store = control_store
         self.evidence_store = evidence_store
@@ -384,9 +468,27 @@ class PlatformYearHarvestWorker:
         self.clock = clock
 
     def _retry_at(self, attempt: int) -> float:
-        exponent = max(0, int(attempt) - 1)
-        delay = min(self.retry_max_seconds, self.retry_base_seconds * (2**exponent))
-        return float(self.clock()) + float(delay)
+        if isinstance(attempt, bool) or not isinstance(attempt, int) or attempt < 0:
+            raise ValueError("attempt must be a non-negative integer")
+        exponent = max(0, attempt - 1)
+        base = self.retry_base_seconds
+        maximum = self.retry_max_seconds
+        if base <= 0.0 or maximum <= 0.0:
+            delay = 0.0
+        elif base >= maximum:
+            delay = maximum
+        else:
+            cap_exponent = max(0, math.ceil(math.log2(maximum / base)))
+            delay = min(maximum, base * (2.0 ** min(exponent, cap_exponent)))
+        now = self.clock()
+        if (
+            isinstance(now, bool)
+            or not isinstance(now, (int, float))
+            or not math.isfinite(float(now))
+            or now < 0
+        ):
+            raise ValueError("retry clock must be finite and non-negative")
+        return float(now) + float(delay)
 
     async def run_once(self) -> PlatformYearHarvestWorkerReport:
         tasks = self.control_store.claim_platform_year_harvests(
