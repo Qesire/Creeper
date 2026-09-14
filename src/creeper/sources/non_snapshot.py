@@ -8,6 +8,7 @@ cross into Creeper SourceRecord payloads.
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import html
 import re
 from urllib.parse import urlsplit
 
@@ -24,6 +25,21 @@ _SQUID_PATH_MARKERS = (
     "/cache/squid/rawlogs/",
     "/squid/rawlogs/",
     "/squid/access",
+)
+_DMOZ_CONTENT_NAMES = frozenset(
+    {
+        "content.rdf.u8",
+        "content.rdf.u8.gz",
+        "kt-content.rdf.u8",
+        "kt-content.rdf.u8.gz",
+    }
+)
+_DMOZ_EXTERNAL_PAGE_RE = re.compile(
+    r"""(?ix)
+    <ExternalPage\b
+    [^>]*\babout\s*=\s*
+    ["']([^"']+)["']
+    """
 )
 
 
@@ -83,6 +99,35 @@ def extract_http_urls(
         if len(result) >= max_urls:
             break
     return tuple(result)
+
+
+def is_dmoz_content_locator(locator: str) -> bool:
+    """Recognize DMOZ/ODP content dumps without claiming generic RDF files."""
+    path = urlsplit(locator).path.lower().rstrip("/")
+    if not path:
+        return False
+    return path.rsplit("/", 1)[-1] in _DMOZ_CONTENT_NAMES
+
+
+def parse_dmoz_external_page_line(line: str) -> str | None:
+    """Return one external HTTP(S) URL from a DMOZ ExternalPage row.
+
+    DMOZ content dumps also contain category links and RDF namespace URLs.
+    Restricting extraction to ExternalPage about=... avoids treating RDF
+    metadata as candidates and avoids the common duplicate representation of
+    one site as both a category link and an ExternalPage description.
+    """
+    match = _DMOZ_EXTERNAL_PAGE_RE.search(line)
+    if match is None:
+        return None
+    value = html.unescape(match.group(1).strip())
+    try:
+        parsed = urlsplit(value)
+    except ValueError:
+        return None
+    if parsed.scheme.lower() not in {"http", "https"} or parsed.hostname is None:
+        return None
+    return value
 
 
 def is_squid_access_locator(locator: str) -> bool:
