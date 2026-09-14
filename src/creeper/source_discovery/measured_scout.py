@@ -38,9 +38,11 @@ from creeper.sources.archive.warc import WarcFormatError, iter_warc_target_recor
 from creeper.sources.non_snapshot import (
     extract_http_urls,
     is_dmoz_content_locator,
+    is_ftp_sitelist_zip_locator,
     is_mailbox_url_locator,
     is_squid_access_locator,
     parse_dmoz_external_page_line,
+    parse_ftp_sitelist_zip,
     parse_squid_access_line,
 )
 
@@ -439,6 +441,36 @@ def _extract_hosts(
 ) -> ParsedHostSample | None:
     suffix, compressed = _suffix(urlsplit(url).path)
     lower_type = content_type.lower()
+    if is_ftp_sitelist_zip_locator(url):
+        if truncated:
+            raise ValueError("FTP sitelist ZIP probe is incomplete")
+        records = parse_ftp_sitelist_zip(
+            payload,
+            max_uncompressed_bytes=policy.max_decompressed_bytes,
+        )
+        hosts: set[str] = set()
+        host_year_pairs: set[tuple[str, int]] = set()
+        observations: list[str] = []
+        sampled = 0
+        for _member, _line, hostname, year, _date_text in records:
+            if sampled >= policy.max_records:
+                break
+            if not policy.target_year_from <= year <= policy.target_year_to:
+                continue
+            normalized = normalize_official(hostname)
+            if normalized is None:
+                continue
+            sampled += 1
+            hosts.add(normalized)
+            host_year_pairs.add((normalized, year))
+            observations.append(f"{normalized}\t{year}")
+        return ParsedHostSample(
+            sampled_records=sampled,
+            hosts=hosts,
+            host_year_pairs=host_year_pairs,
+            measurement_mode=MeasurementMode.HOST_YEAR,
+            observation_keys=tuple(observations),
+        )
     if _is_warc_resource(suffix=suffix, content_type=content_type):
         if compressed or payload.startswith(b"\x1f\x8b"):
             _enforce_gzip_expansion_budget(
