@@ -130,6 +130,7 @@ class SourceReservoirManager:
             "DIRECT_EVIDENCE_BULK",
             "EXPLOIT_DIRECT_ORIGIN",
             "EXPLOIT_SUCCESS",
+            "EXPLORE_NEW_FAMILY",
             "INTERPRET_STRUCTURE",
             "RECOVER_STAGNATION",
         }
