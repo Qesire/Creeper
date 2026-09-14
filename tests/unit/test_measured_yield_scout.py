@@ -139,18 +139,30 @@ class MeasuredYieldScoutTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(measurement.novel_pair_eed, 1.0)
         self.assertEqual(measurement.novel_eed_for_ranking, 1.0)
 
-    async def test_monthly_mailbox_scout_measures_url_hosts_at_shard_year(self) -> None:
+    async def test_monthly_mailbox_scout_uses_message_dates_for_host_years(self) -> None:
         body = (
+            b"From sender@example.net Wed Mar 25 10:38:28 1998\n"
             b"From: Person <person@example.net>\n"
+            b"Date: Wed, 25 Mar 1998 10:38:28 -0600\n"
+            b"Subject: first\n"
+            b"\n"
             b"See http://known.com/a and https://novel.com/b\n"
+            b"From sender@example.net Thu Mar 26 11:00:00 1998\n"
+            b"From: Person <person@example.net>\n"
+            b"Date: Thu, 26 Mar 1998 11:00:00 -0600\n"
+            b"Subject: second\n"
+            b"\n"
             b"Reference: https://other.org/c\n"
         )
 
         async def handler(request: httpx.Request) -> httpx.Response:
             return streamed_response(
-                206,
+                200,
                 body,
-                headers={"content-type": "text/plain"},
+                headers={
+                    "content-type": "text/plain",
+                    "content-length": str(len(body)),
+                },
             )
 
         async with httpx.AsyncClient(
@@ -178,6 +190,7 @@ class MeasuredYieldScoutTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(result.measurement)
         measurement = result.measurement
         assert measurement is not None
+        self.assertEqual(measurement.sampled_records, 2)
         self.assertEqual(measurement.measurement_mode, MeasurementMode.HOST_YEAR)
         self.assertEqual(measurement.unique_hosts, 3)
         self.assertEqual(measurement.novel_hosts, 2)
