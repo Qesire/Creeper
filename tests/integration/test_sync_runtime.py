@@ -52,7 +52,7 @@ class FakeLocalReservoir:
 
 
 class SyncRuntimeIntegrationTests(unittest.TestCase):
-    def test_run_once_filters_baseline_and_commits_one_fake_evidence_capsule(self):
+    def test_run_once_filters_baseline_and_resolves_full_host_range(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             task_root = root / "task"
@@ -169,7 +169,13 @@ class SyncRuntimeIntegrationTests(unittest.TestCase):
             self.assertEqual(report.evidence_tasks_completed, 1)
             self.assertEqual(report.evidence_capsules_committed, 1)
             self.assertLessEqual(report.max_evidence_queue_depth, 2)
-            self.assertEqual(calls, [("novel.example", 1997)])
+            self.assertEqual(
+                calls,
+                [("novel.example", year) for year in range(1996, 2002)],
+            )
+            # The fixture transport exposes a 1997 capture regardless of the
+            # requested year, so only the matching exact-year probe contributes
+            # a capsule while the parent host-range still closes exhaustively.
             self.assertEqual(evidence.count(), 1)
             self.assertEqual(len(adapter.leases), 1)
             executed_lease = adapter.leases[0]
