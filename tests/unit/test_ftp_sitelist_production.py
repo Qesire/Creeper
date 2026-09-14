@@ -6,6 +6,7 @@ import zipfile
 from unittest.mock import patch
 
 from creeper.authority.baseline_index import YEAR_BITS
+from creeper.evidence.planner import EvidencePlanner
 from creeper.evidence.contracts import (
     FTP_SITELIST_DIRECT_CONTRACT,
     bind_contract_to_adapter_id,
@@ -113,6 +114,26 @@ class FtpSitelistProductionAdapterTests(unittest.TestCase):
         self.assertEqual(observation.hostname, "ftp.second.org")
         self.assertEqual(observation.source_time, "1997-01-03")
         self.assertEqual(observation.direct_year_mask, YEAR_BITS[1997])
+
+        plan = EvidencePlanner().plan(
+            observation,
+            official_mask=0,
+            local_mask=0,
+            provider="wayback",
+            policy_version="runtime-policy",
+            allow_direct=True,
+        )
+        self.assertEqual(plan.external_keys, ())
+        self.assertEqual(len(plan.direct_capsules), 1)
+        capsule = plan.direct_capsules[0]
+        self.assertEqual(capsule.hostname, "ftp.second.org")
+        self.assertEqual(capsule.year, 1997)
+        self.assertEqual(capsule.evidence_timestamp, "1997-01-03")
+        self.assertEqual(
+            capsule.evidence_type,
+            FTP_SITELIST_DIRECT_CONTRACT.evidence_type,
+        )
+        self.assertIn("part01.txt", capsule.record_locator)
 
     def test_unreviewed_same_name_stays_discovery_only(self) -> None:
         contract = discovery_only_contract("ftp_sitelist_zip")
