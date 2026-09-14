@@ -99,6 +99,41 @@ max_keepalive_connections = 4
             with self.assertRaises(RuntimeError):
                 config.load_secret()
 
+    def test_worker_config_rejects_provider_client_outside_allowlist(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config_path = root / "worker-mismatch.toml"
+            config_path.write_text(
+                """
+[worker]
+coordinator_url = "https://coord.example"
+worker_id = "gcp-01"
+runtime_class = "vm"
+region = "gcp-us"
+architecture = "x86_64"
+memory_bytes = 1073741824
+cpu_count = 1
+network_class = "public"
+capabilities = ["ONLINE_QUERY"]
+allowed_providers = ["arquivo_pt"]
+
+[[cdx_providers]]
+name = "internet_archive"
+endpoint = "https://web.archive.org/cdx/search/cdx"
+dialect = "wayback"
+max_inflight = 1
+max_connections = 2
+max_keepalive_connections = 1
+""".strip(),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "configured CDX providers are not allowed",
+            ):
+                load_worker_config(config_path)
+
     def test_credentials_file_rejects_empty_or_non_string_entries(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
