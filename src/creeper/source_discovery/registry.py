@@ -2838,7 +2838,14 @@ class SourceDiscoveryRegistry:
                 """,
                 (candidate.canonical_entrypoint,),
             ).fetchone()
-        except sqlite3.OperationalError:
+        except sqlite3.OperationalError as exc:
+            # SourceDiscoveryRegistry is also used standalone by older callers,
+            # where the L9 research table legitimately does not exist. Only
+            # that compatibility case may fail open. Locking, corruption, bad
+            # schema and other database faults must stop scheduling rather than
+            # silently permit a metadata-rejected download.
+            if "no such table: research_artifact_prefilter" not in str(exc).casefold():
+                raise
             row = None
         if row is not None and str(row["admission"]) == "REJECT":
             return "metadata prefilter reject: " + str(row["reason"])
