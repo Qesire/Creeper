@@ -3,11 +3,30 @@ import unittest
 from pathlib import Path
 
 from creeper.authority.baseline_index import YEAR_BITS
-from creeper.evidence.policies import EvidenceCapsule
-from creeper.storage.evidence_store import EvidenceStore
+from creeper.evidence.policies import EvidenceCapsule, EvidenceQueryKey, TemporalScope
+from creeper.storage.evidence_store import EvidenceStore, EvidenceTaskProvenance
 
 
 class EvidenceStoreTests(unittest.TestCase):
+    def test_task_provenance_rejects_nonfinite_commit_time(self):
+        key = EvidenceQueryKey(
+            "example.com",
+            TemporalScope(1997, 1997),
+            "wayback",
+            "v1",
+        )
+        with self.assertRaisesRegex(ValueError, "committed_at"):
+            EvidenceTaskProvenance(
+                key=key,
+                committed_at=float("nan"),
+            )
+        with self.assertRaisesRegex(ValueError, "task_kind"):
+            EvidenceTaskProvenance(
+                key=key,
+                committed_at=1.0,
+                task_kind="unknown",
+            )
+
     def test_put_is_idempotent_and_preserves_provenance(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = EvidenceStore(Path(tmp) / "evidence.sqlite3")
