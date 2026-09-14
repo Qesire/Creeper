@@ -22,6 +22,7 @@ from typing import Mapping
 from urllib.parse import urlsplit
 
 from creeper.sources.non_snapshot import (
+    is_dmoz_rdf_locator,
     is_mailbox_url_locator,
     is_squid_access_locator,
 )
@@ -35,6 +36,7 @@ _PARSER_KINDS = frozenset(
         "cdxj",
         "jsonl",
         "delimited",
+        "dmoz_rdf",
         "lines",
         "mbox_urls",
         "squid_access",
@@ -182,6 +184,8 @@ CDXJ_DIRECT_CONTRACT = SourceEvidenceContract(
 
 def parser_kind_from_locator(locator: str) -> str:
     path = urlsplit(locator).path.lower()
+    if is_dmoz_rdf_locator(locator):
+        return "dmoz_rdf"
     if is_mailbox_url_locator(locator):
         return "mbox_urls"
     if is_squid_access_locator(locator):
