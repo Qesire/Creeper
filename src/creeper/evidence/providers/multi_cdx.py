@@ -686,6 +686,12 @@ class AsyncCDXProviderPool:
         # those years through bounded exact queries *inside this logical task*
         # instead of expanding six durable children and pre-reserving them.
         resolved_years = set(positive_years)
+        if all_physical_exhaustive:
+            # Every independent provider has completely enumerated this host
+            # range, so absence is authoritative for the remaining years.
+            # Without this closure the pool incorrectly reports INCOMPLETE and
+            # retries years that all providers already proved empty.
+            resolved_years.update(missing_years)
         exact_attempts: list[tuple[str, EvidenceQueryResult]] = []
         exact_saw_transient = False
         if missing_years and not all_physical_exhaustive:
