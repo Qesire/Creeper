@@ -239,6 +239,27 @@ def curated_direct_record_sources() -> tuple[SourceCandidate, ...]:
             confidence=1.0,
             state=SourceState.DISCOVERED,
         ),
+        SourceCandidate(
+            canonical_entrypoint=(
+                "https://ftp.zx.net.nz/pub/archive/simtel.net/pub/simtelnet/"
+                "msdos/info/ftp-list.zip"
+            ),
+            source_family="HISTORICAL_FTP_SITELIST",
+            level=SourceLevel.SOURCE,
+            discovered_by="curated-live-research",
+            discovery_strategy="CURATED_DIRECT_RECORD_MIRROR",
+            expected_year_from=1996,
+            expected_year_to=1997,
+            expected_volume=None,
+            temporal_semantics_prior=1.0,
+            enumerability_prior=1.0,
+            direct_evidence_prior=1.0,
+            baseline_overlap_prior=0.95,
+            access_cost_prior=0.02,
+            adapter_cost_prior=0.05,
+            confidence=1.0,
+            state=SourceState.DISCOVERED,
+        ),
     )
 
 

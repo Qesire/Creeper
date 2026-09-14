@@ -106,6 +106,15 @@ Date   : 05-May-97
         with self.assertRaisesRegex(ValueError, "decompressed byte budget"):
             parse_ftp_sitelist_zip(payload, max_decompressed_bytes=8)
 
+    def test_all_audited_sitelist_mirrors_grant_same_direct_contract(self) -> None:
+        self.assertGreaterEqual(len(AUDITED_FTP_SITELIST_LOCATORS), 2)
+        for locator in AUDITED_FTP_SITELIST_LOCATORS:
+            self.assertTrue(is_ftp_sitelist_locator(locator))
+            self.assertTrue(is_audited_ftp_sitelist_locator(locator))
+            contract = resolve_source_evidence_contract(locator)
+            self.assertEqual(contract, FTP_SITELIST_DIRECT_CONTRACT)
+            self.assertTrue(contract.grants_direct_web_year)
+
     def test_locator_classification_separates_format_from_authority(self) -> None:
         mirror = "https://unreviewed.example/archive/ftp-list.zip"
 

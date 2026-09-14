@@ -26,6 +26,10 @@ AUDITED_FTP_SITELIST_LOCATORS = frozenset(
             "https://ftpmirror1.infania.net/pub/simtelnet/msdos/info/"
             "ftp-list.zip"
         ),
+        (
+            "https://ftp.zx.net.nz/pub/archive/simtel.net/pub/simtelnet/"
+            "msdos/info/ftp-list.zip"
+        ),
     }
 )
 
