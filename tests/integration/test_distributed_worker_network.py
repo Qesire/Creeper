@@ -265,6 +265,17 @@ class DistributedWorkerNetworkTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(calls), 1)
         self.assertEqual(self.store.accepted_host_year_count(), 1)
         self.assertEqual(self.store.task_row(task_id)["state"], "COMPLETE")
+        self.assertEqual(
+            self.store.uncovered_resolution_intervals(
+                hostname="example.com",
+                provider=producer.coverage_provider,
+                scope="HOST",
+                resolver_version=producer.resolver_version,
+                year_from=1997,
+                year_to=1997,
+            ),
+            (),
+        )
         budget = self.store.provider_budget_snapshot("internet_archive")
         self.assertEqual(budget["active_inflight"], 0)
 
