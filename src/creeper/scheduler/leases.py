@@ -138,9 +138,32 @@ class WorkLease:
                    max_requests, max_bytes, max_seconds, resource_class,
                    expected_evidence_tasks, expected_novel_eed, None, expires_at)
 
-    def allows(self, *, records: int, requests: int, bytes_read: int, elapsed_seconds: float) -> bool:
-        return (0 <= records < self.max_records and 0 <= requests < self.max_requests
-                and 0 <= bytes_read < self.max_bytes and 0 <= elapsed_seconds < self.max_seconds)
+    def allows(
+        self,
+        *,
+        records: int,
+        requests: int,
+        bytes_read: int,
+        elapsed_seconds: float,
+    ) -> bool:
+        return (
+            0 <= records <= self.max_records
+            and 0 <= requests <= self.max_requests
+            and 0 <= bytes_read <= self.max_bytes
+            and 0 <= elapsed_seconds <= self.max_seconds
+        )
+
+    def allows_result(self, result: LeaseResult) -> bool:
+        if not isinstance(result, LeaseResult):
+            return False
+        if result.lease_id != self.lease_id:
+            return False
+        return self.allows(
+            records=result.records,
+            requests=result.requests,
+            bytes_read=result.bytes_read,
+            elapsed_seconds=result.elapsed_seconds,
+        )
 
     def _move(self, current: LeaseState, target: LeaseState, **changes) -> "WorkLease":
         if self.state is not current:
