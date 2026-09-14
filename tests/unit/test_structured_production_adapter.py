@@ -193,7 +193,7 @@ class StructuredProductionAdapterTests(unittest.TestCase):
         self.assertEqual(adapter.kind, "squid_access")
         record = adapter._generic_record(
             (
-                "952214400.000 42 192.0.2.9 TCP_MISS/200 1234 GET "
+                "952819200.000 42 192.0.2.9 TCP_MISS/200 1234 GET "
                 "http://old.example/path - DIRECT/203.0.113.8 text/html"
             ),
             locator="fixture:1",
