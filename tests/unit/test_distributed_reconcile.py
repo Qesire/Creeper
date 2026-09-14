@@ -31,6 +31,12 @@ class DistributedReconcileTests(unittest.TestCase):
             allowed_providers=("web_discovery",),
         )
         self.store.register_worker(self.worker)
+        self.store.configure_provider_budget(
+            "web_discovery",
+            requests_per_second=1000.0,
+            max_global_inflight=1,
+            require_qualified_region=False,
+        )
 
     def tearDown(self) -> None:
         self.store.close()
