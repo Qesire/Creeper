@@ -447,8 +447,14 @@ class ResearchIntegrationBridge:
         context = result.typed_context
         if envelope is None or context is None:
             raise ValueError("root research result requires envelope and typed context")
-        if envelope.plane is not ProposalPlane.RESEARCH:
-            raise ValueError("root research result must use RESEARCH plane")
+        if envelope.task_type not in {
+            UnifiedLLMTask.COMPILE_ROOT_QUERY_PROGRAM,
+            UnifiedLLMTask.COMPILE_PIVOT_PROGRAM,
+            UnifiedLLMTask.PROPOSE_NEW_ROOT,
+            UnifiedLLMTask.RECOVER_ROOT_STAGNATION,
+            UnifiedLLMTask.CLASSIFY_RESULT_CLUSTER,
+        }:
+            raise ValueError("root research result has non-RESEARCH task type")
         committed = 0
         try:
             for proposal in envelope.proposals:
