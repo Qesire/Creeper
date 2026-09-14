@@ -31,6 +31,36 @@ class IncompleteHostResolution(RuntimeError):
     """At least one target year lacks exhaustive provider coverage."""
 
 
+def distributed_cdx_resolver_identity(
+    configs: tuple[CDXProviderConfig, ...],
+    *,
+    policy_version: str = "cdx-v1",
+) -> tuple[str, str, str]:
+    """Return provider-set digest, coverage provider and resolver version."""
+
+    if not configs or not policy_version.strip():
+        raise ValueError("distributed CDX resolver identity requires providers")
+    digest = stable_identity(
+        "cdx-provider-set",
+        {
+            "providers": [
+                {
+                    "name": config.name,
+                    "endpoint": config.endpoint,
+                    "dialect": config.dialect,
+                }
+                for config in configs
+            ]
+        },
+    )
+    short = digest[:16]
+    return (
+        digest,
+        f"cdx-pool:{short}",
+        f"{policy_version}:{short}",
+    )
+
+
 def build_distributed_cdx_pool(
     configs: tuple[CDXProviderConfig, ...],
     coordinator: CoordinatorClient,
@@ -111,24 +141,13 @@ class DistributedHostQueryProducer:
         self.configs = configs
         self.policy_version = policy_version
         self.transports = dict(transports or {})
-        self.provider_set_digest = stable_identity(
-            "cdx-provider-set",
-            {
-                "providers": [
-                    {
-                        "name": config.name,
-                        "endpoint": config.endpoint,
-                        "dialect": config.dialect,
-                    }
-                    for config in configs
-                ]
-            },
-        )
-        self.coverage_provider = (
-            f"cdx-pool:{self.provider_set_digest[:16]}"
-        )
-        self.resolver_version = (
-            f"{self.policy_version}:{self.provider_set_digest[:16]}"
+        (
+            self.provider_set_digest,
+            self.coverage_provider,
+            self.resolver_version,
+        ) = distributed_cdx_resolver_identity(
+            configs,
+            policy_version=self.policy_version,
         )
 
     @staticmethod
@@ -204,6 +223,30 @@ class DistributedHostQueryProducer:
         year_to = int(coverage.get("year_to", 0))
         if not 1996 <= year_from <= year_to <= 2001:
             raise ValueError("HOST_BATCH year coverage must be within 1996-2001")
+
+        scheduled_provider = str(
+            coverage.get("coverage_provider", self.coverage_provider)
+        )
+        scheduled_resolver = str(
+            coverage.get("resolver_version", self.resolver_version)
+        )
+        raw_providers = coverage.get("providers")
+        if raw_providers is not None:
+            if not isinstance(raw_providers, list):
+                raise ValueError("HOST_BATCH providers must be a list")
+            scheduled_names = tuple(str(value) for value in raw_providers)
+            configured_names = tuple(config.name for config in self.configs)
+            if scheduled_names != configured_names:
+                raise ValueError(
+                    "HOST_BATCH physical provider set does not match worker"
+                )
+        if (
+            scheduled_provider != self.coverage_provider
+            or scheduled_resolver != self.resolver_version
+        ):
+            raise ValueError(
+                "HOST_BATCH resolver identity does not match worker"
+            )
 
         keeper.assert_owned()
         pool = build_distributed_cdx_pool(
