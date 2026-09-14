@@ -70,6 +70,7 @@ def _adapter_kind(entrypoint: str) -> tuple[str, str]:
     structured = (
         ".cdxj", ".cdxj.gz", ".cdx", ".cdx.gz",
         ".jsonl", ".jsonl.gz",
+        ".rdf", ".rdf.gz", ".rdf.u8", ".rdf.u8.gz",
         ".csv", ".csv.gz", ".tsv", ".tsv.gz",
         ".txt", ".txt.gz", ".list", ".list.gz", ".urls", ".urls.gz",
     )
