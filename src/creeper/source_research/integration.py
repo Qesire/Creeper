@@ -48,6 +48,7 @@ from creeper.source_research.models import (
     stable_hash,
 )
 from creeper.source_research.registry import ResearchRegistry
+from creeper.source_research.resolver import resolve_node
 
 
 @dataclass(frozen=True)
@@ -777,13 +778,25 @@ class ResearchIntegrationBridge:
                     raise ValueError("adapter returned hit outside query identity")
                 node = self.research.upsert_hit(hit)
                 nodes[hit.provider_native_id] = node
-                for lead in await adapter.resolve(hit):
-                    # Some structured roots resolve only to another research
-                    # pivot/node. Repository metadata is useful graph state but
-                    # must never cross the L2 artifact boundary unless the
-                    # adapter emitted an explicit ArtifactLead.
-                    if not isinstance(lead, ArtifactLead):
-                        continue
+
+                resolved = resolve_node(
+                    node,
+                    query_id=query.query_id,
+                    program_id=program_id,
+                )
+                explicit = tuple(await adapter.resolve(hit))
+                lead_by_identity = {
+                    lead.artifact_identity: lead
+                    for lead in (
+                        tuple(
+                            item
+                            for item in explicit
+                            if isinstance(item, ArtifactLead)
+                        )
+                        + resolved.artifact_leads
+                    )
+                }
+                for lead in lead_by_identity.values():
                     artifact_id, _candidate, inserted = self.register_artifact_source(
                         lead,
                         node_id=node.node_id,
@@ -797,6 +810,29 @@ class ResearchIntegrationBridge:
                         artifacts += 1
                         seen_lineages.add(key)
                     sources_inserted += int(inserted)
+
+                # New roots remain proposal/research state only. Registration
+                # alone never creates a query or provider request.
+                for lead in resolved.new_root_leads:
+                    self.research.upsert_root(
+                        RootSurface(
+                            root_id=stable_hash(
+                                "resolved-root",
+                                lead.kind.value,
+                                lead.entrypoint,
+                            ),
+                            kind=lead.kind,
+                            canonical_locator=lead.entrypoint,
+                            capabilities=lead.capabilities,
+                            metadata={
+                                "discovered_from_node_id": (
+                                    lead.discovered_from_node_id
+                                ),
+                                "rationale": lead.rationale,
+                                "authority": "proposal_only",
+                            },
+                        )
+                    )
 
             for lead in page.artifact_leads:
                 node = self._match_node(lead, nodes)
