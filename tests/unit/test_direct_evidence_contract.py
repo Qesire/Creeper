@@ -254,6 +254,15 @@ class DirectEvidenceContractTests(unittest.TestCase):
             SQUID_ACCESS_DIRECT_CONTRACT.evidence_type,
         )
 
+    def test_unreviewed_mailbox_artifact_remains_discovery_only(self) -> None:
+        locator = "https://example.test/archive/1998-10.mbox"
+        contract = resolve_source_evidence_contract(locator)
+
+        self.assertEqual(parser_kind_from_locator(locator), "mbox_urls")
+        self.assertEqual(contract.authority, EvidenceAuthority.DISCOVERY_ONLY)
+        self.assertFalse(contract.grants_direct_web_year)
+        self.assertEqual(contract.evidence_mode, "discovery_only")
+
     def test_mailbox_message_contract_is_direct_and_skips_external_provider(self) -> None:
         locator = "https://lists.gnu.org/archive/mbox/lynx-dev/1998-10"
         contract = resolve_source_evidence_contract(locator)
