@@ -1,0 +1,41 @@
+# Creeper Fabric Cloudflare thin worker
+
+This is a standalone edge implementation of the `creeper-fabric-v1` worker
+protocol. It does **not** import or bundle the Python Creeper runtime.
+
+It may execute only Authority-admitted `ThinHistoricalQueryProducer` work:
+one exact hostname, one target year, one physical provider, at most one
+provider HTTP request, and a bounded response. Empty/oversize responses are
+positive-lane misses and never create negative resolution coverage.
+
+## Secrets
+
+Do not place the HMAC worker secret in source or Wrangler configuration.
+
+```bash
+npx wrangler@latest secret put CREEPER_WORKER_SECRET
+```
+
+The Local Authority credentials file must contain the same secret under the
+configured `WORKER_ID`.
+
+## Configure
+
+Copy `wrangler.jsonc.example` to `wrangler.jsonc`, then set:
+
+- `COORDINATOR_URL`: the HTTPS tunnel endpoint for Local Authority.
+- `WORKER_ID`: unique stable Fabric worker identity.
+- `PROVIDERS`: only providers this edge worker is allowed to access.
+- `DAILY_EGRESS_BUDGET_BYTES`: optional Authority-enforced byte budget.
+
+The Authority must also configure matching global provider budgets.
+
+## Deploy / test
+
+```bash
+npx wrangler@latest dev --test-scheduled
+npx wrangler@latest deploy
+```
+
+The cron invokes one pull iteration per minute. The worker registers itself,
+heartbeats, claims at most one eligible task, executes it, and terminates.
