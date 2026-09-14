@@ -224,33 +224,47 @@ class DistributedHostQueryProducer:
         if not 1996 <= year_from <= year_to <= 2001:
             raise ValueError("HOST_BATCH year coverage must be within 1996-2001")
 
+        raw_providers = coverage.get("providers")
+        if raw_providers is None:
+            task_configs = self.configs
+        else:
+            if not isinstance(raw_providers, list) or not raw_providers:
+                raise ValueError("HOST_BATCH providers must be a non-empty list")
+            requested = tuple(str(value) for value in raw_providers)
+            configured = {config.name: config for config in self.configs}
+            missing = [name for name in requested if name not in configured]
+            if missing:
+                raise ValueError(
+                    "HOST_BATCH requires unavailable providers: "
+                    + ",".join(missing)
+                )
+            task_configs = tuple(configured[name] for name in requested)
+
+        (
+            _task_provider_set_digest,
+            task_coverage_provider,
+            task_resolver_version,
+        ) = distributed_cdx_resolver_identity(
+            task_configs,
+            policy_version=self.policy_version,
+        )
         scheduled_provider = str(
-            coverage.get("coverage_provider", self.coverage_provider)
+            coverage.get("coverage_provider", task_coverage_provider)
         )
         scheduled_resolver = str(
-            coverage.get("resolver_version", self.resolver_version)
+            coverage.get("resolver_version", task_resolver_version)
         )
-        raw_providers = coverage.get("providers")
-        if raw_providers is not None:
-            if not isinstance(raw_providers, list):
-                raise ValueError("HOST_BATCH providers must be a list")
-            scheduled_names = tuple(str(value) for value in raw_providers)
-            configured_names = tuple(config.name for config in self.configs)
-            if scheduled_names != configured_names:
-                raise ValueError(
-                    "HOST_BATCH physical provider set does not match worker"
-                )
         if (
-            scheduled_provider != self.coverage_provider
-            or scheduled_resolver != self.resolver_version
+            scheduled_provider != task_coverage_provider
+            or scheduled_resolver != task_resolver_version
         ):
             raise ValueError(
-                "HOST_BATCH resolver identity does not match worker"
+                "HOST_BATCH resolver identity does not match requested providers"
             )
 
         keeper.assert_owned()
         pool = build_distributed_cdx_pool(
-            self.configs,
+            task_configs,
             coordinator,
             keeper,
             transports=self.transports,
@@ -313,9 +327,9 @@ class DistributedHostQueryProducer:
         await coordinator.coverage_complete(
             keeper.lease,
             hostname=hostname,
-            provider=self.coverage_provider,
+            provider=task_coverage_provider,
             scope="HOST",
-            resolver_version=self.resolver_version,
+            resolver_version=task_resolver_version,
             year_from=year_from,
             year_to=year_to,
         )
