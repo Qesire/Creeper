@@ -50,6 +50,9 @@ rdap_backlog_capacity = 4096
 # optimizer can safely own. Compressed or non-range-capable remote indexes stay
 # on the ordinary sequential source-producer path.
 enabled = true
+# CDX/CDXJ is opportunistic bulk work: yield whenever foreground discovery or
+# ordinary source production is actively using the machine/network.
+background_only = true
 
 # Fair, bounded tomography. Indexes are rotated durably between cycles.
 max_indexes_per_cycle = 4
