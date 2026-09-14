@@ -789,6 +789,30 @@ class DistributedAuthorityTests(unittest.TestCase):
         self.assertEqual(claimed.task_id, supported_id)
         self.assertEqual(claimed.work.producer, "HistoricalQueryProducer")
 
+    def test_region_probe_claim_is_targeted_to_declared_region(self) -> None:
+        self.store.configure_provider_budget(
+            "internet_archive",
+            requests_per_second=10.0,
+            max_global_inflight=1,
+            require_qualified_region=True,
+        )
+        task_id = self.store.admit_region_probe_work(
+            provider="internet_archive",
+            probe_hostname="example.com",
+            target_region="eu-central",
+            year=2001,
+            samples=3,
+        )
+
+        self.assertIsNone(self.store.claim_work(self.worker_a.worker_id))
+        lease = self.store.claim_work(self.worker_b.worker_id)
+        assert lease is not None
+        self.assertEqual(lease.task_id, task_id)
+        self.assertEqual(
+            lease.work.coverage["target_region"],
+            "eu-central",
+        )
+
     def test_claim_gate_requires_provider_region_qualification(self) -> None:
         self.store.configure_provider_budget(
             "internet_archive",
