@@ -9,6 +9,22 @@ from creeper.sources.reservoirs import Reservoir, ReservoirEstimate, ReservoirSt
 
 
 class RuntimeModelTests(unittest.TestCase):
+    def test_source_domain_rejects_lossy_temporal_scope(self):
+        with self.assertRaisesRegex(ValueError, "integer year pair"):
+            SourceDomain(
+                domain_id="archive",
+                family="NATIONAL_WEB_ARCHIVE",
+                discovery_mechanism="catalog",
+                temporal_scope=(1996.5, 2001),
+            )
+        with self.assertRaisesRegex(ValueError, "discovery_mechanism"):
+            SourceDomain(
+                domain_id="archive",
+                family="NATIONAL_WEB_ARCHIVE",
+                discovery_mechanism="",
+                temporal_scope=(1996, 2001),
+            )
+
     def test_source_domain_is_immutable_and_has_guarded_transitions(self):
         domain = SourceDomain(
             domain_id="archive",
