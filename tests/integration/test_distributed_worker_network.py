@@ -214,6 +214,7 @@ class DistributedWorkerNetworkTests(unittest.IsolatedAsyncioTestCase):
             "internet_archive",
             requests_per_second=1000.0,
             max_global_inflight=1,
+            require_qualified_region=False,
         )
         task_id = self.store.admit_work(
             WorkDefinition(
