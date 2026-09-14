@@ -529,6 +529,7 @@ class DistributedAuthorityAPITests(unittest.IsolatedAsyncioTestCase):
                 "provider": "internet_archive",
                 "task_id": task_id,
                 "generation": task["generation"] + 1,
+                "permit_request_id": "stale-fixture",
             },
         )
         self.assertEqual(stale.status, 409)
@@ -541,6 +542,7 @@ class DistributedAuthorityAPITests(unittest.IsolatedAsyncioTestCase):
                 "provider": "internet_archive",
                 "task_id": task_id,
                 "generation": task["generation"],
+                "permit_request_id": "permit-fixture",
             },
         )
         self.assertEqual(permit.status, 200, await permit.text())
