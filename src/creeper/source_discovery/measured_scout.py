@@ -44,7 +44,9 @@ from creeper.sources.non_snapshot import (
     is_dmoz_content_locator,
     is_mailbox_url_locator,
     is_squid_access_locator,
+    iter_mbox_messages,
     parse_dmoz_external_page_line,
+    parse_mbox_message,
     parse_squid_access_line,
 )
 
@@ -530,8 +532,11 @@ def _extract_hosts(
         )
 
     if is_mailbox_url_locator(url):
-        for line in lines:
-            urls = extract_http_urls(line)
+        for _offset, raw_message in iter_mbox_messages(
+            payload,
+            include_truncated_tail=not truncated,
+        ):
+            urls, message_year, _message_time = parse_mbox_message(raw_message)
             if not urls:
                 continue
             sampled += 1
@@ -539,14 +544,23 @@ def _extract_hosts(
                 break
             for observed_url in urls:
                 hostname = _hostname_from_scalar(observed_url)
-                if hostname is not None:
-                    hosts.add(hostname)
+                if hostname is None:
+                    continue
+                hosts.add(hostname)
+                if message_year is None:
+                    saw_undated_host = True
                     observations.append(hostname)
+                else:
+                    host_year_pairs.add((hostname, message_year))
+                    observations.append(f"{hostname}\t{message_year}")
         return ParsedHostSample(
             sampled_records=min(sampled, policy.max_records),
             hosts=hosts,
-            host_year_pairs=set(),
-            measurement_mode=MeasurementMode.HOST_ONLY,
+            host_year_pairs=host_year_pairs,
+            measurement_mode=_structured_measurement_mode(
+                host_year_pairs=host_year_pairs,
+                saw_undated_host=saw_undated_host,
+            ),
             observation_keys=tuple(observations),
         )
 
@@ -781,11 +795,11 @@ class MeasuredYieldScoutExecutor:
     @staticmethod
     def _windowable_line_resource(url: str) -> bool:
         suffix, compressed = _suffix(urlsplit(url).path)
-        if (
-            is_mailbox_url_locator(url)
-            or is_squid_access_locator(url)
-            or is_dmoz_content_locator(url)
-        ):
+        if is_mailbox_url_locator(url):
+            # Random line windows can start inside a message and lose its Date
+            # header. Use a bounded prefix and parse only complete messages.
+            return False
+        if is_squid_access_locator(url) or is_dmoz_content_locator(url):
             return not compressed
         return (not compressed) and suffix in {
             ".cdx",
