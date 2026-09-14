@@ -37,11 +37,10 @@ class EvidencePlanner:
     """
 
     MAX_EXTERNAL_TASKS_PER_OBSERVATION = 3
-    # Admission must reserve not only the initial disjoint range/exact tasks,
-    # but also the worst-case exact fanout of a bounded multi-year probe plus
-    # one domain-amplification task. Across six competition years, the peak
-    # nonterminal backlog contribution of one observation is at most seven.
-    MAX_BACKLOG_CAPACITY_PER_OBSERVATION = 7
+    # Host-first admission reserves one initial provider task per source
+    # observation. Rare extra disjoint ranges are durably staged if this slot
+    # is already consumed; range fallback stays inside the logical host task.
+    MAX_BACKLOG_CAPACITY_PER_OBSERVATION = 1
 
     def plan(
         self,
