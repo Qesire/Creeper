@@ -27,10 +27,18 @@ class ReservoirEstimate:
     sampled_records: int = 0
 
     def __post_init__(self) -> None:
-        if self.capacity_lower < 0 or self.sampled_records < 0:
-            raise ValueError("capacity and sample counts must be non-negative")
-        if self.capacity_upper is not None and self.capacity_upper < self.capacity_lower:
-            raise ValueError("capacity_upper must not be below capacity_lower")
+        for name in ("capacity_lower", "sampled_records"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError(f"{name} must be a non-negative integer")
+        if self.capacity_upper is not None and (
+            isinstance(self.capacity_upper, bool)
+            or not isinstance(self.capacity_upper, int)
+            or self.capacity_upper < self.capacity_lower
+        ):
+            raise ValueError(
+                "capacity_upper must be an integer not below capacity_lower"
+            )
 
 
 _RESERVOIR_TRANSITIONS = {
@@ -61,8 +69,20 @@ class Reservoir:
 
     def __post_init__(self) -> None:
         ReservoirEstimate(self.capacity_lower, self.capacity_upper)
-        if not self.reservoir_id.strip() or not self.domain_id.strip() or not self.adapter_id.strip():
-            raise ValueError("reservoir identity fields are required")
+        for name in (
+            "reservoir_id",
+            "domain_id",
+            "adapter_id",
+            "root_locator",
+            "enumeration_kind",
+            "evidence_mode",
+        ):
+            value = getattr(self, name)
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"{name} is required")
+        if self.cursor is not None and not isinstance(self.cursor, str):
+            raise ValueError("cursor must be a string when provided")
+        object.__setattr__(self, "state", ReservoirState(self.state))
 
     def transition(self, state: ReservoirState) -> "Reservoir":
         state = ReservoirState(state)
