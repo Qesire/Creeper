@@ -35,6 +35,7 @@ class WorkerDescriptor:
     cpu_count: int
     network_class: str
     capabilities: tuple[str, ...]
+    producers: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.worker_id.strip():
@@ -53,6 +54,10 @@ class WorkerDescriptor:
             raise ValueError("invalid worker capacity")
         if len(set(self.capabilities)) != len(self.capabilities):
             raise ValueError("worker capabilities must be unique")
+        if len(set(self.producers)) != len(self.producers):
+            raise ValueError("worker producers must be unique")
+        if any(not producer.strip() for producer in self.producers):
+            raise ValueError("worker producer names must be non-empty")
 
 
 @dataclass(frozen=True)
