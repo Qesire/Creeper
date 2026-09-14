@@ -119,12 +119,17 @@ def assess_artifact_metadata(
     media_type = (content_type or "").split(";", 1)[0].strip().casefold()
     path = urlsplit(locator).path.casefold()
     filename_path = str(filename or "").strip().casefold()
-    classification_target = filename_path or locator
-    format_kind, _compression = classify_artifact(
-        classification_target,
-        content_type,
+    locator_kind, locator_compression = classify_artifact(locator, None)
+    filename_kind, filename_compression = (
+        classify_artifact(filename_path, None)
+        if filename_path
+        else ("UNKNOWN", None)
     )
-    if format_kind == "UNKNOWN" and classification_target != locator:
+    if locator_kind != "UNKNOWN":
+        format_kind, _compression = locator_kind, locator_compression
+    elif filename_kind != "UNKNOWN":
+        format_kind, _compression = filename_kind, filename_compression
+    else:
         format_kind, _compression = classify_artifact(locator, content_type)
 
     if (
