@@ -122,6 +122,19 @@ class SourceReservoirManager:
     foreground inventory and advances only on the idle background lane.
     """
 
+    # These strategies encode a specialized task contract. Recycling one as a
+    # generic REFILL_RESERVOIR arm can collide with the dedicated directive's
+    # strategy/subject dedup key and silently change its task_type.
+    _SPECIALIZED_SEARCH_STRATEGIES = frozenset(
+        {
+            "DIRECT_EVIDENCE_BULK",
+            "EXPLOIT_DIRECT_ORIGIN",
+            "EXPLOIT_SUCCESS",
+            "INTERPRET_STRUCTURE",
+            "RECOVER_STAGNATION",
+        }
+    )
+
     _COLD_STATES = frozenset(
         {
             SourceState.DISCOVERED,
@@ -321,7 +334,11 @@ class SourceReservoirManager:
         rewards = [
             reward
             for reward in self.registry.strategy_rewards()
-            if reward.episodes > 0 and reward.search_cost_seconds > 0
+            if (
+                reward.episodes > 0
+                and reward.search_cost_seconds > 0
+                and reward.strategy not in self._SPECIALIZED_SEARCH_STRATEGIES
+            )
         ]
         if not rewards:
             return "META_SOURCE_SEARCH"
