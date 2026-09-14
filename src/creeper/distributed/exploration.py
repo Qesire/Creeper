@@ -324,6 +324,23 @@ class HistoricalCrawlerEngine:
                     )
 
 
+def _select_archive_configs(
+    configs: tuple[CDXProviderConfig, ...],
+    raw_names: object,
+) -> tuple[CDXProviderConfig, ...]:
+    if not isinstance(raw_names, list) or not raw_names:
+        raise ValueError("exploration task requires archive_providers")
+    requested = tuple(str(value) for value in raw_names)
+    configured = {config.name: config for config in configs}
+    missing = [name for name in requested if name not in configured]
+    if missing:
+        raise ValueError(
+            "exploration task requires unavailable archive providers: "
+            + ",".join(missing)
+        )
+    return tuple(configured[name] for name in requested)
+
+
 class HistoricalCrawlerProducer:
     """Explore one historical root and export only novel HY evidence."""
 
@@ -359,9 +376,13 @@ class HistoricalCrawlerProducer:
             str(coverage.get("url", lease.work.input_identity))
         )
         seed = int(coverage.get("seed", 0))
+        task_configs = _select_archive_configs(
+            self.configs,
+            coverage.get("archive_providers"),
+        )
 
         async with RemoteHostnameResolver(
-            self.configs,
+            task_configs,
             coordinator,
             keeper,
             transports=self.cdx_transports,
@@ -551,8 +572,12 @@ class SeededExplorationProducer:
                 )
 
         roots = list(dict.fromkeys(roots))
-        async with RemoteHostnameResolver(
+        task_configs = _select_archive_configs(
             self.configs,
+            coverage.get("archive_providers"),
+        )
+        async with RemoteHostnameResolver(
+            task_configs,
             coordinator,
             keeper,
             transports=self.cdx_transports,
