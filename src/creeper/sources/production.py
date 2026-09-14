@@ -212,6 +212,8 @@ class StructuredProductionAdapter:
     def _cursor_value(cursor: str | None) -> int:
         if cursor in {None, "", "0"}:
             return 0
+        if not isinstance(cursor, str):
+            raise ValueError("invalid structured source cursor; expected byte:<offset>")
         if not cursor.startswith("byte:") or not cursor.removeprefix("byte:").isdigit():
             raise ValueError("invalid structured source cursor; expected byte:<offset>")
         return int(cursor.removeprefix("byte:"))
@@ -897,7 +899,7 @@ class MboxMessageProductionAdapter:
     def _cursor_index(cursor: str | None) -> int:
         if cursor is None:
             return 0
-        if not cursor.startswith("message_record:"):
+        if not isinstance(cursor, str) or not cursor.startswith("message_record:"):
             raise ProductionAdapterError("invalid mbox message cursor")
         raw = cursor.removeprefix("message_record:")
         if not raw.isdigit():
@@ -1112,7 +1114,7 @@ class FtpSitelistProductionAdapter:
     def _cursor_index(cursor: str | None) -> int:
         if cursor is None:
             return 0
-        if not cursor.startswith("record:"):
+        if not isinstance(cursor, str) or not cursor.startswith("record:"):
             raise ProductionAdapterError("invalid FTP sitelist cursor")
         raw = cursor.removeprefix("record:")
         if not raw.isdigit():
