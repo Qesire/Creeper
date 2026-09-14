@@ -347,6 +347,30 @@ class UnifiedCompilerTests(unittest.TestCase):
             first.as_payload()["call_identity"], first.call_identity
         )
 
+    def test_unified_request_preserves_diverse_source_portfolio_policy(self):
+        context = research_context()
+        request = UnifiedCompilerRequest(
+            task_type=UnifiedLLMTask.COMPILE_ROOT_QUERY_PROGRAM,
+            plane=ProposalPlane.RESEARCH,
+            trigger_reason="stagnation",
+            objective="discover high-marginal-value reusable sources",
+            context=context.as_prompt_payload(),
+            context_hash=context.context_hash,
+        )
+        constraints = request.as_payload()["constraints"]
+        self.assertEqual(
+            constraints["source_portfolio"],
+            "diverse_families_not_cdx_monoculture",
+        )
+        self.assertEqual(
+            constraints["bulk_cdx_role"],
+            "high_throughput_evidence_not_exclusive_search_target",
+        )
+        self.assertEqual(
+            constraints["remote_archive_fallback"],
+            "undated_records_only",
+        )
+
     def test_context_hash_is_deterministic(self):
         first = research_context()
         second = research_context()
