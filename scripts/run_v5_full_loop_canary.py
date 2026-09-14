@@ -227,10 +227,15 @@ def _ranked_names(
 
 
 def _synthetic_transport(hostname: str, year: int):
+    # Exercise full host-range completion while keeping the canary's accepted
+    # proof cardinality stable: the source hint is 1997, other target years are
+    # explicit exhaustive negatives.
+    if year != 1997:
+        return (([], True),)
     return (
         [
             {
-                "timestamp": f"{year}0101000000",
+                "timestamp": "19970101000000",
                 "original": f"http://{hostname}/",
                 "status": "200",
             }
