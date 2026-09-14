@@ -317,6 +317,8 @@ def _source_format(entrypoint: str) -> tuple[str, bool, bool]:
     """Return format, timestamp-bearing, sorted-index semantics."""
 
     name = PurePosixPath(urlsplit(entrypoint).path.lower()).name
+    if name == "ftp-list.zip":
+        return "FTP_SITELIST", True, False
     if name.endswith(".cdxj.gz") or name.endswith(".cdxj"):
         return "CDXJ", True, True
     if name.endswith(".cdx.gz") or name.endswith(".cdx"):
