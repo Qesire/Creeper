@@ -56,7 +56,10 @@ class RuntimeSubmissionIntegrationTests(unittest.TestCase):
             baseline_dir = task_root / "merged260912-3"
             baseline_dir.mkdir(parents=True)
             for year in range(1996, 2002):
-                (baseline_dir / f"{year}.txt").write_text("", encoding="utf-8")
+                (baseline_dir / f"{year}.txt").write_text(
+                    "" if year == 1997 else "novel.example\n",
+                    encoding="utf-8",
+                )
             (baseline_dir / "candidate_pool.txt").write_text("", encoding="utf-8")
             authority = _authority_manifest(
                 baseline_dir,
@@ -273,7 +276,6 @@ class RuntimeSubmissionIntegrationTests(unittest.TestCase):
                         locator="fixture://submission/1",
                         payload="novel.example",
                         scope=CandidateSourceScope.LOCAL_DISCOVERY,
-                        source_year=1997,
                     )
                     return iter((record,)), LeaseResult(
                         lease_id=lease.lease_id,
