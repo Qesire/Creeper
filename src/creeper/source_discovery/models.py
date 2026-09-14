@@ -400,6 +400,31 @@ class SearchEpisode:
     search_cost_seconds: float = 0.0
     accepted_novel_eed: float = 0.0
 
+    def __post_init__(self) -> None:
+        for name in ("episode_id", "strategy", "backend", "query", "actor"):
+            value = getattr(self, name)
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"{name} is required")
+        for name in ("started_at", "search_cost_seconds", "accepted_novel_eed"):
+            value = getattr(self, name)
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(float(value))
+                or value < 0
+            ):
+                raise ValueError(f"{name} must be finite and non-negative")
+        if self.finished_at is not None:
+            if (
+                isinstance(self.finished_at, bool)
+                or not isinstance(self.finished_at, (int, float))
+                or not math.isfinite(float(self.finished_at))
+                or self.finished_at < self.started_at
+            ):
+                raise ValueError(
+                    "finished_at must be finite and not precede started_at"
+                )
+
     @property
     def reward_per_cost(self) -> float:
         if self.search_cost_seconds <= 0:
@@ -413,6 +438,21 @@ class StrategyReward:
     episodes: int
     accepted_novel_eed: float
     search_cost_seconds: float
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.strategy, str) or not self.strategy.strip():
+            raise ValueError("strategy is required")
+        if isinstance(self.episodes, bool) or not isinstance(self.episodes, int) or self.episodes < 0:
+            raise ValueError("episodes must be a non-negative integer")
+        for name in ("accepted_novel_eed", "search_cost_seconds"):
+            value = getattr(self, name)
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(float(value))
+                or value < 0
+            ):
+                raise ValueError(f"{name} must be finite and non-negative")
 
     @property
     def reward_per_cost(self) -> float:
