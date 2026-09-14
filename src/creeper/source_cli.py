@@ -19,7 +19,7 @@ from threading import Event
 import time
 import tomllib
 
-from creeper.authority.baseline_index import BaselineIndex
+from creeper.authority.baseline_index import BaselineIndex, YEAR_BITS
 from creeper.evidence.contract_registry import (
     ReviewedContractRegistry,
     load_reviewed_contract_registry,
@@ -371,26 +371,35 @@ class StaticSourceRuntime:
             report["rdap_shadow_tasks_enqueued"] = rdap_shadow
             return report
 
-        headroom = self.producer.admission.available_capacity(
-            provider="wayback",
-            capacity=self.backlog_capacity,
-        )
-        capacity_per_record = (
-            EvidencePlanner.MAX_BACKLOG_CAPACITY_PER_OBSERVATION
-        )
-        lease_records = min(
-            self.max_records,
-            headroom // capacity_per_record,
-        )
-        if lease_records < 1:
-            rdap_shadow = _backfill_rdap_shadow(self)
-            report = SourceProducerReport(
-                admission_blocked=reservoir.state is ReservoirState.READY
-            ).as_dict()
-            report["rdap_shadow_tasks_enqueued"] = rdap_shadow
-            return report
-        expected_tasks = lease_records
-        reservation_tasks = lease_records * capacity_per_record
+        known_dated_static = self.adapter.source_year in YEAR_BITS
+        if known_dated_static:
+            # A static list with an explicit source_year is metadata-dated.
+            # Under the undated-only fallback policy it never reserves or
+            # consumes Wayback capacity.
+            lease_records = self.max_records
+            expected_tasks = 0
+            reservation_tasks = 0
+        else:
+            headroom = self.producer.admission.available_capacity(
+                provider="wayback",
+                capacity=self.backlog_capacity,
+            )
+            capacity_per_record = (
+                EvidencePlanner.MAX_BACKLOG_CAPACITY_PER_OBSERVATION
+            )
+            lease_records = min(
+                self.max_records,
+                headroom // capacity_per_record,
+            )
+            if lease_records < 1:
+                rdap_shadow = _backfill_rdap_shadow(self)
+                report = SourceProducerReport(
+                    admission_blocked=reservoir.state is ReservoirState.READY
+                ).as_dict()
+                report["rdap_shadow_tasks_enqueued"] = rdap_shadow
+                return report
+            expected_tasks = lease_records
+            reservation_tasks = lease_records * capacity_per_record
 
         template = WorkLease.create(
             reservoir_id=reservoir.reservoir_id,
