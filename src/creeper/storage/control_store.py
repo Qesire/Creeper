@@ -35,6 +35,7 @@ from creeper.evidence.platform_harvest import (
     PlatformHarvestState,
     PlatformYearHarvestResult,
     PlatformYearHarvestTask,
+    platform_authority_digest,
     platform_year_harvest_id,
 )
 from creeper.runtime.exposure import ProductionExposure, ProductionExposureState
@@ -3408,6 +3409,13 @@ class ControlStore:
         exposure = self.get_production_exposure(task.exposure_id)
         if exposure is None:
             return False
+        legacy_authority = (authority_digest, authority_digest)
+        if exposure.authority != legacy_authority:
+            if platform_authority_digest(
+                baseline_signature=exposure.baseline_signature,
+                model_signature=exposure.model_signature,
+            ) != authority_digest:
+                return False
         if exposure.state is not ProductionExposureState.FINAL_CLOSED:
             self.record_production_exposure_progress(
                 task.exposure_id,
@@ -3423,7 +3431,7 @@ class ControlStore:
             final_accepted_eed=final_eed,
             accepted_host_years=accepted_host_years,
             evidence_frontier=evidence_frontier,
-            authority=(authority_digest, authority_digest),
+            authority=exposure.authority,
         )
         if not finalized:
             return False
