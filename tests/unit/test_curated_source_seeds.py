@@ -111,8 +111,20 @@ class CuratedSourceSeedTests(unittest.TestCase):
         self.assertTrue(
             all(
                 root.expected_year_from >= 1996
-                and root.expected_year_to <= 1997
+                and root.expected_year_to <= 2001
                 for root in roots
+            )
+        )
+        finnish = [
+            root
+            for root in roots
+            if root.source_family == "HISTORICAL_FINNISH_BBS_DIRECTORY"
+        ]
+        self.assertEqual(len(finnish), 4)
+        self.assertTrue(
+            all(
+                (root.expected_year_from, root.expected_year_to) == (1998, 1998)
+                for root in finnish
             )
         )
         self.assertTrue(all(root.direct_evidence_prior == 1.0 for root in roots))
