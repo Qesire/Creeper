@@ -1,15 +1,18 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import tempfile
 import unittest
 from pathlib import Path
 
+import httpx
 from aiohttp.test_utils import TestServer
 
 from creeper.distributed.authority_api import create_authority_app
 from creeper.distributed.authority_store import DistributedAuthorityStore
 from creeper.distributed.coordinator_client import CoordinatorClient
+from creeper.distributed.host_query import DistributedHostQueryProducer
 from creeper.distributed.models import (
     Capability,
     TaskClass,
@@ -17,6 +20,7 @@ from creeper.distributed.models import (
     WorkerDescriptor,
 )
 from creeper.distributed.worker import DistributedWorker
+from creeper.evidence.providers.multi_cdx import CDXProviderConfig
 
 
 class DistributedWorkerNetworkTests(unittest.IsolatedAsyncioTestCase):
@@ -146,6 +150,84 @@ class DistributedWorkerNetworkTests(unittest.IsolatedAsyncioTestCase):
             report = await worker.run_once()
 
         self.assertFalse(report.claimed)
+
+    async def test_host_query_producer_closes_authority_to_cdx_to_hy_loop(self) -> None:
+        calls = []
+
+        async def cdx_handler(request: httpx.Request) -> httpx.Response:
+            calls.append(request)
+            payload = [
+                ["urlkey", "timestamp", "original", "statuscode"],
+                [
+                    "com,example)/",
+                    "19970102030405",
+                    "http://example.com/",
+                    "200",
+                ],
+            ]
+            return httpx.Response(
+                200,
+                content=json.dumps(payload).encode(),
+                request=request,
+            )
+
+        self.store.configure_provider_budget(
+            "internet_archive",
+            requests_per_second=1000.0,
+            max_global_inflight=1,
+        )
+        task_id = self.store.admit_work(
+            WorkDefinition(
+                producer="HistoricalQueryProducer",
+                task_class=TaskClass.HOST_BATCH,
+                input_identity="example.com",
+                coverage={
+                    "scope": "HOST",
+                    "year_from": 1997,
+                    "year_to": 1997,
+                },
+                partition="0",
+                algorithm_version="resolver-v1",
+                required_capabilities=(Capability.ONLINE_QUERY.value,),
+            )
+        )
+        producer = DistributedHostQueryProducer(
+            (
+                CDXProviderConfig(
+                    name="internet_archive",
+                    endpoint="https://ia.test/cdx",
+                    requests_per_second=1000.0,
+                    max_inflight=1,
+                    max_connections=1,
+                    max_keepalive_connections=1,
+                    max_retries=0,
+                    row_limit=100,
+                ),
+            ),
+            transports={
+                "internet_archive": httpx.MockTransport(cdx_handler),
+            },
+        )
+
+        async with CoordinatorClient(
+            self.base_url,
+            worker_id="worker-a",
+            secret=self.credentials["worker-a"],
+        ) as client:
+            worker = DistributedWorker(
+                client,
+                self.descriptor("worker-a", "oci-test"),
+                {"HistoricalQueryProducer": producer},
+                lease_seconds=30,
+            )
+            report = await worker.run_once()
+
+        self.assertTrue(report.completed, report.error)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(self.store.accepted_host_year_count(), 1)
+        self.assertEqual(self.store.task_row(task_id)["state"], "COMPLETE")
+        budget = self.store.provider_budget_snapshot("internet_archive")
+        self.assertEqual(budget["active_inflight"], 0)
 
     async def test_worker_producer_failure_returns_task_to_ready(self) -> None:
         task_id = self.store.admit_work(
