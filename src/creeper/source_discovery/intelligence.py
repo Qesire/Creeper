@@ -6,6 +6,7 @@ import hashlib
 import json
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import urlsplit
 
 from creeper.source_discovery.manager import SearchDirective
 from creeper.source_discovery.models import SourceState
@@ -129,8 +130,6 @@ class SourceIntelligenceContextBuilder:
         ).fetchall()
         origins: list[str] = []
         seen: set[str] = set()
-        from urllib.parse import urlsplit
-
         for row in rows:
             parsed = urlsplit(str(row["canonical_entrypoint"]))
             if not parsed.scheme or not parsed.netloc:
