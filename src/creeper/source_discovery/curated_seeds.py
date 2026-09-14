@@ -78,6 +78,45 @@ def curated_research_roots() -> tuple[SourceCandidate, ...]:
 
     return (
         SourceCandidate(
+            canonical_entrypoint=(
+                "https://data.law.di.unimi.it/webdata/webbase-2001/"
+                "webbase-2001.urls.gz"
+            ),
+            source_family="EARLY_WEB_URL_CORPUS",
+            level=SourceLevel.SOURCE,
+            discovered_by="curated-research-seed",
+            discovery_strategy="CURATED_YEAR_ARCHETYPE_SEARCH",
+            expected_year_from=2001,
+            expected_year_to=2001,
+            expected_volume=118_142_155,
+            temporal_semantics_prior=1.0,
+            enumerability_prior=1.0,
+            direct_evidence_prior=0.0,
+            baseline_overlap_prior=0.50,
+            access_cost_prior=0.20,
+            adapter_cost_prior=0.10,
+            confidence=1.0,
+            state=SourceState.DISCOVERED,
+        ),
+        SourceCandidate(
+            canonical_entrypoint="https://zenodo.org/records/8408539",
+            source_family="EARLY_WEB_DIRECTORY_DERIVED_DATASET",
+            level=SourceLevel.METASOURCE,
+            discovered_by="curated-research-seed",
+            discovery_strategy="CURATED_YEAR_ARCHETYPE_SEARCH",
+            expected_year_from=1999,
+            expected_year_to=2001,
+            expected_volume=22_915,
+            temporal_semantics_prior=0.90,
+            enumerability_prior=1.0,
+            direct_evidence_prior=0.0,
+            baseline_overlap_prior=0.45,
+            access_cost_prior=0.10,
+            adapter_cost_prior=0.20,
+            confidence=0.98,
+            state=SourceState.DISCOVERED,
+        ),
+        SourceCandidate(
             canonical_entrypoint="https://archive95.net/sources",
             source_family="EARLY_WEB_SOURCE_CATALOG",
             level=SourceLevel.METASOURCE,
