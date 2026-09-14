@@ -21,6 +21,14 @@ class WarcSourceObservation:
     year_hint: int
     record_type: str
 
+    def __post_init__(self) -> None:
+        for name in ("source_id", "locator", "target_uri", "record_type"):
+            value = getattr(self, name)
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"{name} is required")
+        if isinstance(self.year_hint, bool) or not isinstance(self.year_hint, int):
+            raise ValueError("year_hint must be an integer")
+
     @property
     def year_hint_mask(self) -> int:
         """Competition-year hint mask derived from WARC-Date metadata.
@@ -48,6 +56,19 @@ class WarcSourceLeaseResult:
     scanned_records: int
     bytes_advanced: int
 
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "observations", tuple(self.observations))
+        if any(not isinstance(item, WarcSourceObservation) for item in self.observations):
+            raise ValueError("observations must contain WarcSourceObservation values")
+        if self.next_cursor is not None and not isinstance(self.next_cursor, str):
+            raise ValueError("next_cursor must be a string when provided")
+        if not isinstance(self.exhausted, bool):
+            raise ValueError("exhausted must be a boolean")
+        for name in ("scanned_records", "bytes_advanced"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError(f"{name} must be a non-negative integer")
+
 
 class WarcSourceLeaseExecutor:
     """Execute bounded local WARC/ARC metadata leases with durable byte cursors.
@@ -67,8 +88,14 @@ class WarcSourceLeaseExecutor:
         remote_block_size: int = 4 * 1024 * 1024,
         max_record_content_bytes: int = 64 * 1024 * 1024,
     ) -> None:
-        if not source_id.strip():
+        if not isinstance(source_id, str) or not source_id.strip():
             raise ValueError("source_id must be non-empty")
+        for name, value in (
+            ("target_year_from", target_year_from),
+            ("target_year_to", target_year_to),
+        ):
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise ValueError(f"{name} must be an integer")
         if target_year_from > target_year_to:
             raise ValueError("target_year_from must not exceed target_year_to")
         self.source = source
