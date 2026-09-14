@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import base64
 import re
+import time
 from enum import StrEnum
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
@@ -26,6 +27,31 @@ _DATA_EXTENSIONS = (
 )
 _CODE_EXTENSIONS = (".py", ".js", ".ts", ".java", ".go", ".rs", ".c", ".cc", ".cpp", ".h", ".sh")
 _URL_RE = re.compile(r"https?://[^\s\"'<>]+", re.I)
+
+
+def _github_rate_limit_delay(response: Any) -> float | None:
+    explicit = retry_after_seconds(response)
+    if explicit is not None:
+        return explicit
+    headers = getattr(response, "headers", {}) or {}
+    remaining = str(
+        headers.get("X-RateLimit-Remaining")
+        or headers.get("x-ratelimit-remaining")
+        or ""
+    ).strip()
+    if remaining != "0":
+        return None
+    raw_reset = (
+        headers.get("X-RateLimit-Reset")
+        or headers.get("x-ratelimit-reset")
+    )
+    if raw_reset is None:
+        return 60.0
+    try:
+        reset_at = float(raw_reset)
+    except (TypeError, ValueError):
+        return 60.0
+    return max(1.0, reset_at - time.time())
 
 
 class GitHubHitClass(StrEnum):
@@ -74,7 +100,16 @@ class GitHubCodeAdapter:
         status = int(getattr(response, "status_code", 200))
         if 200 <= status < 300:
             return RootCapabilityReport(self.root_id, True, ("code_search", "text_matches", "bounded_pagination"), status_code=status)
-        reason = "AUTH_FAILED" if status in (401, 403) else ("RETRYABLE" if is_retryable(response) else f"HTTP_{status}")
+        rate_delay = _github_rate_limit_delay(response) if status == 403 else None
+        reason = (
+            "RATE_LIMITED"
+            if rate_delay is not None
+            else (
+                "AUTH_FAILED"
+                if status in (401, 403)
+                else ("RETRYABLE" if is_retryable(response) else f"HTTP_{status}")
+            )
+        )
         return RootCapabilityReport(self.root_id, False, reason=reason, status_code=status)
 
     async def search(self, query: Any, checkpoint: SearchCheckpoint | None) -> SearchPage:
@@ -92,12 +127,20 @@ class GitHubCodeAdapter:
         }
         response = await self.transport(self.endpoint, params, self._headers())
         status = int(getattr(response, "status_code", 200))
-        explicit_retry = retry_after_seconds(response)
-        if is_retryable(response) or (status == 403 and explicit_retry is not None):
+        github_rate_delay = (
+            _github_rate_limit_delay(response)
+            if status == 403
+            else None
+        )
+        if is_retryable(response) or github_rate_delay is not None:
             return SearchPage(
                 next_checkpoint=cp,
                 terminal=False,
-                retry_after=retry_delay_seconds(response),
+                retry_after=(
+                    github_rate_delay
+                    if github_rate_delay is not None
+                    else retry_delay_seconds(response)
+                ),
             )
         if status in (401, 403):
             self.state = "DISABLED_AUTH"
