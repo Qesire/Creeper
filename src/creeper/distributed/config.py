@@ -40,6 +40,10 @@ class AuthorityRuntimeConfig:
     reconcile_interval_seconds: float = 5.0
     promotion_batch_size: int = 64
     auto_promote_source_pages: bool = False
+    host_promotion_batch_size: int = 256
+    host_resolution_providers: tuple[str, ...] = ()
+    host_coverage_provider: str = ""
+    host_resolver_version: str = "fabric-host-v1"
     provider_budgets: tuple[ProviderBudgetConfig, ...] = ()
 
     def __post_init__(self) -> None:
@@ -47,8 +51,19 @@ class AuthorityRuntimeConfig:
             raise ValueError("invalid Authority listen address")
         if self.max_clock_skew_seconds <= 0:
             raise ValueError("max_clock_skew_seconds must be positive")
-        if self.reconcile_interval_seconds <= 0 or self.promotion_batch_size < 1:
+        if (
+            self.reconcile_interval_seconds <= 0
+            or self.promotion_batch_size < 1
+            or self.host_promotion_batch_size < 1
+        ):
             raise ValueError("invalid Authority reconcile configuration")
+        if self.host_resolution_providers:
+            if (
+                any(not value.strip() for value in self.host_resolution_providers)
+                or not self.host_coverage_provider.strip()
+                or not self.host_resolver_version.strip()
+            ):
+                raise ValueError("invalid host resolution reconcile configuration")
 
 
 @dataclass(frozen=True)
@@ -115,6 +130,16 @@ def load_authority_config(path: Path) -> AuthorityRuntimeConfig:
     if not isinstance(section, Mapping):
         raise ValueError("[authority] table is required")
 
+    host_resolution_raw = raw.get("host_resolution", {})
+    if not isinstance(host_resolution_raw, Mapping):
+        raise ValueError("[host_resolution] must be a table")
+    raw_host_providers = host_resolution_raw.get("providers", ())
+    if not isinstance(raw_host_providers, (list, tuple)):
+        raise ValueError("host_resolution.providers must be a list")
+    host_resolution_providers = tuple(
+        str(value) for value in raw_host_providers
+    )
+
     budgets_raw = raw.get("provider_budgets", {})
     if not isinstance(budgets_raw, Mapping):
         raise ValueError("[provider_budgets] must be a table")
@@ -148,6 +173,19 @@ def load_authority_config(path: Path) -> AuthorityRuntimeConfig:
         promotion_batch_size=int(section.get("promotion_batch_size", 64)),
         auto_promote_source_pages=bool(
             section.get("auto_promote_source_pages", False)
+        ),
+        host_promotion_batch_size=int(
+            section.get("host_promotion_batch_size", 256)
+        ),
+        host_resolution_providers=host_resolution_providers,
+        host_coverage_provider=str(
+            host_resolution_raw.get("coverage_provider", "")
+        ),
+        host_resolver_version=str(
+            host_resolution_raw.get(
+                "resolver_version",
+                "fabric-host-v1",
+            )
         ),
         provider_budgets=tuple(budgets),
     )
