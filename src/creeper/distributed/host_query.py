@@ -8,6 +8,7 @@ import httpx
 
 from creeper.authority.normalizer import normalize_official
 from creeper.distributed.coordinator_client import CoordinatorClient
+from creeper.distributed.identity import stable_identity
 from creeper.distributed.lease_keeper import LeaseKeeper
 from creeper.distributed.models import TaskClass, TaskLease
 from creeper.distributed.provider_gate import DistributedProviderGate
@@ -103,6 +104,25 @@ class DistributedHostQueryProducer:
         self.configs = configs
         self.policy_version = policy_version
         self.transports = dict(transports or {})
+        self.provider_set_digest = stable_identity(
+            "cdx-provider-set",
+            {
+                "providers": [
+                    {
+                        "name": config.name,
+                        "endpoint": config.endpoint,
+                        "dialect": config.dialect,
+                    }
+                    for config in configs
+                ]
+            },
+        )
+        self.coverage_provider = (
+            f"cdx-pool:{self.provider_set_digest[:16]}"
+        )
+        self.resolver_version = (
+            f"{self.policy_version}:{self.provider_set_digest[:16]}"
+        )
 
     async def __call__(
         self,
@@ -197,6 +217,16 @@ class DistributedHostQueryProducer:
             CDXQueryState.PASS,
             CDXQueryState.EMPTY_EXHAUSTIVE,
         } and not raw.followup_years:
+            keeper.assert_owned()
+            await coordinator.coverage_complete(
+                keeper.lease,
+                hostname=hostname,
+                provider=self.coverage_provider,
+                scope="HOST",
+                resolver_version=self.resolver_version,
+                year_from=year_from,
+                year_to=year_to,
+            )
             return
 
         # Positive evidence may already have been admitted above, but this task
