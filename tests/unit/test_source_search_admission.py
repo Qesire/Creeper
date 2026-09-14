@@ -36,7 +36,7 @@ class SearchAdmissionPolicyTests(unittest.TestCase):
 
     def test_rejects_low_volume_or_wrong_period_before_scout(self) -> None:
         policy = SearchAdmissionPolicy(min_expected_volume=100_000)
-        self.assertIn("high-reservoir floor", policy.rejection_reason(self.candidate(expected_volume=9_999)) or "")
+        self.assertIn("gateway floor", policy.rejection_reason(self.candidate(expected_volume=9_999)) or "")
         self.assertIn(
             "do not overlap target",
             policy.rejection_reason(
@@ -45,6 +45,33 @@ class SearchAdmissionPolicyTests(unittest.TestCase):
             or "",
         )
 
+
+    def test_gateway_uses_smaller_but_stricter_role_aware_floor(self) -> None:
+        policy = SearchAdmissionPolicy(
+            min_expected_volume=100_000,
+            gateway_min_expected_volume=50_000,
+            gateway_min_enumerability_prior=0.8,
+        )
+        gateway = self.candidate(
+            expected_volume=80_000,
+            enumerability_prior=0.9,
+        )
+        source = self.candidate(
+            level=SourceLevel.SOURCE,
+            expected_volume=80_000,
+            enumerability_prior=0.9,
+        )
+        weak_gateway = self.candidate(
+            expected_volume=80_000,
+            enumerability_prior=0.7,
+        )
+
+        self.assertTrue(policy.accepts(gateway))
+        self.assertIn("source floor=100000", policy.rejection_reason(source) or "")
+        self.assertIn(
+            "gateway floor=0.8",
+            policy.rejection_reason(weak_gateway) or "",
+        )
 
     def test_direct_evidence_bulk_uses_lower_volume_floor(self) -> None:
         policy = SearchAdmissionPolicy(
@@ -174,7 +201,19 @@ class AgentAdmissionIntegrationTests(unittest.IsolatedAsyncioTestCase):
             invocation = next((root / "invocations").iterdir())
             request = json.loads((invocation / "request.json").read_text(encoding="utf-8"))
             self.assertEqual(request["admission"]["min_expected_volume"], 100000)
+            self.assertEqual(
+                request["admission"]["gateway_min_expected_volume"],
+                50000,
+            )
             self.assertEqual(request["admission"]["direct_min_expected_volume"], 10000)
+            self.assertEqual(
+                request["admission"]["gateway_min_enumerability_prior"],
+                0.8,
+            )
+            self.assertIn(
+                "page-graph vertex count",
+                request["admission"]["volume_semantics"]["SOURCE"],
+            )
             self.assertIs(request["admission"]["direct_evidence_year_bounds_optional"], True)
             self.assertIs(request["requirements"]["prefer_direct_evidence_bulk"], False)
             self.assertIn(".cdxj.gz", request["requirements"]["direct_evidence_suffixes"])
@@ -205,7 +244,7 @@ class AgentAdmissionIntegrationTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(audit["raw_candidate_count"], 2)
             self.assertEqual(audit["accepted_count"], 1)
             self.assertEqual(audit["rejected_count"], 1)
-            self.assertIn("high-reservoir floor", audit["rejected"][0]["reason"])
+            self.assertIn("gateway floor", audit["rejected"][0]["reason"])
 
 
 if __name__ == "__main__":
