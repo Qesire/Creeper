@@ -14,6 +14,9 @@ import time
 from pathlib import Path
 from uuid import uuid4
 
+from creeper.authority.baseline_index import BaselineIndex, YEAR_BITS
+from creeper.authority.normalizer import normalize_official
+from creeper.distributed.identity import evidence_id, host_year_id
 from creeper.distributed.models import (
     ProviderPermit,
     ResultBatch,
@@ -58,10 +61,17 @@ class DistributedAuthorityStore:
       of worker region.
     """
 
-    def __init__(self, path: Path, *, clock=time.time) -> None:
+    def __init__(
+        self,
+        path: Path,
+        *,
+        baseline_index: BaselineIndex | None = None,
+        clock=time.time,
+    ) -> None:
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
         self.clock = clock
+        self.baseline_index = baseline_index
         self.connection = sqlite3.connect(path, timeout=30.0)
         self.connection.row_factory = sqlite3.Row
         self.connection.execute("PRAGMA journal_mode=WAL")
@@ -120,6 +130,44 @@ class DistributedAuthorityStore:
                 UNIQUE(task_id, sequence_no),
                 FOREIGN KEY(task_id) REFERENCES distributed_work(task_id)
             ) WITHOUT ROWID;
+
+            CREATE TABLE IF NOT EXISTS distributed_hy_probe_decisions (
+                task_id TEXT NOT NULL,
+                hy_id TEXT NOT NULL,
+                hostname TEXT NOT NULL,
+                year INTEGER NOT NULL CHECK(year BETWEEN 1996 AND 2001),
+                locator TEXT NOT NULL,
+                status TEXT NOT NULL,
+                first_seen_at REAL NOT NULL,
+                updated_at REAL NOT NULL,
+                PRIMARY KEY(task_id, hy_id),
+                FOREIGN KEY(task_id) REFERENCES distributed_work(task_id)
+            ) WITHOUT ROWID;
+            CREATE INDEX IF NOT EXISTS idx_distributed_hy_probe_hy
+                ON distributed_hy_probe_decisions(hy_id, status);
+
+            CREATE TABLE IF NOT EXISTS distributed_host_year_ledger (
+                hy_id TEXT PRIMARY KEY,
+                hostname TEXT NOT NULL,
+                year INTEGER NOT NULL CHECK(year BETWEEN 1996 AND 2001),
+                evidence_id TEXT NOT NULL,
+                task_id TEXT NOT NULL,
+                accepted_at REAL NOT NULL,
+                UNIQUE(hostname, year),
+                FOREIGN KEY(task_id) REFERENCES distributed_work(task_id)
+            ) WITHOUT ROWID;
+
+            CREATE TABLE IF NOT EXISTS distributed_evidence_ledger (
+                evidence_id TEXT PRIMARY KEY,
+                hy_id TEXT NOT NULL,
+                task_id TEXT NOT NULL,
+                generation INTEGER NOT NULL CHECK(generation >= 1),
+                evidence_json TEXT NOT NULL,
+                committed_at REAL NOT NULL,
+                FOREIGN KEY(task_id) REFERENCES distributed_work(task_id)
+            ) WITHOUT ROWID;
+            CREATE INDEX IF NOT EXISTS idx_distributed_evidence_hy
+                ON distributed_evidence_ledger(hy_id);
 
             CREATE TABLE IF NOT EXISTS distributed_request_nonces (
                 worker_id TEXT NOT NULL,
@@ -660,6 +708,272 @@ class DistributedAuthorityStore:
         except Exception:
             self.connection.rollback()
             raise
+
+    def probe_host_years(
+        self,
+        task_id: str,
+        *,
+        worker_id: str,
+        generation: int,
+        probes: list[dict[str, object]],
+    ) -> list[dict[str, object]]:
+        """Resolve minimal HY probes against immutable baseline + accepted ledger."""
+
+        now = float(self.clock())
+        normalized: list[tuple[str, int, str, str]] = []
+        seen: set[str] = set()
+        for probe in probes:
+            raw_hostname = probe.get("hostname")
+            year = int(probe.get("year", 0))
+            locator = str(probe.get("locator", "")).strip()
+            if not isinstance(raw_hostname, str):
+                raise ValueError("HY probe hostname must be a string")
+            hostname = normalize_official(raw_hostname)
+            if hostname is None or year not in YEAR_BITS or not locator:
+                raise ValueError("invalid HY probe")
+            hyid = host_year_id(hostname, year)
+            if hyid in seen:
+                continue
+            seen.add(hyid)
+            normalized.append((hostname, year, locator, hyid))
+
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            self._assert_active_lease(
+                task_id,
+                worker_id,
+                generation,
+                now=now,
+            )
+            accepted = {
+                str(row["hy_id"])
+                for row in self.connection.execute(
+                    "SELECT hy_id FROM distributed_host_year_ledger"
+                )
+            }
+            baseline_masks: dict[str, int] = {}
+            if self.baseline_index is not None and normalized:
+                baseline_masks = {
+                    hostname: int(mask)
+                    for hostname, (mask, _candidate) in self.baseline_index.resolve_batch(
+                        [hostname for hostname, _year, _locator, _hyid in normalized]
+                    ).items()
+                }
+
+            decisions: list[dict[str, object]] = []
+            for hostname, year, locator, hyid in normalized:
+                if hyid in accepted:
+                    status = "KNOWN_ACCEPTED"
+                elif baseline_masks.get(hostname, 0) & YEAR_BITS[year]:
+                    status = "KNOWN_BASELINE"
+                else:
+                    status = "NEED_FULL_EVIDENCE"
+                self.connection.execute(
+                    """
+                    INSERT INTO distributed_hy_probe_decisions(
+                        task_id, hy_id, hostname, year, locator, status,
+                        first_seen_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(task_id, hy_id) DO UPDATE SET
+                        locator = excluded.locator,
+                        status = excluded.status,
+                        updated_at = excluded.updated_at
+                    """,
+                    (
+                        task_id,
+                        hyid,
+                        hostname,
+                        year,
+                        locator,
+                        status,
+                        now,
+                        now,
+                    ),
+                )
+                decisions.append(
+                    {"hostname": hostname, "year": year, "status": status}
+                )
+            self.connection.commit()
+            return decisions
+        except Exception:
+            self.connection.rollback()
+            raise
+
+    def commit_full_host_year_evidence(
+        self,
+        task_id: str,
+        *,
+        worker_id: str,
+        generation: int,
+        evidence: list[dict[str, object]],
+    ) -> list[dict[str, object]]:
+        """Commit full proof only for HYs previously admitted by HY_PROBE."""
+
+        now = float(self.clock())
+        prepared: list[tuple[str, int, str, str, str]] = []
+        for item in evidence:
+            raw_hostname = item.get("hostname")
+            year = int(item.get("year", 0))
+            if not isinstance(raw_hostname, str):
+                raise ValueError("HY evidence hostname must be a string")
+            hostname = normalize_official(raw_hostname)
+            evidence_class = str(item.get("evidence_class", "")).strip()
+            source = str(item.get("source", "")).strip()
+            timestamp = str(item.get("timestamp", "")).strip()
+            locator = str(item.get("locator", "")).strip()
+            if (
+                hostname is None
+                or year not in YEAR_BITS
+                or not evidence_class
+                or not source
+                or not timestamp
+                or not locator
+            ):
+                raise ValueError("invalid full HY evidence")
+            hyid = host_year_id(hostname, year)
+            evid = evidence_id(
+                hostname=hostname,
+                year=year,
+                evidence_class=evidence_class,
+                source=source,
+                timestamp=timestamp,
+                locator=locator,
+            )
+            canonical = _json(dict(item) | {"hostname": hostname, "year": year})
+            prepared.append((hostname, year, hyid, evid, canonical))
+
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            self._assert_active_lease(
+                task_id,
+                worker_id,
+                generation,
+                now=now,
+            )
+            results: list[dict[str, object]] = []
+            for hostname, year, hyid, evid, canonical in prepared:
+                accepted = self.connection.execute(
+                    """
+                    SELECT evidence_id FROM distributed_host_year_ledger
+                    WHERE hy_id = ?
+                    """,
+                    (hyid,),
+                ).fetchone()
+                if accepted is not None:
+                    results.append(
+                        {
+                            "hostname": hostname,
+                            "year": year,
+                            "status": "KNOWN_ACCEPTED",
+                            "evidence_id": str(accepted["evidence_id"]),
+                        }
+                    )
+                    continue
+
+                probe = self.connection.execute(
+                    """
+                    SELECT status FROM distributed_hy_probe_decisions
+                    WHERE task_id = ? AND hy_id = ?
+                    """,
+                    (task_id, hyid),
+                ).fetchone()
+                if probe is None:
+                    raise ValueError(
+                        "full HY evidence requires prior task-local HY_PROBE"
+                    )
+                if str(probe["status"]) != "NEED_FULL_EVIDENCE":
+                    raise ValueError(
+                        "full HY evidence was not admitted by HY_PROBE"
+                    )
+
+                # Re-check immutable baseline at commit time. This is cheap and
+                # makes the authority invariant explicit even if a caller
+                # constructed the probe state using an older test fixture.
+                if (
+                    self.baseline_index is not None
+                    and self.baseline_index.year_mask(hostname) & YEAR_BITS[year]
+                ):
+                    self.connection.execute(
+                        """
+                        UPDATE distributed_hy_probe_decisions
+                        SET status = 'KNOWN_BASELINE', updated_at = ?
+                        WHERE task_id = ? AND hy_id = ?
+                        """,
+                        (now, task_id, hyid),
+                    )
+                    results.append(
+                        {
+                            "hostname": hostname,
+                            "year": year,
+                            "status": "KNOWN_BASELINE",
+                        }
+                    )
+                    continue
+
+                self.connection.execute(
+                    """
+                    INSERT OR IGNORE INTO distributed_evidence_ledger(
+                        evidence_id, hy_id, task_id, generation,
+                        evidence_json, committed_at
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (evid, hyid, task_id, generation, canonical, now),
+                )
+                inserted = self.connection.execute(
+                    """
+                    INSERT OR IGNORE INTO distributed_host_year_ledger(
+                        hy_id, hostname, year, evidence_id, task_id, accepted_at
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (hyid, hostname, year, evid, task_id, now),
+                ).rowcount
+                if inserted:
+                    status = "ACCEPTED"
+                    chosen_evidence_id = evid
+                else:
+                    row = self.connection.execute(
+                        """
+                        SELECT evidence_id FROM distributed_host_year_ledger
+                        WHERE hy_id = ?
+                        """,
+                        (hyid,),
+                    ).fetchone()
+                    assert row is not None
+                    status = "KNOWN_ACCEPTED"
+                    chosen_evidence_id = str(row["evidence_id"])
+                self.connection.execute(
+                    """
+                    UPDATE distributed_hy_probe_decisions
+                    SET status = ?, updated_at = ?
+                    WHERE task_id = ? AND hy_id = ?
+                    """,
+                    (
+                        "KNOWN_ACCEPTED" if status == "KNOWN_ACCEPTED" else "ACCEPTED",
+                        now,
+                        task_id,
+                        hyid,
+                    ),
+                )
+                results.append(
+                    {
+                        "hostname": hostname,
+                        "year": year,
+                        "status": status,
+                        "evidence_id": chosen_evidence_id,
+                    }
+                )
+            self.connection.commit()
+            return results
+        except Exception:
+            self.connection.rollback()
+            raise
+
+    def accepted_host_year_count(self) -> int:
+        return int(
+            self.connection.execute(
+                "SELECT COUNT(*) FROM distributed_host_year_ledger"
+            ).fetchone()[0]
+        )
 
     def configure_provider_budget(
         self,
