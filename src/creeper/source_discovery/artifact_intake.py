@@ -9,6 +9,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import StrEnum
+import re
+from collections.abc import Mapping
+from typing import Any
 from urllib.parse import urlsplit
 
 from creeper.source_discovery.coordinator import TriageDisposition, TriageResult
@@ -19,6 +22,185 @@ class ArtifactAdmission(StrEnum):
     WARM = "WARM"
     HOLD = "HOLD"
     REJECT = "REJECT"
+
+
+class MetadataArtifactAdmission(StrEnum):
+    ACCEPT = "ACCEPT"
+    HOLD = "HOLD"
+    REJECT = "REJECT"
+
+
+@dataclass(frozen=True)
+class ArtifactMetadataAssessment:
+    admission: MetadataArtifactAdmission
+    format_kind: str
+    reason: str
+    semantic_hits: tuple[str, ...] = ()
+
+
+_STRONG_ARTIFACT_FORMATS = frozenset({"CDX", "CDXJ", "WARC", "ARC"})
+_SEMANTIC_ARTIFACT_FORMATS = frozenset({"HOST_LIST", "JSONL", "CSV"})
+_POSITIVE_METADATA_PATTERNS = (
+    ("web_archive", re.compile(r"\bweb\s+archiv(?:e|es|ing|ed)\b", re.I)),
+    ("web_crawl", re.compile(r"\bweb\s+crawl(?:s|ed|ing)?\b", re.I)),
+    ("historical_web", re.compile(r"\bhistorical\s+web\b", re.I)),
+    ("url_list", re.compile(r"\burls?\b|\burl\s+(?:list|dataset|corpus|dump)\b", re.I)),
+    ("host_list", re.compile(r"\bhostnames?\b|\bhost\s+list\b", re.I)),
+    ("domain_list", re.compile(r"\bdomains?\b|\bdomain\s+(?:list|dataset|corpus|dump)\b", re.I)),
+    ("link_graph", re.compile(r"\b(?:web|link)\s*graph\b|\bhyperlink\s+graph\b", re.I)),
+    ("capture_index", re.compile(r"\bcapture\s+index\b|\barchive\s+index\b", re.I)),
+    ("warc", re.compile(r"\bwarc\b", re.I)),
+    ("arc", re.compile(r"\barc\s+(?:file|archive|crawl)\b", re.I)),
+    ("cdx", re.compile(r"\bcdxj?\b", re.I)),
+    ("webbase", re.compile(r"\bwebbase\b", re.I)),
+)
+_REJECT_MEDIA_PREFIXES = ("image/", "audio/", "video/", "font/")
+_REJECT_MEDIA_TYPES = frozenset({
+    "application/pdf",
+    "application/msword",
+    "application/vnd.ms-powerpoint",
+    "application/vnd.ms-excel",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "text/html",
+    "application/xhtml+xml",
+})
+_REJECT_SUFFIXES = (
+    ".pdf", ".doc", ".docx", ".ppt", ".pptx", ".xls", ".xlsx",
+    ".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg",
+    ".mp3", ".wav", ".flac", ".mp4", ".mov", ".avi", ".mkv",
+    ".py", ".pyi", ".js", ".ts", ".java", ".c", ".cc", ".cpp", ".h",
+    ".ipynb",
+)
+_HOLD_CONTAINER_SUFFIXES = (
+    ".zip", ".tar", ".tgz", ".tar.gz", ".tar.bz2", ".tar.zst",
+    ".7z", ".rar", ".parquet", ".arrow", ".feather",
+)
+
+
+def _metadata_text(
+    *,
+    filename: str,
+    title: str,
+    description: str,
+    metadata: Mapping[str, Any] | None,
+) -> str:
+    parts = [filename, title, description]
+    md = metadata or {}
+    for key in (
+        "name", "filename", "title", "description", "subject", "subjects",
+        "keywords", "tags", "resource_type", "resourceType", "format",
+    ):
+        value = md.get(key)
+        if isinstance(value, str):
+            parts.append(value)
+        elif isinstance(value, (list, tuple, set)):
+            parts.extend(str(item) for item in value if isinstance(item, (str, int, float)))
+    return " ".join(part for part in parts if part).casefold()
+
+
+def assess_artifact_metadata(
+    *,
+    locator: str,
+    content_type: str | None = None,
+    filename: str = "",
+    title: str = "",
+    description: str = "",
+    metadata: Mapping[str, Any] | None = None,
+    expected_artifact_family: str = "",
+) -> ArtifactMetadataAssessment:
+    """Admission before any artifact HTTP request.
+
+    Search/repository metadata is scheduling state only.  The function decides
+    whether a lead is worth L2 triage; it never grants evidence authority.
+    """
+    media_type = (content_type or "").split(";", 1)[0].strip().casefold()
+    path = urlsplit(locator).path.casefold()
+    filename_path = str(filename or "").strip().casefold()
+    classification_target = filename_path or locator
+    format_kind, _compression = classify_artifact(
+        classification_target,
+        content_type,
+    )
+    if format_kind == "UNKNOWN" and classification_target != locator:
+        format_kind, _compression = classify_artifact(locator, content_type)
+
+    if (
+        media_type in _REJECT_MEDIA_TYPES
+        or any(media_type.startswith(prefix) for prefix in _REJECT_MEDIA_PREFIXES)
+        or any(path.endswith(suffix) or filename_path.endswith(suffix) for suffix in _REJECT_SUFFIXES)
+        or filename_path.startswith(("readme.", "license.", "citation."))
+    ):
+        return ArtifactMetadataAssessment(
+            MetadataArtifactAdmission.REJECT,
+            format_kind,
+            "metadata identifies non-ingestible document/media/software",
+        )
+
+    expected = str(expected_artifact_family or "").strip().upper()
+    if expected in _STRONG_ARTIFACT_FORMATS | _SEMANTIC_ARTIFACT_FORMATS:
+        if format_kind != "UNKNOWN" and format_kind != expected:
+            return ArtifactMetadataAssessment(
+                MetadataArtifactAdmission.REJECT,
+                format_kind,
+                f"artifact format {format_kind} conflicts with expected {expected}",
+            )
+
+    if format_kind in _STRONG_ARTIFACT_FORMATS:
+        return ArtifactMetadataAssessment(
+            MetadataArtifactAdmission.ACCEPT,
+            format_kind,
+            "strong historical-web artifact format",
+            (format_kind.casefold(),),
+        )
+
+    text = _metadata_text(
+        filename=filename,
+        title=title,
+        description=description,
+        metadata=metadata,
+    )
+    hits = tuple(
+        name for name, pattern in _POSITIVE_METADATA_PATTERNS
+        if pattern.search(text)
+    )
+
+    if format_kind in _SEMANTIC_ARTIFACT_FORMATS:
+        if hits or expected == format_kind:
+            return ArtifactMetadataAssessment(
+                MetadataArtifactAdmission.ACCEPT,
+                format_kind,
+                "supported generic artifact plus historical-web metadata signal",
+                hits,
+            )
+        return ArtifactMetadataAssessment(
+            MetadataArtifactAdmission.HOLD,
+            format_kind,
+            "generic table/list lacks historical-web semantic signal",
+        )
+
+    if any(path.endswith(suffix) or filename_path.endswith(suffix) for suffix in _HOLD_CONTAINER_SUFFIXES):
+        return ArtifactMetadataAssessment(
+            MetadataArtifactAdmission.HOLD,
+            format_kind,
+            "container/columnar artifact is not directly ingestible",
+            hits,
+        )
+
+    if hits:
+        return ArtifactMetadataAssessment(
+            MetadataArtifactAdmission.HOLD,
+            format_kind,
+            "metadata is relevant but artifact contract/format is unresolved",
+            hits,
+        )
+
+    return ArtifactMetadataAssessment(
+        MetadataArtifactAdmission.REJECT,
+        format_kind,
+        "metadata has no historical-web artifact signal",
+    )
 
 
 @dataclass(frozen=True)
