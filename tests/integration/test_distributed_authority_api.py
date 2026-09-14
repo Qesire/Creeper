@@ -404,6 +404,7 @@ class DistributedAuthorityAPITests(unittest.IsolatedAsyncioTestCase):
             "internet_archive",
             requests_per_second=10,
             max_global_inflight=1,
+            require_qualified_region=False,
         )
         task_id = self.store.admit_work(
             WorkDefinition(
