@@ -76,6 +76,43 @@ class LinkPromotionTests(unittest.TestCase):
             self.assertEqual(promoted[0].candidate.expected_year_from, expected_year)
             self.assertEqual(promoted[0].candidate.expected_year_to, expected_year)
 
+    def test_same_site_target_mailbox_shard_is_promoted_as_url_corpus(self) -> None:
+        acc = LinkPromotionAccumulator()
+        acc.add(
+            self.link(
+                "https://lists.gnu.org/archive/mbox/lynx-dev/1998-03",
+                page="https://lists.gnu.org/archive/mbox/lynx-dev/",
+                same_site=True,
+                anchor="1998-03",
+            )
+        )
+
+        promoted = acc.promoted()
+
+        self.assertEqual(len(promoted), 1)
+        candidate = promoted[0].candidate
+        self.assertEqual(
+            candidate.source_family,
+            "HISTORICAL_MAILBOX_URL_CORPUS",
+        )
+        self.assertEqual(candidate.level, SourceLevel.SOURCE)
+        self.assertEqual(candidate.expected_year_from, 1998)
+        self.assertEqual(candidate.expected_year_to, 1998)
+        self.assertEqual(candidate.direct_evidence_prior, 0.0)
+
+    def test_off_window_mailbox_navigation_is_not_promoted(self) -> None:
+        acc = LinkPromotionAccumulator()
+        acc.add(
+            self.link(
+                "https://lists.gnu.org/archive/mbox/lynx-dev/2002-03",
+                page="https://lists.gnu.org/archive/mbox/lynx-dev/",
+                same_site=True,
+                anchor="2002-03",
+            )
+        )
+
+        self.assertEqual(acc.promoted(), [])
+
     def test_ambiguous_multiple_target_years_do_not_create_a_single_year_hint(self) -> None:
         acc = LinkPromotionAccumulator()
         acc.add(

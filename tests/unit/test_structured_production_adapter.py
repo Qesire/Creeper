@@ -3,6 +3,7 @@ from __future__ import annotations
 import unittest
 from unittest.mock import patch
 
+from creeper.authority.baseline_index import YEAR_BITS
 from creeper.scheduler.leases import WorkLease
 from creeper.sources.production import StructuredProductionAdapter
 from creeper.sources.reservoirs import Reservoir, ReservoirState
@@ -48,6 +49,88 @@ class _OpenFile:
 
 
 class StructuredProductionAdapterTests(unittest.TestCase):
+    def test_mailbox_adapter_persists_only_urls_and_year_hints(self):
+        reservoir = Reservoir(
+            reservoir_id="reservoir:mbox",
+            domain_id="domain:mbox",
+            adapter_id="structured:mbox",
+            root_locator=(
+                "https://lists.gnu.org/archive/mbox/lynx-dev/1998-03"
+            ),
+            enumeration_kind="structured_records",
+            capacity_lower=0,
+            evidence_mode="discovery_only",
+            state=ReservoirState.READY,
+        )
+        adapter = StructuredProductionAdapter(
+            reservoir,
+            temporal_scope=(1998, 1998),
+        )
+
+        record = adapter._generic_record(
+            (
+                "From: Person <person@example.net> see "
+                "http://old.example/a and https://www.example.org/b."
+            ),
+            locator="fixture:1",
+        )
+        self.assertIsNotNone(record)
+        assert record is not None
+        record = adapter._apply_contract_authority(record)
+
+        self.assertNotIn("person@", record.payload)
+        self.assertNotIn("From:", record.payload)
+        self.assertEqual(
+            record.payload.split("\t"),
+            ["http://old.example/a", "https://www.example.org/b"],
+        )
+        self.assertEqual(record.direct_year_mask, 0)
+        self.assertEqual(record.year_hint_mask, YEAR_BITS[1998])
+
+        observations = tuple(adapter.extract_hosts(record))
+        self.assertEqual(
+            {item.hostname for item in observations},
+            {"old.example", "www.example.org"},
+        )
+        self.assertTrue(
+            all(item.direct_year_mask == 0 for item in observations)
+        )
+        self.assertTrue(
+            all(item.year_hint_mask == YEAR_BITS[1998] for item in observations)
+        )
+
+    def test_squid_adapter_keeps_access_year_as_hint_not_evidence(self):
+        reservoir = Reservoir(
+            reservoir_id="reservoir:squid",
+            domain_id="domain:squid",
+            adapter_id="structured:squid",
+            root_locator="https://trace.example/data/old.squid.log",
+            enumeration_kind="structured_records",
+            capacity_lower=0,
+            evidence_mode="discovery_only",
+            state=ReservoirState.READY,
+        )
+        adapter = StructuredProductionAdapter(
+            reservoir,
+            temporal_scope=(1996, 2001),
+        )
+
+        record = adapter._generic_record(
+            (
+                "915148800.123 42 192.0.2.9 TCP_MISS/200 1234 GET "
+                "http://old.example/path - DIRECT/203.0.113.8 text/html"
+            ),
+            locator="fixture:1",
+        )
+        self.assertIsNotNone(record)
+        assert record is not None
+        record = adapter._apply_contract_authority(record)
+
+        self.assertEqual(record.payload, "http://old.example/path")
+        self.assertEqual(record.source_year, 1999)
+        self.assertEqual(record.direct_year_mask, 0)
+        self.assertEqual(record.year_hint_mask, YEAR_BITS[1999])
+
     def test_non_range_http_source_reopens_as_stream_and_skips_cursor(self):
         payload = b"ignored.example\nkept.example\n"
         files = []

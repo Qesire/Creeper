@@ -66,23 +66,30 @@ Search root-first, not shard-first. Follow the request's
 ``calibrated_search_profile`` as the primary search shape for this call so
 parallel agents explore orthogonal source families instead of duplicating one
 another. For broad discovery, combine an explicit 1996-2001 year/range term
-with one concrete source archetype (for example: link list, URL list, domain
-list, seed list, dated NIC/registry allocation snapshot, research dataset,
-manifest, directory, collection export, or crawl index). Diversify
+with one concrete source archetype. Prioritize source families whose sampling
+mechanism is different from a generic Web crawl: historical public mailing-list
+mbox shards containing contemporaneous HTTP URLs, sanitized Squid/proxy access
+logs that preserve original requested URLs, DNS/domain survey outputs, dated
+NIC/registry exports, link/URL/domain/seed lists, research datasets, manifests,
+directories, and collection exports. Generic crawl indexes belong behind these
+unless they provide direct timestamp-bearing CDX/CDXJ evidence. Diversify
 institutions/origins instead of returning many siblings from one famous
 archive. Treat known CDX/CDXJ shards as background data-plane work, not a
 reason for another search. Treat measured zero-yield terminal sources in the
 request context as negative search evidence: do not re-propose the same
 origin/family/archetype unless you can state a materially different residual
 mechanism. Never infer hostname opportunity from page/document/graph-node
-counts alone.
+counts alone. Reject anonymized traces whose server names or URLs were
+irreversibly hashed/tokenized: large request counts are worthless when the
+original hostname cannot be recovered.
 
 Prefer:
-1. large enumerable historical-web resources with 1996-2001 overlap,
+1. non-snapshot contemporaneous URL reservoirs with 1996-2001 overlap
+   (mail archives, proxy/access traces, DNS/domain inventories),
 2. early-web link/URL/domain/seed inventories, including dated NIC/registry exports,
 3. research-repository datasets and new archive/data-package roots,
-4. compact URL templates over long URL lists,
-5. hypotheses testable with very few requests.
+4. exact direct-evidence CDX/CDXJ resources that can fill idle data-plane capacity,
+5. compact URL templates over long URL lists and hypotheses testable cheaply.
 
 Avoid spending search effort on format documentation, generic archive landing
 pages, post-2001-only datasets, or access-controlled APIs without public data.
