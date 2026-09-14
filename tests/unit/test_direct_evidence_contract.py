@@ -310,5 +310,12 @@ class DirectEvidenceContractTests(unittest.TestCase):
         self.assertEqual(second.direct_year_mask, 1 << (1999 - 1996))
 
 
+    def test_rdf_link_dump_is_discovery_only(self):
+        locator = "https://download.example/content.rdf.u8.gz"
+        contract = resolve_source_evidence_contract(locator)
+        self.assertEqual(contract.parser_kind, "rdf_links")
+        self.assertEqual(contract.authority, EvidenceAuthority.DISCOVERY_ONLY)
+        self.assertEqual(contract.evidence_mode, "discovery_only")
+
 if __name__ == "__main__":
     unittest.main()
