@@ -346,6 +346,64 @@ class DistributedAuthorityTests(unittest.TestCase):
         )
         self.assertIsNotNone(permit_b)
 
+    def test_claim_gate_requires_provider_region_qualification(self) -> None:
+        self.store.configure_provider_budget(
+            "internet_archive",
+            requests_per_second=10.0,
+            max_global_inflight=1,
+        )
+        formal = WorkDefinition(
+            producer="HistoricalQueryProducer",
+            task_class=TaskClass.HOST_BATCH,
+            input_identity="qualified.example",
+            coverage={
+                "provider": "internet_archive",
+                "year_from": 1996,
+                "year_to": 2001,
+            },
+            partition="0",
+            algorithm_version="resolver-v1",
+            required_capabilities=(Capability.ONLINE_QUERY.value,),
+        )
+        self.store.admit_work(formal)
+        self.assertIsNone(self.store.claim_work(self.worker_a.worker_id))
+
+        probe = WorkDefinition(
+            producer="RegionProbeProducer",
+            task_class=TaskClass.PROBE,
+            input_identity="internet_archive",
+            coverage={"provider": "internet_archive"},
+            partition="qualification",
+            algorithm_version="probe-v1",
+            required_capabilities=(Capability.ONLINE_QUERY.value,),
+            priority=2.0,
+        )
+        probe_task = self.store.admit_work(probe)
+        probe_lease = self.store.claim_work(self.worker_a.worker_id)
+        assert probe_lease is not None
+        self.assertEqual(probe_lease.task_id, probe_task)
+        for _ in range(3):
+            self.store.record_provider_region_observation(
+                "internet_archive",
+                worker_id=probe_lease.worker_id,
+                task_id=probe_lease.task_id,
+                generation=probe_lease.generation,
+                connect_success=True,
+                status_code=200,
+                latency_ms=50.0,
+                response_bytes=64,
+            )
+        self.store.finish_task(
+            probe_lease.task_id,
+            worker_id=probe_lease.worker_id,
+            generation=probe_lease.generation,
+        )
+
+        formal_lease = self.store.claim_work(self.worker_a.worker_id)
+        self.assertIsNotNone(formal_lease)
+        assert formal_lease is not None
+        self.assertEqual(formal_lease.work.producer, "HistoricalQueryProducer")
+
     def test_formal_provider_permit_requires_qualified_region(self) -> None:
         self.store.configure_provider_budget(
             "internet_archive",
