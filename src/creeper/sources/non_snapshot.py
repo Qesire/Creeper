@@ -82,6 +82,17 @@ def is_target_mailbox_shard(locator: str) -> bool:
     )
 
 
+def is_audited_gnu_mailbox_locator(locator: str) -> bool:
+    """Grant GNU mailbox authority only to exact target-period monthly shards."""
+    parsed = urlsplit(locator)
+    return (
+        parsed.scheme.lower() == "https"
+        and (parsed.hostname or "").lower() == "lists.gnu.org"
+        and parsed.path.lower().startswith("/archive/mbox/")
+        and mailbox_year_from_locator(locator) is not None
+    )
+
+
 def extract_http_urls(
     text: str,
     *,
