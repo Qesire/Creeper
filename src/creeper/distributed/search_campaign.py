@@ -14,12 +14,21 @@ _ALLOWED_FIELDS = frozenset(
 )
 
 
-def _clean_terms(values: Sequence[str], *, name: str) -> tuple[str, ...]:
-    result = tuple(
-        value.strip()
-        for value in values
-        if isinstance(value, str) and value.strip()
-    )
+def _clean_terms(
+    values: Sequence[str],
+    *,
+    name: str,
+    allow_blank: bool = False,
+) -> tuple[str, ...]:
+    cleaned: list[str] = []
+    for value in values:
+        if not isinstance(value, str):
+            continue
+        item = value.strip()
+        if not item and not allow_blank:
+            continue
+        cleaned.append(item)
+    result = tuple(cleaned)
     if not result:
         raise ValueError(f"search campaign dimension is empty: {name}")
     if len(set(result)) != len(result):
@@ -84,12 +93,20 @@ class SearchCampaign:
         object.__setattr__(
             self,
             "language_terms",
-            _clean_terms(self.language_terms, name="language_terms"),
+            _clean_terms(
+                self.language_terms,
+                name="language_terms",
+                allow_blank=True,
+            ),
         )
         object.__setattr__(
             self,
             "operators",
-            _clean_terms(self.operators, name="operators"),
+            _clean_terms(
+                self.operators,
+                name="operators",
+                allow_blank=True,
+            ),
         )
 
     @property
