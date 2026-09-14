@@ -80,8 +80,14 @@ class WorkerRuntimeConfig:
             raise ValueError("worker coordinator_url and secret_env are required")
         if self.poll_seconds <= 0 or self.lease_seconds <= 0:
             raise ValueError("worker polling/lease intervals must be positive")
-        if not self.cdx_providers:
-            raise ValueError("at least one distributed CDX provider is required")
+        capabilities = set(self.descriptor.capabilities)
+        if (
+            {"ONLINE_QUERY", "THIN_QUERY"} & capabilities
+            and not self.cdx_providers
+        ):
+            raise ValueError(
+                "ONLINE_QUERY/THIN_QUERY workers require CDX providers"
+            )
         configured = {provider.name for provider in self.cdx_providers}
         allowed = set(self.descriptor.allowed_providers)
         missing = configured - allowed
@@ -196,9 +202,9 @@ def load_worker_config(path: Path) -> WorkerRuntimeConfig:
     section = raw.get("worker")
     if not isinstance(section, Mapping):
         raise ValueError("[worker] table is required")
-    providers_raw = raw.get("cdx_providers")
-    if not isinstance(providers_raw, list) or not providers_raw:
-        raise ValueError("[[cdx_providers]] entries are required")
+    providers_raw = raw.get("cdx_providers", [])
+    if not isinstance(providers_raw, list):
+        raise ValueError("[[cdx_providers]] entries must form a list")
     providers = tuple(
         CDXProviderConfig.from_mapping(spec)
         for spec in providers_raw
