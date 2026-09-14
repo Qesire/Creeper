@@ -215,7 +215,11 @@ class SourceDiscoveryProducer:
                 row[0],
             )
         )
-        selected = classified[:max_links]
+        selected = [
+            row
+            for row in classified
+            if row[0] != final_url
+        ][:max_links]
         results = [
             {
                 "kind": "SOURCE_CANDIDATE",
