@@ -313,7 +313,7 @@ class MultiCDXProviderPoolTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.followup_years, ())
         self.assertEqual(result.provider_requests, 2)
 
-    async def test_range_failure_decomposes_only_missing_years(self) -> None:
+    async def test_partial_range_closes_missing_year_inside_same_host_task(self) -> None:
         pool, first, second = self.make_pool()
         key = EvidenceQueryKey(
             "partial.example",
@@ -339,12 +339,67 @@ class MultiCDXProviderPoolTests(unittest.IsolatedAsyncioTestCase):
             provider_requests=1,
             error="offline",
         )
+        exact = EvidenceQueryKey(
+            key.hostname,
+            TemporalScope(1999, 1999),
+            key.provider,
+            key.policy_version,
+        )
+        for name, client in clients.items():
+            client.exact[exact] = EvidenceQueryResult(
+                key.hostname,
+                1999,
+                CDXQueryState.PASS,
+                capsule=capsule(key.hostname, 1999, name),
+                provider_requests=1,
+                key=exact,
+            )
 
         result = await pool.query_range(key)
 
-        self.assertEqual(result.state, CDXQueryState.DECOMPOSED)
+        self.assertEqual(result.state, CDXQueryState.PASS)
+        self.assertEqual(result.candidate_years, (1998, 1999))
+        self.assertEqual(result.followup_years, ())
+        self.assertGreaterEqual(result.provider_requests, 3)
+
+    async def test_unresolved_exact_fallback_retries_parent_without_children(self) -> None:
+        pool, first, second = self.make_pool()
+        key = EvidenceQueryKey(
+            "still-partial.example",
+            TemporalScope(1998, 1999),
+            "wayback",
+            "cdx-v1",
+        )
+        clients = {"first": first, "second": second}
+        for client in clients.values():
+            client.ranges[key] = RangeEvidenceQueryResult(
+                hostname=key.hostname,
+                key=key,
+                state=CDXQueryState.DECOMPOSED,
+                candidate_years=(1998,),
+                capsules=(capsule(key.hostname, 1998, "range"),),
+                provider_requests=1,
+            )
+        exact = EvidenceQueryKey(
+            key.hostname,
+            TemporalScope(1999, 1999),
+            key.provider,
+            key.policy_version,
+        )
+        for client in clients.values():
+            client.exact[exact] = EvidenceQueryResult(
+                key.hostname,
+                1999,
+                CDXQueryState.INCOMPLETE,
+                provider_requests=1,
+                key=exact,
+            )
+
+        result = await pool.query_range(key)
+
+        self.assertEqual(result.state, CDXQueryState.INCOMPLETE)
         self.assertEqual(result.candidate_years, (1998,))
-        self.assertEqual(result.followup_years, (1999,))
+        self.assertEqual(result.followup_years, ())
 
 
 if __name__ == "__main__":
