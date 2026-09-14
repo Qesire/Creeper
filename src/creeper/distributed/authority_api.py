@@ -242,7 +242,12 @@ def create_authority_app(
             ttl_seconds=float(data.get("ttl_seconds", 30.0)),
         )
         if permit is None:
-            return web.json_response({"permit": None}, status=429)
+            # This is Authority-side global budget backpressure, not an
+            # external provider HTTP 429. Keep the two telemetry domains
+            # separate.
+            return web.json_response(
+                {"permit": None, "reason": "BUDGET_WAIT"}
+            )
         return web.json_response(
             {
                 "permit": {
