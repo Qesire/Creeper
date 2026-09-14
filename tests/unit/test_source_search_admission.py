@@ -242,9 +242,26 @@ class AgentAdmissionIntegrationTests(unittest.IsolatedAsyncioTestCase):
             self.assertIs(request["requirements"]["prefer_direct_evidence_bulk"], False)
             self.assertIn(".cdxj.gz", request["requirements"]["direct_evidence_suffixes"])
             self.assertTrue(
-                request["requirements"]["resource_priority"][0].startswith(
-                    "non-snapshot hostname inventories"
-                )
+                request["requirements"]["prefer_new_direct_record_sources"]
+            )
+            direct_priority = request["requirements"]["direct_record_priority"]
+            self.assertIn(
+                "hostname or URL",
+                direct_priority["highest_value_shape"],
+            )
+            self.assertIn(
+                "direct annual evidence",
+                direct_priority["authority_rule"],
+            )
+            self.assertIn(
+                "record-level hostname/URL + timestamp",
+                request["requirements"]["resource_priority"][0],
+            )
+            self.assertIn(
+                "access log",
+                request["requirements"]["query_construction"][
+                    "prefer_direct_record_terms"
+                ],
             )
             mechanism = request["requirements"]["capture_mechanism_policy"]
             self.assertIn(
