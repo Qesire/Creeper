@@ -201,10 +201,11 @@ class SourceProducerTests(unittest.TestCase):
         reservoir = self.control.get_reservoir("fixture-reservoir")
         self.assertEqual(reservoir.state, ReservoirState.READY)
         self.assertEqual(reservoir.cursor, "0")
-        row = self.control.connection.execute(
-            "SELECT state FROM work_leases ORDER BY rowid DESC LIMIT 1"
-        ).fetchone()
-        self.assertEqual(row["state"], "ABORTED")
+        rows = self.control.connection.execute(
+            "SELECT state FROM work_leases"
+        ).fetchall()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["state"], "ABORTED")
 
     def build_direct_runtime(
         self,
