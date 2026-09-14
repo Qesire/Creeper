@@ -202,7 +202,19 @@ WantedBy=multi-user.target
 EOF
 
 curl -fsS "${FABRIC_COORDINATOR_URL%/}/healthz" >/dev/null
-curl -fsS "${FABRIC_COORDINATOR_URL%/}/meta" >/dev/null
+META_JSON="$(curl -fsS "${FABRIC_COORDINATOR_URL%/}/meta")"
+AUTHORITY_TIME="$(
+  printf '%s' "${META_JSON}" |
+    "${FABRIC_INSTALL_ROOT}/.venv/bin/python" -c \
+      'import json,sys; print(int(float(json.load(sys.stdin)["server_unix_time"])))'
+)"
+LOCAL_TIME="$(date +%s)"
+CLOCK_SKEW=$(( LOCAL_TIME > AUTHORITY_TIME ? LOCAL_TIME - AUTHORITY_TIME : AUTHORITY_TIME - LOCAL_TIME ))
+MAX_CLOCK_SKEW="${FABRIC_DEPLOY_MAX_CLOCK_SKEW_SECONDS:-240}"
+if (( CLOCK_SKEW > MAX_CLOCK_SKEW )); then
+  echo "clock skew too large for Fabric HMAC: ${CLOCK_SKEW}s > ${MAX_CLOCK_SKEW}s" >&2
+  exit 2
+fi
 
 systemctl daemon-reload
 systemctl enable --now creeper-fabric-worker.service
