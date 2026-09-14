@@ -29,6 +29,10 @@ class StaleLeaseCoordinatorError(CoordinatorError):
     """Authority rejected an obsolete lease generation."""
 
 
+class CoordinatorTransportError(CoordinatorError):
+    """Authority could not be reached over the transport."""
+
+
 @dataclass(frozen=True)
 class HYProbeDecision:
     hostname: str
@@ -112,7 +116,7 @@ class CoordinatorClient:
                 },
             )
         except (httpx.TimeoutException, httpx.TransportError) as exc:
-            raise CoordinatorError(
+            raise CoordinatorTransportError(
                 f"Authority transport unavailable: {type(exc).__name__}"
             ) from exc
         try:
