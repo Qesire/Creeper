@@ -99,10 +99,12 @@ def _is_bulk(url: str) -> bool:
 
 
 def _inferred_target_year(url: str) -> int | None:
-    """Infer one target-year scheduling hint from an explicit resource name.
+    """Infer one target-year measurement hint from an explicit resource name.
 
-    This is discovery metadata only. It may narrow later provider queries, but
-    never grants direct evidence authority.
+    This is discovery metadata only. It improves target-year scout ranking and
+    attribution, but host-first production still resolves every discovery-only
+    hostname across all uncovered 1996-2001 years and it never grants direct
+    evidence authority.
     """
     name = urlsplit(url).path.rsplit("/", 1)[-1]
     years = {int(match.group(1)) for match in _TARGET_YEAR_RE.finditer(name)}

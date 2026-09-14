@@ -6,6 +6,7 @@ import hashlib
 import json
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import urlsplit
 
 from creeper.source_discovery.manager import SearchDirective
 from creeper.source_discovery.models import SourceState
@@ -17,12 +18,16 @@ class SourceIntelligenceContextPolicy:
     max_top_sources: int = 8
     max_failures: int = 8
     max_strategy_rewards: int = 8
+    max_recent_searches: int = 8
+    max_known_origins: int = 16
 
     def __post_init__(self) -> None:
         if min(
             self.max_top_sources,
             self.max_failures,
             self.max_strategy_rewards,
+            self.max_recent_searches,
+            self.max_known_origins,
         ) < 1:
             raise ValueError("context limits must be positive")
 
@@ -91,6 +96,52 @@ class SourceIntelligenceContextBuilder:
             }
             for row in rows
         ]
+
+    def _recent_searches(self) -> list[dict[str, Any]]:
+        rows = self.registry.connection.execute(
+            """
+            SELECT episode_id, strategy, query, accepted_proposals, new_sources
+            FROM source_search_episodes
+            WHERE finished_at IS NOT NULL
+            ORDER BY finished_at DESC, episode_id DESC
+            LIMIT ?
+            """,
+            (self.policy.max_recent_searches,),
+        ).fetchall()
+        return [
+            {
+                "strategy": str(row["strategy"]),
+                "query": str(row["query"]),
+                "accepted_proposals": int(row["accepted_proposals"] or 0),
+                "new_sources": int(row["new_sources"] or 0),
+            }
+            for row in rows
+        ]
+
+    def _known_origins(self) -> list[str]:
+        rows = self.registry.connection.execute(
+            """
+            SELECT canonical_entrypoint
+            FROM source_candidates
+            ORDER BY updated_at DESC
+            LIMIT ?
+            """,
+            (self.policy.max_known_origins * 8,),
+        ).fetchall()
+        origins: list[str] = []
+        seen: set[str] = set()
+        for row in rows:
+            parsed = urlsplit(str(row["canonical_entrypoint"]))
+            if not parsed.scheme or not parsed.netloc:
+                continue
+            origin = f"{parsed.scheme.lower()}://{parsed.netloc.lower()}"
+            if origin in seen:
+                continue
+            seen.add(origin)
+            origins.append(origin)
+            if len(origins) >= self.policy.max_known_origins:
+                break
+        return origins
 
     def _subject_sources(
         self,
@@ -204,6 +255,8 @@ class SourceIntelligenceContextBuilder:
             ],
             "top_measured_sources": self._top_sources(),
             "recent_terminal_sources": self._recent_failures(),
+            "recent_searches": self._recent_searches(),
+            "known_origins": self._known_origins(),
             "subject_sources": self._subject_sources(directive),
             "constraints": {
                 "target_year_from": 1996,

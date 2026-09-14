@@ -191,12 +191,16 @@ class DurableSequentialRuntimeIntegrationTests(unittest.TestCase):
                 self.assertEqual(
                     calls,
                     [
-                        ("one.example", 1997),
-                        ("two.example", 1997),
-                        ("three.example", 1997),
+                        (hostname, year)
+                        for hostname in (
+                            "one.example",
+                            "two.example",
+                            "three.example",
+                        )
+                        for year in range(1996, 2002)
                     ],
                 )
-                self.assertEqual(evidence.count(), 3)
+                self.assertEqual(evidence.count(), 18)
                 self.assertEqual(
                     control.get_reservoir("sequential-reservoir").state,
                     ReservoirState.EXHAUSTED,
@@ -277,9 +281,13 @@ class DurableSequentialRuntimeIntegrationTests(unittest.TestCase):
                 )
                 self.assertEqual(
                     calls,
-                    [("one.example", 1997), ("two.example", 1997)],
+                    [
+                        (hostname, year)
+                        for hostname in ("one.example", "two.example")
+                        for year in range(1996, 2002)
+                    ],
                 )
-                self.assertEqual(reopened_evidence.count(), 2)
+                self.assertEqual(reopened_evidence.count(), 12)
                 self.assertEqual(
                     reopened_control.get_reservoir("restart-reservoir").state,
                     ReservoirState.READY,
@@ -328,17 +336,21 @@ class DurableSequentialRuntimeIntegrationTests(unittest.TestCase):
                 self.assertEqual(report.observations, 3)
                 self.assertEqual(report.evidence_tasks_enqueued, 3)
                 self.assertEqual(report.evidence_tasks_completed, 3)
-                self.assertEqual(report.evidence_capsules_committed, 3)
+                self.assertEqual(report.evidence_capsules_committed, 18)
                 self.assertEqual(
                     calls,
                     [
-                        ("hint-one.example", 1997),
-                        ("hint-two.example", 1997),
-                        ("hint-three.example", 1997),
+                        (hostname, year)
+                        for hostname in (
+                            "hint-one.example",
+                            "hint-two.example",
+                            "hint-three.example",
+                        )
+                        for year in range(1996, 2002)
                     ],
                 )
                 self.assertLessEqual(report.max_evidence_queue_depth, 1)
-                self.assertEqual(evidence.count(), 3)
+                self.assertEqual(evidence.count(), 18)
                 for hostname in (
                     "hint-one.example",
                     "hint-two.example",
@@ -346,7 +358,7 @@ class DurableSequentialRuntimeIntegrationTests(unittest.TestCase):
                 ):
                     key = EvidenceQueryKey(
                         hostname,
-                        TemporalScope(1997, 1997),
+                        TemporalScope(1996, 2001),
                         "wayback",
                         "cdx-v1",
                     )

@@ -16,7 +16,7 @@ import time
 
 from creeper.authority.baseline_index import BaselineIndex
 from creeper.evidence.planner import EvidencePlanner
-from creeper.evidence.policies import EvidenceQueryKey
+from creeper.evidence.policies import CDXQueryState, EvidenceQueryKey
 from creeper.evidence.providers.cdx import Transport, query_year
 from creeper.records.models import HostObservation
 from creeper.runtime.queues import BoundedQueues
@@ -26,7 +26,7 @@ from creeper.scheduler.leases import WorkLease
 from creeper.scheduler.priority import LeaseCandidate
 from creeper.storage.commit_writer import CommitWriter
 from creeper.storage.control_store import ControlStore
-from creeper.storage.evidence_store import EvidenceStore
+from creeper.storage.evidence_store import EvidenceStore, EvidenceTaskProvenance
 
 
 @dataclass(frozen=True)
@@ -176,19 +176,104 @@ class SyncRuntime:
                 for key in claim_keys:
                     if key not in claimed_by_key:
                         continue
-                    query_result = query_year(
-                        key.hostname,
-                        key.temporal_scope.year_from,
-                        self.evidence_transport,
-                        provider=key.provider,
-                        policy_version=key.policy_version,
+                    scope = key.temporal_scope
+                    if scope.year_from == scope.year_to:
+                        query_result = query_year(
+                            key.hostname,
+                            scope.year_from,
+                            self.evidence_transport,
+                            provider=key.provider,
+                            policy_version=key.policy_version,
+                        )
+                        max_commits = max(
+                            max_commits,
+                            self._put(queues.commits, query_result),
+                        )
+                        queues.commits.get_nowait()
+                        writer.submit(query_result.capsule, query_result)
+                        completed += 1
+                        continue
+
+                    # The synchronous runtime is a compatibility/offline path,
+                    # but it must preserve the same host-first task identity as
+                    # production. Resolve the bounded six-year scope internally
+                    # and finish the *parent* range task once; never fabricate
+                    # durable exact-year children or try to complete exact keys
+                    # that were never enqueued.
+                    year_results = []
+                    for year in range(scope.year_from, scope.year_to + 1):
+                        result = query_year(
+                            key.hostname,
+                            year,
+                            self.evidence_transport,
+                            provider=key.provider,
+                            policy_version=key.policy_version,
+                        )
+                        year_results.append(result)
+                        max_commits = max(
+                            max_commits,
+                            self._put(queues.commits, result),
+                        )
+                        queues.commits.get_nowait()
+
+                    capsules_for_range = [
+                        result.capsule
+                        for result in year_results
+                        if result.capsule is not None
+                    ]
+                    if capsules_for_range:
+                        origin = self.control_store.primary_evidence_task_origin(key)
+                        provenance = EvidenceTaskProvenance(
+                            key=key,
+                            source_key="" if origin is None else origin[0],
+                            reservoir_id="" if origin is None else origin[1],
+                            lease_id="" if origin is None else origin[2],
+                            committed_at=float(self.control_store.clock()),
+                        )
+                        writer.inserted_capsules += (
+                            self.evidence_store.put_many_with_task_provenance(
+                                (capsule, provenance)
+                                for capsule in capsules_for_range
+                            )
+                        )
+                        self.control_store.attribute_task_host_years(
+                            key,
+                            (capsule.year for capsule in capsules_for_range),
+                        )
+
+                    states = [
+                        result.state
+                        if isinstance(result.state, CDXQueryState)
+                        else CDXQueryState(str(result.state))
+                        for result in year_results
+                    ]
+                    if all(
+                        state
+                        in {
+                            CDXQueryState.PASS,
+                            CDXQueryState.EMPTY_EXHAUSTIVE,
+                        }
+                        for state in states
+                    ):
+                        final_state = (
+                            CDXQueryState.PASS
+                            if capsules_for_range
+                            else CDXQueryState.EMPTY_EXHAUSTIVE
+                        )
+                    elif CDXQueryState.TRANSIENT_ERROR in states:
+                        final_state = CDXQueryState.TRANSIENT_ERROR
+                    elif states and all(
+                        state is CDXQueryState.INVALID for state in states
+                    ):
+                        final_state = CDXQueryState.INVALID
+                    else:
+                        final_state = CDXQueryState.INCOMPLETE
+
+                    self.control_store.finish_evidence_task(
+                        key,
+                        final_state,
+                        owner=self.owner,
                     )
-                    max_commits = max(
-                        max_commits,
-                        self._put(queues.commits, query_result),
-                    )
-                    queues.commits.get_nowait()
-                    writer.submit(query_result.capsule, query_result)
                     completed += 1
         finally:
             writer.close()

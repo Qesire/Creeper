@@ -119,14 +119,6 @@ p.add_argument("--request", required=True)
 p.add_argument("--response", required=True)
 a = p.parse_args()
 request = json.loads(Path(a.request).read_text(encoding="utf-8"))
-assert request["admission"]["min_expected_volume"] == 100000
-assert request["admission"]["direct_min_expected_volume"] == 10000
-assert request["admission"]["direct_evidence_year_bounds_optional"] is True
-assert request["requirements"]["prefer_direct_evidence_bulk"] is False
-assert ".cdxj.gz" in request["requirements"]["direct_evidence_suffixes"]
-assert request["requirements"]["resource_priority"][0].startswith("new official archive")
-assert "national libraries and web archives" in request["requirements"]["search_targets"]
-assert request["requirements"]["avoid_low_yield"][0] == "ordinary archived pages"
 payload = {
     "query": "large historical web collection",
     "candidates": [
@@ -179,12 +171,36 @@ class AgentAdmissionIntegrationTests(unittest.IsolatedAsyncioTestCase):
 
             batch = await executor(directive)
 
+            invocation = next((root / "invocations").iterdir())
+            request = json.loads((invocation / "request.json").read_text(encoding="utf-8"))
+            self.assertEqual(request["admission"]["min_expected_volume"], 100000)
+            self.assertEqual(request["admission"]["direct_min_expected_volume"], 10000)
+            self.assertIs(request["admission"]["direct_evidence_year_bounds_optional"], True)
+            self.assertIs(request["requirements"]["prefer_direct_evidence_bulk"], False)
+            self.assertIn(".cdxj.gz", request["requirements"]["direct_evidence_suffixes"])
+            self.assertTrue(
+                request["requirements"]["resource_priority"][0].startswith(
+                    "new enumerable root"
+                )
+            )
+            self.assertIn(
+                "national libraries and web archives",
+                request["requirements"]["search_targets"],
+            )
+            self.assertIn(
+                "ordinary archived pages and single-site snapshots",
+                request["requirements"]["avoid_low_yield"],
+            )
+            self.assertEqual(
+                request["requirements"]["calibrated_search_profile"]["mode"],
+                "high_density_refill",
+            )
+
             self.assertEqual(len(batch.candidates), 1)
             self.assertEqual(
                 batch.candidates[0].canonical_entrypoint,
                 "https://large.example/catalog/",
             )
-            invocation = next((root / "invocations").iterdir())
             audit = json.loads((invocation / "admission.json").read_text(encoding="utf-8"))
             self.assertEqual(audit["raw_candidate_count"], 2)
             self.assertEqual(audit["accepted_count"], 1)

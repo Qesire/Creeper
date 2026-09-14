@@ -175,10 +175,7 @@ class SourceReservoirManagerTests(unittest.TestCase):
             confidence=1.0,
         )
         loc = SourceCandidate(
-            canonical_entrypoint=(
-                "https://data.labs.loc.gov/us-elections/"
-                "by-year/2000/manifest.html"
-            ),
+            canonical_entrypoint="https://data.labs.loc.gov/us-elections/",
             source_family="PUBLIC_ARCHIVE_INDEX_CATALOG",
             level=SourceLevel.METASOURCE,
             discovered_by="curated-official-seed",
@@ -491,7 +488,7 @@ class SourceReservoirManagerTests(unittest.TestCase):
         self.assertEqual(plan.effective_cold_count, 1)
         self.assertFalse(plan.needs_search)
 
-    def test_cold_deficit_emits_parallel_exploit_refill_and_exploration(self) -> None:
+    def test_cold_deficit_uses_two_orthogonal_agent_calls(self) -> None:
         proven = self.candidate("proven", family="HIGH_YIELD_FAMILY")
         self.to_warm(proven, novel_eed=20.0, elapsed_seconds=2.0)
         manager = SourceReservoirManager(
@@ -509,7 +506,7 @@ class SourceReservoirManagerTests(unittest.TestCase):
 
         plan = manager.plan()
 
-        self.assertEqual(len(plan.search_directives), 3)
+        self.assertEqual(len(plan.search_directives), 2)
         self.assertFalse(
             any(
                 directive.strategy
@@ -530,12 +527,81 @@ class SourceReservoirManagerTests(unittest.TestCase):
                 for directive in plan.search_directives
             )
         )
-        self.assertTrue(
-            any(
-                directive.kind is SearchDirectiveKind.DISCOVER_NEW_FAMILY
-                for directive in plan.search_directives
-            )
+
+    def test_empty_search_supply_reduces_budget_and_expands_global_cooldown(self) -> None:
+        now = [1_000.0]
+        self.registry.clock = lambda: now[0]
+        productive = self.registry.begin_search_episode(
+            strategy="YEAR_ARCHETYPE",
+            backend="test",
+            query="1996-2001 early web link list dataset",
+            actor="test",
+            episode_id="search:productive",
         )
+        discovered = self.candidate(
+            "new-dataset",
+            origin="https://research.example",
+        )
+        self.registry.register_proposal(
+            discovered,
+            episode_id=productive.episode_id,
+        )
+        self.registry.finish_search_episode(
+            productive.episode_id,
+            search_cost_seconds=1.0,
+            accepted_proposals=1,
+            new_sources=1,
+        )
+        manager = SourceReservoirManager(
+            self.registry,
+            targets=SourcePoolTargets(
+                active_min=0,
+                active_target=0,
+                warm_min=0,
+                warm_target=0,
+                cold_min=10,
+                cold_target=20,
+                max_search_directives=3,
+            ),
+            search_cooldown_seconds=30.0,
+        )
+
+        now[0] += 31.0
+        self.assertEqual(len(manager.plan().search_directives), 2)
+
+        empty = self.registry.begin_search_episode(
+            strategy="EXPLORE_NEW_FAMILY",
+            backend="test",
+            query="1998 historical domain list dataset",
+            actor="test",
+            episode_id="search:empty",
+        )
+        self.registry.finish_search_episode(
+            empty.episode_id,
+            search_cost_seconds=1.0,
+        )
+
+        # One empty result reduces budget to one, but another orthogonal arm
+        # may run immediately. Only repeated empty supply triggers global
+        # exponential backoff.
+        first_empty_plan = manager.plan()
+        self.assertEqual(len(first_empty_plan.search_directives), 1)
+        second_empty = self.registry.begin_search_episode(
+            strategy=first_empty_plan.search_directives[0].strategy,
+            backend="test",
+            query="1999 historical registry allocation snapshot",
+            actor="test",
+            episode_id="search:empty:2",
+        )
+        self.registry.finish_search_episode(
+            second_empty.episode_id,
+            search_cost_seconds=1.0,
+        )
+
+        now[0] += 59.0
+        self.assertEqual(manager.plan().search_directives, ())
+        now[0] += 2.0
+        self.assertEqual(len(manager.plan().search_directives), 1)
 
     def test_proven_cdxj_stays_background_and_never_drives_agent_search(self) -> None:
         proven = SourceCandidate(

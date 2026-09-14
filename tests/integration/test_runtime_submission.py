@@ -373,7 +373,10 @@ class RuntimeSubmissionIntegrationTests(unittest.TestCase):
             try:
                 report = runtime.run_once()
                 self.assertTrue(report.snapshot_ready)
-                self.assertEqual(report.novel_records, 1)
+                # One discovery hostname is resolved across the entire
+                # competition interval, so the synthetic provider contributes
+                # six accepted host-year records rather than only its source hint.
+                self.assertEqual(report.novel_records, 6)
             finally:
                 evidence.close()
                 control.close()

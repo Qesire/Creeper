@@ -63,10 +63,9 @@ class LeaseCandidate:
     evidence_mode: str = "discovery_only"
     evidence_provider: str = "wayback"
     expected_evidence_tasks: int = 0
-    # Hard backlog-reservation bound. This is deliberately separate from
-    # expected_evidence_tasks: planner expansion can create multiple disjoint
-    # year scopes from one source observation even when the expected cost is
-    # near one task/record.
+    # Initial durable backlog reservation. Host-first activated production
+    # normally sets this to one slot per admitted source observation; secondary
+    # disjoint/domain work may spill through the bounded EvidenceRouter.
     reservation_evidence_tasks: int | None = None
     source_key: str | None = None
     # Optional FINAL-first value supplied by the production-value model.

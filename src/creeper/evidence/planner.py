@@ -37,11 +37,10 @@ class EvidencePlanner:
     """
 
     MAX_EXTERNAL_TASKS_PER_OBSERVATION = 3
-    # Admission must reserve not only the initial disjoint range/exact tasks,
-    # but also the worst-case exact fanout of a bounded multi-year probe plus
-    # one domain-amplification task. Across six competition years, the peak
-    # nonterminal backlog contribution of one observation is at most seven.
-    MAX_BACKLOG_CAPACITY_PER_OBSERVATION = 7
+    # Host-first admission reserves one initial provider task per source
+    # observation. Rare extra disjoint ranges are durably staged if this slot
+    # is already consumed; range fallback stays inside the logical host task.
+    MAX_BACKLOG_CAPACITY_PER_OBSERVATION = 1
 
     def plan(
         self,
@@ -60,6 +59,9 @@ class EvidencePlanner:
             raise ValueError("invalid hostname")
         if not 0.0 <= float(range_first_fraction) <= 1.0:
             raise ValueError("range_first_fraction must be between 0 and 1")
+        # Kept as a compatibility/configuration input. Host-first discovery now
+        # always queries the full unresolved competition interval, so sampling
+        # a subset into range-first mode is no longer necessary.
 
         suppressed_mask = official_mask | local_mask
         claimed_direct_mask = observation.direct_year_mask & ~suppressed_mask
@@ -71,25 +73,19 @@ class EvidencePlanner:
         hint_mask = observation.year_hint_mask
         if observation.source_year in YEAR_BITS:
             hint_mask |= YEAR_BITS[observation.source_year]
+
         if not allow_direct or restricted_source:
-            hint_mask |= claimed_direct_mask
-        has_temporal_claim = bool(
-            observation.year_hint_mask
-            or observation.direct_year_mask
-            or observation.source_year in YEAR_BITS
-        )
-        if not has_temporal_claim:
-            # An undated hostname is still a valid discovery candidate.
+            # Discovery-only temporal metadata is a *discovery provenance*, not
+            # an evidence boundary. Since the production provider now resolves
+            # 1996-2001 with one logical host-range task, paying for only the
+            # hinted source year throws away the other competition years at no
+            # durable-task saving. Query every still-uncovered competition year
+            # once; IA/Arquivo can return all host captures in that interval.
             hint_mask = ALL_YEAR_MASK
-        elif (
-            (not allow_direct or restricted_source)
-            and self._range_first_selected(hostname, range_first_fraction)
-        ):
-            # Deterministic exploration bucket: discover every unresolved
-            # competition year for a small fraction of externally verified
-            # hostnames. The provider executes this as a one-page bounded range
-            # probe, so exploration cannot silently turn into unbounded archive
-            # pagination.
+        elif not hint_mask and not direct_mask:
+            # An authorized direct reservoir can still emit an undated fallback
+            # candidate. Preserve the old full-range behavior for that rare
+            # case without forcing dated direct evidence back through CDX.
             hint_mask = ALL_YEAR_MASK
         hint_mask &= ~suppressed_mask
         hint_mask &= ~direct_mask

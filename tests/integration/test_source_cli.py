@@ -194,7 +194,7 @@ class SourceProducerCliTests(unittest.TestCase):
         self.assertEqual(result["leases_succeeded"], 1)
         self.assertTrue(result["admission_blocked"])
 
-    def test_activated_runtime_shrinks_lease_to_backlog_headroom(self):
+    def test_activated_runtime_uses_one_backlog_slot_per_host_record(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             task_root = root / "task"
@@ -279,12 +279,12 @@ class SourceProducerCliTests(unittest.TestCase):
                 self.assertAlmostEqual(runtime.producer.range_first_fraction, 0.10)
                 lease = runtime.producer.candidates[0].lease
                 assert lease is not None
-                self.assertEqual(lease.max_records, 2)
-                self.assertEqual(lease.expected_evidence_tasks, 2)
+                self.assertEqual(lease.max_records, 4)
+                self.assertEqual(lease.expected_evidence_tasks, 4)
                 candidate_runtime = runtime.producer.candidates[0]
-                self.assertAlmostEqual(candidate_runtime.expected_novel_eed, 1.0)
-                self.assertEqual(candidate_runtime.costs.evidence_network, 2.0)
-                self.assertEqual(candidate_runtime.reservation_evidence_tasks, 14)
+                self.assertAlmostEqual(candidate_runtime.expected_novel_eed, 2.0)
+                self.assertEqual(candidate_runtime.costs.evidence_network, 4.0)
+                self.assertEqual(candidate_runtime.reservation_evidence_tasks, 4)
 
     def test_activated_runtime_delegates_only_optimizer_eligible_direct_indexes(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -397,7 +397,7 @@ class SourceProducerCliTests(unittest.TestCase):
                     candidates[1].source_key,
                 )
 
-    def test_static_runtime_shrinks_lease_to_backlog_headroom(self):
+    def test_static_runtime_consumes_up_to_one_host_task_per_backlog_slot(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             task_root = root / "task"
@@ -471,18 +471,21 @@ class SourceProducerCliTests(unittest.TestCase):
             report = run_once(config, owner="static-headroom-test")
 
             self.assertEqual(report["leases_succeeded"], 1)
-            self.assertEqual(report["source_records"], 1)
-            self.assertEqual(report["evidence_tasks_enqueued"], 2)
+            self.assertEqual(report["source_records"], 4)
+            self.assertEqual(report["evidence_tasks_enqueued"], 8)
             control = ControlStore(runtime_root / "control.sqlite3")
             try:
                 reservoir = control.get_reservoir("webbase-static")
                 self.assertIsNotNone(reservoir)
-                self.assertIsNotNone(reservoir.cursor)
+                # Seven free Wayback slots now admit all four source records
+                # because each discovery hostname costs one host-range task.
+                # The finite source is therefore exhausted in this single lease.
+                self.assertIsNone(reservoir.cursor)
                 self.assertEqual(
                     sum(
                         control.evidence_task_state_counts().values()
                     ),
-                    5,
+                    11,
                 )
             finally:
                 control.close()
@@ -616,7 +619,7 @@ class SourceProducerCliTests(unittest.TestCase):
             try:
                 key = EvidenceQueryKey(
                     "novel.example",
-                    TemporalScope(1997, 1997),
+                    TemporalScope(1996, 2001),
                     "wayback",
                     "cdx-v1",
                 )

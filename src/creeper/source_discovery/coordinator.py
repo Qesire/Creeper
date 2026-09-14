@@ -130,6 +130,9 @@ class CoordinatorCycleReport:
     usable_cold_count: int = 0
     effective_cold_count: int = 0
     search_directives_planned: int = 0
+    search_zero_new_streak: int = 0
+    search_adaptive_cooldown_seconds: float = 0.0
+    search_call_budget: int = 0
     activated: int = 0
     triaged_to_scout: int = 0
     triaged_hold: int = 0
@@ -554,6 +557,8 @@ class SourceDiscoveryCoordinator:
                     dropped += 1
                     continue
                 accepted.append(normalized)
+            registered_count = 0
+            new_source_count = 0
             for candidate in accepted:
                 if is_common_crawl_provenance(
                     candidate.source_family,
@@ -562,10 +567,12 @@ class SourceDiscoveryCoordinator:
                 ):
                     dropped += 1
                     continue
-                self.registry.register_proposal(
+                _stored, inserted = self.registry.register_proposal(
                     candidate,
                     episode_id=episode.episode_id,
                 )
+                registered_count += 1
+                new_source_count += int(inserted)
                 if (
                     directive.task_type.value == "INTERPRET_STRUCTURE"
                     and directive.subject
@@ -593,6 +600,8 @@ class SourceDiscoveryCoordinator:
             self.registry.finish_search_episode(
                 episode.episode_id,
                 search_cost_seconds=cost,
+                accepted_proposals=registered_count,
+                new_sources=new_source_count,
             )
             if batch.llm_episode_id is not None:
                 self.registry.finish_llm_episode(
@@ -600,7 +609,7 @@ class SourceDiscoveryCoordinator:
                     cost_seconds=cost,
                 )
             counts["search_episodes"] += 1
-            counts["search_candidates_registered"] += len(accepted)
+            counts["search_candidates_registered"] += registered_count
             counts["search_candidates_dropped"] += dropped
 
     async def run_once(self) -> CoordinatorCycleReport:
@@ -645,6 +654,11 @@ class SourceDiscoveryCoordinator:
                 "usable_cold_count": plan.cold_count,
                 "effective_cold_count": plan.effective_cold_count,
                 "search_directives_planned": len(plan.search_directives),
+                "search_zero_new_streak": plan.search_zero_new_streak,
+                "search_adaptive_cooldown_seconds": (
+                    plan.search_adaptive_cooldown_seconds
+                ),
+                "search_call_budget": plan.search_call_budget,
                 "activated": 0,
                 "triaged_to_scout": 0,
                 "triaged_hold": 0,

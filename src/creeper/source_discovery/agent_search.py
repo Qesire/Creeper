@@ -143,6 +143,58 @@ class CommandAgentSearchExecutor:
         self.context_builder = context_builder
         self.clock = clock
 
+    @staticmethod
+    def _calibrated_search_profile(
+        directive: SearchDirective,
+    ) -> dict[str, object]:
+        """Map one agent slot to a distinct search shape observed to work live."""
+        kind = directive.kind.value
+        if kind == "INTERPRET_STRUCTURE":
+            return {
+                "mode": "subject_structure",
+                "primary_archetype": "machine-readable child inventory",
+                "query_examples": [
+                    "inspect the exact subject for download manifests, file lists, API/catalog endpoints",
+                ],
+            }
+        if kind == "RECOVER_STAGNATION":
+            return {
+                "mode": "recovery",
+                "primary_archetype": "alternate repository or citation-chain source",
+                "query_examples": [
+                    '"1996" OR "1997" OR "1998" historical web dataset filetype',
+                    '"1999" OR "2000" OR "2001" internet directory URL dataset',
+                    "paper dataset repository early web crawl URL list",
+                ],
+            }
+        if kind == "DISCOVER_NEW_FAMILY":
+            return {
+                "mode": "orthogonal_exploration",
+                "primary_archetype": "offline web directory/CD-ROM/site-list collection",
+                "query_examples": [
+                    '"1996" internet CD-ROM archived websites original URLs',
+                    '"1997" web directory URL list dataset',
+                    '"1998" offline web collection site list',
+                ],
+            }
+        if kind == "EXPLOIT_SOURCE_FAMILY":
+            return {
+                "mode": "family_exploitation",
+                "primary_archetype": "sibling dataset/root from measured productive family",
+                "query_examples": [
+                    "search the subject family/origin for adjacent years, manifests, sibling exports",
+                ],
+            }
+        return {
+            "mode": "high_density_refill",
+            "primary_archetype": "research crawl/link-list/URL-corpus dataset",
+            "query_examples": [
+                '"1996-2000" early web link list dataset',
+                '"2001" web crawl URL corpus dataset',
+                '"1999-2001" internet directory URLs dataset',
+            ],
+        }
+
     def _request_payload(
         self,
         directive: SearchDirective,
@@ -193,6 +245,9 @@ class CommandAgentSearchExecutor:
             "target_year_from": 1996,
             "target_year_to": 2001,
             "requirements": {
+                "calibrated_search_profile": self._calibrated_search_profile(
+                    directive
+                ),
                 "prefer_metasources": True,
                 # Deterministic CDX/CDXJ artifacts are background bulk work.
                 # Search capacity should find new roots/families, not spend an
@@ -206,22 +261,49 @@ class CommandAgentSearchExecutor:
                 ),
                 "prefer_catalogs_that_enumerate_direct_evidence_bulk": False,
                 "resource_priority": [
-                    "new official archive or historical-data metasource",
-                    "new archive collection root with machine-readable inventory",
-                    "new public dataset family overlapping 1996-2001",
-                    "large historical URL/domain source not already enumerated",
+                    "new enumerable root or dataset family overlapping 1996-2001",
+                    "early-web link/URL/domain/seed inventories with year provenance",
+                    "historical NIC/registry domain-allocation or connected-domain snapshots",
+                    "research-repository datasets derived from 1996-2001 web collections",
+                    "national-library or university collection/data manifests",
+                    "historical directories or site lists exposing many external hosts",
                     "CDX/CDXJ only when surfaced incidentally by a new root",
                 ],
                 "search_targets": [
+                    "institutional and research data repositories",
                     "national libraries and web archives",
-                    "university or research web-archive datasets",
+                    "university early-web research datasets",
                     "public archive data-package manifests",
-                    "directory indexes and machine-readable file manifests",
+                    "historical link lists, URL lists, domain lists, and seed inventories",
+                    "NIC/registry FTP exports and dated allocation/statistics snapshots",
                 ],
+                "query_construction": {
+                    "must_include_target_period": (
+                        "use 1996-2001, an overlapping subrange, or an explicit "
+                        "target year in every broad web search"
+                    ),
+                    "must_include_source_archetype": (
+                        "combine the year term with one concrete archetype such "
+                        "as link list, URL list, domain list, seed list, registry "
+                        "snapshot, dataset, manifest, directory, crawl index, or "
+                        "collection export"
+                    ),
+                    "root_first": (
+                        "find a new dataset/root/family before enumerating files; "
+                        "known CDX/CDXJ shards are background work"
+                    ),
+                    "diversify_origins": (
+                        "prefer distinct institutions/origins over many siblings "
+                        "from one already-known archive"
+                    ),
+                },
                 "avoid_low_yield": [
-                    "ordinary archived pages",
-                    "single-site snapshots",
-                    "undated seed lists without bulk provenance",
+                    "format specifications or software documentation without data",
+                    "generic archive landing pages without enumerable resources",
+                    "ordinary archived pages and single-site snapshots",
+                    "partner-auth-only APIs unless public direct files also exist",
+                    "datasets entirely after 2001",
+                    "already-known origins when a new origin can be tested",
                     "search results that do not expose a finite enumerable resource",
                 ],
                 "exploit_subject_origin": (

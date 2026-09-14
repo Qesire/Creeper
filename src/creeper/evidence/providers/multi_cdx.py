@@ -27,6 +27,7 @@ from creeper.evidence.policies import (
     EvidenceQueryKey,
     EvidenceQueryResult,
     RangeEvidenceQueryResult,
+    TemporalScope,
 )
 from creeper.evidence.providers.async_cdx import (
     AsyncWaybackCDXClient,
@@ -680,38 +681,87 @@ class AsyncCDXProviderPool:
             and exhaustive_results == len(order)
         )
 
-        if not missing_years:
-            state = CDXQueryState.PASS
-            followups: tuple[int, ...] = ()
-        elif all_physical_exhaustive:
+        # Host-first closure: a range task remains one durable backlog object.
+        # If range pagination cannot prove every missing year, resolve only
+        # those years through bounded exact queries *inside this logical task*
+        # instead of expanding six durable children and pre-reserving them.
+        resolved_years = set(positive_years)
+        exact_attempts: list[tuple[str, EvidenceQueryResult]] = []
+        exact_saw_transient = False
+        if missing_years and not all_physical_exhaustive:
+            exact_keys = tuple(
+                EvidenceQueryKey(
+                    key.hostname,
+                    TemporalScope(year, year),
+                    key.provider,
+                    key.policy_version,
+                )
+                for year in missing_years
+            )
+            exact_results = await asyncio.gather(
+                *(self.query_key(exact_key) for exact_key in exact_keys)
+            )
+            for year, result in zip(
+                missing_years,
+                exact_results,
+                strict=True,
+            ):
+                exact_attempts.append((f"exact:{year}", result))
+                requests += result.provider_requests
+                elapsed += result.provider_elapsed_milliseconds
+                pages += result.pages_seen
+                records += result.records_seen
+                if result.state is CDXQueryState.PASS:
+                    if result.capsule is not None:
+                        capsules_by_year.setdefault(year, result.capsule)
+                    resolved_years.add(year)
+                elif result.state is CDXQueryState.EMPTY_EXHAUSTIVE:
+                    resolved_years.add(year)
+                elif result.state is CDXQueryState.TRANSIENT_ERROR:
+                    exact_saw_transient = True
+
+        positive_years = tuple(sorted(capsules_by_year))
+        unresolved_years = tuple(
+            year for year in expected_years if year not in resolved_years
+        )
+        if not unresolved_years:
             state = (
                 CDXQueryState.PASS
                 if positive_years
                 else CDXQueryState.EMPTY_EXHAUSTIVE
             )
-            followups = ()
-        elif usable_results:
-            state = CDXQueryState.DECOMPOSED
-            followups = missing_years
-        elif attempts and all(
-            result.state is CDXQueryState.INVALID for _name, result in attempts
+        elif (
+            not positive_years
+            and attempts
+            and all(
+                result.state is CDXQueryState.INVALID
+                for _name, result in attempts
+            )
+            and exact_attempts
+            and all(
+                result.state is CDXQueryState.INVALID
+                for _name, result in exact_attempts
+            )
         ):
             state = CDXQueryState.INVALID
-            followups = ()
         else:
             state = (
                 CDXQueryState.TRANSIENT_ERROR
-                if saw_transient
+                if saw_transient or exact_saw_transient
                 else CDXQueryState.INCOMPLETE
             )
-            followups = ()
+
+        errors = self._error_summary(attempts)
+        if exact_attempts:
+            exact_errors = self._error_summary(exact_attempts)
+            errors = "; ".join(part for part in (errors, exact_errors) if part)
 
         return RangeEvidenceQueryResult(
             hostname=key.hostname,
             key=key,
             state=state,
             candidate_years=positive_years,
-            followup_years=followups,
+            followup_years=(),
             capsules=tuple(capsules_by_year[year] for year in positive_years),
             pages_seen=pages,
             records_seen=records,
@@ -722,8 +772,7 @@ class AsyncCDXProviderPool:
                 if state in {
                     CDXQueryState.PASS,
                     CDXQueryState.EMPTY_EXHAUSTIVE,
-                    CDXQueryState.DECOMPOSED,
                 }
-                else self._error_summary(attempts)
+                else errors
             ),
         )

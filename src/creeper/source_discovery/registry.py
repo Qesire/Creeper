@@ -160,7 +160,9 @@ class SourceDiscoveryRegistry:
                 started_at REAL NOT NULL,
                 finished_at REAL,
                 search_cost_seconds REAL NOT NULL DEFAULT 0,
-                accepted_novel_eed REAL NOT NULL DEFAULT 0
+                accepted_novel_eed REAL NOT NULL DEFAULT 0,
+                accepted_proposals INTEGER NOT NULL DEFAULT 0,
+                new_sources INTEGER NOT NULL DEFAULT 0
             ) WITHOUT ROWID;
             CREATE INDEX IF NOT EXISTS idx_source_search_strategy
                 ON source_search_episodes(strategy, finished_at);
@@ -357,6 +359,25 @@ class SourceDiscoveryRegistry:
                 ON source_suppressions(expires_at);
             """
         )
+        search_episode_columns = {
+            str(row[1])
+            for row in self.connection.execute(
+                "PRAGMA table_info(source_search_episodes)"
+            ).fetchall()
+        }
+        for name, statement in {
+            "accepted_proposals": (
+                "ALTER TABLE source_search_episodes "
+                "ADD COLUMN accepted_proposals INTEGER NOT NULL DEFAULT 0"
+            ),
+            "new_sources": (
+                "ALTER TABLE source_search_episodes "
+                "ADD COLUMN new_sources INTEGER NOT NULL DEFAULT 0"
+            ),
+        }.items():
+            if name not in search_episode_columns:
+                self.connection.execute(statement)
+
         source_run_columns = {
             str(row[1])
             for row in self.connection.execute(
@@ -680,9 +701,29 @@ class SourceDiscoveryRegistry:
             accepted_novel_eed=float(row["accepted_novel_eed"]),
         )
 
-    def finish_search_episode(self, episode_id: str, *, search_cost_seconds: float) -> SearchEpisode:
+    def finish_search_episode(
+        self,
+        episode_id: str,
+        *,
+        search_cost_seconds: float,
+        accepted_proposals: int = 0,
+        new_sources: int = 0,
+    ) -> SearchEpisode:
         if search_cost_seconds < 0:
             raise ValueError("search_cost_seconds must be non-negative")
+        if (
+            isinstance(accepted_proposals, bool)
+            or not isinstance(accepted_proposals, int)
+            or accepted_proposals < 0
+            or isinstance(new_sources, bool)
+            or not isinstance(new_sources, int)
+            or new_sources < 0
+            or new_sources > accepted_proposals
+        ):
+            raise ValueError(
+                "search supply counts must be non-negative integers and "
+                "new_sources cannot exceed accepted_proposals"
+            )
         now = float(self.clock())
         self.connection.execute("BEGIN IMMEDIATE")
         try:
@@ -697,10 +738,17 @@ class SourceDiscoveryRegistry:
             self.connection.execute(
                 """
                 UPDATE source_search_episodes
-                SET finished_at = ?, search_cost_seconds = ?
+                SET finished_at = ?, search_cost_seconds = ?,
+                    accepted_proposals = ?, new_sources = ?
                 WHERE episode_id = ?
                 """,
-                (now, float(search_cost_seconds), episode_id),
+                (
+                    now,
+                    float(search_cost_seconds),
+                    accepted_proposals,
+                    new_sources,
+                    episode_id,
+                ),
             )
             self.connection.commit()
         except BaseException:

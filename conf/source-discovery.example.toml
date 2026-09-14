@@ -17,7 +17,7 @@ cold_target = 100
 max_cold_credit_per_origin = 12
 triage_batch = 16
 scout_parallelism = 4
-max_search_directives = 3
+max_search_directives = 2
 
 [saturation]
 # Current-authority measured siblings with durable zero yield suppress only
@@ -31,7 +31,11 @@ suppression_ttl_seconds = 21600.0
 # External I/O overlaps; SQLite authority commits remain serialized.
 triage_parallelism = 8
 scout_parallelism = 4
-search_parallelism = 3
+search_parallelism = 2
+# Agent cadence is further reduced automatically after zero-new-source episodes.
+# One empty/duplicate episode reduces the next budget to one orthogonal call.
+# Starting with two consecutive empty episodes, global cooldown expands to
+# 2x/4x/8x while per-strategy cooldown still prevents immediate repetition.
 # Transient executor failures are retried after this process-local backoff.
 failure_retry_seconds = 30.0
 # Completed strategies, including valid empty-result searches, are durably cooled down.

@@ -415,9 +415,31 @@ class SourceProducer:
                     return
                 for key in fresh:
                     scheduled_keys[key] = None
-                if reservation is None:
+
+                # A discovery SourceLease reserves one initial host-task slot per
+                # record, not every hypothetical year refinement. Consume those
+                # slots one key at a time. Any additional disjoint ranges are
+                # durably staged and admitted later through the normal provider
+                # high-water gate instead of aborting the source lease.
+                overflow: list[EvidenceQueryKey] = []
+                for key in fresh:
+                    if (
+                        reservation is not None
+                        and self.admission.remaining(reservation) > 0
+                    ):
+                        enqueued += self.admission.enqueue_reserved(
+                            reservation,
+                            [key],
+                            source_key=origin_source_key,
+                            reservoir_id=candidate.reservoir_id,
+                            lease_id=running.lease_id,
+                        )
+                    else:
+                        overflow.append(key)
+
+                if overflow:
                     routed_result = self.evidence_router.enqueue_or_stage(
-                        fresh,
+                        overflow,
                         source_key=origin_source_key,
                         reservoir_id=candidate.reservoir_id,
                         lease_id=running.lease_id,
@@ -425,14 +447,6 @@ class SourceProducer:
                         preferred_provider=provider,
                     )
                     enqueued += routed_result.enqueued
-                    return
-                enqueued += self.admission.enqueue_reserved(
-                    reservation,
-                    fresh,
-                    source_key=origin_source_key,
-                    reservoir_id=candidate.reservoir_id,
-                    lease_id=running.lease_id,
-                )
 
             def enqueue_auxiliary_keys(
                 aux_provider: str,
@@ -572,7 +586,10 @@ class SourceProducer:
                             )
                             for parent in domain_parents
                         )
-                        enqueue_external_keys(domain_keys)
+                        # Domain amplification is opportunistic secondary work;
+                        # it must never consume the SourceLease's host-first
+                        # reservation or block primary hostname admission.
+                        enqueue_auxiliary_keys(provider, domain_keys)
                         self.control_store.mark_domain_fanout_enqueued(
                             domain_parents
                         )

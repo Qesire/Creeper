@@ -638,12 +638,11 @@ class ActivatedSourceRuntime:
                 expected_tasks = 0
                 reservation_tasks = 0
             else:
-                # Supported production adapters emit at most one HostObservation
-                # per source record, but one observation can expand across six
-                # competition-year backlog slots after bounded-range fanout,
-                # plus one bounded domain-amplification task.
-                # Size the lease from the hard capacity bound, not the expected
-                # request cost, so admission remains fail-closed.
+                # Host-first admission: one source record can claim one
+                # initial hostname/range task. The provider resolves the year
+                # interval inside that logical task; rare extra disjoint work
+                # is staged behind the same bounded router instead of being
+                # pre-reserved at a 7x worst-case multiplier.
                 capacity_per_record = (
                     EvidencePlanner.MAX_BACKLOG_CAPACITY_PER_OBSERVATION
                 )

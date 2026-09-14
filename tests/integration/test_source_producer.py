@@ -85,13 +85,16 @@ class SourceProducerTests(unittest.TestCase):
         range_first_fraction: float = 0.0,
         source_key: str | None = None,
         source_registry=None,
+        source_year: int | None = 1997,
+        year_hint_mask: int = 0,
     ):
         record = SourceRecord(
             source_id="fixture-source",
             locator="fixture://1",
             payload="novel.example",
             scope=CandidateSourceScope.LOCAL_DISCOVERY,
-            source_year=1997,
+            source_year=source_year,
+            year_hint_mask=year_hint_mask,
         )
         adapter = FakeSource([record])
         domain = SourceDomain(
@@ -362,7 +365,7 @@ class SourceProducerTests(unittest.TestCase):
         report = runtime.run_once()
 
         key = EvidenceQueryKey(
-            "novel.example", TemporalScope(1997, 1997), "wayback", "cdx-v1"
+            "novel.example", TemporalScope(1996, 2001), "wayback", "cdx-v1"
         )
         task = self.control.get_evidence_task(key)
         self.assertEqual(report.leases_succeeded, 1)
@@ -379,13 +382,13 @@ class SourceProducerTests(unittest.TestCase):
             FROM evidence_task_origins
             WHERE hostname = ? AND year_from = ? AND year_to = ?
             """,
-            ("novel.example", 1997, 1997),
+            ("novel.example", 1996, 2001),
         ).fetchone()
         self.assertIsNotNone(origin)
         self.assertEqual(origin["source_key"], "fixture-reservoir")
         self.assertEqual(origin["reservoir_id"], "fixture-reservoir")
 
-    def test_single_year_discovery_hint_enqueues_exact_year_without_direct_capsule(self):
+    def test_single_year_discovery_hint_enqueues_full_host_range_without_direct_capsule(self):
         record = SourceRecord(
             source_id="webbase-fixture",
             locator="fixture://webbase/1",
@@ -453,7 +456,7 @@ class SourceProducerTests(unittest.TestCase):
 
         key = EvidenceQueryKey(
             "novel.example",
-            TemporalScope(2001, 2001),
+            TemporalScope(1996, 2001),
             "wayback",
             "cdx-v1",
         )
@@ -546,11 +549,11 @@ class SourceProducerTests(unittest.TestCase):
         self.assertGreaterEqual(report.max_observation_queue_depth, 1)
         self.assertLessEqual(report.max_observation_queue_depth, 2)
 
-    def test_range_first_reservation_covers_parent_and_future_fanout(self):
+    def test_range_first_host_task_uses_one_reservation_slot(self):
         runtime, adapter = self.build_runtime(
-            backlog_capacity=6,
+            backlog_capacity=1,
             expected_tasks=1,
-            reservation_tasks=6,
+            reservation_tasks=1,
             range_first_fraction=1.0,
         )
 
@@ -568,11 +571,11 @@ class SourceProducerTests(unittest.TestCase):
             ),
             (1996, 2001),
         )
-        # One parent row is durable; five extra slots remain held for a
-        # worst-case DECOMPOSED exact-year fanout.
-        self.assertEqual(runtime.admission.reserved("wayback"), 5)
+        # The six-year range remains one durable host task; no hypothetical
+        # exact-year fanout capacity remains reserved.
+        self.assertEqual(runtime.admission.reserved("wayback"), 0)
 
-    def test_completed_wayback_range_suppresses_redundant_exact_year_work(self):
+    def test_completed_partial_wayback_range_schedules_only_uncovered_tail(self):
         range_key = EvidenceQueryKey(
             "novel.example", TemporalScope(1996, 1998), "wayback", "cdx-v1"
         )
@@ -587,12 +590,16 @@ class SourceProducerTests(unittest.TestCase):
 
         report = runtime.run_once()
 
+        uncovered_key = EvidenceQueryKey(
+            "novel.example", TemporalScope(1999, 2001), "wayback", "cdx-v1"
+        )
         exact_key = EvidenceQueryKey(
             "novel.example", TemporalScope(1997, 1997), "wayback", "cdx-v1"
         )
         self.assertEqual(report.leases_succeeded, 1)
-        self.assertEqual(report.evidence_tasks_enqueued, 0)
+        self.assertEqual(report.evidence_tasks_enqueued, 1)
         self.assertEqual(adapter.executions, 1)
+        self.assertIsNotNone(self.control.get_evidence_task(uncovered_key))
         self.assertIsNone(self.control.get_evidence_task(exact_key))
 
     def test_duplicate_direct_host_years_commit_one_capsule_per_batch(self):
@@ -734,7 +741,7 @@ class SourceProducerTests(unittest.TestCase):
             lease=template,
             evidence_provider="wayback",
             expected_evidence_tasks=5,
-            reservation_evidence_tasks=35,
+            reservation_evidence_tasks=5,
         )
         runtime = SourceProducer(
             baseline=self.baseline,
@@ -1000,6 +1007,32 @@ class SourceProducerTests(unittest.TestCase):
         self.assertIsNotNone(granted)
         self.assertEqual(granted[0].source_key, "idle-background-source")
         self.assertEqual(granted[1].resource_class, "background-bulk")
+
+    def test_one_slot_lease_collapses_discovery_hints_to_one_full_host_range(self):
+        hint_mask = (1 << (1996 - 1996)) | (1 << (1998 - 1996))
+        runtime, adapter = self.build_runtime(
+            backlog_capacity=1,
+            expected_tasks=1,
+            reservation_tasks=1,
+            source_year=None,
+            year_hint_mask=hint_mask,
+        )
+
+        report = runtime.run_once()
+
+        self.assertEqual(report.leases_succeeded, 1)
+        self.assertEqual(adapter.executions, 1)
+        self.assertEqual(report.evidence_tasks_enqueued, 1)
+        tasks = self.control.list_evidence_tasks()
+        self.assertEqual(len(tasks), 1)
+        self.assertEqual(
+            (
+                tasks[0].key.temporal_scope.year_from,
+                tasks[0].key.temporal_scope.year_to,
+            ),
+            (1996, 2001),
+        )
+        self.assertEqual(runtime.evidence_router.pending_count(provider="wayback"), 0)
 
     def test_full_backlog_blocks_source_before_adapter_execution(self):
         occupied = EvidenceQueryKey(
