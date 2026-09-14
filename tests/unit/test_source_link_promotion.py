@@ -98,7 +98,29 @@ class LinkPromotionTests(unittest.TestCase):
         self.assertEqual(candidate.level, SourceLevel.SOURCE)
         self.assertEqual(candidate.expected_year_from, 1998)
         self.assertEqual(candidate.expected_year_to, 1998)
-        self.assertEqual(candidate.direct_evidence_prior, 0.0)
+        self.assertEqual(candidate.direct_evidence_prior, 1.0)
+        self.assertEqual(candidate.temporal_semantics_prior, 1.0)
+
+    def test_ircache_trace_promotes_with_direct_evidence_prior(self) -> None:
+        acc = LinkPromotionAccumulator()
+        acc.add(
+            self.link(
+                "https://trace.example/uc.sanitized-access.20000312.gz",
+                same_site=True,
+                anchor="sanitized access log",
+            )
+        )
+
+        promoted = acc.promoted()
+
+        self.assertEqual(len(promoted), 1)
+        candidate = promoted[0].candidate
+        self.assertEqual(
+            candidate.source_family,
+            "HISTORICAL_PROXY_URL_TRACE",
+        )
+        self.assertEqual(candidate.direct_evidence_prior, 1.0)
+        self.assertEqual(candidate.temporal_semantics_prior, 1.0)
 
     def test_off_window_mailbox_navigation_is_not_promoted(self) -> None:
         acc = LinkPromotionAccumulator()
