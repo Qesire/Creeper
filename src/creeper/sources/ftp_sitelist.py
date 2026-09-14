@@ -11,6 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 import io
+import ipaddress
 from pathlib import PurePosixPath
 import re
 from urllib.parse import urlsplit
@@ -59,6 +60,12 @@ def _parse_site_date(
     if "://" in site:
         parsed = urlsplit(site)
         site = parsed.hostname or ""
+    try:
+        ipaddress.ip_address(site)
+    except ValueError:
+        pass
+    else:
+        return None
     hostname = normalize_official(site)
     if hostname is None:
         return None
