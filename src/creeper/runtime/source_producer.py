@@ -207,22 +207,45 @@ class SourceProducer:
     ) -> tuple[LeaseCandidate, WorkLease, CapacityReservation | None] | None:
         self.control_store.recover_expired_leases()
         ranked = self.scheduler.rank(self.candidates)
+
+        # Background bulk inputs are opportunistic. They may use otherwise idle
+        # producer capacity, but can never leapfrog an admissible foreground
+        # source through first-exposure fairness or a high measured value.
+        foreground = [
+            candidate
+            for candidate in ranked
+            if candidate.lease is None
+            or candidate.lease.resource_class != "background-bulk"
+        ]
+        background = [
+            candidate
+            for candidate in ranked
+            if candidate.lease is not None
+            and candidate.lease.resource_class == "background-bulk"
+        ]
+
         # A high scout/FINAL score must not permanently starve another source
-        # that has already passed real activation.  The count is durable in
-        # source_run_outcomes, so concurrent workers converge on the remaining
-        # never-read sources through the reservoir claim fence. After every
-        # source has one real exposure, the ordinary FINAL-first ranking is
-        # unchanged.
+        # that has already passed real activation. Apply first-exposure fairness
+        # independently within each resource class so it cannot promote bulk
+        # background work above foreground production.
         source_run_count = getattr(self.source_registry, "source_run_count", None)
         if callable(source_run_count):
-            unseen: list[LeaseCandidate] = []
-            seen: list[LeaseCandidate] = []
-            for candidate in ranked:
-                if candidate.source_key is not None and source_run_count(candidate.source_key) == 0:
-                    unseen.append(candidate)
-                else:
-                    seen.append(candidate)
-            ranked = unseen + seen
+            def fair(group: list[LeaseCandidate]) -> list[LeaseCandidate]:
+                unseen: list[LeaseCandidate] = []
+                seen: list[LeaseCandidate] = []
+                for candidate in group:
+                    if (
+                        candidate.source_key is not None
+                        and source_run_count(candidate.source_key) == 0
+                    ):
+                        unseen.append(candidate)
+                    else:
+                        seen.append(candidate)
+                return unseen + seen
+
+            foreground = fair(foreground)
+            background = fair(background)
+        ranked = foreground + background
         for candidate in ranked:
             template = candidate.lease
             if template is None:
