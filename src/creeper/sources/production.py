@@ -33,6 +33,7 @@ from creeper.sources.archive.cdx import parse_cdx_line
 from creeper.sources.non_snapshot import (
     extract_http_urls,
     parse_dmoz_external_page_line,
+    parse_mbox_message,
     parse_squid_access_line,
 )
 from creeper.sources.reservoirs import Reservoir
@@ -80,6 +81,173 @@ class WarcProductionAdapter:
             bytes_read=result.bytes_advanced,
             elapsed_seconds=0.0,
             next_cursor=result.next_cursor,
+        )
+
+    def _execute_mbox_stream(
+        self,
+        lease: WorkLease,
+        emit_record: Callable[[SourceRecord], None],
+    ) -> LeaseResult:
+        """Emit complete mailbox messages with durable message-boundary cursors."""
+        start = self._cursor_value(lease.cursor_start)
+        end = (
+            self._cursor_value(lease.cursor_end)
+            if lease.cursor_end is not None
+            else None
+        )
+        if end is not None and end < start:
+            raise ValueError("structured cursor_end must not precede cursor_start")
+
+        emitted = 0
+        bytes_read = 0
+        started = time.monotonic()
+        downstream_wait_seconds = 0.0
+        next_cursor: str | None = f"byte:{start}"
+        if lease.max_requests <= 0 or lease.max_seconds <= 0:
+            return LeaseResult(lease.lease_id, next_cursor=next_cursor)
+        if end is not None and end == start:
+            return LeaseResult(lease.lease_id, next_cursor=None)
+
+        source, opened = self._ensure_stream(start)
+        stream_fallback_used = False
+
+        def position() -> int:
+            if self._streaming_mode:
+                return self._stream_position
+            return int(source.tell())
+
+        def read_line(size: int = -1) -> tuple[int, bytes]:
+            nonlocal source, opened, stream_fallback_used
+            if self._pending_line is not None:
+                offset, raw = self._pending_line
+                self._pending_line = None
+                return offset, raw
+            offset = position()
+            try:
+                raw = (
+                    self._read_streaming_line(size)
+                    if self._streaming_mode
+                    else (source.readline() if size < 0 else source.readline(size))
+                )
+            except (OSError, ValueError, io.UnsupportedOperation):
+                if stream_fallback_used or urlsplit(self.source).scheme.lower() not in {
+                    "http",
+                    "https",
+                }:
+                    raise
+                offset = int(source.tell())
+                self._stream_at(offset)
+                source = self._stream
+                assert source is not None
+                opened += 1
+                stream_fallback_used = True
+                raw = self._read_streaming_line(size)
+            if self._streaming_mode and raw:
+                offset = self._last_line_offset
+            return offset, raw
+
+        try:
+            while (
+                self._stream is not None
+                and emitted < lease.max_records
+                and bytes_read < lease.max_bytes
+            ):
+                if (
+                    time.monotonic() - started - downstream_wait_seconds
+                    >= lease.max_seconds
+                ):
+                    break
+
+                first_offset, first = read_line()
+                if not first:
+                    next_cursor = None
+                    self.close()
+                    break
+                bytes_read += len(first)
+
+                # A legacy cursor or bounded region may begin inside a message.
+                # Fail closed by discarding that suffix until the next true
+                # Unix-mbox separator rather than borrowing a previous Date.
+                while first and not first.startswith(b"From "):
+                    if end is not None and position() >= end:
+                        next_cursor = None
+                        self.close()
+                        break
+                    if bytes_read >= lease.max_bytes:
+                        next_cursor = f"byte:{position()}"
+                        break
+                    first_offset, first = read_line()
+                    if first:
+                        bytes_read += len(first)
+                if self._stream is None or not first:
+                    break
+                if not first.startswith(b"From "):
+                    break
+
+                message_offset = first_offset
+                message = bytearray(first)
+                complete = False
+                eof = False
+
+                while True:
+                    if end is not None and position() >= end:
+                        break
+                    line_offset, raw = read_line()
+                    if not raw:
+                        eof = True
+                        complete = True
+                        break
+                    if raw.startswith(b"From "):
+                        self._pending_line = (line_offset, raw)
+                        complete = True
+                        break
+                    if bytes_read + len(raw) > lease.max_bytes:
+                        break
+                    bytes_read += len(raw)
+                    message.extend(raw)
+
+                if not complete:
+                    # Never commit a partial message. Rewind logically to the
+                    # message boundary so the next lease/restart re-reads it.
+                    next_cursor = f"byte:{message_offset}"
+                    self.close()
+                    if emitted == 0 and len(message) >= lease.max_bytes:
+                        raise ProductionAdapterError(
+                            "mailbox message exceeds lease max_bytes"
+                        )
+                    break
+
+                locator = f"{self.source}:byte:{message_offset}"
+                record = self._mbox_record(bytes(message), locator=locator)
+                if record is not None:
+                    record = self._apply_contract_authority(record)
+                    emit_started = time.monotonic()
+                    emit_record(record)
+                    downstream_wait_seconds += time.monotonic() - emit_started
+                    emitted += 1
+
+                if eof:
+                    next_cursor = None
+                    self.close()
+                    break
+                assert self._pending_line is not None
+                next_cursor = f"byte:{self._pending_line[0]}"
+
+        except BaseException:
+            if self._pending_line is None:
+                self.close()
+            raise
+
+        return LeaseResult(
+            lease_id=lease.lease_id,
+            records=emitted,
+            requests=opened,
+            bytes_read=bytes_read,
+            elapsed_seconds=max(
+                0.0,
+                time.monotonic() - started - downstream_wait_seconds,
+            ),
+            next_cursor=next_cursor,
         )
 
     def execute_stream(
@@ -437,6 +605,40 @@ class StructuredProductionAdapter:
         if stream is not None and not getattr(stream, "closed", False):
             stream.close()
 
+    def _mbox_record(
+        self,
+        message: bytes,
+        *,
+        locator: str,
+    ) -> SourceRecord | None:
+        urls, message_year, message_time = parse_mbox_message(message)
+        if not urls:
+            return None
+        source_year = (
+            message_year
+            if message_year is not None
+            else self._default_source_year()
+        )
+        direct_year = (
+            message_year
+            if (
+                message_year in YEAR_BITS
+                and self.evidence_contract.grants_direct_web_year
+            )
+            else None
+        )
+        return SourceRecord(
+            source_id=self.source_id,
+            locator=locator,
+            payload="\t".join(urls),
+            scope=CandidateSourceScope.LOCAL_DISCOVERY,
+            source_year=source_year,
+            source_time=message_time,
+            record_type="MAILBOX_MESSAGE_URLS",
+            artifact_ref=self.source,
+            direct_year_mask=YEAR_BITS.get(direct_year, 0),
+        )
+
     def _generic_record(
         self,
         line: str,
@@ -450,13 +652,12 @@ class StructuredProductionAdapter:
         contract_direct_year: int | None = None
 
         if self.kind == "mbox_urls":
-            urls = extract_http_urls(payload)
-            if not urls:
-                return None
-            # Privacy boundary: the durable pipeline sees only extracted URLs,
-            # never mailbox authors, addresses, subjects, or surrounding text.
-            payload = "\t".join(urls)
-            record_type = "MAILBOX_URL_LINE"
+            # Production uses the message-level reader below. Keep this
+            # compatibility path conservative for direct helper callers.
+            return self._mbox_record(
+                payload.encode("utf-8", errors="replace"),
+                locator=locator,
+            )
 
         elif self.kind == "squid_access":
             raw_access_time = payload.split(None, 1)[0] if payload else ""
@@ -621,14 +822,19 @@ class StructuredProductionAdapter:
     ) -> LeaseResult:
         """Read and emit one bounded structured lease incrementally.
 
-        cursor_end is an optional exclusive byte boundary. Normal source
+        Mailbox sources use a message-level reader so Date headers and body URLs
+        are bound within one durable record.
+        """
+        if self.kind == "mbox_urls":
+            return self._execute_mbox_stream(lease, emit_record)
+
+        """cursor_end is an optional exclusive byte boundary. Normal source
         production leaves it unset. Region harvest uses it to reuse this mature
         reader without allowing a selected region to bleed into adjacent bytes.
         When a bounded region starts in the middle of a line, that fragment is
         discarded; when it ends in the middle of a line, the trailing fragment
         is discarded. Every emitted row is therefore a complete source record
-        wholly represented by the selected byte interval.
-        """
+        wholly represented by the selected byte interval."""
 
         start = self._cursor_value(lease.cursor_start)
         end = (
