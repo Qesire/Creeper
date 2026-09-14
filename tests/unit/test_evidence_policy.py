@@ -1,10 +1,52 @@
 import unittest
 
-from creeper.evidence.policies import CDXQueryState, EvidenceQueryKey, TemporalScope
+from creeper.evidence.policies import (
+    CDXQueryState,
+    EvidenceCapsule,
+    EvidenceQueryKey,
+    TemporalScope,
+)
 from creeper.evidence.providers.cdx import query_missing_years, query_year
 
 
 class EvidencePolicyTests(unittest.TestCase):
+    def test_temporal_scope_rejects_fractional_and_boolean_years(self):
+        with self.assertRaisesRegex(ValueError, "integers within"):
+            TemporalScope(1996.5, 1997)
+        with self.assertRaisesRegex(ValueError, "integers within"):
+            TemporalScope(True, 1997)
+
+    def test_query_key_requires_provider_and_policy_identity(self):
+        scope = TemporalScope(1997, 1997)
+        with self.assertRaisesRegex(ValueError, "provider"):
+            EvidenceQueryKey("example.com", scope, "", "v1")
+        with self.assertRaisesRegex(ValueError, "policy_version"):
+            EvidenceQueryKey("example.com", scope, "wayback", "   ")
+
+    def test_capsule_rejects_fractional_year_and_normalizes_hostname(self):
+        with self.assertRaisesRegex(ValueError, "integer within"):
+            EvidenceCapsule(
+                hostname="example.com",
+                year=1997.5,
+                provider="wayback",
+                temporal_semantics="capture_timestamp_year",
+                evidence_timestamp="19970101000000",
+                source_locator="http://example.com/",
+                payload_hash="hash",
+                policy_version="v1",
+            )
+        capsule = EvidenceCapsule(
+            hostname=" EXAMPLE.COM ",
+            year=1997,
+            provider="wayback",
+            temporal_semantics="capture_timestamp_year",
+            evidence_timestamp="19970101000000",
+            source_locator="http://example.com/",
+            payload_hash="hash",
+            policy_version="v1",
+        )
+        self.assertEqual(capsule.hostname, "example.com")
+
     def test_completed_second_empty_page_is_exhaustive(self):
         result = query_year("example.com", 1997, lambda h, y: [([], False), ([], True)])
         self.assertEqual(result.state, CDXQueryState.EMPTY_EXHAUSTIVE)
