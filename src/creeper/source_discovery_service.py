@@ -1263,6 +1263,8 @@ def _root_query_runtime_adapters(
 
     max_response_bytes = 8 * 1024 * 1024
     owner = "source-discovery-root-runtime"
+    provider_gate_lock = asyncio.Lock()
+    provider_inflight: dict[str, int] = {}
 
     async def transport(
         url: str,
@@ -1322,6 +1324,77 @@ def _root_query_runtime_adapters(
                 token=os.environ.get("DATAVERSE_TOKEN"),
             )
         return None
+
+    async def claim_provider_slot(root_id: str, adapter: object) -> tuple[float, bool]:
+        """Apply adapter-specific concurrency/RPS limits before provider I/O.
+
+        The next-request timestamp is persisted in ControlStore so a service
+        restart cannot immediately burst a provider whose adapter declares a
+        low request rate. The process-local inflight count is sufficient for
+        concurrency because the source-discovery service itself is protected
+        by the runtime service lock.
+        """
+        raw_max_inflight = getattr(adapter, "max_inflight", None)
+        raw_rps = getattr(adapter, "requests_per_second", None)
+        if raw_max_inflight is None and raw_rps is None:
+            return 0.0, False
+
+        max_inflight = (
+            max(1, int(raw_max_inflight))
+            if raw_max_inflight is not None
+            else parallelism
+        )
+        requests_per_second = (
+            max(0.0, float(raw_rps))
+            if raw_rps is not None
+            else 0.0
+        )
+        interval = (
+            1.0 / requests_per_second
+            if requests_per_second > 0
+            else 0.0
+        )
+        checkpoint_key = f"research-provider-next-request:{root_id}"
+
+        async with provider_gate_lock:
+            now = time.time()
+            if provider_inflight.get(root_id, 0) >= max_inflight:
+                return max(0.1, interval), False
+
+            if interval > 0:
+                raw_next = research.control_store.get_checkpoint(checkpoint_key)
+                if raw_next is None:
+                    next_allowed = 0.0
+                else:
+                    try:
+                        next_allowed = float(raw_next)
+                    except (TypeError, ValueError):
+                        # Corrupt gate state fails closed for one full interval
+                        # and is repaired deterministically.
+                        next_allowed = now + interval
+                        research.control_store.set_checkpoint(
+                            checkpoint_key,
+                            repr(next_allowed),
+                        )
+                if next_allowed > now:
+                    return next_allowed - now, False
+                research.control_store.set_checkpoint(
+                    checkpoint_key,
+                    repr(now + interval),
+                )
+
+            provider_inflight[root_id] = provider_inflight.get(root_id, 0) + 1
+            return 0.0, True
+
+    async def release_provider_slot(root_id: str, acquired: bool) -> None:
+        if not acquired:
+            return
+        async with provider_gate_lock:
+            current = provider_inflight.get(root_id, 0)
+            if current <= 1:
+                provider_inflight.pop(root_id, None)
+            else:
+                provider_inflight[root_id] = current - 1
 
     def plan_root_queries() -> tuple[object, ...]:
         now = time.time()
@@ -1523,18 +1596,50 @@ def _root_query_runtime_adapters(
                     retryable=False,
                 )
 
-            decision_id = str(checkpoint.get("decision_id", "") or "")
-            if not decision_id:
-                decision = research.latest_decision_for_task(task_id)
-                decision_id = "" if decision is None else decision.decision_id
-            pivot_id = str(checkpoint.get("pivot_id", "") or "")
-            result = await bridge.execute_root_query_page(
+            gate_delay, gate_acquired = await claim_provider_slot(
+                root.root_id,
                 adapter,
-                query,
-                program_id=program_id,
-                pivot_id=pivot_id,
-                decision_id=decision_id,
             )
+            if gate_delay > 0:
+                retry_at = time.time() + gate_delay
+                research.update_query_checkpoint(
+                    query_id,
+                    checkpoint=research.query_checkpoint(query_id),
+                    state=QueryState.RETRYABLE,
+                    retry_at=retry_at,
+                    last_error=(
+                        f"provider runtime gate deferred {gate_delay:.3f}s"
+                    ),
+                )
+                result = RootPageResult(
+                    query_id=query_id,
+                    hits=0,
+                    artifacts=0,
+                    sources_inserted=0,
+                    terminal=False,
+                    retryable=True,
+                )
+            else:
+                try:
+                    decision_id = str(checkpoint.get("decision_id", "") or "")
+                    if not decision_id:
+                        decision = research.latest_decision_for_task(task_id)
+                        decision_id = (
+                            "" if decision is None else decision.decision_id
+                        )
+                    pivot_id = str(checkpoint.get("pivot_id", "") or "")
+                    result = await bridge.execute_root_query_page(
+                        adapter,
+                        query,
+                        program_id=program_id,
+                        pivot_id=pivot_id,
+                        decision_id=decision_id,
+                    )
+                finally:
+                    await release_provider_slot(
+                        root.root_id,
+                        gate_acquired,
+                    )
             row = research.get_query_row(query_id)
             if result.retryable:
                 frontier_state = FrontierState.RETRYABLE
