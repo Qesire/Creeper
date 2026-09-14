@@ -549,6 +549,8 @@ class SourceReservoirManagerTests(unittest.TestCase):
         self.registry.finish_search_episode(
             productive.episode_id,
             search_cost_seconds=1.0,
+            accepted_proposals=1,
+            new_sources=1,
         )
         manager = SourceReservoirManager(
             self.registry,
