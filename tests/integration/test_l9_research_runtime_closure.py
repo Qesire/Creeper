@@ -387,6 +387,90 @@ class L9ResearchRuntimeClosureTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 control.close()
 
+    async def test_archiveit_runtime_gate_prevents_same_cycle_burst(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            control = ControlStore(Path(tmp) / "control.sqlite3")
+            try:
+                discovery = SourceDiscoveryRegistry(control)
+                research = ResearchRegistry(control)
+                bridge = ResearchIntegrationBridge(research, discovery)
+                root = RootSurface(
+                    root_id="archiveit",
+                    kind=RootKind.ARCHIVE,
+                    canonical_locator="https://partner.archive-it.org/api/collection",
+                )
+                research.upsert_root(root)
+                q1 = AdapterRootQuery(
+                    "query:archiveit:1", root.root_id, "early web one", 1, 5.0
+                )
+                q2 = AdapterRootQuery(
+                    "query:archiveit:2", root.root_id, "early web two", 1, 5.0
+                )
+                program = QueryProgram(
+                    root_id=root.root_id,
+                    strategy="archiveit-rate-gate",
+                    queries=(q1, q2),
+                    hard_max_requests=4,
+                    stop_conditions=("page_budget",),
+                    program_id="program:archiveit-rate-gate",
+                )
+                research.register_program(program)
+                calls = 0
+
+                def handler(request: httpx.Request) -> httpx.Response:
+                    nonlocal calls
+                    calls += 1
+                    return httpx.Response(
+                        200,
+                        request=request,
+                        json={"collections": [], "count": 0},
+                    )
+
+                async with httpx.AsyncClient(
+                    transport=httpx.MockTransport(handler),
+                    trust_env=False,
+                ) as client:
+                    planner, executor = _root_query_runtime_adapters(
+                        research,
+                        bridge,
+                        client,
+                        parallelism=2,
+                    )
+                    tasks = planner()
+                    self.assertEqual(len(tasks), 2)
+                    first = await executor(tasks[0])
+                    second = await executor(tasks[1])
+
+                self.assertTrue(first.terminal)
+                self.assertTrue(second.retryable)
+                self.assertFalse(second.terminal)
+                self.assertEqual(calls, 1)
+                self.assertEqual(
+                    research.program_request_budget(program.program_id),
+                    (1, 4),
+                )
+                states = {
+                    row["query_id"]: (row["state"], row["attempts"])
+                    for row in research.connection.execute(
+                        """
+                        SELECT query_id,state,attempts
+                        FROM research_queries
+                        WHERE program_id=?
+                        """,
+                        (program.program_id,),
+                    )
+                }
+                self.assertEqual(states[tasks[0].entity_id][0], QueryState.COMPLETE.value)
+                self.assertEqual(states[tasks[0].entity_id][1], 1)
+                self.assertEqual(states[tasks[1].entity_id][0], QueryState.RETRYABLE.value)
+                self.assertEqual(states[tasks[1].entity_id][1], 0)
+                self.assertEqual(
+                    research.get_frontier(tasks[1].task_id).state,
+                    FrontierState.RETRYABLE,
+                )
+            finally:
+                control.close()
+
     async def test_metadata_resolver_promotes_only_concrete_artifact_leads(self):
         with tempfile.TemporaryDirectory() as tmp:
             control = ControlStore(Path(tmp) / "control.sqlite3")
