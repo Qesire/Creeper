@@ -19,6 +19,8 @@ from enum import StrEnum
 from pathlib import PurePosixPath
 from urllib.parse import urlsplit
 
+from creeper.sources.non_snapshot import is_ftp_sitelist_zip_locator
+
 from creeper.source_discovery.coordinator import TriageResult
 from creeper.source_discovery.models import (
     MeasurementMode,
@@ -317,6 +319,8 @@ def _source_format(entrypoint: str) -> tuple[str, bool, bool]:
     """Return format, timestamp-bearing, sorted-index semantics."""
 
     name = PurePosixPath(urlsplit(entrypoint).path.lower()).name
+    if is_ftp_sitelist_zip_locator(entrypoint):
+        return "FTP_SITELIST", True, False
     if name.endswith(".cdxj.gz") or name.endswith(".cdxj"):
         return "CDXJ", True, True
     if name.endswith(".cdx.gz") or name.endswith(".cdx"):
