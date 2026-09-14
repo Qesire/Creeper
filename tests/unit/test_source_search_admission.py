@@ -219,16 +219,41 @@ class AgentAdmissionIntegrationTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn(".cdxj.gz", request["requirements"]["direct_evidence_suffixes"])
             self.assertTrue(
                 request["requirements"]["resource_priority"][0].startswith(
-                    "new enumerable root"
+                    "non-snapshot hostname inventories"
                 )
             )
+            mechanism = request["requirements"]["capture_mechanism_policy"]
             self.assertIn(
-                "national libraries and web archives",
+                "active HTTP/web-server survey",
+                mechanism["preferred_non_snapshot_mechanisms"],
+            )
+            self.assertIn(
+                "passive HTTP proxy/cache/request log",
+                mechanism["preferred_non_snapshot_mechanisms"],
+            )
+            self.assertIn(
+                "DNS hostcount/zone/connected-host enumeration",
+                mechanism["preferred_non_snapshot_mechanisms"],
+            )
+            self.assertIn(
+                "historical proxy/cache trace repositories",
                 request["requirements"]["search_targets"],
             )
             self.assertIn(
                 "ordinary archived pages and single-site snapshots",
                 request["requirements"]["avoid_low_yield"],
+            )
+            self.assertTrue(
+                any(
+                    "privacy-sanitized traces" in item
+                    for item in request["requirements"]["avoid_low_yield"]
+                )
+            )
+            self.assertIn(
+                "capture mechanism",
+                request["requirements"]["query_construction"][
+                    "must_name_capture_mechanism"
+                ],
             )
             self.assertEqual(
                 request["requirements"]["calibrated_search_profile"]["mode"],
