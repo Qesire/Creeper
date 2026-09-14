@@ -124,6 +124,63 @@ class DistributedHostQueryProducer:
             f"{self.policy_version}:{self.provider_set_digest[:16]}"
         )
 
+    @staticmethod
+    async def _admit_capsules(
+        capsules,
+        *,
+        coordinator: CoordinatorClient,
+        keeper: LeaseKeeper,
+    ) -> None:
+        capsules = list(capsules)
+        if not capsules:
+            return
+        decisions = await coordinator.hy_probe(
+            keeper.lease,
+            [
+                {
+                    "hostname": capsule.hostname,
+                    "year": capsule.year,
+                    "locator": (
+                        capsule.record_locator
+                        or capsule.source_locator
+                        or capsule.original_url
+                    ),
+                }
+                for capsule in capsules
+            ],
+        )
+        need = {
+            (decision.hostname, decision.year)
+            for decision in decisions
+            if decision.status == "NEED_FULL_EVIDENCE"
+        }
+        if not need:
+            return
+        full = []
+        for capsule in capsules:
+            if (capsule.hostname, capsule.year) not in need:
+                continue
+            full.append(
+                {
+                    "hostname": capsule.hostname,
+                    "year": capsule.year,
+                    "evidence_class": capsule.evidence_type,
+                    "source": capsule.source_id or capsule.provider,
+                    "timestamp": capsule.evidence_timestamp,
+                    "locator": (
+                        capsule.record_locator
+                        or capsule.source_locator
+                        or capsule.original_url
+                    ),
+                    "original_url": capsule.original_url,
+                    "provider": capsule.provider,
+                    "policy_version": capsule.policy_version,
+                    "payload_hash": capsule.payload_hash,
+                    "extraction_method": capsule.extraction_method,
+                }
+            )
+        await coordinator.hy_full(keeper.lease, full)
+
     async def __call__(
         self,
         lease: TaskLease,
@@ -155,83 +212,60 @@ class DistributedHostQueryProducer:
                 "wayback",
                 self.policy_version,
             )
-            raw = await pool.query_range(key)
+            if year_from == year_to:
+                exact = await pool.query_key(key)
+                keeper.assert_owned()
+                await self._admit_capsules(
+                    () if exact.capsule is None else (exact.capsule,),
+                    coordinator=coordinator,
+                    keeper=keeper,
+                )
+                if exact.state not in {
+                    CDXQueryState.PASS,
+                    CDXQueryState.EMPTY_EXHAUSTIVE,
+                }:
+                    raise IncompleteHostResolution(
+                        "exact host resolution incomplete: "
+                        f"state={exact.state.value}"
+                    )
+            else:
+                raw = await pool.query_range(key)
+                if not isinstance(raw, RangeEvidenceQueryResult):
+                    raise ValueError(
+                        "HOST_BATCH unexpectedly returned a domain result"
+                    )
+                keeper.assert_owned()
+                await self._admit_capsules(
+                    raw.capsules,
+                    coordinator=coordinator,
+                    keeper=keeper,
+                )
+                # PASS with no followups means every missing year is a
+                # provider-exhaustive negative. EMPTY_EXHAUSTIVE is likewise
+                # complete.
+                if (
+                    raw.state
+                    not in {
+                        CDXQueryState.PASS,
+                        CDXQueryState.EMPTY_EXHAUSTIVE,
+                    }
+                    or raw.followup_years
+                ):
+                    raise IncompleteHostResolution(
+                        "host resolution incomplete: "
+                        f"state={raw.state.value}, "
+                        f"followup_years={raw.followup_years}"
+                    )
         finally:
             await pool.aclose()
 
-        if not isinstance(raw, RangeEvidenceQueryResult):
-            raise ValueError("HOST_BATCH unexpectedly returned a domain result")
-
         keeper.assert_owned()
-        capsules = list(raw.capsules)
-        if capsules:
-            decisions = await coordinator.hy_probe(
-                keeper.lease,
-                [
-                    {
-                        "hostname": capsule.hostname,
-                        "year": capsule.year,
-                        "locator": (
-                            capsule.record_locator
-                            or capsule.source_locator
-                            or capsule.original_url
-                        ),
-                    }
-                    for capsule in capsules
-                ],
-            )
-            need = {
-                (decision.hostname, decision.year)
-                for decision in decisions
-                if decision.status == "NEED_FULL_EVIDENCE"
-            }
-            if need:
-                full = []
-                for capsule in capsules:
-                    if (capsule.hostname, capsule.year) not in need:
-                        continue
-                    full.append(
-                        {
-                            "hostname": capsule.hostname,
-                            "year": capsule.year,
-                            "evidence_class": capsule.evidence_type,
-                            "source": capsule.source_id or capsule.provider,
-                            "timestamp": capsule.evidence_timestamp,
-                            "locator": (
-                                capsule.record_locator
-                                or capsule.source_locator
-                                or capsule.original_url
-                            ),
-                            "original_url": capsule.original_url,
-                            "provider": capsule.provider,
-                            "policy_version": capsule.policy_version,
-                            "payload_hash": capsule.payload_hash,
-                            "extraction_method": capsule.extraction_method,
-                        }
-                    )
-                await coordinator.hy_full(keeper.lease, full)
-
-        # PASS with no followups means every missing year is a legitimate
-        # provider-exhaustive negative. EMPTY_EXHAUSTIVE is likewise complete.
-        if raw.state in {
-            CDXQueryState.PASS,
-            CDXQueryState.EMPTY_EXHAUSTIVE,
-        } and not raw.followup_years:
-            keeper.assert_owned()
-            await coordinator.coverage_complete(
-                keeper.lease,
-                hostname=hostname,
-                provider=self.coverage_provider,
-                scope="HOST",
-                resolver_version=self.resolver_version,
-                year_from=year_from,
-                year_to=year_to,
-            )
-            return
-
-        # Positive evidence may already have been admitted above, but this task
-        # must not be marked complete while any provider coverage is unresolved.
-        raise IncompleteHostResolution(
-            f"host resolution incomplete: state={raw.state.value}, "
-            f"followup_years={raw.followup_years}"
+        await coordinator.coverage_complete(
+            keeper.lease,
+            hostname=hostname,
+            provider=self.coverage_provider,
+            scope="HOST",
+            resolver_version=self.resolver_version,
+            year_from=year_from,
+            year_to=year_to,
         )
