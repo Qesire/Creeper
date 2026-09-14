@@ -201,6 +201,8 @@ class FinnishBbsParserTests(unittest.TestCase):
             {
                 "https://files.mpoli.fi/software/TEXTS/MISC/FI980225.ZIP",
                 "https://files.mpoli.fi/software/TEXTS/MISC/030698.ZIP",
+                "https://files.mpoli.fi/software/TEXTS/COMPUTER/FI980701.ZIP",
+                "https://files.mpoli.fi/software/TEXTS/COMPUTER/FI980916.ZIP",
             },
         )
 
