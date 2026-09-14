@@ -171,21 +171,39 @@ class AsyncArquivoCDXClient(AsyncWaybackCDXClient):
                 if isinstance(item, dict):
                     rows.append(item)
             return rows
+        rows: list[dict[str, object]] = []
         if isinstance(value, dict):
-            values = [value]
+            rows.append(dict(value))
         elif isinstance(value, list):
-            values = [item for item in value if isinstance(item, dict)]
-        else:
-            values = []
-        rows = []
-        for item in values:
+            if value and isinstance(value[0], list):
+                header = value[0]
+                if not all(isinstance(field, str) for field in header):
+                    return []
+                for raw in value[1:]:
+                    if not isinstance(raw, list):
+                        continue
+                    rows.append(
+                        {
+                            str(field): raw[index]
+                            for index, field in enumerate(header)
+                            if index < len(raw)
+                        }
+                    )
+            else:
+                rows.extend(
+                    dict(item) for item in value if isinstance(item, dict)
+                )
+        normalized_rows: list[dict[str, object]] = []
+        for item in rows:
             row = dict(item)
             if "original" not in row and "url" in row:
                 row["original"] = row["url"]
             if "statuscode" not in row and "status" in row:
                 row["statuscode"] = row["status"]
-            rows.append(row)
-        return rows
+            if "mimetype" not in row and "mime" in row:
+                row["mimetype"] = row["mime"]
+            normalized_rows.append(row)
+        return normalized_rows
 
     async def iter_range_pages(
         self,
@@ -207,9 +225,7 @@ class AsyncArquivoCDXClient(AsyncWaybackCDXClient):
             "from": str(year_from),
             "to": str(year_to),
             "output": "json",
-            "fields": (
-                "url,timestamp,status,mime,digest,length,offset,filename"
-            ),
+            "fl": "url,timestamp,status,mime,digest,length,offset,filename",
             "limit": str(effective_limit),
         }
         response = await self._get(params, accounting=accounting)
