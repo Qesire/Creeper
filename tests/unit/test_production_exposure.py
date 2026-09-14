@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from creeper.runtime.exposure import ProductionExposure, ProductionExposureState
 from creeper.storage.control_store import ControlStore
 
 
@@ -23,6 +24,88 @@ class ProductionExposureTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.store.close()
         self.tmp.cleanup()
+
+    def test_model_and_begin_reject_invalid_identity_clock_and_timeline(self) -> None:
+        with self.assertRaisesRegex(ValueError, "source_records"):
+            ProductionExposure(
+                exposure_id="exp",
+                source_key="source:a",
+                reservoir_id="reservoir:a",
+                lease_id="lease:a",
+                task_id=None,
+                lane="sequential",
+                baseline_signature="baseline:v1",
+                model_signature="model:v1",
+                source_records=1.5,
+                source_requests=0,
+                source_bytes=0,
+                provider_requests=0,
+                provider_bytes=0,
+                source_elapsed_seconds=0.0,
+                provider_elapsed_seconds=0.0,
+                evidence_frontier=0,
+                accepted_host_years=0,
+                final_accepted_eed=0.0,
+                state=ProductionExposureState.RUNNING,
+                terminal_reason=None,
+                created_at=2.0,
+                updated_at=2.0,
+                closed_at=None,
+            )
+        with self.assertRaisesRegex(ValueError, "updated_at"):
+            ProductionExposure(
+                exposure_id="exp",
+                source_key="source:a",
+                reservoir_id="reservoir:a",
+                lease_id="lease:a",
+                task_id=None,
+                lane="sequential",
+                baseline_signature="baseline:v1",
+                model_signature="model:v1",
+                source_records=0,
+                source_requests=0,
+                source_bytes=0,
+                provider_requests=0,
+                provider_bytes=0,
+                source_elapsed_seconds=0.0,
+                provider_elapsed_seconds=0.0,
+                evidence_frontier=0,
+                accepted_host_years=0,
+                final_accepted_eed=0.0,
+                state=ProductionExposureState.RUNNING,
+                terminal_reason=None,
+                created_at=2.0,
+                updated_at=1.0,
+                closed_at=None,
+            )
+
+        self.store.clock = lambda: float("nan")
+        with self.assertRaisesRegex(ValueError, "clock must be finite"):
+            self.store.begin_production_exposure(
+                source_key="source:a",
+                reservoir_id="reservoir:a",
+                lease_id="lease:a",
+                lane="sequential",
+                baseline_signature="baseline:v1",
+                model_signature="model:v1",
+            )
+        self.assertEqual(
+            self.store.connection.execute(
+                "SELECT COUNT(*) FROM production_exposures"
+            ).fetchone()[0],
+            0,
+        )
+
+    def test_begin_rejects_non_string_identity_instead_of_coercing(self) -> None:
+        with self.assertRaisesRegex(ValueError, "lease_id"):
+            self.store.begin_production_exposure(
+                source_key="source:a",
+                reservoir_id="reservoir:a",
+                lease_id=123,
+                lane="sequential",
+                baseline_signature="baseline:v1",
+                model_signature="model:v1",
+            )
 
     def test_same_lane_identity_and_authority_reuses_one_exposure(self) -> None:
         first = self.store.begin_production_exposure(
