@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import math
 import sqlite3
 import time
 from dataclasses import dataclass, replace
@@ -75,8 +76,13 @@ class ControlStore:
         default_lease_seconds: float = 300.0,
         clock=time.time,
     ):
-        if default_lease_seconds < 0:
-            raise ValueError("default_lease_seconds must be non-negative")
+        if (
+            not math.isfinite(float(default_lease_seconds))
+            or default_lease_seconds < 0
+        ):
+            raise ValueError(
+                "default_lease_seconds must be finite and non-negative"
+            )
         path.parent.mkdir(parents=True, exist_ok=True)
         self.connection = sqlite3.connect(path, timeout=30.0)
         self.connection.row_factory = sqlite3.Row
@@ -2525,8 +2531,8 @@ class ControlStore:
             return []
         if lease_seconds is None:
             lease_seconds = self.default_lease_seconds
-        if lease_seconds < 0:
-            raise ValueError("lease_seconds must be non-negative")
+        if not math.isfinite(float(lease_seconds)) or lease_seconds < 0:
+            raise ValueError("lease_seconds must be finite and non-negative")
         now = float(self.clock())
         key_values = list(keys) if keys is not None else None
         clauses = [
@@ -2991,8 +2997,10 @@ class ControlStore:
             return []
         if lease_seconds is None:
             lease_seconds = self.default_lease_seconds
-        if lease_seconds <= 0:
-            raise ValueError("platform harvest lease_seconds must be positive")
+        if not math.isfinite(float(lease_seconds)) or lease_seconds <= 0:
+            raise ValueError(
+                "platform harvest lease_seconds must be finite and positive"
+            )
         provider_values = tuple(dict.fromkeys(providers or ()))
         now = float(self.clock())
         lease_expires_at = now + float(lease_seconds)
@@ -3073,8 +3081,10 @@ class ControlStore:
             raise ValueError("platform harvest owner is required")
         if lease_seconds is None:
             lease_seconds = self.default_lease_seconds
-        if lease_seconds <= 0:
-            raise ValueError("platform harvest lease_seconds must be positive")
+        if not math.isfinite(float(lease_seconds)) or lease_seconds <= 0:
+            raise ValueError(
+                "platform harvest lease_seconds must be finite and positive"
+            )
         now = float(self.clock())
         lease_expires_at = now + float(lease_seconds)
         with self.connection:
@@ -3830,8 +3840,8 @@ class ControlStore:
         """
         from creeper.scheduler.leases import LeaseState
 
-        if ttl_seconds <= 0:
-            raise ValueError("ttl_seconds must be positive")
+        if not math.isfinite(float(ttl_seconds)) or ttl_seconds <= 0:
+            raise ValueError("ttl_seconds must be finite and positive")
         lease_id = self._field(lease, "lease_id")
         owner = self._field(lease, "owner")
         if not lease_id or not owner:
