@@ -7,6 +7,7 @@ from creeper.sources.non_snapshot import (
     is_dmoz_content_locator,
     is_mailbox_url_locator,
     is_squid_access_locator,
+    mailbox_period_from_locator,
     mailbox_year_from_locator,
     parse_dmoz_external_page_line,
     parse_squid_access_line,
@@ -40,6 +41,25 @@ class NonSnapshotParserTests(unittest.TestCase):
         self.assertFalse(
             is_mailbox_url_locator(
                 "https://lists.gnu.org/archive/mbox/lynx-dev/2002-03"
+            )
+        )
+
+    def test_mailbox_period_from_dated_shard(self) -> None:
+        self.assertEqual(
+            mailbox_period_from_locator(
+                "https://lists.gnu.org/archive/mbox/lynx-dev/1998-03"
+            ),
+            "1998-03",
+        )
+        self.assertEqual(
+            mailbox_period_from_locator(
+                "https://example.test/archive/2001-12.mbox.gz"
+            ),
+            "2001-12",
+        )
+        self.assertIsNone(
+            mailbox_period_from_locator(
+                "https://example.test/archive/archive.mbox.gz"
             )
         )
 
