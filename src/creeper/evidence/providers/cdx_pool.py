@@ -286,6 +286,7 @@ class AsyncCDXProviderPool:
         pages = records = requests = elapsed = 0
         errors: list[str] = []
         saw_non_exhaustive = False
+        saw_transient = False
         year = key.temporal_scope.year_from
         for name in names:
             result = await self._exact_from(name, key)
@@ -312,13 +313,15 @@ class AsyncCDXProviderPool:
             if result.state is CDXQueryState.EMPTY_EXHAUSTIVE:
                 continue
             saw_non_exhaustive = True
+            if result.state is CDXQueryState.TRANSIENT_ERROR:
+                saw_transient = True
             if result.error:
                 errors.append(f"{name}:{result.error}")
 
         if saw_non_exhaustive:
             state = (
                 CDXQueryState.TRANSIENT_ERROR
-                if errors
+                if saw_transient
                 else CDXQueryState.INCOMPLETE
             )
             error = "; ".join(errors) or "one or more CDX services were incomplete"
