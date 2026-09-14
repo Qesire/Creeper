@@ -42,6 +42,17 @@ class EvidenceServiceCliTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(worker._retry_at(1_000_000), 3700.0)
 
+    async def test_retry_deadline_rejects_invalid_attempt_and_clock(self):
+        worker = AsyncEvidenceWorker.__new__(AsyncEvidenceWorker)
+        worker.retry_base_seconds = 30.0
+        worker.retry_max_seconds = 3600.0
+        worker.clock = lambda: 100.0
+        with self.assertRaisesRegex(ValueError, "attempt must be"):
+            worker._retry_at(1.5)
+        worker.clock = lambda: float("nan")
+        with self.assertRaisesRegex(ValueError, "retry clock"):
+            worker._retry_at(1)
+
     async def test_invalid_idle_backoff_is_rejected_before_worker_loop(self):
         with tempfile.TemporaryDirectory() as tmp:
             with self.assertRaisesRegex(ValueError, "poll bounds"):
