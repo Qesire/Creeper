@@ -60,6 +60,16 @@ class SourceProducerReport:
         return self.__dict__.copy()
 
 
+def _domain_fanout_parent(hostname: str) -> str | None:
+    labels = hostname.split(".")
+    if len(labels) < 3:
+        return None
+    parent_labels = labels[1:]
+    if len(parent_labels[-1]) == 2 and len(parent_labels) < 3:
+        return None
+    return ".".join(parent_labels)
+
+
 def _coalesce_planning_observations(
     observations: Iterable[HostObservation],
 ) -> list[HostObservation]:
@@ -447,8 +457,20 @@ class SourceProducer:
                 hostnames = list(
                     dict.fromkeys(observation.hostname for observation in planning_pending)
                 )
+                undated_hostnames = list(dict.fromkeys(
+                    observation.hostname
+                    for observation in planning_pending
+                    if (
+                        observation.source_year not in YEAR_BITS
+                        and observation.year_hint_mask == 0
+                        and observation.direct_year_mask == 0
+                    )
+                ))
+                # Domain-scope Wayback amplification obeys the same fallback
+                # boundary as ordinary external evidence: only undated source
+                # records may contribute fanout signal.
                 self.control_store.record_domain_fanout_observations(
-                    hostnames,
+                    undated_hostnames,
                     source_key=origin_source_key,
                 )
                 resolved: dict[str, tuple[int, bool]] = {}
@@ -601,9 +623,18 @@ class SourceProducer:
                         provider_coverage_masks[item.hostname] = scheduled_mask
 
                 if not allow_direct:
+                    eligible_domain_parents = {
+                        parent
+                        for hostname in undated_hostnames
+                        if (parent := _domain_fanout_parent(hostname)) is not None
+                    }
                     domain_parents = self.control_store.ready_domain_fanout_candidates(
                         min_children=self.domain_fanout_min_children,
-                        limit=min(self.domain_fanout_batch_size, len(planning_pending)),
+                        limit=min(
+                            self.domain_fanout_batch_size,
+                            max(1, len(eligible_domain_parents)),
+                        ),
+                        parents=eligible_domain_parents,
                     )
                     if domain_parents:
                         domain_keys = tuple(
