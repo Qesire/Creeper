@@ -857,6 +857,101 @@ class DistributedAuthorityStore:
         )
         return self.admit_work(work)
 
+    def admit_historical_exploration_work(
+        self,
+        *,
+        url: str,
+        archive_providers: tuple[str, ...],
+        seed: int = 0,
+        priority: float = 0.0,
+        algorithm_version: str = "fabric-historical-crawler-v1",
+    ) -> str:
+        canonical_url = canonical_http_url(url)
+        providers = tuple(
+            dict.fromkeys(("web_discovery", *archive_providers))
+        )
+        if (
+            not archive_providers
+            or any(not value.strip() for value in providers)
+            or int(seed) < 0
+        ):
+            raise ValueError("invalid historical exploration admission")
+        work = WorkDefinition(
+            producer="HistoricalCrawlerProducer",
+            task_class=TaskClass.SOURCE_PAGE,
+            input_identity=canonical_url,
+            coverage={
+                "url": canonical_url,
+                "seed": int(seed),
+                "providers": list(providers),
+                "archive_providers": list(archive_providers),
+            },
+            partition=f"crawl:{int(seed)}",
+            algorithm_version=algorithm_version,
+            required_capabilities=("WEB_DISCOVERY", "ONLINE_QUERY"),
+            priority=float(priority),
+        )
+        return self.admit_work(work)
+
+    def admit_seeded_exploration(
+        self,
+        *,
+        campaign: SearchCampaign,
+        seed: int,
+        slot_start: int,
+        slot_count: int,
+        search_endpoint: str,
+        archive_providers: tuple[str, ...],
+        query_param: str = "q",
+        search_provider: str = "web_search",
+        priority: float = 0.0,
+        algorithm_version: str = "fabric-seeded-exploration-v1",
+    ) -> str:
+        endpoint = canonical_http_url(search_endpoint)
+        search_provider = search_provider.strip()
+        query_param = query_param.strip()
+        providers = tuple(
+            dict.fromkeys(
+                (search_provider, "web_discovery", *archive_providers)
+            )
+        )
+        if (
+            int(seed) < 0
+            or int(slot_start) < 0
+            or not 1 <= int(slot_count) <= 8
+            or not archive_providers
+            or not search_provider
+            or not query_param
+            or any(not value.strip() for value in providers)
+        ):
+            raise ValueError("invalid seeded exploration admission")
+        work = WorkDefinition(
+            producer="SeededExplorationProducer",
+            task_class=TaskClass.SEARCH_SLICE,
+            input_identity=campaign.campaign_id,
+            coverage={
+                "campaign_id": campaign.campaign_id,
+                "campaign": campaign.as_dict(),
+                "seed": int(seed),
+                "slot_start": int(slot_start),
+                "slot_count": int(slot_count),
+                "search_endpoint": endpoint,
+                "query_param": query_param,
+                "search_provider": search_provider,
+                "providers": list(providers),
+                "archive_providers": list(archive_providers),
+            },
+            partition=f"explore:{int(seed)}:{int(slot_start)}:{int(slot_count)}",
+            algorithm_version=algorithm_version,
+            required_capabilities=(
+                "SEARCH_QUERY",
+                "WEB_DISCOVERY",
+                "ONLINE_QUERY",
+            ),
+            priority=float(priority),
+        )
+        return self.admit_work(work)
+
     def admit_source_page_work(
         self,
         *,
