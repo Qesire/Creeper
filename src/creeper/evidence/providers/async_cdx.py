@@ -495,6 +495,13 @@ class AsyncWaybackCDXClient:
                     raise ConnectionError("CDX returned a repeated resume key")
                 resume_key = next_key
                 continue
+            if len(rows) >= effective_limit:
+                # Some pywb/CDX Server deployments ignore showResumeKey. A
+                # full page without a continuation therefore cannot prove
+                # exhaustion. Positive rows remain usable, but negative
+                # coverage must fail closed.
+                yield rows, False
+                return
             yield rows, True
             return
 
