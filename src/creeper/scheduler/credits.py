@@ -23,10 +23,13 @@ class ResourceCredits:
             ("commit", self.commit),
             ("reserved_evidence_tasks", self.reserved_evidence_tasks),
         ):
-            if not isinstance(value, int) or value < 0:
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                 raise ValueError(f"{name} must be a non-negative integer")
         evidence = dict(self.evidence)
-        if any(not isinstance(value, int) or value < 0 for value in evidence.values()):
+        if any(
+            isinstance(value, bool) or not isinstance(value, int) or value < 0
+            for value in evidence.values()
+        ):
             raise ValueError("evidence credits must be non-negative integers")
         object.__setattr__(self, "evidence", evidence)
 
@@ -66,7 +69,11 @@ class CreditLedger:
     def _validate_capacities(capacities: Mapping[str, int]) -> dict[str, int]:
         result = dict(capacities)
         if any(
-            not provider or not isinstance(capacity, int) or capacity < 0
+            not isinstance(provider, str)
+            or not provider.strip()
+            or isinstance(capacity, bool)
+            or not isinstance(capacity, int)
+            or capacity < 0
             for provider, capacity in result.items()
         ):
             raise ValueError("provider capacities must be non-negative integers")
@@ -81,7 +88,7 @@ class CreditLedger:
 
     @staticmethod
     def _check_amount(amount: int) -> None:
-        if not isinstance(amount, int) or amount < 0:
+        if isinstance(amount, bool) or not isinstance(amount, int) or amount < 0:
             raise ValueError("amount must be a non-negative integer")
 
     def balance(self, provider: str) -> CreditBalance:
