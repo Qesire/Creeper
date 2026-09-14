@@ -29,8 +29,16 @@ class TemporalScope:
     year_to: int
 
     def __post_init__(self) -> None:
-        if not 1996 <= self.year_from <= self.year_to <= 2001:
-            raise ValueError("temporal scope must be within 1996-2001")
+        if (
+            isinstance(self.year_from, bool)
+            or not isinstance(self.year_from, int)
+            or isinstance(self.year_to, bool)
+            or not isinstance(self.year_to, int)
+            or not 1996 <= self.year_from <= self.year_to <= 2001
+        ):
+            raise ValueError(
+                "temporal scope years must be integers within 1996-2001"
+            )
 
 
 @dataclass(frozen=True)
@@ -44,6 +52,12 @@ class EvidenceQueryKey:
         normalized = normalize_official(self.hostname)
         if normalized is None:
             raise ValueError("invalid hostname")
+        if not isinstance(self.temporal_scope, TemporalScope):
+            raise ValueError("temporal_scope must be a TemporalScope")
+        if not isinstance(self.provider, str) or not self.provider.strip():
+            raise ValueError("evidence provider is required")
+        if not isinstance(self.policy_version, str) or not self.policy_version.strip():
+            raise ValueError("evidence policy_version is required")
         object.__setattr__(self, "hostname", normalized)
 
 
@@ -64,6 +78,24 @@ class EvidenceCapsule:
     extraction_method: str = ""
 
     def __post_init__(self) -> None:
+        normalized = normalize_official(self.hostname)
+        if normalized is None:
+            raise ValueError("evidence capsule contains an invalid hostname")
+        if (
+            isinstance(self.year, bool)
+            or not isinstance(self.year, int)
+            or not 1996 <= self.year <= 2001
+        ):
+            raise ValueError(
+                "evidence capsule year must be an integer within 1996-2001"
+            )
+        if not isinstance(self.provider, str) or not self.provider.strip():
+            raise ValueError("evidence capsule provider is required")
+        if not isinstance(self.policy_version, str) or not self.policy_version.strip():
+            raise ValueError("evidence capsule policy_version is required")
+        if not isinstance(self.payload_hash, str) or not self.payload_hash.strip():
+            raise ValueError("evidence capsule payload_hash is required")
+        object.__setattr__(self, "hostname", normalized)
         # Keep old persisted/test capsules readable while making the V3
         # provenance fields explicit in every new representation.
         if not self.evidence_type:
