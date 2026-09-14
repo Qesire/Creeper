@@ -35,6 +35,12 @@ if ! id "${FABRIC_SERVICE_USER}" >/dev/null 2>&1; then
   useradd --system --home-dir "${FABRIC_STATE_DIR}" --shell /usr/sbin/nologin     "${FABRIC_SERVICE_USER}"
 fi
 
+if ! runuser -u "${FABRIC_SERVICE_USER}" -- test -r "${FABRIC_BASELINE_INDEX}"; then
+  echo "baseline index is not readable by ${FABRIC_SERVICE_USER}: ${FABRIC_BASELINE_INDEX}" >&2
+  echo "move/copy it to a readable path or adjust directory/file permissions" >&2
+  exit 2
+fi
+
 mkdir -p "${FABRIC_INSTALL_ROOT}" "${FABRIC_STATE_DIR}" "${FABRIC_CONFIG_DIR}"
 chown "${FABRIC_SERVICE_USER}:${FABRIC_SERVICE_USER}"   "${FABRIC_INSTALL_ROOT}" "${FABRIC_STATE_DIR}"
 chmod 0750 "${FABRIC_STATE_DIR}"
