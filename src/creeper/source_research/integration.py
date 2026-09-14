@@ -120,6 +120,44 @@ class ResearchIntegrationBridge:
                 """
             )
 
+    def llm_gate_state(
+        self,
+        context_hash: str,
+    ) -> tuple[str | None, float | None, int]:
+        """Recover persistent L8 concurrency/cooldown facts after restart."""
+        now = float(self.clock())
+        stale_before = now - self.llm_claim_stale_seconds
+        active = self.connection.execute(
+            """
+            SELECT call_identity
+            FROM research_llm_call_claims
+            WHERE state='RUNNING' AND started_at>?
+            ORDER BY started_at DESC, call_identity
+            LIMIT 1
+            """,
+            (stale_before,),
+        ).fetchone()
+        last = self.connection.execute(
+            "SELECT MAX(started_at) AS started_at FROM research_llm_call_claims"
+        ).fetchone()
+        failures = self.connection.execute(
+            """
+            SELECT COUNT(*) AS n
+            FROM research_llm_call_claims
+            WHERE context_hash=? AND state='FAILED'
+            """,
+            (context_hash,),
+        ).fetchone()
+        return (
+            None if active is None else str(active["call_identity"]),
+            (
+                None
+                if last is None or last["started_at"] is None
+                else float(last["started_at"])
+            ),
+            0 if failures is None else int(failures["n"]),
+        )
+
     @staticmethod
     def build_execution_request(directive: ResearchDirective) -> UnifiedCompilerRequest:
         task = UnifiedLLMTask(directive.task_type)
