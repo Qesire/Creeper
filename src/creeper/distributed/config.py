@@ -181,6 +181,9 @@ def load_worker_config(path: Path) -> WorkerRuntimeConfig:
         allowed_providers=tuple(
             str(value) for value in section.get("allowed_providers", ())
         ),
+        daily_egress_budget_bytes=int(
+            section.get("daily_egress_budget_bytes", 0)
+        ),
     )
     return WorkerRuntimeConfig(
         coordinator_url=str(section["coordinator_url"]),
