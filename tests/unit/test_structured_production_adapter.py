@@ -4,6 +4,10 @@ import unittest
 from unittest.mock import patch
 
 from creeper.authority.baseline_index import YEAR_BITS
+from creeper.evidence.contracts import (
+    SQUID_ACCESS_DIRECT_CONTRACT,
+    bind_contract_to_adapter_id,
+)
 from creeper.scheduler.leases import WorkLease
 from creeper.sources.production import StructuredProductionAdapter
 from creeper.sources.reservoirs import Reservoir, ReservoirState
@@ -139,15 +143,18 @@ class StructuredProductionAdapterTests(unittest.TestCase):
         self.assertEqual(observations[0].direct_year_mask, 0)
         self.assertEqual(observations[0].year_hint_mask, YEAR_BITS[2001])
 
-    def test_squid_adapter_keeps_access_year_as_hint_not_evidence(self):
+    def test_squid_adapter_uses_access_timestamp_as_direct_evidence(self):
         reservoir = Reservoir(
             reservoir_id="reservoir:squid",
             domain_id="domain:squid",
-            adapter_id="structured:squid",
+            adapter_id=bind_contract_to_adapter_id(
+                "structured:squid",
+                SQUID_ACCESS_DIRECT_CONTRACT,
+            ),
             root_locator="https://trace.example/data/old.squid.log",
             enumeration_kind="structured_records",
             capacity_lower=0,
-            evidence_mode="discovery_only",
+            evidence_mode="direct_year",
             state=ReservoirState.READY,
         )
         adapter = StructuredProductionAdapter(
@@ -168,6 +175,39 @@ class StructuredProductionAdapterTests(unittest.TestCase):
 
         self.assertEqual(record.payload, "http://old.example/path")
         self.assertEqual(record.source_year, 1999)
+        self.assertEqual(record.source_time, "915148800.123")
+        self.assertEqual(record.direct_year_mask, YEAR_BITS[1999])
+        self.assertEqual(record.year_hint_mask, 0)
+        self.assertEqual(
+            record.evidence_contract_id,
+            SQUID_ACCESS_DIRECT_CONTRACT.contract_id,
+        )
+
+    def test_legacy_squid_reservoir_does_not_silently_gain_authority(self):
+        reservoir = Reservoir(
+            reservoir_id="reservoir:squid-legacy",
+            domain_id="domain:squid-legacy",
+            adapter_id="structured:squid-legacy",
+            root_locator="https://trace.example/data/old.squid.log",
+            enumeration_kind="structured_records",
+            capacity_lower=0,
+            evidence_mode="discovery_only",
+            state=ReservoirState.READY,
+        )
+        adapter = StructuredProductionAdapter(
+            reservoir,
+            temporal_scope=(1996, 2001),
+        )
+        record = adapter._generic_record(
+            (
+                "915148800.123 42 192.0.2.9 TCP_MISS/200 1234 GET "
+                "http://old.example/path - DIRECT/203.0.113.8 text/html"
+            ),
+            locator="fixture:legacy",
+        )
+        self.assertIsNotNone(record)
+        assert record is not None
+        record = adapter._apply_contract_authority(record)
         self.assertEqual(record.direct_year_mask, 0)
         self.assertEqual(record.year_hint_mask, YEAR_BITS[1999])
 
@@ -175,14 +215,17 @@ class StructuredProductionAdapterTests(unittest.TestCase):
         reservoir = Reservoir(
             reservoir_id="reservoir:ircache",
             domain_id="domain:ircache",
-            adapter_id="structured:ircache",
+            adapter_id=bind_contract_to_adapter_id(
+                "structured:ircache",
+                SQUID_ACCESS_DIRECT_CONTRACT,
+            ),
             root_locator=(
                 "https://mirror.example/Traces/"
                 "uc.sanitized-access.20000312.gz"
             ),
             enumeration_kind="structured_records",
             capacity_lower=0,
-            evidence_mode="discovery_only",
+            evidence_mode="direct_year",
             state=ReservoirState.READY,
         )
         adapter = StructuredProductionAdapter(
@@ -204,8 +247,9 @@ class StructuredProductionAdapterTests(unittest.TestCase):
 
         self.assertEqual(record.payload, "http://old.example/path")
         self.assertEqual(record.source_year, 2000)
-        self.assertEqual(record.direct_year_mask, 0)
-        self.assertEqual(record.year_hint_mask, YEAR_BITS[2000])
+        self.assertEqual(record.source_time, "952819200.000")
+        self.assertEqual(record.direct_year_mask, YEAR_BITS[2000])
+        self.assertEqual(record.year_hint_mask, 0)
 
     def test_non_range_http_source_reopens_as_stream_and_skips_cursor(self):
         payload = b"ignored.example\nkept.example\n"
