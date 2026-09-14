@@ -47,7 +47,7 @@ class CuratedSourceSeedTests(unittest.TestCase):
     def test_non_snapshot_roots_are_audited_mailbox_catalogs(self):
         roots = curated_non_snapshot_roots()
 
-        self.assertEqual(len(roots), 3)
+        self.assertEqual(len(roots), 5)
         self.assertEqual(
             {item.source_family for item in roots},
             {"HISTORICAL_MAILBOX_CATALOG"},
@@ -72,17 +72,27 @@ class CuratedSourceSeedTests(unittest.TestCase):
         self.assertTrue(
             any("bug-findutils" in item.canonical_entrypoint for item in roots)
         )
+        self.assertTrue(
+            any("swarm-support" in item.canonical_entrypoint for item in roots)
+        )
+        self.assertTrue(
+            any("help-octave" in item.canonical_entrypoint for item in roots)
+        )
+        self.assertEqual(
+            min(item.expected_year_from for item in roots),
+            1996,
+        )
 
     def test_all_curated_seeds_are_idempotent(self):
         seeds = curated_source_seeds()
-        self.assertEqual(len(seeds), 8)
+        self.assertEqual(len(seeds), 10)
         with tempfile.TemporaryDirectory() as tmp:
             control = ControlStore(Path(tmp) / "control.sqlite3")
             registry = SourceDiscoveryRegistry(control)
             try:
-                self.assertEqual(ensure_curated_source_seeds(registry), 8)
+                self.assertEqual(ensure_curated_source_seeds(registry), 10)
                 self.assertEqual(ensure_curated_source_seeds(registry), 0)
-                self.assertEqual(len(registry.list_candidates()), 8)
+                self.assertEqual(len(registry.list_candidates()), 10)
             finally:
                 control.close()
 
