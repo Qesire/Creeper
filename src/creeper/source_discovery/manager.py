@@ -254,14 +254,28 @@ class SourceReservoirManager:
         *,
         active: list[SourceCandidate],
     ) -> list[SourceCandidate]:
-        return sorted(
-            candidates,
-            key=lambda candidate: (
-                self._candidate_value(candidate, active=active),
-                candidate.source_key,
-            ),
-            reverse=True,
-        )
+        """Greedily rank by marginal value against the evolving portfolio.
+
+        A static sort only penalizes overlap with sources that were ACTIVE
+        before this planning pass. When several WARM sources can activate at
+        once, that can select two near-mirrors in the same batch. Re-score after
+        every choice so the next slot values novelty relative to both existing
+        ACTIVE sources and sources already selected in this plan.
+        """
+        remaining = list(candidates)
+        selected: list[SourceCandidate] = []
+        while remaining:
+            comparison = [*active, *selected]
+            best = max(
+                remaining,
+                key=lambda candidate: (
+                    self._candidate_value(candidate, active=comparison),
+                    candidate.source_key,
+                ),
+            )
+            selected.append(best)
+            remaining.remove(best)
+        return selected
 
     def _best_measured_family(
         self,
