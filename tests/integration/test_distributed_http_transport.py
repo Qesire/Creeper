@@ -23,7 +23,7 @@ class DistributedAuthorityTransportTests(unittest.IsolatedAsyncioTestCase):
     async def test_each_real_cdx_retry_consumes_one_authority_permit(self) -> None:
         calls = 0
         permits: list[str] = []
-        reports: list[tuple[str, int | None]] = []
+        reports: list[tuple[str, int | None, int]] = []
 
         async def acquire() -> object:
             token = f"permit-{len(permits) + 1}"
@@ -34,8 +34,9 @@ class DistributedAuthorityTransportTests(unittest.IsolatedAsyncioTestCase):
             token: object,
             status_code: int | None,
             _headers: httpx.Headers | None,
+            response_bytes: int,
         ) -> None:
-            reports.append((str(token), status_code))
+            reports.append((str(token), status_code, response_bytes))
 
         async def handler(request: httpx.Request) -> httpx.Response:
             nonlocal calls
@@ -77,11 +78,17 @@ class DistributedAuthorityTransportTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(permits, ["permit-1", "permit-2"])
         self.assertEqual(
             reports,
-            [("permit-1", 503), ("permit-2", 200)],
+            [
+                ("permit-1", 503, 0),
+                ("permit-2", 200, len(json.dumps([
+                    ["timestamp", "original", "statuscode"],
+                    ["19970102030405", "http://example.com/", "200"],
+                ]).encode())),
+            ],
         )
 
     async def test_permit_is_held_until_response_stream_is_consumed(self) -> None:
-        reports: list[tuple[str, int | None]] = []
+        reports: list[tuple[str, int | None, int]] = []
 
         async def acquire() -> object:
             return "permit-stream"
@@ -90,8 +97,9 @@ class DistributedAuthorityTransportTests(unittest.IsolatedAsyncioTestCase):
             token: object,
             status_code: int | None,
             _headers: httpx.Headers | None,
+            response_bytes: int,
         ) -> None:
-            reports.append((str(token), status_code))
+            reports.append((str(token), status_code, response_bytes))
 
         async def handler(request: httpx.Request) -> httpx.Response:
             return httpx.Response(
@@ -111,11 +119,11 @@ class DistributedAuthorityTransportTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(reports, [])
         body = b"".join([chunk async for chunk in response.stream])
         self.assertEqual(body, b"ab")
-        self.assertEqual(reports, [("permit-stream", 200)])
+        self.assertEqual(reports, [("permit-stream", 200, 2)])
 
         # Closing after complete consumption must not double-report/release.
         await response.aclose()
-        self.assertEqual(reports, [("permit-stream", 200)])
+        self.assertEqual(reports, [("permit-stream", 200, 2)])
 
 
 if __name__ == "__main__":
