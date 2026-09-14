@@ -88,10 +88,10 @@ class LeaseKeeper:
                 self._lost = LeaseLostError("lease expired before renewal")
                 return
             target_wait = max(
-                self.min_renew_interval,
+                0.01,
                 min(
                     remaining * self.renew_fraction,
-                    max(0.0, remaining - self.min_renew_interval),
+                    max(0.01, remaining - self.min_renew_interval),
                 ),
             )
             try:
