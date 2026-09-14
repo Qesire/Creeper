@@ -34,20 +34,26 @@ def build_parser() -> argparse.ArgumentParser:
 async def _run(config_path: Path, *, once: bool) -> int:
     config = load_worker_config(config_path)
     secret = config.load_secret()
-    host_query = DistributedHostQueryProducer(config.cdx_providers)
-    region_probe = RegionProbeProducer(config.cdx_providers)
-    bulk_index = BulkHistoricalIndexProducer()
-    source_discovery = SourceDiscoveryProducer()
-    seeded_search = SeededSearchProducer()
-    thin_query = ThinHistoricalQueryProducer(config.cdx_providers)
-    producers = {
-        "HistoricalQueryProducer": host_query,
-        "RegionProbeProducer": region_probe,
-        "BulkHistoricalIndexProducer": bulk_index,
-        "SourceDiscoveryProducer": source_discovery,
-        "SeededSearchProducer": seeded_search,
-        "ThinHistoricalQueryProducer": thin_query,
-    }
+    capabilities = set(config.descriptor.capabilities)
+    producers = {}
+
+    if "ONLINE_QUERY" in capabilities:
+        producers["HistoricalQueryProducer"] = DistributedHostQueryProducer(
+            config.cdx_providers
+        )
+        producers["RegionProbeProducer"] = RegionProbeProducer(
+            config.cdx_providers
+        )
+    if "THIN_QUERY" in capabilities:
+        producers["ThinHistoricalQueryProducer"] = ThinHistoricalQueryProducer(
+            config.cdx_providers
+        )
+    if "STREAMING_BULK" in capabilities:
+        producers["BulkHistoricalIndexProducer"] = BulkHistoricalIndexProducer()
+    if "WEB_DISCOVERY" in capabilities:
+        producers["SourceDiscoveryProducer"] = SourceDiscoveryProducer()
+    if "SEARCH_QUERY" in capabilities:
+        producers["SeededSearchProducer"] = SeededSearchProducer()
     async with CoordinatorClient(
         config.coordinator_url,
         worker_id=config.descriptor.worker_id,
