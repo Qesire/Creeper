@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import tempfile
@@ -198,6 +199,98 @@ class DistributedAuthorityAPITests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status, 409)
         payload = await response.json()
         self.assertEqual(payload["error"], "FABRIC_PROTOCOL_MISMATCH")
+
+    async def test_long_poll_claim_returns_when_work_appears(self) -> None:
+        await self.register("worker-a")
+
+        pending = asyncio.create_task(
+            self.post(
+                "worker-a",
+                "/v1/tasks/claim",
+                {"lease_seconds": 30, "wait_seconds": 1.0},
+            )
+        )
+        await asyncio.sleep(0.1)
+        task_id = self.store.admit_work(
+            WorkDefinition(
+                producer="HistoricalQueryProducer",
+                task_class=TaskClass.HOST_BATCH,
+                input_identity="late.example",
+                coverage={"year_from": 1997, "year_to": 1997},
+                partition="0",
+                algorithm_version="resolver-v1",
+                required_capabilities=(Capability.ONLINE_QUERY.value,),
+            )
+        )
+
+        response = await pending
+        self.assertEqual(response.status, 200, await response.text())
+        task = (await response.json())["task"]
+        self.assertIsNotNone(task)
+        self.assertEqual(task["task_id"], task_id)
+
+    async def test_provider_permit_request_replay_is_idempotent_over_api(self) -> None:
+        await self.register("worker-a")
+        self.store.configure_provider_budget(
+            "internet_archive",
+            requests_per_second=1_000_000.0,
+            max_global_inflight=2,
+            require_qualified_region=False,
+        )
+        task_id = self.store.admit_work(
+            WorkDefinition(
+                producer="HistoricalQueryProducer",
+                task_class=TaskClass.HOST_BATCH,
+                input_identity="permit-replay.example",
+                coverage={"year_from": 1997, "year_to": 1997},
+                partition="0",
+                algorithm_version="resolver-v1",
+                required_capabilities=(Capability.ONLINE_QUERY.value,),
+            )
+        )
+        claim = await self.post(
+            "worker-a",
+            "/v1/tasks/claim",
+            {"lease_seconds": 30},
+        )
+        task = (await claim.json())["task"]
+        self.assertEqual(task["task_id"], task_id)
+
+        payload = {
+            "provider": "internet_archive",
+            "task_id": task_id,
+            "generation": task["generation"],
+            "permit_request_id": "network-request-1",
+            "ttl_seconds": 30,
+        }
+        first = await self.post(
+            "worker-a",
+            "/v1/providers/permit",
+            payload,
+        )
+        replay = await self.post(
+            "worker-a",
+            "/v1/providers/permit",
+            payload,
+        )
+        self.assertEqual(first.status, 200, await first.text())
+        self.assertEqual(replay.status, 200, await replay.text())
+        first_permit = (await first.json())["permit"]
+        replay_permit = (await replay.json())["permit"]
+        self.assertEqual(
+            first_permit["permit_id"],
+            replay_permit["permit_id"],
+        )
+        self.assertEqual(
+            first_permit["request_id"],
+            "network-request-1",
+        )
+        self.assertEqual(
+            self.store.provider_budget_snapshot(
+                "internet_archive"
+            )["active_inflight"],
+            1,
+        )
 
     async def test_signed_register_claim_commit_and_replay(self) -> None:
         await self.register("worker-a")
