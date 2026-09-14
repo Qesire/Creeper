@@ -551,6 +551,69 @@ class DistributedAuthorityTests(unittest.TestCase):
             (),
         )
 
+    def test_host_work_admission_subtracts_existing_coverage(self) -> None:
+        self.store.admit_work(self.work("admission.example"))
+        lease = self.store.claim_work(self.worker_a.worker_id)
+        assert lease is not None
+        self.store.record_complete_resolution_coverage(
+            lease.task_id,
+            worker_id=lease.worker_id,
+            generation=lease.generation,
+            hostname="admission.example",
+            provider="cdx-pool:set-a",
+            scope="HOST",
+            resolver_version="resolver-v1",
+            year_from=1996,
+            year_to=1999,
+        )
+        self.store.finish_task(
+            lease.task_id,
+            worker_id=lease.worker_id,
+            generation=lease.generation,
+        )
+
+        admitted = self.store.admit_host_resolution_work(
+            hostname="admission.example",
+            physical_providers=("internet_archive", "arquivo_pt"),
+            coverage_provider="cdx-pool:set-a",
+            resolver_version="resolver-v1",
+            year_from=1998,
+            year_to=2001,
+        )
+
+        self.assertEqual(len(admitted), 1)
+        row = self.store.task_row(admitted[0])
+        coverage = __import__("json").loads(str(row["coverage_json"]))
+        self.assertEqual(
+            (coverage["year_from"], coverage["year_to"]),
+            (2000, 2001),
+        )
+        self.assertEqual(
+            coverage["providers"],
+            ["internet_archive", "arquivo_pt"],
+        )
+
+        self.assertEqual(
+            self.store.admit_host_resolution_work(
+                hostname="admission.example",
+                physical_providers=("internet_archive", "arquivo_pt"),
+                coverage_provider="cdx-pool:set-a",
+                resolver_version="resolver-v1",
+                year_from=1996,
+                year_to=1999,
+            ),
+            (),
+        )
+        changed_provider_set = self.store.admit_host_resolution_work(
+            hostname="admission.example",
+            physical_providers=("internet_archive",),
+            coverage_provider="cdx-pool:set-b",
+            resolver_version="resolver-v1:set-b",
+            year_from=1998,
+            year_to=2001,
+        )
+        self.assertEqual(len(changed_provider_set), 1)
+
     def test_provider_region_qualification_is_derived_from_worker_region(self) -> None:
         probe_work = WorkDefinition(
             producer="RegionProbeProducer",
