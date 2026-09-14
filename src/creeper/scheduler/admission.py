@@ -139,7 +139,7 @@ class EvidenceBacklogAdmission:
         """
         if not provider:
             raise ValueError("provider is required")
-        if not isinstance(capacity, int) or capacity < 0:
+        if isinstance(capacity, bool) or not isinstance(capacity, int) or capacity < 0:
             raise ValueError("capacity must be a non-negative integer")
         now = self._now()
         self.connection.execute("BEGIN IMMEDIATE")
@@ -165,7 +165,7 @@ class EvidenceBacklogAdmission:
     ) -> CapacityReservation | None:
         if not provider:
             raise ValueError("provider is required")
-        if not isinstance(amount, int) or amount < 0:
+        if isinstance(amount, bool) or not isinstance(amount, int) or amount < 0:
             raise ValueError("amount must be a non-negative integer")
         if not isinstance(capacity, int) or capacity < 0:
             raise ValueError("capacity must be a non-negative integer")
