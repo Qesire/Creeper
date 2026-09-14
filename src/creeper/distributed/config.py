@@ -158,6 +158,9 @@ def load_worker_config(path: Path) -> WorkerRuntimeConfig:
         cpu_count=int(section["cpu_count"]),
         network_class=str(section["network_class"]),
         capabilities=tuple(str(value) for value in section["capabilities"]),
+        allowed_providers=tuple(
+            str(value) for value in section.get("allowed_providers", ())
+        ),
     )
     return WorkerRuntimeConfig(
         coordinator_url=str(section["coordinator_url"]),
