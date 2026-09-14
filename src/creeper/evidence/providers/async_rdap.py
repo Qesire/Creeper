@@ -49,25 +49,61 @@ class AsyncRDAPClient:
         client: httpx.AsyncClient | None = None,
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
-        if (
-            not endpoint.strip()
-            or timeout <= 0
-            or requests_per_second < 0
-            or min_requests_per_second <= 0
-            or (
-                requests_per_second > 0
-                and min_requests_per_second > requests_per_second
-            )
-            or not math.isfinite(decrease_factor)
-            or not 0 < decrease_factor < 1
-            or not isinstance(recovery_successes, int)
-            or isinstance(recovery_successes, bool)
-            or recovery_successes < 1
-            or not math.isfinite(recovery_step_fraction)
-            or recovery_step_fraction <= 0
-            or throttle_floor_seconds < 0
+        for name, value in (("endpoint", endpoint), ("user_agent", user_agent)):
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"{name} must be non-empty")
+        for name, value, minimum in (
+            ("max_connections", max_connections, 1),
+            ("max_keepalive_connections", max_keepalive_connections, 0),
+            ("recovery_successes", recovery_successes, 1),
         ):
-            raise ValueError("invalid RDAP client configuration")
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, int)
+                or value < minimum
+            ):
+                raise ValueError(f"{name} must be an integer >= {minimum}")
+        if max_keepalive_connections > max_connections:
+            raise ValueError(
+                "max_keepalive_connections cannot exceed max_connections"
+            )
+        for name, value in (
+            ("timeout", timeout),
+            ("min_requests_per_second", min_requests_per_second),
+            ("recovery_step_fraction", recovery_step_fraction),
+        ):
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(float(value))
+                or value <= 0
+            ):
+                raise ValueError(f"{name} must be finite and positive")
+        for name, value in (
+            ("requests_per_second", requests_per_second),
+            ("throttle_floor_seconds", throttle_floor_seconds),
+        ):
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(float(value))
+                or value < 0
+            ):
+                raise ValueError(f"{name} must be finite and non-negative")
+        if requests_per_second > 0 and min_requests_per_second > requests_per_second:
+            raise ValueError(
+                "min_requests_per_second cannot exceed requests_per_second"
+            )
+        for name, value in (
+            ("decrease_factor", decrease_factor),
+            ("recovery_step_fraction", recovery_step_fraction),
+        ):
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise ValueError(f"{name} must be numeric")
+        if not math.isfinite(float(decrease_factor)) or not 0 < decrease_factor < 1:
+            raise ValueError("decrease_factor must be finite within (0, 1)")
+        if client is not None and transport is not None:
+            raise ValueError("pass either client or transport, not both")
         self.endpoint = endpoint.rstrip("/")
         self.timeout = float(timeout)
         self.requests_per_second = float(requests_per_second)
