@@ -83,6 +83,7 @@ class SourceProducerTests(unittest.TestCase):
         expected_tasks: int = 1,
         reservation_tasks: int | None = None,
         range_first_fraction: float = 0.0,
+        source_year: int | None = 1997,
         source_key: str | None = None,
         source_registry=None,
     ):
@@ -91,7 +92,7 @@ class SourceProducerTests(unittest.TestCase):
             locator="fixture://1",
             payload="novel.example",
             scope=CandidateSourceScope.LOCAL_DISCOVERY,
-            source_year=1997,
+            source_year=source_year,
         )
         adapter = FakeSource([record])
         domain = SourceDomain(
@@ -357,12 +358,17 @@ class SourceProducerTests(unittest.TestCase):
         self.assertEqual(row["terminal_state"], "ABORTED")
 
     def test_source_producer_only_enqueues_durable_work(self):
-        runtime, adapter = self.build_runtime(backlog_capacity=1)
+        runtime, adapter = self.build_runtime(
+            backlog_capacity=6,
+            expected_tasks=6,
+            reservation_tasks=6,
+            source_year=None,
+        )
 
         report = runtime.run_once()
 
         key = EvidenceQueryKey(
-            "novel.example", TemporalScope(1997, 1997), "wayback", "cdx-v1"
+            "novel.example", TemporalScope(1996, 2001), "wayback", "cdx-v1"
         )
         task = self.control.get_evidence_task(key)
         self.assertEqual(report.leases_succeeded, 1)
@@ -379,13 +385,13 @@ class SourceProducerTests(unittest.TestCase):
             FROM evidence_task_origins
             WHERE hostname = ? AND year_from = ? AND year_to = ?
             """,
-            ("novel.example", 1997, 1997),
+            ("novel.example", 1996, 2001),
         ).fetchone()
         self.assertIsNotNone(origin)
         self.assertEqual(origin["source_key"], "fixture-reservoir")
         self.assertEqual(origin["reservoir_id"], "fixture-reservoir")
 
-    def test_single_year_discovery_hint_enqueues_exact_year_without_direct_capsule(self):
+    def test_single_year_discovery_hint_does_not_enqueue_wayback(self):
         record = SourceRecord(
             source_id="webbase-fixture",
             locator="fixture://webbase/1",
@@ -457,7 +463,7 @@ class SourceProducerTests(unittest.TestCase):
             "wayback",
             "cdx-v1",
         )
-        self.assertIsNotNone(self.control.get_evidence_task(key))
+        self.assertIsNone(self.control.get_evidence_task(key))
         self.assertEqual(report.evidence_tasks_enqueued, 1)
         self.assertEqual(report.direct_capsules_committed, 0)
         self.assertEqual(self.evidence.count(), 0)
@@ -540,7 +546,7 @@ class SourceProducerTests(unittest.TestCase):
         self.assertEqual(report.source_records, 4)
         self.assertEqual(report.observations, 4)
         self.assertEqual(report.pipeline_batches, 2)
-        self.assertEqual(report.evidence_tasks_enqueued, 4)
+        self.assertEqual(report.evidence_tasks_enqueued, 0)
         self.assertGreaterEqual(report.max_source_record_queue_depth, 1)
         self.assertLessEqual(report.max_source_record_queue_depth, 2)
         self.assertGreaterEqual(report.max_observation_queue_depth, 1)
@@ -549,9 +555,10 @@ class SourceProducerTests(unittest.TestCase):
     def test_range_first_reservation_covers_parent_and_future_fanout(self):
         runtime, adapter = self.build_runtime(
             backlog_capacity=6,
-            expected_tasks=1,
+            expected_tasks=6,
             reservation_tasks=6,
             range_first_fraction=1.0,
+            source_year=None,
         )
 
         report = runtime.run_once()
@@ -583,7 +590,12 @@ class SourceProducerTests(unittest.TestCase):
             CDXQueryState.PASS,
             owner="evidence-a",
         )
-        runtime, adapter = self.build_runtime(backlog_capacity=2)
+        runtime, adapter = self.build_runtime(
+            backlog_capacity=3,
+            expected_tasks=3,
+            reservation_tasks=3,
+            source_year=None,
+        )
 
         report = runtime.run_once()
 
@@ -883,8 +895,8 @@ class SourceProducerTests(unittest.TestCase):
             "rdap",
             "rdap-registration-v1",
         )
-        self.assertEqual(report.evidence_tasks_enqueued, 7)
-        self.assertIsNotNone(self.control.get_evidence_task(domain_key))
+        self.assertEqual(report.evidence_tasks_enqueued, 1)
+        self.assertIsNone(self.control.get_evidence_task(domain_key))
         self.assertIsNotNone(self.control.get_evidence_task(rdap_key))
         state = self.control.connection.execute(
             """
@@ -897,7 +909,7 @@ class SourceProducerTests(unittest.TestCase):
         self.assertEqual(state["observed_self"], 0)
         self.assertEqual(state["child_count"], 4)
         self.assertEqual(int(state["child_sketch"]).bit_count(), 4)
-        self.assertEqual(state["query_enqueued"], 1)
+        self.assertEqual(state["query_enqueued"], 0)
         # RDAP now relies on EvidenceTask identity instead of a second per-host
         # enqueue flag.
         self.assertEqual(state["rdap_enqueued"], 0)
@@ -934,7 +946,7 @@ class SourceProducerTests(unittest.TestCase):
         self.assertIsNone(self.control.get_evidence_task(fallback))
         self.assertEqual(
             runtime.evidence_router.pending_count(provider="wayback"),
-            1,
+            0,
         )
         self.assertEqual(runtime.admission.reserved("wayback"), 0)
         stored = self.control.get_reservoir("direct-isolation-reservoir")
