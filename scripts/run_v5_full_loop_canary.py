@@ -23,7 +23,7 @@ from creeper.authority.identity import (
     eed_model_authority_signature,
 )
 from creeper.evidence.providers.cdx import query_year
-from creeper.evidence.policies import EvidenceQueryKey
+from creeper.evidence.policies import CDXQueryState, EvidenceQueryKey
 from creeper.runtime.readiness import IncrementalReadinessRuntime
 from creeper.runtime.source_producer import SourceProducer
 from creeper.runtime.submission import (
@@ -51,7 +51,7 @@ from creeper.sources.reservoirs import ReservoirState
 from creeper.storage.candidate_store import CandidateStore
 from creeper.storage.commit_writer import CommitWriter
 from creeper.storage.control_store import ControlStore
-from creeper.storage.evidence_store import EvidenceStore
+from creeper.storage.evidence_store import EvidenceStore, EvidenceTaskProvenance
 from creeper.storage.telemetry_store import RuntimeTelemetryStore
 from creeper.submission.artifact_manifest import ArtifactSpec
 
@@ -239,7 +239,11 @@ def _synthetic_transport(hostname: str, year: int):
     ),
 
 
-def _drain_synthetic_evidence(control: ControlStore, evidence: EvidenceStore) -> None:
+def _drain_synthetic_evidence(
+    control: ControlStore,
+    evidence: EvidenceStore,
+) -> int:
+    """Resolve synthetic host tasks without changing their durable identity."""
     tasks = control.list_evidence_tasks()
     if not tasks:
         raise RuntimeError("synthetic production did not enqueue evidence tasks")
@@ -257,21 +261,85 @@ def _drain_synthetic_evidence(control: ControlStore, evidence: EvidenceStore) ->
         owner="v5-canary-evidence",
         flush_count=1,
     )
+    provider_requests = 0
+    expected_proofs = 0
     try:
         for task in claimed:
             key: EvidenceQueryKey = task.key
-            result = query_year(
-                key.hostname,
-                key.temporal_scope.year_from,
-                _synthetic_transport,
-                provider=key.provider,
-                policy_version=key.policy_version,
+            scope = key.temporal_scope
+            if scope.year_from == scope.year_to:
+                result = query_year(
+                    key.hostname,
+                    scope.year_from,
+                    _synthetic_transport,
+                    provider=key.provider,
+                    policy_version=key.policy_version,
+                )
+                provider_requests += 1
+                writer.submit(result.capsule, result)
+                expected_proofs += int(result.capsule is not None)
+                continue
+
+            results = [
+                query_year(
+                    key.hostname,
+                    year,
+                    _synthetic_transport,
+                    provider=key.provider,
+                    policy_version=key.policy_version,
+                )
+                for year in range(scope.year_from, scope.year_to + 1)
+            ]
+            provider_requests += len(results)
+            capsules = [
+                result.capsule
+                for result in results
+                if result.capsule is not None
+            ]
+            origin = control.primary_evidence_task_origin(key)
+            if capsules:
+                provenance = EvidenceTaskProvenance(
+                    key=key,
+                    source_key="" if origin is None else origin[0],
+                    reservoir_id="" if origin is None else origin[1],
+                    lease_id="" if origin is None else origin[2],
+                    committed_at=float(control.clock()),
+                )
+                evidence.put_many_with_task_provenance(
+                    (capsule, provenance) for capsule in capsules
+                )
+                control.attribute_task_host_years(
+                    key,
+                    (capsule.year for capsule in capsules),
+                )
+            expected_proofs += len(capsules)
+            states = [result.state for result in results]
+            if all(
+                state in {
+                    CDXQueryState.PASS,
+                    CDXQueryState.EMPTY_EXHAUSTIVE,
+                }
+                for state in states
+            ):
+                final_state = (
+                    CDXQueryState.PASS
+                    if capsules
+                    else CDXQueryState.EMPTY_EXHAUSTIVE
+                )
+            else:
+                raise RuntimeError(
+                    "synthetic range evidence unexpectedly remained incomplete"
+                )
+            control.finish_evidence_task(
+                key,
+                final_state,
+                owner="v5-canary-evidence",
             )
-            writer.submit(result.capsule, result)
     finally:
         writer.close()
-    if evidence.count() != len(keys):
+    if evidence.count() != expected_proofs:
         raise RuntimeError("synthetic evidence proof count is incomplete")
+    return provider_requests
 
 
 def run_canary(
@@ -412,7 +480,10 @@ def run_canary(
             adapter.close()
         if producer_report.leases_succeeded != 1:
             raise RuntimeError("synthetic production did not complete its source lease")
-        _drain_synthetic_evidence(control, evidence)
+        synthetic_provider_requests = _drain_synthetic_evidence(
+            control,
+            evidence,
+        )
 
         # Readiness consumes the durable evidence frontier and publishes FINAL.
         evidence.close()
@@ -459,7 +530,13 @@ def run_canary(
         )
         cdx_audit = source_root / "cdx-audit.json"
         cdx_audit.write_text(
-            json.dumps({"provider": "synthetic", "requests": 5}, sort_keys=True),
+            json.dumps(
+                {
+                    "provider": "synthetic",
+                    "requests": synthetic_provider_requests,
+                },
+                sort_keys=True,
+            ),
             encoding="utf-8",
         )
         control = ControlStore(runtime_root / "control.sqlite3")
