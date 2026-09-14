@@ -7,6 +7,15 @@ from creeper.sources.local.static_dataset import StaticDatasetAdapter
 
 
 class StaticDatasetAdapterTests(unittest.TestCase):
+    def test_constructor_rejects_invalid_identity_and_year(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "hosts.txt"
+            path.write_text("one.example\n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "source_id"):
+                StaticDatasetAdapter(path, source_id="")
+            with self.assertRaisesRegex(ValueError, "source_year"):
+                StaticDatasetAdapter(path, source_year=2001.5)
+
     def test_reuses_open_file_across_cursor_leases_and_closes_explicitly(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "hosts.txt"
