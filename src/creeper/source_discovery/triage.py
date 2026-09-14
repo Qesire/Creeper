@@ -22,7 +22,7 @@ class TriageTransientError(RuntimeError):
 @dataclass(frozen=True)
 class HttpTriagePolicy:
     timeout_seconds: float = 10.0
-    fallback_get_statuses: frozenset[int] = frozenset({400, 403, 405, 501})
+    fallback_get_statuses: frozenset[int] = frozenset({400, 403, 404, 405, 501})
     transient_statuses: frozenset[int] = frozenset({408, 425, 429})
 
     def __post_init__(self) -> None:
@@ -36,8 +36,9 @@ class HttpTriagePolicy:
 class HttpSourceTriageExecutor:
     """Probe an entrypoint with HEAD and a zero-body streaming GET fallback.
 
-    Some archives and object stores reject HEAD while serving GET normally. For
-    those statuses a Range GET is opened only far enough to observe response
+    Some archives and object stores reject or misroute HEAD while serving GET
+    normally, including occasional HEAD 404 responses on generated manifests.
+    For those statuses a Range GET is opened only far enough to observe response
     headers; the body is not consumed. 429/5xx/network failures raise so the
     coordinator's TTL suppression provides retry/backoff instead of parking a
     source permanently.
