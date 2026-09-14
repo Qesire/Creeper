@@ -110,7 +110,7 @@ class MeasuredYieldScoutTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(measurement.observed_host_year_pairs, 2)
         self.assertEqual(measurement.novel_host_year_pairs, 2)
         self.assertEqual(measurement.novel_pair_eed, 2.0)
-        self.assertEqual(measurement.direct_host_years, 0)
+        self.assertEqual(measurement.direct_host_years, 2)
 
     async def test_dated_source_keeps_new_year_for_partially_known_hostname(self) -> None:
         body = b'com,known)/ 19980101000000 {"url":"https://known.com/new"}\n'
