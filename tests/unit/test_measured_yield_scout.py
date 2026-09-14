@@ -139,18 +139,26 @@ class MeasuredYieldScoutTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(measurement.novel_pair_eed, 1.0)
         self.assertEqual(measurement.novel_eed_for_ranking, 1.0)
 
-    async def test_monthly_mailbox_scout_measures_url_hosts_at_shard_year(self) -> None:
+    async def test_monthly_mailbox_scout_uses_message_dates_for_host_years(self) -> None:
         body = (
-            b"From: Person <person@example.net>\n"
+            b"From first@example.test Fri Oct 16 04:31:23 1998\n"
+            b"Date: Fri, 16 Oct 1998 04:31:23 -0400\n"
+            b"Content-Type: text/plain; charset=utf-8\n\n"
             b"See http://known.com/a and https://novel.com/b\n"
+            b"From second@example.test Sat Oct 17 04:31:23 1998\n"
+            b"Date: Sat, 17 Oct 1998 04:31:23 -0400\n"
+            b"Content-Type: text/plain; charset=utf-8\n\n"
             b"Reference: https://other.org/c\n"
         )
 
         async def handler(request: httpx.Request) -> httpx.Response:
             return streamed_response(
-                206,
+                200,
                 body,
-                headers={"content-type": "text/plain"},
+                headers={
+                    "content-type": "text/plain",
+                    "content-length": str(len(body)),
+                },
             )
 
         async with httpx.AsyncClient(
@@ -169,7 +177,7 @@ class MeasuredYieldScoutTests(unittest.IsolatedAsyncioTestCase):
             )
             result = await scout(
                 self.candidate(
-                    "https://lists.gnu.org/archive/mbox/lynx-dev/1998-03",
+                    "https://lists.gnu.org/archive/mbox/lynx-dev/1998-10",
                     exact_year=1998,
                 )
             )
@@ -178,13 +186,70 @@ class MeasuredYieldScoutTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(result.measurement)
         measurement = result.measurement
         assert measurement is not None
+        self.assertEqual(measurement.sampled_records, 2)
         self.assertEqual(measurement.measurement_mode, MeasurementMode.HOST_YEAR)
         self.assertEqual(measurement.unique_hosts, 3)
         self.assertEqual(measurement.novel_hosts, 2)
         self.assertEqual(measurement.observed_host_year_pairs, 3)
-        # known.com exists only in the 1996 baseline, so 1998 remains novel.
+        # known.com exists only in the 1996 baseline, so its 1998 pair is new.
         self.assertEqual(measurement.novel_host_year_pairs, 3)
         self.assertEqual(measurement.direct_host_years, 0)
+
+    async def test_mailbox_scout_drops_truncated_final_message_without_date_leak(self) -> None:
+        complete = (
+            b"From first@example.test Fri Oct 16 04:31:23 1998\n"
+            b"Date: Fri, 16 Oct 1998 04:31:23 -0400\n\n"
+            b"http://first.example/\n"
+        )
+        partial = (
+            b"From second@example.test Sat Oct 17 04:31:23 1998\n"
+            b"Date: Sat, 17 Oct 1998 04:31:23 -0400\n\n"
+            b"http://partial.example/"
+        )
+        body = complete + partial + (b"x" * 2048)
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            budget = int(request.headers["Range"].split("-")[1]) + 1
+            chunk = body[:budget]
+            return streamed_response(
+                206,
+                chunk,
+                headers={
+                    "content-type": "text/plain",
+                    "content-range": f"bytes 0-{len(chunk)-1}/{len(body)}",
+                    "content-length": str(len(chunk)),
+                },
+            )
+
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler)
+        ) as client:
+            scout = MeasuredYieldScoutExecutor(
+                client,
+                self.baseline,
+                {"example": Decimal("1")},
+                policy=self.policy(
+                    max_download_bytes=len(complete) + 64,
+                    progressive_initial_bytes=len(complete) + 64,
+                    sample_windows=1,
+                    min_unique_hosts=1,
+                    min_novel_hosts=1,
+                    min_novel_fraction=0.0,
+                    min_novel_eed=0.0,
+                ),
+            )
+            result = await scout(
+                self.candidate(
+                    "https://lists.gnu.org/archive/mbox/lynx-dev/1998-10",
+                    exact_year=1998,
+                )
+            )
+
+        self.assertIsNotNone(result.measurement)
+        measurement = result.measurement
+        assert measurement is not None
+        self.assertEqual(measurement.unique_hosts, 1)
+        self.assertEqual(measurement.observed_host_year_pairs, 1)
 
     async def test_dmoz_scout_uses_exact_dump_year_as_ranking_hint(self) -> None:
         raw = (
