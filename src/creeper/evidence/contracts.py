@@ -21,6 +21,10 @@ from types import MappingProxyType
 from typing import Mapping
 from urllib.parse import urlsplit
 
+from creeper.sources.ftp_sitelist import (
+    is_audited_ftp_sitelist_locator,
+    is_ftp_sitelist_locator,
+)
 from creeper.sources.non_snapshot import (
     is_dmoz_content_locator,
     is_mailbox_url_locator,
@@ -40,6 +44,7 @@ _PARSER_KINDS = frozenset(
         "mbox_urls",
         "squid_access",
         "dmoz_rdf_urls",
+        "ftp_sitelist_zip",
         "warc_arc",
     }
 )
@@ -193,6 +198,18 @@ SQUID_ACCESS_DIRECT_CONTRACT = SourceEvidenceContract(
 )
 
 
+FTP_SITELIST_DIRECT_CONTRACT = SourceEvidenceContract(
+    contract_id="anonymous-ftp-sitelist-v1",
+    authority=EvidenceAuthority.DIRECT_WEB_YEAR,
+    parser_kind="ftp_sitelist_zip",
+    temporal_semantics="curated_ftp_site_record_last_modified",
+    evidence_type="dated_ftp_site_directory_record",
+    hostname_field="site",
+    timestamp_field="date",
+    policy_version="ftp-sitelist-contract-v1",
+)
+
+
 def parser_kind_from_locator(locator: str) -> str:
     path = urlsplit(locator).path.lower()
     if is_mailbox_url_locator(locator):
@@ -201,6 +218,8 @@ def parser_kind_from_locator(locator: str) -> str:
         return "squid_access"
     if is_dmoz_content_locator(locator):
         return "dmoz_rdf_urls"
+    if is_ftp_sitelist_locator(locator):
+        return "ftp_sitelist_zip"
     if path.endswith((".warc.gz", ".arc.gz", ".warc", ".arc")):
         return "warc_arc"
     if path.endswith((".cdxj", ".cdxj.gz")):
@@ -283,6 +302,11 @@ def resolve_source_evidence_contract(
         return CDXJ_DIRECT_CONTRACT
     if actual_parser == "squid_access":
         return SQUID_ACCESS_DIRECT_CONTRACT
+    if (
+        actual_parser == "ftp_sitelist_zip"
+        and is_audited_ftp_sitelist_locator(locator)
+    ):
+        return FTP_SITELIST_DIRECT_CONTRACT
     return discovery_only_contract(actual_parser)
 
 
