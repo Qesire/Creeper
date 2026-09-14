@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import unittest
 
+import httpx
+
 from creeper.evidence.policies import (
     CDXQueryState,
     EvidenceCapsule,
@@ -10,7 +12,10 @@ from creeper.evidence.policies import (
     RangeEvidenceQueryResult,
     TemporalScope,
 )
-from creeper.evidence.providers.multi_cdx import AsyncCDXProviderPool
+from creeper.evidence.providers.multi_cdx import (
+    AsyncArquivoCDXClient,
+    AsyncCDXProviderPool,
+)
 
 
 def capsule(hostname: str, year: int, source_id: str) -> EvidenceCapsule:
@@ -52,6 +57,60 @@ class FakeClient:
             )
         )
         return self.ranges[key]
+
+
+class ArquivoDialectTests(unittest.IsolatedAsyncioTestCase):
+    async def test_arquivo_uses_native_query_shape_and_normalizes_rows(self) -> None:
+        seen: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(request)
+            return httpx.Response(
+                200,
+                json=[
+                    {
+                        "url": "http://arquivo.example/path",
+                        "timestamp": "19980102030405",
+                        "status": "200",
+                        "mime": "text/html",
+                        "digest": "sha1:test",
+                        "length": "123",
+                        "offset": "10",
+                        "filename": "example.arc.gz",
+                    }
+                ],
+            )
+
+        client = AsyncArquivoCDXClient(
+            endpoint="https://arquivo.example/wayback/cdx",
+            provider="wayback",
+            source_id="arquivo_pt",
+            limit=100,
+            requests_per_second=0.0,
+            transport=httpx.MockTransport(handler),
+        )
+        key = EvidenceQueryKey(
+            "arquivo.example",
+            TemporalScope(1998, 1998),
+            "wayback",
+            "cdx-v1",
+        )
+        try:
+            result = await client.query_key(key)
+        finally:
+            await client.aclose()
+
+        self.assertEqual(result.state, CDXQueryState.PASS)
+        assert result.capsule is not None
+        self.assertEqual(result.capsule.source_id, "arquivo_pt")
+        self.assertEqual(len(seen), 1)
+        params = seen[0].url.params
+        self.assertEqual(params["from"], "1998")
+        self.assertEqual(params["to"], "1998")
+        self.assertEqual(params["matchType"], "host")
+        self.assertIn("fields", params)
+        self.assertNotIn("fl", params)
+        self.assertNotIn("showResumeKey", params)
 
 
 class MultiCDXProviderPoolTests(unittest.IsolatedAsyncioTestCase):
