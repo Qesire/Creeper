@@ -30,11 +30,6 @@ AUDITED_FTP_SITELIST_LOCATORS = frozenset(
 
 _SITE_RE = re.compile(r"^Site\s*:\s*(.*?)\s*$", re.IGNORECASE)
 _DATE_RE = re.compile(r"^Date\s*:\s*(.*?)\s*$", re.IGNORECASE)
-_LISTING_MARKERS = (
-    "Anonymous FTP Sites Listing",
-    "comprehensive alphabetic listing of Internet sites accepting",
-)
-
 
 @dataclass(frozen=True)
 class FtpSitelistRecord:
@@ -154,9 +149,6 @@ def parse_ftp_sitelist_zip(
                 raise ValueError("FTP sitelist ZIP exceeds decompressed byte budget")
             raw = archive.read(info)
             text = raw.decode("utf-8", errors="replace")
-            lowered = text.lower()
-            if not any(marker.lower() in lowered for marker in _LISTING_MARKERS):
-                continue
             for record in parse_ftp_sitelist_text(
                 text,
                 member_name=info.filename,
