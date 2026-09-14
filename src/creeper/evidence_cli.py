@@ -220,6 +220,15 @@ async def run_service(
                             + "_max_inflight",
                             stats["max_inflight"],
                         ),
+                        (
+                            "cdx_"
+                            + "".join(
+                                char if char.isalnum() else "_"
+                                for char in name
+                            )
+                            + "_row_limit",
+                            stats["row_limit"],
+                        ),
                     )
                 }
             )
