@@ -9,6 +9,7 @@ from pathlib import Path
 from creeper.distributed.config import load_worker_config
 from creeper.distributed.coordinator_client import CoordinatorClient
 from creeper.distributed.host_query import DistributedHostQueryProducer
+from creeper.distributed.region_probe import RegionProbeProducer
 from creeper.distributed.worker import DistributedWorker
 
 
@@ -30,8 +31,10 @@ async def _run(config_path: Path, *, once: bool) -> int:
     config = load_worker_config(config_path)
     secret = config.load_secret()
     host_query = DistributedHostQueryProducer(config.cdx_providers)
+    region_probe = RegionProbeProducer(config.cdx_providers)
     producers = {
         "HistoricalQueryProducer": host_query,
+        "RegionProbeProducer": region_probe,
     }
     async with CoordinatorClient(
         config.coordinator_url,
