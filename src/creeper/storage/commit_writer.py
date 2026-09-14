@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import time
 from collections.abc import Callable
 
@@ -29,21 +30,45 @@ class CommitWriter:
         flush_interval_seconds: float = 1.0,
         clock: Callable[[], float] = time.monotonic,
     ):
-        if flush_count < 1:
-            raise ValueError("flush_count must be positive")
-        if flush_interval_seconds <= 0:
-            raise ValueError("flush_interval_seconds must be positive")
+        if (
+            isinstance(flush_count, bool)
+            or not isinstance(flush_count, int)
+            or flush_count < 1
+        ):
+            raise ValueError("flush_count must be a positive integer")
+        if (
+            isinstance(flush_interval_seconds, bool)
+            or not isinstance(flush_interval_seconds, (int, float))
+            or not math.isfinite(float(flush_interval_seconds))
+            or flush_interval_seconds <= 0
+        ):
+            raise ValueError(
+                "flush_interval_seconds must be finite and positive"
+            )
+        if not isinstance(owner, str) or not owner.strip():
+            raise ValueError("owner must be a non-empty string")
         self.evidence_store = evidence_store
         self.control_store = control_store
         self.owner = owner
         self.flush_count = flush_count
-        self.flush_interval_seconds = flush_interval_seconds
+        self.flush_interval_seconds = float(flush_interval_seconds)
         self.clock = clock
         self._pending: list[tuple[EvidenceCapsule | None, EvidenceQueryResult]] = []
         self._closed = False
-        self._last_flush = float(clock())
+        self._last_flush = self._clock_value()
         self.inserted_capsules = 0
         self.finished_tasks = 0
+
+    def _clock_value(self, value: object | None = None) -> float:
+        raw = self.clock() if value is None else value
+        if (
+            isinstance(raw, bool)
+            or not isinstance(raw, (int, float))
+            or not math.isfinite(float(raw))
+            or raw < 0
+        ):
+            raise ValueError("commit writer clock must be finite and non-negative")
+        return float(raw)
 
     @property
     def pending_count(self) -> int:
@@ -52,8 +77,12 @@ class CommitWriter:
     def submit(self, capsule: EvidenceCapsule | None, result: EvidenceQueryResult) -> None:
         if self._closed:
             raise RuntimeError("commit writer is closed")
+        if capsule is not None and not isinstance(capsule, EvidenceCapsule):
+            raise ValueError("capsule must be an EvidenceCapsule when provided")
+        if not isinstance(result, EvidenceQueryResult):
+            raise ValueError("result must be an EvidenceQueryResult")
+        now = self._clock_value()
         self._pending.append((capsule, result))
-        now = float(self.clock())
         if (
             len(self._pending) >= self.flush_count
             or now - self._last_flush >= self.flush_interval_seconds
@@ -61,9 +90,9 @@ class CommitWriter:
             self.flush(now=now)
 
     def flush(self, *, now: float | None = None) -> int:
+        effective_now = self._clock_value(now)
         if not self._pending:
-            if now is not None:
-                self._last_flush = float(now)
+            self._last_flush = effective_now
             return 0
         pending = self._pending
         capsules = [capsule for capsule, _ in pending if capsule is not None]
@@ -101,7 +130,7 @@ class CommitWriter:
                 results, owner=self.owner
             )
         self._pending = []
-        self._last_flush = float(self.clock()) if now is None else float(now)
+        self._last_flush = effective_now
         return len(pending)
 
     def close(self) -> None:
