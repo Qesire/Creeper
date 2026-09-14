@@ -2780,6 +2780,18 @@ class ControlStore:
                 """ + ownership,
                 [(*update, owner) if owner is not None else update for update in updates],
             )
+            # Legacy runtimes pre-reserved exact-year fanout for range tasks.
+            # Host-first execution no longer uses those tokens; clear them on
+            # any task transition so upgraded long-running databases converge
+            # without an explicit destructive migration.
+            self.connection.executemany(
+                """
+                DELETE FROM evidence_task_fanout_reservations
+                WHERE hostname = ? AND year_from = ? AND year_to = ?
+                  AND provider = ? AND policy_version = ?
+                """,
+                [self._values(result.key) for result in keyed_results],
+            )
             self.connection.commit()
         except BaseException:
             self.connection.rollback()
