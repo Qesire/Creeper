@@ -89,6 +89,10 @@ def main(argv: list[str] | None = None) -> int:
         store,
         promotion_batch_size=config.promotion_batch_size,
         include_source_pages=config.auto_promote_source_pages,
+        host_promotion_batch_size=config.host_promotion_batch_size,
+        host_physical_providers=config.host_resolution_providers,
+        host_coverage_provider=config.host_coverage_provider,
+        host_resolver_version=config.host_resolver_version,
     )
 
     async def reconciliation_context(_app: web.Application):
