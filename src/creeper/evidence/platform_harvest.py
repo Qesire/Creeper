@@ -345,8 +345,19 @@ class PlatformYearHarvestResult:
             PlatformHarvestState.FAILED_INVALID,
         }:
             raise ValueError("provider result must be a page-completion state")
-        if state is PlatformHarvestState.PARTIAL and not self.next_resume_key:
-            raise ValueError("partial platform harvest must preserve a continuation")
+        if state is PlatformHarvestState.PARTIAL:
+            if not self.next_resume_key:
+                raise ValueError(
+                    "partial platform harvest must preserve a continuation"
+                )
+            if self.next_resume_key == self.resume_key_used:
+                raise ValueError(
+                    "partial platform harvest must advance the continuation"
+                )
+        elif self.next_resume_key is not None:
+            raise ValueError(
+                "only PARTIAL platform harvest results may publish a continuation"
+            )
         if state is PlatformHarvestState.COMPLETE:
             if self.next_resume_key is not None or not self.exhaustive:
                 raise ValueError(
