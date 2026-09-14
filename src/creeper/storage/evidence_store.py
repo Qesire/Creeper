@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import sqlite3
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -27,6 +28,21 @@ class EvidenceTaskProvenance:
     lease_id: str = ""
     committed_at: float = 0.0
     task_kind: str = ""
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.key, EvidenceQueryKey):
+            raise ValueError("provenance key must be an EvidenceQueryKey")
+        if (
+            isinstance(self.committed_at, bool)
+            or not isinstance(self.committed_at, (int, float))
+            or not math.isfinite(float(self.committed_at))
+            or self.committed_at < 0
+        ):
+            raise ValueError("committed_at must be finite and non-negative")
+        if self.task_kind and self.task_kind not in {
+            "exact", "range", "domain", "rdap", "platform_year"
+        }:
+            raise ValueError("unsupported evidence provenance task_kind")
 
 
 @dataclass(frozen=True)
