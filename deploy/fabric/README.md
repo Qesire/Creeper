@@ -63,6 +63,9 @@ Optional verification:
 ```bash
 curl -fsS https://fabric.example.com/healthz
 curl -fsS https://fabric.example.com/meta
+
+sudo -E FABRIC_PUBLIC_URL=https://fabric.example.com \
+  deploy/fabric/local-authority/smoke.sh
 ```
 
 Do not use a Quick Tunnel for production.
@@ -109,6 +112,12 @@ Default OCI profile:
 
 The worker runs as `creeper-fabric-worker.service`.
 
+Verify connectivity from the OCI node:
+
+```bash
+sudo deploy/fabric/vm-worker/smoke.sh
+```
+
 ## 4. GCP metered explorer
 
 On the GCP VM:
@@ -133,6 +142,12 @@ Google Compute Engine startup scripts may invoke the same installer, but do
 not embed `CREEPER_WORKER_SECRET` directly in startup-script metadata.
 Provision the root-only secret file first or retrieve it from a dedicated
 secret system.
+
+Verify connectivity from the GCP node:
+
+```bash
+sudo deploy/fabric/vm-worker/smoke.sh
+```
 
 ## 5. Qualify each provider x region
 
@@ -170,7 +185,32 @@ sudo -u creeper-fabric "$CONTROL" --config "$CONFIG" status
 journalctl -u creeper-fabric-worker -f
 ```
 
-## 6. Start evidence-only exploration
+## 6. Submit local hostname pools
+
+Existing local candidate pools remain a first-class input. They are streamed
+locally into Authority; baseline years, already accepted HYs, and completed
+coverage are subtracted before any remote task is created.
+
+Single hostname:
+
+```bash
+sudo -u creeper-fabric "$CONTROL" --config "$CONFIG" host \
+  --hostname old-host.example \
+  --archive-providers internet_archive,arquivo_pt
+```
+
+One-hostname-per-line pool:
+
+```bash
+sudo -u creeper-fabric "$CONTROL" --config "$CONFIG" hosts \
+  --input /absolute/path/to/candidate_pool.txt \
+  --archive-providers internet_archive,arquivo_pt
+```
+
+The command computes the same provider-set/resolver fingerprint as the remote
+`HistoricalQueryProducer`; do not hand-write coverage identities.
+
+## 7. Start evidence-only exploration
 
 A known historical root:
 
@@ -198,7 +238,7 @@ to automate. Search URLs/hostnames remain worker-local; workers immediately
 consume discovered hostnames through their configured CDX providers and send
 only HY admission/evidence traffic to Authority.
 
-## 7. Cloudflare thin worker
+## 8. Cloudflare thin worker
 
 The Cloudflare runtime is independent JavaScript and only executes the
 positive-only exact-year thin contract.
@@ -215,6 +255,20 @@ set +a
 
 The deploy script stores the worker HMAC secret using Wrangler secrets and
 then deploys the Worker/Cron.
+
+## 9. End-to-end deployment order
+
+For a fresh deployment, use this exact order:
+
+1. Install Local Authority with the immutable baseline index.
+2. Install Cloudflare Tunnel and verify the public `/healthz` and `/meta`.
+3. Provision one HMAC secret per worker identity.
+4. Install OCI/GCP workers and run the VM smoke script.
+5. Submit provider x region qualification probes from Local Authority.
+6. Confirm `creeper-fabric-control status` shows the workers and qualified
+   provider regions.
+7. Submit local hostname pools and/or evidence-only exploration tasks.
+8. Deploy the Cloudflare thin worker after its worker identity/secret exists.
 
 ## Operations
 
