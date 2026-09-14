@@ -2555,15 +2555,25 @@ class ControlStore:
         lease_seconds: float | None = None,
         keys: Iterable[EvidenceQueryKey] | None = None,
     ) -> list[EvidenceTask]:
-        if not owner:
+        if not isinstance(owner, str) or not owner.strip():
             raise ValueError("owner is required")
+        if isinstance(limit, bool) or not isinstance(limit, int):
+            raise ValueError("evidence claim limit must be an integer")
         if limit < 1:
             return []
         if lease_seconds is None:
             lease_seconds = self.default_lease_seconds
         if not math.isfinite(float(lease_seconds)) or lease_seconds < 0:
             raise ValueError("lease_seconds must be finite and non-negative")
-        now = float(self.clock())
+        now_raw = self.clock()
+        if (
+            isinstance(now_raw, bool)
+            or not isinstance(now_raw, (int, float))
+            or not math.isfinite(float(now_raw))
+            or now_raw < 0
+        ):
+            raise ValueError("evidence claim clock must be finite and non-negative")
+        now = float(now_raw)
         key_values = list(keys) if keys is not None else None
         clauses = [
             "state IN (?, ?, ?)",
