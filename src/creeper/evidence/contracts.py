@@ -25,6 +25,7 @@ from creeper.sources.ftp_sitelist import (
     is_audited_ftp_sitelist_locator,
     is_ftp_sitelist_locator,
 )
+from creeper.sources.mailbox_records import is_audited_gnu_mbox_locator
 from creeper.sources.non_snapshot import (
     is_dmoz_content_locator,
     is_mailbox_url_locator,
@@ -197,6 +198,17 @@ SQUID_ACCESS_DIRECT_CONTRACT = SourceEvidenceContract(
     policy_version="http-proxy-access-contract-v1",
 )
 
+GNU_MBOX_DIRECT_CONTRACT = SourceEvidenceContract(
+    contract_id="gnu-mbox-message-observation-v1",
+    authority=EvidenceAuthority.DIRECT_WEB_YEAR,
+    parser_kind="mbox_urls",
+    temporal_semantics="mail_message_date_header",
+    evidence_type="dated_mail_message_url_observation",
+    hostname_field="message_body_url",
+    timestamp_field="date_header",
+    policy_version="gnu-mbox-message-contract-v1",
+)
+
 
 FTP_SITELIST_DIRECT_CONTRACT = SourceEvidenceContract(
     contract_id="anonymous-ftp-sitelist-v1",
@@ -303,6 +315,11 @@ def resolve_source_evidence_contract(
         return CDXJ_DIRECT_CONTRACT
     if actual_parser == "squid_access":
         return SQUID_ACCESS_DIRECT_CONTRACT
+    if (
+        actual_parser == "mbox_urls"
+        and is_audited_gnu_mbox_locator(locator)
+    ):
+        return GNU_MBOX_DIRECT_CONTRACT
     if (
         actual_parser == "ftp_sitelist_zip"
         and is_audited_ftp_sitelist_locator(locator)
