@@ -238,6 +238,21 @@ def create_authority_app(
             }
         )
 
+    async def coverage_complete(request: web.Request) -> web.Response:
+        data = _body(request)
+        mask = store.record_complete_resolution_coverage(
+            str(data["task_id"]),
+            worker_id=str(request["worker_id"]),
+            generation=int(data["generation"]),
+            hostname=str(data["hostname"]),
+            provider=str(data["provider"]),
+            scope=str(data["scope"]),
+            resolver_version=str(data["resolver_version"]),
+            year_from=int(data["year_from"]),
+            year_to=int(data["year_to"]),
+        )
+        return web.json_response({"year_mask": mask})
+
     async def hy_probe(request: web.Request) -> web.Response:
         data = _body(request)
         probes = data.get("probes", ())
@@ -341,6 +356,7 @@ def create_authority_app(
     app.router.add_post("/v1/tasks/fail", fail)
     app.router.add_post("/v1/tasks/finish", finish)
     app.router.add_post("/v1/results/batch", commit_batch)
+    app.router.add_post("/v1/coverage/complete", coverage_complete)
     app.router.add_post("/v1/results/hy-probe", hy_probe)
     app.router.add_post("/v1/results/hy-full", hy_full)
     app.router.add_post("/v1/providers/observation", provider_observation)
