@@ -175,6 +175,30 @@ Path(a.response).write_text(json.dumps(payload), encoding="utf-8")
 '''
 
 
+class SearchProfileMechanismTests(unittest.TestCase):
+    def test_recovery_profile_avoids_crawl_centric_queries(self) -> None:
+        directive = SearchDirective(
+            kind=SearchDirectiveKind.RECOVER_STAGNATION,
+            strategy="RECOVER_STAGNATION",
+            desired_candidates=5,
+            subject=None,
+            reason="recent search tail has zero credited reward",
+        )
+
+        profile = CommandAgentSearchExecutor._calibrated_search_profile(directive)
+        query_text = " ".join(profile["query_examples"]).lower()
+
+        self.assertEqual(profile["mode"], "recovery")
+        self.assertIn("capture mechanism", profile["primary_archetype"])
+        self.assertIn("proxy", query_text)
+        self.assertIn("dns hostcount", query_text)
+        self.assertIn("server survey", query_text)
+        self.assertIn("open directory", query_text)
+        self.assertNotIn("crawl", query_text)
+        self.assertNotIn("warc", query_text)
+        self.assertNotIn("cdx", query_text)
+
+
 class AgentAdmissionIntegrationTests(unittest.IsolatedAsyncioTestCase):
     async def test_executor_filters_low_reservoir_and_persists_audit(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -219,16 +243,41 @@ class AgentAdmissionIntegrationTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn(".cdxj.gz", request["requirements"]["direct_evidence_suffixes"])
             self.assertTrue(
                 request["requirements"]["resource_priority"][0].startswith(
-                    "new enumerable root"
+                    "non-snapshot hostname inventories"
                 )
             )
+            mechanism = request["requirements"]["capture_mechanism_policy"]
             self.assertIn(
-                "national libraries and web archives",
+                "active HTTP/web-server survey",
+                mechanism["preferred_non_snapshot_mechanisms"],
+            )
+            self.assertIn(
+                "passive HTTP proxy/cache/request log",
+                mechanism["preferred_non_snapshot_mechanisms"],
+            )
+            self.assertIn(
+                "DNS hostcount/zone/connected-host enumeration",
+                mechanism["preferred_non_snapshot_mechanisms"],
+            )
+            self.assertIn(
+                "historical proxy/cache trace repositories",
                 request["requirements"]["search_targets"],
             )
             self.assertIn(
                 "ordinary archived pages and single-site snapshots",
                 request["requirements"]["avoid_low_yield"],
+            )
+            self.assertTrue(
+                any(
+                    "privacy-sanitized traces" in item
+                    for item in request["requirements"]["avoid_low_yield"]
+                )
+            )
+            self.assertIn(
+                "capture mechanism",
+                request["requirements"]["query_construction"][
+                    "must_name_capture_mechanism"
+                ],
             )
             self.assertEqual(
                 request["requirements"]["calibrated_search_profile"]["mode"],

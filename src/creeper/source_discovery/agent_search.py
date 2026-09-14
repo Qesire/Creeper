@@ -160,21 +160,28 @@ class CommandAgentSearchExecutor:
         if kind == "RECOVER_STAGNATION":
             return {
                 "mode": "recovery",
-                "primary_archetype": "alternate repository or citation-chain source",
+                "primary_archetype": (
+                    "independent capture mechanism with recoverable host identity"
+                ),
                 "query_examples": [
-                    '"1996" OR "1997" OR "1998" historical web dataset filetype',
-                    '"1999" OR "2000" OR "2001" internet directory URL dataset',
-                    "paper dataset repository early web crawl URL list",
+                    '"1996" OR "1997" OR "1998" proxy cache access log URL hostname dataset',
+                    '"1997" OR "1998" OR "1999" DNS hostcount raw output zone host list',
+                    '"1998" OR "1999" OR "2000" web server survey hostname list',
+                    '"2000" OR "2001" Open Directory RDF URL dump historical',
                 ],
             }
         if kind == "DISCOVER_NEW_FAMILY":
             return {
                 "mode": "orthogonal_exploration",
-                "primary_archetype": "offline web directory/CD-ROM/site-list collection",
+                "primary_archetype": (
+                    "non-snapshot hostname inventory from an independent "
+                    "acquisition mechanism"
+                ),
                 "query_examples": [
-                    '"1996" internet CD-ROM archived websites original URLs',
-                    '"1997" web directory URL list dataset',
-                    '"1998" offline web collection site list',
+                    '"1996-2001" active web server survey hostname list',
+                    '"1996-2001" sanitized proxy cache access log URL trace',
+                    '"1996-2001" DNS hostcount zone transfer raw host list',
+                    '"1998-2001" curated web directory RDF URL export',
                 ],
             }
         if kind == "EXPLOIT_SOURCE_FAMILY":
@@ -187,11 +194,13 @@ class CommandAgentSearchExecutor:
             }
         return {
             "mode": "high_density_refill",
-            "primary_archetype": "research crawl/link-list/URL-corpus dataset",
+            "primary_archetype": (
+                "passive HTTP trace/DNS host inventory/curated directory export"
+            ),
             "query_examples": [
-                '"1996-2000" early web link list dataset',
-                '"2001" web crawl URL corpus dataset',
-                '"1999-2001" internet directory URLs dataset',
+                '"1996-2001" proxy cache access log URL hostname dataset',
+                '"1996-2001" DNS hostcount raw output hostname list',
+                '"1998-2001" web directory RDF URL dump',
             ],
         }
 
@@ -260,22 +269,44 @@ class CommandAgentSearchExecutor:
                     "capture timestamp + original URL rows for 1996-2001"
                 ),
                 "prefer_catalogs_that_enumerate_direct_evidence_bulk": False,
+                "capture_mechanism_policy": {
+                    "orthogonality_unit": (
+                        "how hostnames were originally observed or curated, not "
+                        "the present hosting origin"
+                    ),
+                    "preferred_non_snapshot_mechanisms": [
+                        "active HTTP/web-server survey",
+                        "passive HTTP proxy/cache/request log",
+                        "DNS hostcount/zone/connected-host enumeration",
+                        "human-curated web directory or bookmark export",
+                        "historical NIC/registry domain or host inventory",
+                        "measurement-project destination/target list",
+                    ],
+                    "snapshot_aggregate_status": (
+                        "saturated background mechanism; do not spend broad or "
+                        "recovery search calls finding another WARC/CDX/crawl corpus"
+                    ),
+                    "identity_requirement": (
+                        "candidate data must preserve recoverable destination "
+                        "hostname or URL identity"
+                    ),
+                },
                 "resource_priority": [
-                    "new enumerable root or dataset family overlapping 1996-2001",
-                    "early-web link/URL/domain/seed inventories with year provenance",
+                    "non-snapshot hostname inventories overlapping 1996-2001",
+                    "passive HTTP proxy/cache/request logs with recoverable destination URLs",
+                    "DNS hostcount/zone/connected-host exports with dated provenance",
+                    "historical human-curated directories or site lists exposing external hosts",
                     "historical NIC/registry domain-allocation or connected-domain snapshots",
-                    "research-repository datasets derived from 1996-2001 web collections",
-                    "national-library or university collection/data manifests",
-                    "historical directories or site lists exposing many external hosts",
+                    "new enumerable roots from an acquisition mechanism not already saturated",
                     "CDX/CDXJ only when surfaced incidentally by a new root",
                 ],
                 "search_targets": [
-                    "institutional and research data repositories",
-                    "national libraries and web archives",
-                    "university early-web research datasets",
-                    "public archive data-package manifests",
-                    "historical link lists, URL lists, domain lists, and seed inventories",
-                    "NIC/registry FTP exports and dated allocation/statistics snapshots",
+                    "network-measurement and web-server-survey data repositories",
+                    "historical proxy/cache trace repositories",
+                    "DNS hostcount, zone-transfer, and connected-host mirrors",
+                    "historical human-curated web-directory exports",
+                    "NIC/registry FTP exports and dated allocation or host inventories",
+                    "research repositories only when the underlying acquisition mechanism is non-snapshot",
                 ],
                 "query_construction": {
                     "must_include_target_period": (
@@ -284,23 +315,37 @@ class CommandAgentSearchExecutor:
                     ),
                     "must_include_source_archetype": (
                         "combine the year term with one concrete archetype such "
-                        "as link list, URL list, domain list, seed list, registry "
-                        "snapshot, dataset, manifest, directory, crawl index, or "
-                        "collection export"
+                        "as proxy log, cache trace, DNS hostcount, zone host list, "
+                        "server survey, directory export, registry snapshot, "
+                        "URL list, domain list, seed list, or manifest"
+                    ),
+                    "must_name_capture_mechanism": (
+                        "prefer queries that identify how hostnames were observed "
+                        "or curated; changing repositories without changing the "
+                        "capture mechanism is not orthogonal exploration"
                     ),
                     "root_first": (
                         "find a new dataset/root/family before enumerating files; "
                         "known CDX/CDXJ shards are background work"
                     ),
                     "diversify_origins": (
-                        "prefer distinct institutions/origins over many siblings "
-                        "from one already-known archive"
+                        "prefer distinct capture mechanisms first, then distinct "
+                        "institutions/origins within a mechanism"
                     ),
                 },
                 "avoid_low_yield": [
                     "format specifications or software documentation without data",
                     "generic archive landing pages without enumerable resources",
                     "ordinary archived pages and single-site snapshots",
+                    (
+                        "WARC/CDX/CDXJ mirrors or archive-derived research crawl "
+                        "corpora during broad/recovery search unless the strategy "
+                        "explicitly requests direct archive work"
+                    ),
+                    (
+                        "privacy-sanitized traces whose destination hostname or "
+                        "URL was irreversibly replaced by opaque identifiers"
+                    ),
                     "partner-auth-only APIs unless public direct files also exist",
                     "datasets entirely after 2001",
                     "already-known origins when a new origin can be tested",
