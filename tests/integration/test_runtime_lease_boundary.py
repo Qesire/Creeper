@@ -26,7 +26,6 @@ class OneRecordReservoir:
             locator="fixture://lease-boundary/1",
             payload="boundary.example",
             scope=CandidateSourceScope.LOCAL_DISCOVERY,
-            source_year=1997,
         )
         return iter((record,)), LeaseResult(
             lease_id=lease.lease_id,
@@ -53,7 +52,10 @@ class RuntimeLeaseBoundaryTests(unittest.TestCase):
         baseline_dir = task_root / "merged260909-3"
         baseline_dir.mkdir(parents=True)
         for year in range(1996, 2002):
-            (baseline_dir / f"{year}.txt").write_text("", encoding="utf-8")
+            (baseline_dir / f"{year}.txt").write_text(
+                "" if year == 1997 else "boundary.example\n",
+                encoding="utf-8",
+            )
         (baseline_dir / "candidate_pool.txt").write_text("", encoding="utf-8")
         baseline = BaselineIndex.build(task_root, root / "baseline.sqlite3")
         control = ControlStore(root / "control.sqlite3")
