@@ -16,6 +16,7 @@ from creeper.distributed.authority_api import create_authority_app
 from creeper.distributed.authority_store import DistributedAuthorityStore
 from creeper.distributed.coordinator_client import CoordinatorClient
 from creeper.distributed.host_query import DistributedHostQueryProducer
+from creeper.distributed.region_probe import RegionProbeProducer
 from creeper.distributed.models import (
     Capability,
     TaskClass,
@@ -189,6 +190,82 @@ class DistributedWorkerNetworkTests(unittest.IsolatedAsyncioTestCase):
             report = await worker.run_once()
 
         self.assertFalse(report.claimed)
+
+    async def test_region_probe_worker_qualifies_provider_region(self) -> None:
+        calls = 0
+
+        async def probe_handler(request: httpx.Request) -> httpx.Response:
+            nonlocal calls
+            calls += 1
+            return httpx.Response(
+                200,
+                content=b"[]",
+                request=request,
+            )
+
+        self.store.configure_provider_budget(
+            "internet_archive",
+            requests_per_second=1000.0,
+            max_global_inflight=1,
+            require_qualified_region=True,
+        )
+        probe_task = self.store.admit_work(
+            WorkDefinition(
+                producer="RegionProbeProducer",
+                task_class=TaskClass.PROBE,
+                input_identity="internet_archive",
+                coverage={
+                    "provider": "internet_archive",
+                    "probe_hostname": "example.com",
+                    "year": 2001,
+                    "samples": 3,
+                },
+                partition="qualification",
+                algorithm_version="probe-v1",
+                required_capabilities=(Capability.ONLINE_QUERY.value,),
+            )
+        )
+        producer = RegionProbeProducer(
+            (
+                CDXProviderConfig(
+                    name="internet_archive",
+                    endpoint="https://ia.test/cdx",
+                    requests_per_second=1000.0,
+                    max_inflight=1,
+                    max_connections=1,
+                    max_keepalive_connections=1,
+                    max_retries=0,
+                    row_limit=1,
+                ),
+            ),
+            transports={
+                "internet_archive": httpx.MockTransport(probe_handler),
+            },
+        )
+
+        async with CoordinatorClient(
+            self.base_url,
+            worker_id="worker-a",
+            secret=self.credentials["worker-a"],
+        ) as client:
+            worker = DistributedWorker(
+                client,
+                self.descriptor("worker-a", "oci-test"),
+                {"RegionProbeProducer": producer},
+                lease_seconds=30,
+            )
+            report = await worker.run_once()
+
+        self.assertTrue(report.completed, report.error)
+        self.assertEqual(report.task_id, probe_task)
+        self.assertEqual(calls, 3)
+        snapshot = self.store.provider_region_snapshot(
+            "internet_archive",
+            "oci-test",
+        )
+        assert snapshot is not None
+        self.assertEqual(snapshot["state"], "QUALIFIED")
+        self.assertEqual(snapshot["samples"], 3)
 
     async def test_host_query_producer_closes_authority_to_cdx_to_hy_loop(self) -> None:
         calls = []
