@@ -175,6 +175,30 @@ Path(a.response).write_text(json.dumps(payload), encoding="utf-8")
 '''
 
 
+class SearchProfileMechanismTests(unittest.TestCase):
+    def test_recovery_profile_avoids_crawl_centric_queries(self) -> None:
+        directive = SearchDirective(
+            kind=SearchDirectiveKind.RECOVER_STAGNATION,
+            strategy="RECOVER_STAGNATION",
+            desired_candidates=5,
+            subject=None,
+            reason="recent search tail has zero credited reward",
+        )
+
+        profile = CommandAgentSearchExecutor._calibrated_search_profile(directive)
+        query_text = " ".join(profile["query_examples"]).lower()
+
+        self.assertEqual(profile["mode"], "recovery")
+        self.assertIn("capture mechanism", profile["primary_archetype"])
+        self.assertIn("proxy", query_text)
+        self.assertIn("dns hostcount", query_text)
+        self.assertIn("server survey", query_text)
+        self.assertIn("open directory", query_text)
+        self.assertNotIn("crawl", query_text)
+        self.assertNotIn("warc", query_text)
+        self.assertNotIn("cdx", query_text)
+
+
 class AgentAdmissionIntegrationTests(unittest.IsolatedAsyncioTestCase):
     async def test_executor_filters_low_reservoir_and_persists_audit(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
