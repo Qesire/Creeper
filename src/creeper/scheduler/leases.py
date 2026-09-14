@@ -183,18 +183,10 @@ class WorkLease:
             raise StateTransitionError(f"invalid lease transition: {self.state} -> {LeaseState.EXPIRED}")
         return LeaseState.EXPIRED
 
-    def expired(self) -> "WorkLease":
+    def expired(self, *, now: float) -> "WorkLease":
         if self.state is LeaseState.EXPIRED:
             return self
-        if self.state not in {
-            LeaseState.GRANTED,
-            LeaseState.RUNNING,
-            LeaseState.PAUSED,
-            LeaseState.PREEMPTED,
-        }:
-            raise StateTransitionError(
-                f"invalid lease transition: {self.state} -> {LeaseState.EXPIRED}"
-            )
+        self.expire(now)
         return replace(self, state=LeaseState.EXPIRED)
 
     def resume(self) -> "WorkLease":
