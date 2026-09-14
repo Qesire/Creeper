@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass
+import math
 
 from creeper.source_discovery.models import (
     MeasurementMode,
@@ -30,20 +31,40 @@ class SaturationPolicy:
     suppression_ttl_seconds: float | None = 6 * 60 * 60
 
     def __post_init__(self) -> None:
-        if self.min_measured_siblings < 1:
-            raise ValueError("min_measured_siblings must be positive")
-        if self.min_total_observations < 0:
-            raise ValueError("min_total_observations must be non-negative")
-        if self.max_total_novel_eed_for_zero_class < 0:
-            raise ValueError(
-                "max_total_novel_eed_for_zero_class must be non-negative"
-            )
+        for name, value, minimum in (
+            ("min_measured_siblings", self.min_measured_siblings, 1),
+            ("min_total_observations", self.min_total_observations, 0),
+        ):
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, int)
+                or value < minimum
+            ):
+                raise ValueError(
+                    f"{name} must be an integer >= {minimum}"
+                )
         if (
-            self.suppression_ttl_seconds is not None
-            and self.suppression_ttl_seconds <= 0
+            isinstance(self.max_total_novel_eed_for_zero_class, bool)
+            or not isinstance(
+                self.max_total_novel_eed_for_zero_class,
+                (int, float),
+            )
+            or not math.isfinite(
+                float(self.max_total_novel_eed_for_zero_class)
+            )
+            or self.max_total_novel_eed_for_zero_class < 0
         ):
             raise ValueError(
-                "suppression_ttl_seconds must be positive when configured"
+                "max_total_novel_eed_for_zero_class must be finite and non-negative"
+            )
+        if self.suppression_ttl_seconds is not None and (
+            isinstance(self.suppression_ttl_seconds, bool)
+            or not isinstance(self.suppression_ttl_seconds, (int, float))
+            or not math.isfinite(float(self.suppression_ttl_seconds))
+            or self.suppression_ttl_seconds <= 0
+        ):
+            raise ValueError(
+                "suppression_ttl_seconds must be finite and positive when configured"
             )
 
 
