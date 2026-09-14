@@ -204,6 +204,16 @@ class SourceActivationCompilerTests(unittest.TestCase):
                 self.assertEqual(spec.adapter_kind, "structured")
                 self.assertEqual(spec.enumeration_kind, "structured_records")
                 self.assertEqual(spec.evidence_mode, "direct_year")
+                index_row = control.connection.execute(
+                    "SELECT source_format, timestamp_bearing, "
+                    "direct_evidence_authority FROM source_indexes_v1 "
+                    "WHERE source_key = ?",
+                    (candidate.source_key,),
+                ).fetchone()
+                self.assertIsNotNone(index_row)
+                self.assertEqual(index_row["source_format"], "FTP_SITELIST")
+                self.assertEqual(index_row["timestamp_bearing"], 1)
+                self.assertEqual(index_row["direct_evidence_authority"], 1)
             finally:
                 control.close()
 
