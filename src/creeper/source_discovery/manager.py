@@ -648,9 +648,22 @@ class SourceReservoirManager:
         ] = []
         if structural and len(selected) < capacity:
             selected.extend(structural)
-        remaining_after_structural = max(0, capacity - len(selected))
-        reserve_refill = int(bool(refill) and remaining_after_structural > 0)
-        optional_slots = max(0, remaining_after_structural - reserve_refill)
+
+        # Once repeated searches have produced no downstream credit, spend the
+        # scarce single call on a qualitatively different recovery task rather
+        # than another refill query with the same search shape.
+        if stagnating and len(selected) < capacity:
+            recovery = [
+                spec
+                for spec in optional
+                if spec[4] is SourceIntelligenceTask.RECOVER_STAGNATION
+            ][:1]
+            selected.extend(recovery)
+            optional = [spec for spec in optional if spec not in recovery]
+
+        remaining = max(0, capacity - len(selected))
+        reserve_refill = int(bool(refill) and remaining > 0)
+        optional_slots = max(0, remaining - reserve_refill)
         selected.extend(optional[:optional_slots])
         if refill and len(selected) < capacity:
             selected.extend(refill)
