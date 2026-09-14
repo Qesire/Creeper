@@ -135,6 +135,64 @@ class WarcCursorTests(unittest.TestCase):
     def tearDown(self):
         warc._archive_iterator = self.old
 
+    def test_metadata_models_reject_invalid_offsets_and_terminal_cursor(self):
+        with self.assertRaisesRegex(ValueError, "offset"):
+            warc.WarcTargetRecord(
+                record_type="response",
+                target_uri="http://example.test/",
+                source_year=1999,
+                offset=-1,
+                length=1,
+            )
+        with self.assertRaisesRegex(ValueError, "end_offset"):
+            warc.WarcMetadataLease(
+                records=(),
+                scanned_records=0,
+                start_offset=10,
+                end_offset=9,
+                next_offset=None,
+                exhausted=True,
+            )
+        with self.assertRaisesRegex(ValueError, "next_offset"):
+            warc.WarcMetadataLease(
+                records=(),
+                scanned_records=0,
+                start_offset=0,
+                end_offset=10,
+                next_offset=9,
+                exhausted=False,
+            )
+        with self.assertRaisesRegex(ValueError, "cannot retain next_offset"):
+            warc.WarcMetadataLease(
+                records=(),
+                scanned_records=0,
+                start_offset=0,
+                end_offset=10,
+                next_offset=10,
+                exhausted=True,
+            )
+
+    def test_reader_rejects_lossy_budget_and_year_configuration(self):
+        with self.assertRaisesRegex(ValueError, "max_scanned_records"):
+            warc.read_warc_metadata_lease(
+                self.stream,
+                max_scanned_records=1.5,
+                max_archive_bytes=1000,
+            )
+        with self.assertRaisesRegex(ValueError, "max_archive_bytes"):
+            warc.read_warc_metadata_lease(
+                self.stream,
+                max_scanned_records=1,
+                max_archive_bytes=True,
+            )
+        with self.assertRaisesRegex(ValueError, "target_year_from"):
+            warc.read_warc_metadata_lease(
+                self.stream,
+                max_scanned_records=1,
+                max_archive_bytes=1000,
+                target_year_from=1996.5,
+            )
+
     def test_two_leases_resume_without_replaying_from_zero(self):
         first = warc.read_warc_metadata_lease(
             self.stream,
