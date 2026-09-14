@@ -47,6 +47,23 @@ class GitHubCodeRootTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(page.terminal)
         self.assertEqual(page.retry_after, 5.0)
 
+    async def test_primary_rate_limit_403_is_retryable_not_auth_failure(self):
+        adapter = GitHubCodeAdapter(
+            transport=FakeTransport(
+                [
+                    Response(
+                        403,
+                        headers={"X-RateLimit-Remaining": "0"},
+                    )
+                ]
+            ),
+            token="t",
+        )
+        page = await adapter.search(self.query(), None)
+        self.assertFalse(page.terminal)
+        self.assertEqual(page.retry_after, 60.0)
+        self.assertEqual(adapter.state, "ENABLED")
+
     def test_schema_family_classification_does_not_create_artifact_class(self):
         cls = classify_code_hit("docs/schema.md", "crawl_date src dest anchor")
         self.assertEqual(cls, GitHubHitClass.SCHEMA_DOC)
