@@ -9,7 +9,7 @@ cpu_count = 2
 network_class = "public"
 capabilities = ["ONLINE_QUERY", "STREAMING_BULK", "WEB_DISCOVERY", "RDAP"]
 # Fail-closed egress/provider policy enforced by Local Authority.
-allowed_providers = ["internet_archive", "arquivo_pt"]
+allowed_providers = ["internet_archive", "arquivo_pt", "web_discovery"]
 secret_env = "CREEPER_WORKER_SECRET"
 poll_seconds = 1.0
 lease_seconds = 300.0
