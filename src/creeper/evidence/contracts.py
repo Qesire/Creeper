@@ -25,6 +25,7 @@ from creeper.sources.non_snapshot import (
     is_dmoz_content_locator,
     is_mailbox_url_locator,
     is_squid_access_locator,
+    is_target_mailbox_shard,
 )
 
 
@@ -192,6 +193,17 @@ SQUID_ACCESS_DIRECT_CONTRACT = SourceEvidenceContract(
     policy_version="http-proxy-access-contract-v1",
 )
 
+MAILBOX_MONTH_DIRECT_CONTRACT = SourceEvidenceContract(
+    contract_id="dated-mailbox-url-observation-v1",
+    authority=EvidenceAuthority.DIRECT_WEB_YEAR,
+    parser_kind="mbox_urls",
+    temporal_semantics="mailbox_shard_month",
+    evidence_type="dated_mailbox_url_observation",
+    hostname_field="message_url",
+    timestamp_field="mailbox_shard_month",
+    policy_version="dated-mailbox-contract-v1",
+)
+
 
 def parser_kind_from_locator(locator: str) -> str:
     path = urlsplit(locator).path.lower()
@@ -283,6 +295,8 @@ def resolve_source_evidence_contract(
         return CDXJ_DIRECT_CONTRACT
     if actual_parser == "squid_access":
         return SQUID_ACCESS_DIRECT_CONTRACT
+    if actual_parser == "mbox_urls" and is_target_mailbox_shard(locator):
+        return MAILBOX_MONTH_DIRECT_CONTRACT
     return discovery_only_contract(actual_parser)
 
 
