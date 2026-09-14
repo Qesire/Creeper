@@ -397,7 +397,7 @@ class SourceProducerCliTests(unittest.TestCase):
                     candidates[1].source_key,
                 )
 
-    def test_static_runtime_shrinks_lease_to_backlog_headroom(self):
+    def test_static_runtime_consumes_up_to_one_host_task_per_backlog_slot(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             task_root = root / "task"
@@ -477,7 +477,10 @@ class SourceProducerCliTests(unittest.TestCase):
             try:
                 reservoir = control.get_reservoir("webbase-static")
                 self.assertIsNotNone(reservoir)
-                self.assertIsNotNone(reservoir.cursor)
+                # Seven free Wayback slots now admit all four source records
+                # because each discovery hostname costs one host-range task.
+                # The finite source is therefore exhausted in this single lease.
+                self.assertIsNone(reservoir.cursor)
                 self.assertEqual(
                     sum(
                         control.evidence_task_state_counts().values()
@@ -616,7 +619,7 @@ class SourceProducerCliTests(unittest.TestCase):
             try:
                 key = EvidenceQueryKey(
                     "novel.example",
-                    TemporalScope(1997, 1997),
+                    TemporalScope(1996, 2001),
                     "wayback",
                     "cdx-v1",
                 )
