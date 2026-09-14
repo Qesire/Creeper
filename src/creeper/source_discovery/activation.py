@@ -72,6 +72,8 @@ def _adapter_kind(entrypoint: str) -> tuple[str, str]:
         ".jsonl", ".jsonl.gz",
         ".csv", ".csv.gz", ".tsv", ".tsv.gz",
         ".txt", ".txt.gz", ".list", ".list.gz", ".urls", ".urls.gz",
+        ".rdf", ".rdf.gz", ".rdf.u8", ".rdf.u8.gz",
+        ".zone", ".zone.gz",
     )
     if name.endswith(structured):
         return "structured", "structured_records"
