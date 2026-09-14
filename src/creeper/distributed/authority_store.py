@@ -70,6 +70,10 @@ class ProviderAccessDeniedError(RuntimeError):
     """Worker is not permitted to access the requested provider."""
 
 
+class WorkerEgressBudgetExceededError(RuntimeError):
+    """Worker exhausted its local daily provider egress budget."""
+
+
 def _json(value) -> str:
     return json.dumps(
         value,
@@ -122,6 +126,8 @@ class DistributedAuthorityStore:
                 capabilities_json TEXT NOT NULL,
                 producers_json TEXT NOT NULL DEFAULT '[]',
                 allowed_providers_json TEXT NOT NULL DEFAULT '[]',
+                daily_egress_budget_bytes INTEGER NOT NULL DEFAULT 0
+                    CHECK(daily_egress_budget_bytes >= 0),
                 protocol_version TEXT NOT NULL DEFAULT 'creeper-fabric-v1',
                 edition_version TEXT NOT NULL DEFAULT '0.1.0-dev',
                 last_heartbeat REAL NOT NULL,
@@ -245,6 +251,16 @@ class DistributedAuthorityStore:
             CREATE INDEX IF NOT EXISTS idx_distributed_request_nonces_seen
                 ON distributed_request_nonces(seen_at);
 
+            CREATE TABLE IF NOT EXISTS distributed_worker_egress_daily (
+                worker_id TEXT NOT NULL,
+                day_key INTEGER NOT NULL,
+                response_bytes INTEGER NOT NULL DEFAULT 0
+                    CHECK(response_bytes >= 0),
+                updated_at REAL NOT NULL,
+                PRIMARY KEY(worker_id, day_key),
+                FOREIGN KEY(worker_id) REFERENCES distributed_workers(worker_id)
+            ) WITHOUT ROWID;
+
             CREATE TABLE IF NOT EXISTS distributed_provider_regions (
                 provider TEXT NOT NULL,
                 region TEXT NOT NULL,
@@ -352,6 +368,15 @@ class DistributedAuthorityStore:
                 ADD COLUMN allowed_providers_json TEXT NOT NULL DEFAULT '[]'
                 """
             )
+        if "daily_egress_budget_bytes" not in worker_columns:
+            self.connection.execute(
+                """
+                ALTER TABLE distributed_workers
+                ADD COLUMN daily_egress_budget_bytes INTEGER
+                    NOT NULL DEFAULT 0
+                    CHECK(daily_egress_budget_bytes >= 0)
+                """
+            )
         if "protocol_version" not in worker_columns:
             self.connection.execute(
                 """
@@ -437,9 +462,9 @@ class DistributedAuthorityStore:
             INSERT INTO distributed_workers(
                 worker_id, runtime_class, region, architecture, memory_bytes,
                 cpu_count, network_class, capabilities_json, producers_json,
-                allowed_providers_json, protocol_version, edition_version,
-                last_heartbeat
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                allowed_providers_json, daily_egress_budget_bytes,
+                protocol_version, edition_version, last_heartbeat
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(worker_id) DO UPDATE SET
                 runtime_class = excluded.runtime_class,
                 region = excluded.region,
@@ -450,6 +475,8 @@ class DistributedAuthorityStore:
                 capabilities_json = excluded.capabilities_json,
                 producers_json = excluded.producers_json,
                 allowed_providers_json = excluded.allowed_providers_json,
+                daily_egress_budget_bytes =
+                    excluded.daily_egress_budget_bytes,
                 protocol_version = excluded.protocol_version,
                 edition_version = excluded.edition_version,
                 last_heartbeat = excluded.last_heartbeat
@@ -465,6 +492,7 @@ class DistributedAuthorityStore:
                 _json(sorted(worker.capabilities)),
                 _json(sorted(worker.producers)),
                 _json(sorted(worker.allowed_providers)),
+                int(worker.daily_egress_budget_bytes),
                 worker.protocol_version,
                 worker.edition_version,
                 now,
@@ -532,6 +560,53 @@ class DistributedAuthorityStore:
         if row is None or int(row["revoked"]):
             raise WorkerRejectedError(worker_id)
         return set(json.loads(str(row["allowed_providers_json"])))
+
+    @staticmethod
+    def _egress_day_key(now: float) -> int:
+        return int(float(now) // 86_400)
+
+    def worker_egress_snapshot(
+        self,
+        worker_id: str,
+        *,
+        now: float | None = None,
+    ) -> dict[str, int]:
+        current = float(self.clock()) if now is None else float(now)
+        worker = self.connection.execute(
+            """
+            SELECT daily_egress_budget_bytes, revoked
+            FROM distributed_workers
+            WHERE worker_id = ?
+            """,
+            (worker_id,),
+        ).fetchone()
+        if worker is None or int(worker["revoked"]):
+            raise WorkerRejectedError(worker_id)
+        day_key = self._egress_day_key(current)
+        row = self.connection.execute(
+            """
+            SELECT response_bytes
+            FROM distributed_worker_egress_daily
+            WHERE worker_id = ? AND day_key = ?
+            """,
+            (worker_id, day_key),
+        ).fetchone()
+        used = 0 if row is None else int(row["response_bytes"])
+        return {
+            "day_key": day_key,
+            "budget_bytes": int(worker["daily_egress_budget_bytes"]),
+            "used_bytes": used,
+        }
+
+    def _worker_egress_available(
+        self,
+        worker_id: str,
+        *,
+        now: float,
+    ) -> bool:
+        snapshot = self.worker_egress_snapshot(worker_id, now=now)
+        budget = int(snapshot["budget_bytes"])
+        return budget == 0 or int(snapshot["used_bytes"]) < budget
 
     def _worker_runtime_class(self, worker_id: str) -> str:
         row = self.connection.execute(
@@ -1024,6 +1099,10 @@ class DistributedAuthorityStore:
         allowed_providers = self._worker_allowed_providers(worker_id)
         worker_region = self._worker_region(worker_id)
         runtime_class = self._worker_runtime_class(worker_id)
+        egress_available = self._worker_egress_available(
+            worker_id,
+            now=now,
+        )
         self.connection.execute("BEGIN IMMEDIATE")
         try:
             chosen = None
@@ -1058,6 +1137,13 @@ class DistributedAuthorityStore:
                         row,
                         runtime_class=runtime_class,
                     ):
+                        continue
+                    coverage = json.loads(str(row["coverage_json"]))
+                    has_provider = bool(
+                        coverage.get("provider")
+                        or coverage.get("providers")
+                    )
+                    if has_provider and not egress_available:
                         continue
                     if not self._work_region_eligible(
                         row,
@@ -2103,6 +2189,10 @@ class DistributedAuthorityStore:
                 raise ProviderAccessDeniedError(
                     f"worker={worker_id} provider={provider}"
                 )
+            if not self._worker_egress_available(worker_id, now=now):
+                raise WorkerEgressBudgetExceededError(
+                    f"worker={worker_id} daily egress budget exhausted"
+                )
             budget = self.connection.execute(
                 """
                 SELECT * FROM distributed_provider_budgets
@@ -2223,9 +2313,12 @@ class DistributedAuthorityStore:
         worker_id: str,
         status_code: int | None = None,
         cooldown_seconds: float = 0.0,
+        response_bytes: int = 0,
     ) -> None:
-        if cooldown_seconds < 0:
-            raise ValueError("cooldown_seconds must be non-negative")
+        if cooldown_seconds < 0 or response_bytes < 0:
+            raise ValueError(
+                "cooldown_seconds and response_bytes must be non-negative"
+            )
         now = float(self.clock())
         self.connection.execute("BEGIN IMMEDIATE")
         try:
@@ -2251,6 +2344,26 @@ class DistributedAuthorityStore:
                 """,
                 (status_code, permit_id),
             )
+            if response_bytes:
+                day_key = self._egress_day_key(now)
+                self.connection.execute(
+                    """
+                    INSERT INTO distributed_worker_egress_daily(
+                        worker_id, day_key, response_bytes, updated_at
+                    ) VALUES (?, ?, ?, ?)
+                    ON CONFLICT(worker_id, day_key) DO UPDATE SET
+                        response_bytes =
+                            distributed_worker_egress_daily.response_bytes
+                            + excluded.response_bytes,
+                        updated_at = excluded.updated_at
+                    """,
+                    (
+                        worker_id,
+                        day_key,
+                        int(response_bytes),
+                        now,
+                    ),
+                )
             if status_code in {429, 503}:
                 delay = float(cooldown_seconds)
                 budget = self.connection.execute(
