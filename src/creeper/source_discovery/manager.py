@@ -338,6 +338,103 @@ class SourceReservoirManager:
 
         return max(rewards, key=ucb).strategy
 
+    def _recent_search_supply(self) -> tuple[int, int, int]:
+        """Return (zero-new-source streak, new sources, completed episodes).
+
+        FINAL/scout reward is intentionally too delayed to throttle expensive
+        agent calls. This immediate signal counts a source only in the episode
+        that first proposed it, so repeated famous archive URLs are treated as
+        zero supply rather than apparent progress.
+        """
+        rows = self.registry.connection.execute(
+            """
+            SELECT e.episode_id,
+                   (
+                       SELECT COUNT(*)
+                       FROM source_proposals p
+                       WHERE p.episode_id = e.episode_id
+                         AND NOT EXISTS (
+                             SELECT 1
+                             FROM source_proposals prior
+                             WHERE prior.source_key = p.source_key
+                               AND (
+                                   prior.created_at < p.created_at
+                                   OR (
+                                       prior.created_at = p.created_at
+                                       AND prior.proposal_id < p.proposal_id
+                                   )
+                               )
+                         )
+                   ) AS new_sources
+            FROM source_search_episodes e
+            WHERE e.finished_at IS NOT NULL
+            ORDER BY e.finished_at DESC, e.episode_id DESC
+            LIMIT ?
+            """,
+            (self.stagnation_window,),
+        ).fetchall()
+        zero_streak = 0
+        new_sources = 0
+        for row in rows:
+            count = int(row["new_sources"] or 0)
+            new_sources += count
+            if zero_streak == len(rows[:zero_streak + 1]) - 1 and count == 0:
+                zero_streak += 1
+        # The expression above deliberately stops streak growth after the first
+        # productive episode; normalize it defensively for readability.
+        zero_streak = 0
+        for row in rows:
+            if int(row["new_sources"] or 0) > 0:
+                break
+            zero_streak += 1
+        return zero_streak, new_sources, len(rows)
+
+    def _adaptive_search_cooldown(self) -> float:
+        zero_streak, _new_sources, episodes = self._recent_search_supply()
+        if episodes < 1 or zero_streak < 1:
+            return self.search_cooldown_seconds
+        multiplier = min(8, 2 ** min(zero_streak, 3))
+        return self.search_cooldown_seconds * float(multiplier)
+
+    def _global_search_available(self) -> bool:
+        """Apply behavior-driven pacing across strategies, not just per arm."""
+        cooldown = self._adaptive_search_cooldown()
+        if cooldown <= 0:
+            return True
+        row = self.registry.connection.execute(
+            """
+            SELECT MAX(finished_at) AS finished_at
+            FROM source_search_episodes
+            WHERE finished_at IS NOT NULL
+            """
+        ).fetchone()
+        if row is None or row["finished_at"] is None:
+            return True
+        return (
+            float(self.registry.clock()) - float(row["finished_at"])
+            >= cooldown
+        )
+
+    def _adaptive_search_budget(self, *, structural_hold: bool) -> int:
+        """Bound simultaneous agent calls from immediate observed search supply."""
+        if not self._global_search_available():
+            return 0
+        zero_streak, new_sources, episodes = self._recent_search_supply()
+        configured = self.targets.max_search_directives
+        if configured < 1:
+            return 0
+        if structural_hold:
+            # One structure-specific call is usually higher information density
+            # than launching several broad searches against the same blockage.
+            return 1
+        if episodes < 1:
+            return min(configured, 2)
+        if zero_streak:
+            return 1
+        if new_sources > 0:
+            return min(configured, 2)
+        return 1
+
     def _is_stagnating(self) -> bool:
         rows = self.registry.connection.execute(
             """
@@ -535,10 +632,13 @@ class SourceReservoirManager:
             )
         )
 
+        adaptive_budget = self._adaptive_search_budget(
+            structural_hold=bool(structural_holds)
+        )
         capacity = (
-            min(gap, self.targets.max_search_directives)
+            min(gap, adaptive_budget)
             if ordinary_refill
-            else min(len(specs), self.targets.max_search_directives)
+            else min(len(specs), adaptive_budget)
         )
         selected: list[
             tuple[
