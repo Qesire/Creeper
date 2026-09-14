@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import fcntl
+import math
 import os
 import time
 from collections.abc import Awaitable, Callable
@@ -119,8 +120,13 @@ class SearchBatch:
         )
         if not self.backend.strip() or not self.query.strip() or not self.actor.strip():
             raise ValueError("search batch attribution fields are required")
-        if self.search_cost_seconds is not None and self.search_cost_seconds < 0:
-            raise ValueError("search_cost_seconds must be non-negative")
+        if self.search_cost_seconds is not None and (
+            not math.isfinite(self.search_cost_seconds)
+            or self.search_cost_seconds < 0
+        ):
+            raise ValueError(
+                "search_cost_seconds must be finite and non-negative"
+            )
         if self.llm_episode_id is not None and not self.llm_episode_id.strip():
             raise ValueError("llm_episode_id must be non-empty when provided")
         if self.llm_episode_id is not None and not self.llm_task_type:
@@ -143,6 +149,19 @@ class SearchBatch:
             if hypothesis_id in hypothesis_ids:
                 raise ValueError(
                     f"duplicate search batch hypothesis_id: {hypothesis_id}"
+                )
+            action = hypothesis.get("action")
+            if not isinstance(action, str) or not action.strip():
+                raise ValueError("search batch hypothesis action is required")
+            confidence = hypothesis.get("confidence", 0.0)
+            if (
+                isinstance(confidence, bool)
+                or not isinstance(confidence, (int, float))
+                or not math.isfinite(float(confidence))
+                or not 0.0 <= float(confidence) <= 1.0
+            ):
+                raise ValueError(
+                    "search batch hypothesis confidence must be within [0, 1]"
                 )
             hypothesis_ids.add(hypothesis_id)
 
