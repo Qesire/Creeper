@@ -20,6 +20,7 @@ from creeper.source_discovery.models import (
     SourceLevel,
     SourceState,
     is_common_crawl_provenance,
+    is_direct_evidence_entrypoint,
 )
 from creeper.source_discovery.region_compilation import CompiledScoutPlan
 
@@ -318,6 +319,7 @@ class ExplorationExecutor:
                 plan.region_key,
             ):
                 continue
+            direct_prior = 1.0 if is_direct_evidence_entrypoint(url) else 0.0
             candidate = SourceCandidate(
                 canonical_entrypoint=url,
                 source_family=plan.source_family,
@@ -326,6 +328,8 @@ class ExplorationExecutor:
                 discovery_strategy=(
                     f"DETERMINISTIC_REGION:{plan.region_id}:{plan.region_key}"
                 ),
+                direct_evidence_prior=direct_prior,
+                temporal_semantics_prior=direct_prior,
                 confidence=1.0,
                 state=SourceState.DISCOVERED,
             )
