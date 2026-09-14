@@ -77,7 +77,7 @@ class SearchAdmissionPolicy:
             return "Common Crawl corpus is excluded from the active candidate pool"
         volume = candidate.expected_volume
         if volume is None:
-            return "missing expected_volume high-reservoir estimate"
+            return "missing role-aware expected_volume estimate"
         direct_evidence = is_direct_evidence_entrypoint(
             candidate.canonical_entrypoint
         )
