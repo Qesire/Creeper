@@ -831,6 +831,11 @@ class DistributedAuthorityStore:
             ).fetchone()
             if row is None or str(row["worker_id"]) != worker_id:
                 raise WorkerRejectedError(worker_id)
+            if not int(row["active"]):
+                # Provider reports are idempotent. In particular, replaying a
+                # previously accepted 429/503 must not extend global cooldown.
+                self.connection.commit()
+                return
             self.connection.execute(
                 """
                 UPDATE distributed_provider_permits
