@@ -34,7 +34,7 @@ class AsyncRDAPClientTests(unittest.IsolatedAsyncioTestCase):
                 max_keepalive_connections=2,
             )
 
-    def test_rejects_client_and_transport_together(self):
+    async def test_rejects_client_and_transport_together(self):
         client = httpx.AsyncClient()
         try:
             with self.assertRaisesRegex(ValueError, "either client or transport"):
@@ -43,8 +43,7 @@ class AsyncRDAPClientTests(unittest.IsolatedAsyncioTestCase):
                     transport=httpx.MockTransport(lambda request: httpx.Response(200)),
                 )
         finally:
-            import asyncio
-            asyncio.run(client.aclose())
+            await client.aclose()
 
     async def test_registration_event_in_target_period_is_positive_evidence(self):
         async def handler(request):
