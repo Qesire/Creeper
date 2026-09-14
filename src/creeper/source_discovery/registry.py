@@ -1348,8 +1348,15 @@ class SourceDiscoveryRegistry:
             raise ValueError("source-run validation counters must be non-negative")
         if int(evidence_tasks_terminal) > int(evidence_tasks_created):
             raise ValueError("terminal evidence tasks cannot exceed created tasks")
-        if provider_elapsed_seconds < 0 or final_accepted_eed < 0:
-            raise ValueError("source-run final reward and cost must be non-negative")
+        if (
+            not math.isfinite(float(provider_elapsed_seconds))
+            or not math.isfinite(float(final_accepted_eed))
+            or provider_elapsed_seconds < 0
+            or final_accepted_eed < 0
+        ):
+            raise ValueError(
+                "source-run final reward and cost must be finite and non-negative"
+            )
         now = float(self.clock())
         self.connection.execute("BEGIN IMMEDIATE")
         try:
@@ -1731,8 +1738,13 @@ class SourceDiscoveryRegistry:
         current authority exists it is attached to the projection so stale
         values cannot train scheduling after an authority cutover.
         """
-        if final_accepted_eed < 0 or cost_seconds < 0:
-            raise ValueError("final reward and cost must be non-negative")
+        if (
+            not math.isfinite(float(final_accepted_eed))
+            or not math.isfinite(float(cost_seconds))
+            or final_accepted_eed < 0
+            or cost_seconds < 0
+        ):
+            raise ValueError("final reward and cost must be finite and non-negative")
         if self.get_candidate(source_key) is None:
             raise KeyError(f"unknown source: {source_key}")
         if (baseline_signature is None) != (model_signature is None):
@@ -2164,8 +2176,12 @@ class SourceDiscoveryRegistry:
     ) -> SourceCandidate:
         if not reason.strip():
             raise ValueError("activation failure reason is required")
-        if not permanent and retry_seconds <= 0:
-            raise ValueError("retry_seconds must be positive for transient failures")
+        if not permanent and (
+            not math.isfinite(float(retry_seconds)) or retry_seconds <= 0
+        ):
+            raise ValueError(
+                "retry_seconds must be finite and positive for transient failures"
+            )
         target = SourceState.REJECTED if permanent else SourceState.HOLD
         now = float(self.clock())
         retry_at = None if permanent else now + float(retry_seconds)
@@ -2705,8 +2721,10 @@ class SourceDiscoveryRegistry:
         scope = SuppressionScope(scope)
         if not scope_key.strip() or not reason.strip():
             raise ValueError("suppression key and reason are required")
-        if ttl_seconds is not None and ttl_seconds < 0:
-            raise ValueError("ttl_seconds must be non-negative")
+        if ttl_seconds is not None and (
+            not math.isfinite(float(ttl_seconds)) or ttl_seconds < 0
+        ):
+            raise ValueError("ttl_seconds must be finite and non-negative")
         now = float(self.clock())
         expires_at = None if ttl_seconds is None else now + float(ttl_seconds)
         with self.connection:
