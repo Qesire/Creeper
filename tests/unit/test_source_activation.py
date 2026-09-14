@@ -141,6 +141,25 @@ class SourceActivationCompilerTests(unittest.TestCase):
             finally:
                 control.close()
 
+    def test_dmoz_content_dump_activates_as_discovery_only_structured_source(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            control = ControlStore(Path(tmp) / "control.sqlite3")
+            try:
+                candidate = _candidate(
+                    "https://mirror.example/dmoz/2001-01-22/content.rdf.u8.gz"
+                )
+                registry = self._registry(control, candidate)
+                spec = SourceActivationCompiler(
+                    control,
+                    registry=registry,
+                ).compile(candidate)
+
+                self.assertEqual(spec.adapter_kind, "structured")
+                self.assertEqual(spec.enumeration_kind, "structured_records")
+                self.assertEqual(spec.evidence_mode, "discovery_only")
+            finally:
+                control.close()
+
     def test_compressed_cdxj_activates_with_direct_year_mode(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             control = ControlStore(Path(tmp) / "control.sqlite3")

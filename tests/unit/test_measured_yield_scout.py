@@ -183,6 +183,54 @@ class MeasuredYieldScoutTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(measurement.novel_host_year_pairs, 3)
         self.assertEqual(measurement.direct_host_years, 0)
 
+    async def test_dmoz_scout_uses_exact_dump_year_as_ranking_hint(self) -> None:
+        raw = (
+            b'<RDF xmlns:r="http://www.w3.org/1999/02/22-rdf-syntax-ns#">\n'
+            b'<link r:resource="http://duplicate.example/ignored"/>\n'
+            b'<ExternalPage about="http://known.com/from-directory">\n'
+            b'<ExternalPage about="https://novel.org/from-directory">\n'
+        )
+        body = gzip.compress(raw)
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            return streamed_response(
+                206,
+                body,
+                headers={"content-type": "application/gzip"},
+            )
+
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler)
+        ) as client:
+            scout = MeasuredYieldScoutExecutor(
+                client,
+                self.baseline,
+                {"com": Decimal("1"), "org": Decimal("0.5")},
+                policy=self.policy(
+                    min_unique_hosts=2,
+                    min_novel_hosts=1,
+                    min_novel_fraction=0.1,
+                    min_novel_eed=0.5,
+                ),
+            )
+            result = await scout(
+                self.candidate(
+                    "https://mirror.example/dmoz/2001-01-22/content.rdf.u8.gz",
+                    exact_year=2001,
+                )
+            )
+
+        self.assertEqual(result.disposition, ScoutDisposition.WARM)
+        self.assertIsNotNone(result.measurement)
+        measurement = result.measurement
+        assert measurement is not None
+        self.assertEqual(measurement.sampled_records, 2)
+        self.assertEqual(measurement.unique_hosts, 2)
+        self.assertEqual(measurement.measurement_mode, MeasurementMode.HOST_YEAR)
+        self.assertEqual(measurement.observed_host_year_pairs, 2)
+        self.assertEqual(measurement.novel_host_year_pairs, 2)
+        self.assertEqual(measurement.direct_host_years, 0)
+
     async def test_squid_scout_uses_access_year_and_drops_off_window_rows(self) -> None:
         body = (
             b"915148800.000 1 192.0.2.1 TCP_MISS/200 10 GET "

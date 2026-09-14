@@ -9,6 +9,8 @@ from creeper.evidence.contracts import (
     SourceEvidenceContract,
     bind_contract_to_adapter_id,
     contract_from_adapter_id,
+    parser_kind_from_locator,
+    resolve_source_evidence_contract,
 )
 from creeper.evidence.planner import EvidencePlanner
 from creeper.scheduler.leases import WorkLease
@@ -178,6 +180,15 @@ class DirectEvidenceContractTests(unittest.TestCase):
 
         self.assertEqual(observation.direct_year_mask, 0)
         self.assertEqual(observation.year_hint_mask, 1 << (1998 - 1996))
+
+    def test_dmoz_content_dump_is_discovery_only_by_default(self) -> None:
+        locator = "https://mirror.example/2001/content.rdf.u8.gz"
+        self.assertEqual(parser_kind_from_locator(locator), "dmoz_rdf_urls")
+        contract = resolve_source_evidence_contract(locator)
+        self.assertEqual(contract.parser_kind, "dmoz_rdf_urls")
+        self.assertEqual(contract.authority, EvidenceAuthority.DISCOVERY_ONLY)
+        self.assertFalse(contract.grants_direct_web_year)
+        self.assertEqual(contract.evidence_mode, "discovery_only")
 
     def test_dns_observation_contract_never_grants_annual_web_capsule(self) -> None:
         contract = SourceEvidenceContract(

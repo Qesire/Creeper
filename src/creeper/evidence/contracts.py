@@ -22,6 +22,7 @@ from typing import Mapping
 from urllib.parse import urlsplit
 
 from creeper.sources.non_snapshot import (
+    is_dmoz_content_locator,
     is_mailbox_url_locator,
     is_squid_access_locator,
 )
@@ -38,6 +39,7 @@ _PARSER_KINDS = frozenset(
         "lines",
         "mbox_urls",
         "squid_access",
+        "dmoz_rdf_urls",
         "warc_arc",
     }
 )
@@ -186,6 +188,8 @@ def parser_kind_from_locator(locator: str) -> str:
         return "mbox_urls"
     if is_squid_access_locator(locator):
         return "squid_access"
+    if is_dmoz_content_locator(locator):
+        return "dmoz_rdf_urls"
     if path.endswith((".warc.gz", ".arc.gz", ".warc", ".arc")):
         return "warc_arc"
     if path.endswith((".cdxj", ".cdxj.gz")):
