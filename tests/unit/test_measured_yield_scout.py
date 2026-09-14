@@ -278,9 +278,9 @@ class MeasuredYieldScoutTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_ircache_sanitized_access_name_uses_squid_parser(self) -> None:
         raw = (
-            b"952214400.000 1 192.0.2.1 TCP_MISS/200 10 GET "
+            b"952819200.000 1 192.0.2.1 TCP_MISS/200 10 GET "
             b"http://known.com/a - DIRECT/x text/html\n"
-            b"952214401.000 1 192.0.2.2 TCP_MISS/200 10 GET "
+            b"952819201.000 1 192.0.2.2 TCP_MISS/200 10 GET "
             b"https://novel.org/b - DIRECT/x text/html\n"
         )
         body = gzip.compress(raw)
