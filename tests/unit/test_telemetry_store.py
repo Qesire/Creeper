@@ -88,6 +88,22 @@ class RuntimeTelemetryStoreTests(unittest.TestCase):
                 second.close()
                 first.close()
 
+    def test_rejects_nonfinite_gauges_and_timestamps(self):
+        with self.assertRaisesRegex(ValueError, "finite numbers"):
+            self.store.set_gauges({"bad": float("nan")})
+        with self.assertRaisesRegex(ValueError, "sampled_at"):
+            self.store.append_resource_sample(
+                rss_bytes=1,
+                disk_free_bytes=1,
+                governor_state="normal",
+                sampled_at=float("inf"),
+            )
+        with self.assertRaisesRegex(ValueError, "start_time"):
+            self.store.resource_summary(
+                start_time=float("nan"),
+                end_time=1.0,
+            )
+
     def test_rejects_negative_counter_delta(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = RuntimeTelemetryStore(Path(tmp) / "telemetry.sqlite3")
