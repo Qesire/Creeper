@@ -294,6 +294,70 @@ class L9ResearchRuntimeClosureTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 control.close()
 
+    async def test_last_budget_request_failure_does_not_requeue_frontier(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            control = ControlStore(Path(tmp) / "control.sqlite3")
+            try:
+                discovery = SourceDiscoveryRegistry(control)
+                research = ResearchRegistry(control)
+                bridge = ResearchIntegrationBridge(research, discovery)
+                root = RootSurface(
+                    root_id="datacite",
+                    kind=RootKind.STRUCTURED_REPOSITORY,
+                    canonical_locator="https://api.datacite.org/dois",
+                )
+                research.upsert_root(root)
+                query = AdapterRootQuery(
+                    "query:last-budget",
+                    root.root_id,
+                    "historical crawl",
+                    2,
+                    5.0,
+                )
+                program = QueryProgram(
+                    root_id=root.root_id,
+                    strategy="last-budget-failure",
+                    queries=(query,),
+                    hard_max_requests=1,
+                    stop_conditions=("request_budget",),
+                    program_id="program:last-budget",
+                )
+                research.register_program(program)
+                calls = 0
+
+                def handler(request: httpx.Request) -> httpx.Response:
+                    nonlocal calls
+                    calls += 1
+                    raise httpx.ConnectError("synthetic provider failure", request=request)
+
+                async with httpx.AsyncClient(
+                    transport=httpx.MockTransport(handler),
+                    trust_env=False,
+                ) as client:
+                    planner, executor = _root_query_runtime_adapters(
+                        research,
+                        bridge,
+                        client,
+                        parallelism=1,
+                    )
+                    tasks = planner()
+                    self.assertEqual(len(tasks), 1)
+                    with self.assertRaises(httpx.ConnectError):
+                        await executor(tasks[0])
+
+                    self.assertEqual(calls, 1)
+                    self.assertEqual(
+                        research.get_query_row(query.query_id)["state"],
+                        QueryState.EXHAUSTED.value,
+                    )
+                    self.assertEqual(
+                        research.get_frontier(tasks[0].task_id).state,
+                        FrontierState.DONE,
+                    )
+                    self.assertEqual(planner(), ())
+            finally:
+                control.close()
+
     async def test_metadata_resolver_promotes_only_concrete_artifact_leads(self):
         with tempfile.TemporaryDirectory() as tmp:
             control = ControlStore(Path(tmp) / "control.sqlite3")
