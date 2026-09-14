@@ -5,10 +5,12 @@ import unittest
 from creeper.sources.non_snapshot import (
     extract_http_urls,
     is_dmoz_content_locator,
+    is_ftp_sitelist_zip_locator,
     is_mailbox_url_locator,
     is_squid_access_locator,
     mailbox_year_from_locator,
     parse_dmoz_external_page_line,
+    parse_ftp_sitelist_records,
     parse_squid_access_line,
 )
 
@@ -57,6 +59,39 @@ class NonSnapshotParserTests(unittest.TestCase):
                 "https://example.test/archive/1999-04.mbox.gz"
             ),
             1999,
+        )
+
+    def test_ftp_sitelist_zip_locator_is_exact(self) -> None:
+        self.assertTrue(
+            is_ftp_sitelist_zip_locator(
+                "https://mirror.example/simtel/msdos/info/ftp-list.zip"
+            )
+        )
+        self.assertFalse(
+            is_ftp_sitelist_zip_locator(
+                "https://mirror.example/data/arbitrary-list.zip"
+            )
+        )
+
+    def test_ftp_sitelist_parser_binds_site_to_record_date(self) -> None:
+        text = (
+            "Site   : ftp.target.example\n"
+            "Country: USA\n"
+            "Date   : 05-May-97\n"
+            "URL    : ftp://ftp.target.example/\n"
+            "\n"
+            "Site   : ftp.old.example\n"
+            "Date   : 10-Sep-94\n"
+        )
+
+        records = parse_ftp_sitelist_records(text)
+
+        self.assertEqual(
+            records,
+            (
+                ("ftp.target.example", "05-May-97", 1997, 1),
+                ("ftp.old.example", "10-Sep-94", 1994, 6),
+            ),
         )
 
     def test_dmoz_content_locator_is_specific_to_content_dumps(self) -> None:
