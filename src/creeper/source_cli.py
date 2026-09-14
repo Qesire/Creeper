@@ -630,17 +630,28 @@ class ActivatedSourceRuntime:
                 )
                 self.adapter_cache[reservoir.adapter_id] = adapter
             adapters[reservoir.adapter_id] = adapter
-            if reservoir.evidence_mode == "direct_year":
+            # Wayback is an undated-hostname fallback only. Direct-year
+            # reservoirs never need it; WARC/ARC production observations are
+            # guaranteed to carry WARC-Date-derived source_year, and a
+            # singleton structured temporal scope is injected as source_year
+            # by StructuredProductionAdapter. These known-dated sources must
+            # not be blocked by or reserve the Wayback backlog.
+            known_dated_discovery = (
+                reservoir.evidence_mode != "direct_year"
+                and (
+                    spec.adapter_kind == "warc_arc"
+                    or spec.temporal_scope[0] == spec.temporal_scope[1]
+                )
+            )
+            if reservoir.evidence_mode == "direct_year" or known_dated_discovery:
                 lease_records = self.max_records
                 expected_tasks = 0
                 reservation_tasks = 0
             else:
-                # Supported production adapters emit at most one HostObservation
-                # per source record, but one observation can expand across six
-                # competition-year backlog slots after bounded-range fanout,
-                # plus one bounded domain-amplification task.
-                # Size the lease from the hard capacity bound, not the expected
-                # request cost, so admission remains fail-closed.
+                # Only potentially-undated sources reserve fallback capacity.
+                # One undated observation can occupy one range parent plus its
+                # worst-case exact fanout and one bounded domain-amplification
+                # task, so admission remains fail-closed.
                 capacity_per_record = (
                     EvidencePlanner.MAX_BACKLOG_CAPACITY_PER_OBSERVATION
                 )
@@ -677,11 +688,7 @@ class ActivatedSourceRuntime:
                         # expected_tasks scale with lease size, this makes the
                         # scheduler prefer expected Novel EED per Wayback task.
                         # Direct-year sources bypass Wayback and pay zero here.
-                        evidence_network=(
-                            0
-                            if reservoir.evidence_mode == "direct_year"
-                            else float(expected_tasks)
-                        ),
+                        evidence_network=float(expected_tasks),
                         cpu=1,
                         ssd=1,
                     ),
