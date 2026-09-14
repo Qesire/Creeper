@@ -255,13 +255,23 @@ function acceptedRow(rows, hostname, year) {
 }
 
 async function providerPermit(env, lease, provider) {
-  const value = await signedPost(env, "/v1/providers/permit", {
-    provider,
-    task_id: lease.task_id,
-    generation: lease.generation,
-    ttl_seconds: 30,
-  });
-  return value.permit ?? null;
+  const requestId = crypto.randomUUID();
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      const value = await signedPost(env, "/v1/providers/permit", {
+        provider,
+        task_id: lease.task_id,
+        generation: lease.generation,
+        permit_request_id: requestId,
+        ttl_seconds: 30,
+      });
+      return value.permit ?? null;
+    } catch (error) {
+      if (error instanceof FabricHttpError || attempt === 2) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 100 * (attempt + 1)));
+    }
+  }
+  return null;
 }
 
 async function reportPermit(env, permit, statusCode, responseBytes, headers) {
