@@ -87,8 +87,10 @@ class DurableEvidenceQueue:
         providers: Iterable[str],
         lease_seconds: float,
     ) -> list[EvidenceTask]:
-        if not owner:
+        if not isinstance(owner, str) or not owner.strip():
             raise ValueError("owner is required")
+        if isinstance(limit, bool) or not isinstance(limit, int):
+            raise ValueError("limit must be an integer")
         if limit < 1:
             return []
         if not math.isfinite(float(lease_seconds)) or lease_seconds <= 0:
@@ -97,7 +99,15 @@ class DurableEvidenceQueue:
         if not provider_list:
             return []
 
-        now = float(self.control_store.clock())
+        now_raw = self.control_store.clock()
+        if (
+            isinstance(now_raw, bool)
+            or not isinstance(now_raw, (int, float))
+            or not math.isfinite(float(now_raw))
+            or now_raw < 0
+        ):
+            raise ValueError("queue clock must be finite and non-negative")
+        now = float(now_raw)
         lease_until = now + float(lease_seconds)
         placeholders = ",".join("?" for _ in provider_list)
         params: list[object] = [
@@ -232,14 +242,22 @@ class DurableEvidenceQueue:
         lease_seconds: float,
     ) -> int:
         """Extend visibility for a bounded set of tasks still owned by caller."""
-        if not owner:
+        if not isinstance(owner, str) or not owner.strip():
             raise ValueError("owner is required")
         if not math.isfinite(float(lease_seconds)) or lease_seconds <= 0:
             raise ValueError("lease_seconds must be finite and positive")
         key_list = list(dict.fromkeys(keys))
         if not key_list:
             return 0
-        lease_until = float(self.control_store.clock()) + float(lease_seconds)
+        now_raw = self.control_store.clock()
+        if (
+            isinstance(now_raw, bool)
+            or not isinstance(now_raw, (int, float))
+            or not math.isfinite(float(now_raw))
+            or now_raw < 0
+        ):
+            raise ValueError("queue clock must be finite and non-negative")
+        lease_until = float(now_raw) + float(lease_seconds)
         changed = 0
         self.connection.execute("BEGIN IMMEDIATE")
         try:
