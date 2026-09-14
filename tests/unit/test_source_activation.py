@@ -141,6 +141,34 @@ class SourceActivationCompilerTests(unittest.TestCase):
             finally:
                 control.close()
 
+    def test_ircache_trace_activates_with_direct_year_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            control = ControlStore(Path(tmp) / "control.sqlite3")
+            try:
+                candidate = _candidate(
+                    "https://mirror.example/Traces/"
+                    "uc.sanitized-access.20000312.gz"
+                )
+                registry = self._registry(control, candidate)
+                spec = SourceActivationCompiler(
+                    control,
+                    registry=registry,
+                ).compile(candidate)
+
+                self.assertEqual(spec.adapter_kind, "structured")
+                self.assertEqual(spec.enumeration_kind, "structured_records")
+                self.assertEqual(spec.evidence_mode, "direct_year")
+                reservoir = control.get_reservoir(spec.reservoir_id)
+                self.assertIsNotNone(reservoir)
+                assert reservoir is not None
+                contract = contract_from_adapter_id(reservoir.adapter_id)
+                self.assertIsNotNone(contract)
+                assert contract is not None
+                self.assertEqual(contract.parser_kind, "squid_access")
+                self.assertTrue(contract.grants_direct_web_year)
+            finally:
+                control.close()
+
     def test_dmoz_content_dump_activates_as_discovery_only_structured_source(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             control = ControlStore(Path(tmp) / "control.sqlite3")

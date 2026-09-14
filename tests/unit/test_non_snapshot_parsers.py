@@ -127,6 +127,21 @@ class NonSnapshotParserTests(unittest.TestCase):
                 "https://trace.example/data/old.squid.log.gz"
             )
         )
+        self.assertTrue(
+            is_squid_access_locator(
+                "https://mirror.example/Traces/uc.sanitized-access.20000312.gz"
+            )
+        )
+        self.assertTrue(
+            is_squid_access_locator(
+                "https://mirror.example/Traces/sanitized-access.20010827"
+            )
+        )
+        self.assertFalse(
+            is_squid_access_locator(
+                "https://mirror.example/Traces/uc.sanitized-access.20070109.gz"
+            )
+        )
         self.assertFalse(
             is_squid_access_locator("https://trace.example/data/server.log")
         )

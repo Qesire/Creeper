@@ -181,6 +181,17 @@ CDXJ_DIRECT_CONTRACT = SourceEvidenceContract(
     policy_version="archive-capture-contract-v1",
 )
 
+SQUID_ACCESS_DIRECT_CONTRACT = SourceEvidenceContract(
+    contract_id="http-proxy-access-observation-v1",
+    authority=EvidenceAuthority.DIRECT_WEB_YEAR,
+    parser_kind="squid_access",
+    temporal_semantics="http_request_access_timestamp",
+    evidence_type="dated_http_request_observation",
+    hostname_field="request_url",
+    timestamp_field="unix_timestamp",
+    policy_version="http-proxy-access-contract-v1",
+)
+
 
 def parser_kind_from_locator(locator: str) -> str:
     path = urlsplit(locator).path.lower()
@@ -270,6 +281,8 @@ def resolve_source_evidence_contract(
         return CDX_DIRECT_CONTRACT
     if actual_parser == "cdxj":
         return CDXJ_DIRECT_CONTRACT
+    if actual_parser == "squid_access":
+        return SQUID_ACCESS_DIRECT_CONTRACT
     return discovery_only_contract(actual_parser)
 
 

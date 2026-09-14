@@ -68,7 +68,7 @@ class EvidencePlannerTests(unittest.TestCase):
             [("new.example", 1996, 2001)],
         )
 
-    def test_isc_reference_can_never_become_direct_evidence(self):
+    def test_isc_reference_with_authorized_direct_mask_stays_direct(self):
         from creeper.evidence.planner import EvidencePlanner
 
         plan = EvidencePlanner().plan(
@@ -76,6 +76,29 @@ class EvidencePlannerTests(unittest.TestCase):
                 scope=CandidateSourceScope.ISC_REFERENCE,
                 source_id="network_wizards:1997",
                 direct_year_mask=YEAR_BITS[1997],
+                source_time="19970701000000",
+                evidence_type="dated_dns_host_observation",
+                temporal_semantics="dns_observation_timestamp",
+                evidence_contract_id="isc-hostcount-v1",
+                evidence_contract_version="v1",
+            ),
+            official_mask=0,
+            local_mask=0,
+            provider="wayback",
+            policy_version="v1",
+            allow_direct=True,
+        )
+
+        self.assertEqual([item.year for item in plan.direct_capsules], [1997])
+        self.assertEqual(plan.external_keys, ())
+
+    def test_explicitly_excluded_common_crawl_scope_cannot_be_direct(self):
+        from creeper.evidence.planner import EvidencePlanner
+
+        plan = EvidencePlanner().plan(
+            self.observation(
+                scope=CandidateSourceScope.COMMON_CRAWL_CORPUS_EXCLUDED,
+                direct_year_mask=YEAR_BITS[1999],
             ),
             official_mask=0,
             local_mask=0,
@@ -86,7 +109,10 @@ class EvidencePlannerTests(unittest.TestCase):
 
         self.assertEqual(plan.direct_capsules, ())
         self.assertEqual(
-            [(key.temporal_scope.year_from, key.temporal_scope.year_to) for key in plan.external_keys],
+            [
+                (key.temporal_scope.year_from, key.temporal_scope.year_to)
+                for key in plan.external_keys
+            ],
             [(1996, 2001)],
         )
 
