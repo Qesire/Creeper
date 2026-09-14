@@ -72,20 +72,38 @@ Do not use a Quick Tunnel for production.
 
 ## 2. Provision worker identities
 
-On the Local Authority machine:
+Recommended first deployment: provision all expected identities in one atomic
+credentials update and write root-only secret files:
 
 ```bash
-sudo deploy/fabric/local-authority/provision-worker-secret.sh oci-sg-01 \
-  > /root/oci-sg-01.secret
-
-sudo deploy/fabric/local-authority/provision-worker-secret.sh gcp-us-01 \
-  > /root/gcp-us-01.secret
+sudo \
+  FABRIC_OCI_WORKER_ID=oci-sg-01 \
+  FABRIC_GCP_WORKER_ID=gcp-us-01 \
+  FABRIC_CF_WORKER_ID=cf-thin-01 \
+  bash deploy/fabric/local-authority/bootstrap-workers.sh
 ```
 
-The script atomically updates the Authority credential file, restarts
-Authority, and prints the newly generated HMAC secret once. Transfer each file
-over an authenticated admin channel (for example SSH/SCP), not via instance
-metadata or the repository.
+This creates files such as:
+
+```text
+/root/creeper-fabric-secrets/oci-sg-01.secret
+/root/creeper-fabric-secrets/gcp-us-01.secret
+/root/creeper-fabric-secrets/cf-thin-01.secret
+```
+
+Existing identities are not overwritten. Rotation requires the explicit
+`FABRIC_ROTATE_WORKER_SECRETS=1` switch.
+
+For one-off provisioning, the single-worker helper remains available:
+
+```bash
+sudo deploy/fabric/local-authority/provision-worker-secret.sh oci-extra-01 \
+  > /root/oci-extra-01.secret
+```
+
+Transfer each secret file only to its matching node over an authenticated
+admin channel (for example SSH/SCP). Never put worker HMAC secrets in instance
+metadata, the repository, or ordinary shell history.
 
 ## 3. OCI persistent explorer
 
