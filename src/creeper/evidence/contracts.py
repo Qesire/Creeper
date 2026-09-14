@@ -30,6 +30,10 @@ from creeper.sources.non_snapshot import (
     is_mailbox_url_locator,
     is_squid_access_locator,
 )
+from creeper.sources.sbi_bbs import (
+    is_audited_sbi_bbs_locator,
+    is_sbi_bbs_locator,
+)
 
 
 _CONTRACT_MARKER = ":evc1:"
@@ -45,6 +49,7 @@ _PARSER_KINDS = frozenset(
         "squid_access",
         "dmoz_rdf_urls",
         "ftp_sitelist_zip",
+        "sbi_bbs_zip",
         "warc_arc",
     }
 )
@@ -209,6 +214,17 @@ FTP_SITELIST_DIRECT_CONTRACT = SourceEvidenceContract(
     policy_version="ftp-sitelist-contract-v1",
 )
 
+SBI_BBS_DIRECT_CONTRACT = SourceEvidenceContract(
+    contract_id="sbi-monthly-internet-bbs-v1",
+    authority=EvidenceAuthority.DIRECT_WEB_YEAR,
+    parser_kind="sbi_bbs_zip",
+    temporal_semantics="verified_monthly_bbs_directory_edition",
+    evidence_type="dated_verified_internet_bbs_directory_record",
+    hostname_field="telnet_or_web_address",
+    timestamp_field="edition_revision_date",
+    policy_version="sbi-bbs-contract-v1",
+)
+
 
 def parser_kind_from_locator(locator: str) -> str:
     path = urlsplit(locator).path.lower()
@@ -220,6 +236,8 @@ def parser_kind_from_locator(locator: str) -> str:
         return "dmoz_rdf_urls"
     if is_ftp_sitelist_locator(locator):
         return "ftp_sitelist_zip"
+    if is_sbi_bbs_locator(locator):
+        return "sbi_bbs_zip"
     if path.endswith((".warc.gz", ".arc.gz", ".warc", ".arc")):
         return "warc_arc"
     if path.endswith((".cdxj", ".cdxj.gz")):
@@ -308,6 +326,11 @@ def resolve_source_evidence_contract(
         and is_audited_ftp_sitelist_locator(locator)
     ):
         return FTP_SITELIST_DIRECT_CONTRACT
+    if (
+        actual_parser == "sbi_bbs_zip"
+        and is_audited_sbi_bbs_locator(locator)
+    ):
+        return SBI_BBS_DIRECT_CONTRACT
     return discovery_only_contract(actual_parser)
 
 

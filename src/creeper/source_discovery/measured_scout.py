@@ -47,6 +47,10 @@ from creeper.sources.non_snapshot import (
     parse_dmoz_external_page_line,
     parse_squid_access_line,
 )
+from creeper.sources.sbi_bbs import (
+    is_sbi_bbs_locator,
+    parse_sbi_bbs_zip,
+)
 
 
 @dataclass(frozen=True)
@@ -446,6 +450,36 @@ def _extract_hosts(
         # reliable than HTTP Range metadata from old mirrors; a partial object
         # fails closed in parse_ftp_sitelist_zip.
         records = parse_ftp_sitelist_zip(
+            payload,
+            max_decompressed_bytes=policy.max_decompressed_bytes,
+        )
+        hosts: set[str] = set()
+        host_year_pairs: set[tuple[str, int]] = set()
+        observations: list[str] = []
+        sampled = 0
+        for record in records:
+            if sampled >= policy.max_records:
+                break
+            if not (
+                policy.target_year_from
+                <= record.year
+                <= policy.target_year_to
+            ):
+                continue
+            sampled += 1
+            hosts.add(record.hostname)
+            host_year_pairs.add((record.hostname, record.year))
+            observations.append(f"{record.hostname}\t{record.year}")
+        return ParsedHostSample(
+            sampled_records=sampled,
+            hosts=hosts,
+            host_year_pairs=host_year_pairs,
+            measurement_mode=MeasurementMode.HOST_YEAR,
+            observation_keys=tuple(observations),
+        )
+
+    if is_sbi_bbs_locator(url):
+        records = parse_sbi_bbs_zip(
             payload,
             max_decompressed_bytes=policy.max_decompressed_bytes,
         )
