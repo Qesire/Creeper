@@ -7,6 +7,10 @@ FABRIC_EDITION_VERSION = "0.1.0-dev"
 FABRIC_PROTOCOL_VERSION = "creeper-fabric-v1"
 FABRIC_AUTHORITY_SCHEMA_VERSION = 1
 
+# Edge/thin runtimes are opportunistic positive-evidence producers only.
+FABRIC_THIN_MAX_PROVIDER_REQUESTS = 1
+FABRIC_THIN_MAX_ESTIMATED_RESPONSE_BYTES = 256 * 1024
+
 # The derivative may reuse these stable, mostly dependency-free core primitives.
 # Any new dependency on the monolithic runtime must be reviewed explicitly.
 ALLOWED_CORE_IMPORTS = frozenset(
