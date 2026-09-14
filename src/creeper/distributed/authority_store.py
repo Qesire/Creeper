@@ -39,6 +39,10 @@ class WorkerRejectedError(RuntimeError):
     """Raised when an unknown or revoked worker attempts authority actions."""
 
 
+class AuthorityNotReadyError(RuntimeError):
+    """Required local authority state is unavailable; fail closed."""
+
+
 def _json(value) -> str:
     return json.dumps(
         value,
@@ -736,6 +740,10 @@ class DistributedAuthorityStore:
     ) -> list[dict[str, object]]:
         """Resolve minimal HY probes against immutable baseline + accepted ledger."""
 
+        if self.baseline_index is None:
+            raise AuthorityNotReadyError(
+                "HY admission requires a bound local baseline index"
+            )
         now = float(self.clock())
         normalized: list[tuple[str, int, str, str]] = []
         seen: set[str] = set()
@@ -780,7 +788,7 @@ class DistributedAuthorityStore:
                     )
                 )
             baseline_masks: dict[str, int] = {}
-            if self.baseline_index is not None and normalized:
+            if normalized:
                 baseline_masks = {
                     hostname: int(mask)
                     for hostname, (mask, _candidate) in self.baseline_index.resolve_batch(
@@ -837,6 +845,10 @@ class DistributedAuthorityStore:
     ) -> list[dict[str, object]]:
         """Commit full proof only for HYs previously admitted by HY_PROBE."""
 
+        if self.baseline_index is None:
+            raise AuthorityNotReadyError(
+                "HY admission requires a bound local baseline index"
+            )
         now = float(self.clock())
         prepared: list[tuple[str, int, str, str, str]] = []
         for item in evidence:
@@ -858,6 +870,8 @@ class DistributedAuthorityStore:
                 or not locator
             ):
                 raise ValueError("invalid full HY evidence")
+            if not timestamp.startswith(str(year)):
+                raise ValueError("HY evidence timestamp year mismatch")
             hyid = host_year_id(hostname, year)
             evid = evidence_id(
                 hostname=hostname,
@@ -917,10 +931,7 @@ class DistributedAuthorityStore:
                 # Re-check immutable baseline at commit time. This is cheap and
                 # makes the authority invariant explicit even if a caller
                 # constructed the probe state using an older test fixture.
-                if (
-                    self.baseline_index is not None
-                    and self.baseline_index.year_mask(hostname) & YEAR_BITS[year]
-                ):
+                if self.baseline_index.year_mask(hostname) & YEAR_BITS[year]:
                     self.connection.execute(
                         """
                         UPDATE distributed_hy_probe_decisions
