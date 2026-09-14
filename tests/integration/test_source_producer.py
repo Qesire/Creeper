@@ -157,6 +157,36 @@ class SourceProducerTests(unittest.TestCase):
         )
         return runtime, adapter
 
+    def test_final_source_commit_revalidates_lease_ownership(self):
+        runtime, _adapter = self.build_runtime(backlog_capacity=1)
+        original_renew = self.control.renew_lease
+        renew_calls = 0
+
+        def renew_with_final_expiry(lease, *, ttl_seconds, now=None):
+            nonlocal renew_calls
+            renew_calls += 1
+            if renew_calls >= 2:
+                raise RuntimeError("synthetic expiry before final commit")
+            return original_renew(
+                lease,
+                ttl_seconds=ttl_seconds,
+                now=now,
+            )
+
+        self.control.renew_lease = renew_with_final_expiry
+
+        with self.assertRaisesRegex(RuntimeError, "expiry before final commit"):
+            runtime.run_once()
+
+        self.assertEqual(renew_calls, 2)
+        reservoir = self.control.get_reservoir("fixture-reservoir")
+        self.assertEqual(reservoir.state, ReservoirState.READY)
+        self.assertEqual(reservoir.cursor, "0")
+        row = self.control.connection.execute(
+            "SELECT state FROM work_leases ORDER BY rowid DESC LIMIT 1"
+        ).fetchone()
+        self.assertEqual(row["state"], "ABORTED")
+
     def build_direct_runtime(
         self,
         *,
