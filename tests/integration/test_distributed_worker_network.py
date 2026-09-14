@@ -21,6 +21,8 @@ from creeper.distributed.bulk_index import (
 from creeper.distributed.coordinator_client import CoordinatorClient
 from creeper.distributed.host_query import DistributedHostQueryProducer
 from creeper.distributed.region_probe import RegionProbeProducer
+from creeper.distributed.search_campaign import SearchCampaign
+from creeper.distributed.seeded_search import SeededSearchProducer
 from creeper.distributed.source_discovery import SourceDiscoveryProducer
 from creeper.distributed.thin_query import ThinHistoricalQueryProducer
 from creeper.distributed.models import (
@@ -258,6 +260,11 @@ class DistributedWorkerNetworkTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(report.completed, report.error)
         self.assertEqual(report.task_id, task_id)
         self.assertEqual(self.store.source_candidate_count(), 2)
+        self.assertEqual(self.store.host_candidate_count(), 1)
+        self.assertEqual(
+            self.store.host_candidate_rows()[0]["hostname"],
+            "sources.test",
+        )
         rows = self.store.source_candidate_rows()
         by_url = {str(row["canonical_url"]): row for row in rows}
         self.assertEqual(
@@ -280,6 +287,98 @@ class DistributedWorkerNetworkTests(unittest.IsolatedAsyncioTestCase):
         row = self.store.task_row(task_id)
         self.assertEqual(row["state"], "COMPLETE")
         self.assertEqual(row["cursor"], SourceDiscoveryProducer.EOF_CURSOR)
+
+    async def test_seeded_search_emits_deduplicated_hostname_candidates(self) -> None:
+        requested_queries: list[str] = []
+        html = b"""
+        <html><body>
+          <a href="https://result-one.example/a">one</a>
+          <a href="https://result-one.example/b">one duplicate host</a>
+          <a href="/redir?uddg=https%3A%2F%2Fresult-two.example%2Fx">two</a>
+        </body></html>
+        """
+
+        async def search_handler(request: httpx.Request) -> httpx.Response:
+            requested_queries.append(request.url.params.get("q", ""))
+            return httpx.Response(
+                200,
+                headers={"Content-Type": "text/html"},
+                content=html,
+                request=request,
+            )
+
+        campaign = SearchCampaign(
+            name="fixture-search",
+            templates=("{anchor} {source} {era} {topology}",),
+            anchors=("personal homepage", "company page"),
+            source_terms=("links", "directory"),
+            era_terms=("1998", "2000"),
+            topology_terms=("webring", "resources"),
+        )
+        expected_queries = list(
+            campaign.render_slice(
+                seed=42,
+                slot_start=0,
+                slot_count=2,
+            )
+        )
+
+        self.store.configure_provider_budget(
+            "web_search",
+            requests_per_second=1000.0,
+            max_global_inflight=1,
+            require_qualified_region=False,
+        )
+        task_id = self.store.admit_search_slice(
+            campaign=campaign,
+            seed=42,
+            slot_start=0,
+            slot_count=2,
+            search_endpoint="https://search.test/",
+            provider="web_search",
+        )
+        producer = SeededSearchProducer(
+            transport=httpx.MockTransport(search_handler)
+        )
+        descriptor = WorkerDescriptor(
+            worker_id="worker-a",
+            runtime_class="vm",
+            region="search-free",
+            architecture="x86_64",
+            memory_bytes=512 * 1024**2,
+            cpu_count=1,
+            network_class="public",
+            capabilities=(Capability.SEARCH_QUERY.value,),
+            allowed_providers=("web_search",),
+        )
+
+        async with CoordinatorClient(
+            self.base_url,
+            worker_id="worker-a",
+            secret=self.credentials["worker-a"],
+        ) as client:
+            worker = DistributedWorker(
+                client,
+                descriptor,
+                {"SeededSearchProducer": producer},
+                lease_seconds=30,
+            )
+            report = await worker.run_once()
+
+        self.assertTrue(report.completed, report.error)
+        self.assertEqual(report.task_id, task_id)
+        self.assertEqual(requested_queries, expected_queries)
+        self.assertEqual(self.store.host_candidate_count(), 2)
+        hosts = {
+            str(row["hostname"]): int(row["discovery_count"])
+            for row in self.store.host_candidate_rows()
+        }
+        self.assertEqual(
+            set(hosts),
+            {"result-one.example", "result-two.example"},
+        )
+        self.assertEqual(hosts["result-one.example"], 1)
+        self.assertEqual(self.store.batch_count(task_id), 1)
 
     async def test_region_probe_worker_qualifies_provider_region(self) -> None:
         calls = 0
