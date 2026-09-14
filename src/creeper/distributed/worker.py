@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Awaitable, Callable
 
 from creeper.distributed.coordinator_client import (
@@ -47,8 +47,13 @@ class DistributedWorker:
         if lease_seconds <= 0:
             raise ValueError("lease_seconds must be positive")
         self.client = client
-        self.descriptor = descriptor
         self.producers = dict(producers)
+        advertised = tuple(sorted(self.producers))
+        if descriptor.producers and set(descriptor.producers) != set(advertised):
+            raise ValueError(
+                "worker descriptor producers do not match runtime producer registry"
+            )
+        self.descriptor = replace(descriptor, producers=advertised)
         self.lease_seconds = float(lease_seconds)
         self._registered = False
 
@@ -70,7 +75,7 @@ class DistributedWorker:
                 await self.client.fail(
                     lease,
                     f"unsupported producer: {lease.work.producer}",
-                    retryable=False,
+                    retryable=True,
                 )
             except CoordinatorError:
                 pass
