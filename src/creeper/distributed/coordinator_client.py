@@ -142,6 +142,7 @@ class CoordinatorClient:
                 "cpu_count": descriptor.cpu_count,
                 "network_class": descriptor.network_class,
                 "capabilities": list(descriptor.capabilities),
+                "producers": list(descriptor.producers),
             },
         )
 
