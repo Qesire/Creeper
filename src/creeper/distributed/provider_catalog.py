@@ -38,20 +38,21 @@ def canonical_cdx_provider_configs(
 ) -> tuple[CDXProviderConfig, ...]:
     if not names:
         raise ValueError("at least one canonical CDX provider is required")
-    result: list[CDXProviderConfig] = []
-    seen: set[str] = set()
-    for raw_name in names:
-        name = raw_name.strip()
-        if not name or name in seen:
-            continue
-        try:
-            config = _CANONICAL_CDX_PROVIDERS[name]
-        except KeyError as exc:
-            raise ValueError(
-                f"unknown canonical CDX provider: {name}"
-            ) from exc
-        result.append(config)
-        seen.add(name)
-    if not result:
+    selected = {
+        raw_name.strip()
+        for raw_name in names
+        if raw_name.strip()
+    }
+    if not selected:
         raise ValueError("no canonical CDX providers selected")
-    return tuple(result)
+    unknown = selected - set(_CANONICAL_CDX_PROVIDERS)
+    if unknown:
+        raise ValueError(
+            "unknown canonical CDX provider: "
+            + ",".join(sorted(unknown))
+        )
+    return tuple(
+        config
+        for name, config in _CANONICAL_CDX_PROVIDERS.items()
+        if name in selected
+    )
