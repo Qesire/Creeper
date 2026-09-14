@@ -101,6 +101,62 @@ max_keepalive_connections = 4
             with self.assertRaises(RuntimeError):
                 config.load_secret()
 
+    def test_search_only_worker_does_not_require_cdx_configuration(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config_path = root / "search-worker.toml"
+            config_path.write_text(
+                """
+[worker]
+coordinator_url = "https://coord.example"
+worker_id = "search-01"
+runtime_class = "vm"
+region = "free-search"
+architecture = "x86_64"
+memory_bytes = 536870912
+cpu_count = 1
+network_class = "public"
+capabilities = ["SEARCH_QUERY"]
+allowed_providers = ["web_search"]
+""".strip(),
+                encoding="utf-8",
+            )
+
+            config = load_worker_config(config_path)
+
+        self.assertEqual(config.cdx_providers, ())
+        self.assertEqual(
+            config.descriptor.capabilities,
+            ("SEARCH_QUERY",),
+        )
+
+    def test_online_query_worker_without_cdx_configuration_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config_path = root / "bad-online-worker.toml"
+            config_path.write_text(
+                """
+[worker]
+coordinator_url = "https://coord.example"
+worker_id = "online-01"
+runtime_class = "vm"
+region = "free-online"
+architecture = "x86_64"
+memory_bytes = 536870912
+cpu_count = 1
+network_class = "public"
+capabilities = ["ONLINE_QUERY"]
+allowed_providers = ["internet_archive"]
+""".strip(),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "ONLINE_QUERY/THIN_QUERY workers require CDX providers",
+            ):
+                load_worker_config(config_path)
+
     def test_worker_config_rejects_provider_client_outside_allowlist(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
