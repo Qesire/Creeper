@@ -21,18 +21,27 @@ from creeper.source_discovery.region_compilation import compile_region
 from creeper.source_discovery.research_compiler import ResearchCompiler
 from creeper.source_discovery.research_models import ExplorationRegion, RegionState
 from creeper.source_discovery.research_trigger import ResearchDirective
-from creeper.source_research.agent.context import UnifiedCompilerRequest
+from creeper.source_research.agent.context import (
+    ResearchCompilerContext,
+    UnifiedCompilerRequest,
+)
 from creeper.source_research.agent.protocol import (
     ContractFamilyProposal,
+    PivotProgramProposal,
     ProposalEnvelope,
     ProposalPlane,
+    QueryProgramProposal,
+    RootSurfaceProposal,
     UnifiedLLMTask,
 )
 from creeper.source_research.feedback import ResearchFeedback
 from creeper.source_research.models import (
     ArtifactLead,
+    QueryProgram,
     QueryState,
+    RootKind,
     RootQuery,
+    RootSurface,
     RuleRecord,
     RuleState,
     SearchHit,
@@ -46,6 +55,7 @@ class IntegratedResearchResult:
     call_identity: str
     envelope: ProposalEnvelope | None
     suppressed: bool = False
+    typed_context: ResearchCompilerContext | None = None
 
 
 @dataclass(frozen=True)
@@ -175,6 +185,87 @@ class ResearchIntegrationBridge:
             context_hash=directive.context_key,
         )
 
+    def build_root_research_context(
+        self,
+        root_id: str,
+        *,
+        cooldown_satisfied: bool,
+    ) -> ResearchCompilerContext:
+        root = self.research.get_root(root_id)
+        rows = self.connection.execute(
+            """
+            SELECT *
+            FROM research_queries
+            WHERE root_id=?
+            ORDER BY updated_at DESC, query_id DESC
+            LIMIT 64
+            """,
+            (root_id,),
+        ).fetchall()
+        active_states = {"READY", "RUNNING", "RETRYABLE"}
+        equivalent_unexecuted = any(
+            str(row["state"]) in active_states for row in rows
+        )
+        exhausted = bool(rows) and not equivalent_unexecuted
+        metrics_available = any(
+            str(row["state"]) in {"COMPLETE", "EXHAUSTED"}
+            for row in rows
+        )
+        recent_hashes: list[str] = []
+        for row in rows:
+            query = RootQuery(
+                root_id=str(row["root_id"]),
+                query_text=str(row["query_text"]),
+                max_pages=int(row["max_pages"]),
+                max_wall_seconds=float(row["max_wall_seconds"]),
+                page_size=int(row["page_size"]),
+                native_filters=json.loads(str(row["native_filters_json"]) or "{}"),
+                expected_signal=str(row["expected_signal"]),
+                expected_artifact_family=str(row["expected_artifact_family"]),
+                query_id=str(row["query_id"]),
+            )
+            recent_hashes.append(query.query_hash)
+        negatives = self.connection.execute(
+            """
+            SELECT reason
+            FROM research_negative_knowledge
+            WHERE root_id=?
+            ORDER BY last_seen_at DESC
+            LIMIT 32
+            """,
+            (root_id,),
+        ).fetchall()
+        return ResearchCompilerContext(
+            root_id=root.root_id,
+            root_capabilities=root.capabilities,
+            seed_current_program_exhausted=exhausted,
+            equivalent_unexecuted_program=equivalent_unexecuted,
+            cooldown_satisfied=bool(cooldown_satisfied),
+            deterministic_seed_search_available=True,
+            metrics_available=metrics_available,
+            recent_query_hashes=tuple(recent_hashes),
+            negative_knowledge=tuple(str(row["reason"]) for row in negatives),
+        )
+
+    @staticmethod
+    def build_root_research_request(
+        context: ResearchCompilerContext,
+        *,
+        task_type: UnifiedLLMTask = UnifiedLLMTask.COMPILE_ROOT_QUERY_PROGRAM,
+        trigger_reason: str = "ROOT_PROGRAM_EXHAUSTED",
+    ) -> UnifiedCompilerRequest:
+        return UnifiedCompilerRequest(
+            task_type=task_type,
+            plane=ProposalPlane.RESEARCH,
+            trigger_reason=trigger_reason,
+            objective=(
+                "propose a bounded orthogonal structured-root program that "
+                "maximizes marginal FINAL accepted Novel EED per total cost"
+            ),
+            context=context.as_prompt_payload(),
+            context_hash=context.context_hash,
+        )
+
     def try_claim_llm_call(self, request: UnifiedCompilerRequest) -> bool:
         now = float(self.clock())
         stale_before = now - self.llm_claim_stale_seconds
@@ -294,6 +385,146 @@ class ResearchIntegrationBridge:
             call_identity=request.call_identity,
             envelope=envelope,
         )
+
+    async def execute_root_research(
+        self,
+        root_id: str,
+        executor: Any,
+        *,
+        cooldown_satisfied: bool = True,
+    ) -> IntegratedResearchResult:
+        context = self.build_root_research_context(
+            root_id,
+            cooldown_satisfied=cooldown_satisfied,
+        )
+        request = self.build_root_research_request(context)
+        if not self.try_claim_llm_call(request):
+            return IntegratedResearchResult(
+                call_identity=request.call_identity,
+                envelope=None,
+                suppressed=True,
+                typed_context=context,
+            )
+        started = time.perf_counter()
+        try:
+            envelope = await executor(request, context=context)
+        except BaseException as exc:
+            self.finish_llm_call(
+                request.call_identity,
+                success=False,
+                cost_seconds=max(0.0, time.perf_counter() - started),
+                error=f"{type(exc).__name__}: {exc}",
+            )
+            raise
+        return IntegratedResearchResult(
+            call_identity=request.call_identity,
+            envelope=envelope,
+            typed_context=context,
+        )
+
+    @staticmethod
+    def _root_kind_from_proposal(value: str) -> RootKind:
+        text = str(value).strip().upper()
+        if "OAI" in text:
+            return RootKind.OAI
+        if "CODE" in text or "GITHUB" in text:
+            return RootKind.CODE
+        if "ARCHIVE" in text:
+            return RootKind.ARCHIVE
+        if any(token in text for token in ("REPOSITORY", "API", "CATALOG", "DATA")):
+            return RootKind.STRUCTURED_REPOSITORY
+        return RootKind.GENERIC
+
+    def commit_root_research_result(
+        self,
+        result: IntegratedResearchResult,
+        *,
+        elapsed_seconds: float,
+    ) -> int:
+        if result.suppressed:
+            return 0
+        envelope = result.envelope
+        context = result.typed_context
+        if envelope is None or context is None:
+            raise ValueError("root research result requires envelope and typed context")
+        if envelope.plane is not ProposalPlane.RESEARCH:
+            raise ValueError("root research result must use RESEARCH plane")
+        committed = 0
+        try:
+            for proposal in envelope.proposals:
+                if isinstance(proposal, (QueryProgramProposal, PivotProgramProposal)):
+                    queries = tuple(
+                        RootQuery(
+                            root_id=proposal.root_id,
+                            query_text=item.query,
+                            native_filters=dict(item.filters),
+                            expected_signal=item.expected_signal,
+                            expected_artifact_family=item.expected_family,
+                            max_pages=item.max_pages,
+                            max_wall_seconds=60.0,
+                            page_size=100,
+                            seed_library_version="integrated-l6-v1",
+                        )
+                        for item in proposal.queries
+                    )
+                    self.research.register_program(
+                        QueryProgram(
+                            root_id=proposal.root_id,
+                            strategy=proposal.strategy,
+                            queries=queries,
+                            hard_max_requests=proposal.hard_max_requests,
+                            stop_conditions=proposal.stop_conditions,
+                            compiler_version="integrated-l6-v1",
+                            context_hash=proposal.context_hash,
+                            program_id=proposal.program_id,
+                            source=(
+                                "LLM_PIVOT"
+                                if isinstance(proposal, PivotProgramProposal)
+                                else "LLM_RESEARCH"
+                            ),
+                        )
+                    )
+                    committed += 1
+                elif isinstance(proposal, RootSurfaceProposal):
+                    root_id = stable_hash(
+                        "root-proposal",
+                        proposal.reuse_key,
+                        proposal.entrypoint,
+                    )
+                    self.research.upsert_root(
+                        RootSurface(
+                            root_id=root_id,
+                            kind=self._root_kind_from_proposal(proposal.kind),
+                            canonical_locator=proposal.entrypoint,
+                            capabilities=proposal.capabilities,
+                            metadata={
+                                "rationale": proposal.rationale,
+                                "reuse_key": proposal.reuse_key,
+                                "confidence": proposal.confidence,
+                                "authority": "proposal_only",
+                                "created_by_call": result.call_identity,
+                            },
+                        )
+                    )
+                    committed += 1
+                else:
+                    raise ValueError(
+                        "unsupported RESEARCH-plane proposal in root commit"
+                    )
+        except BaseException as exc:
+            self.finish_llm_call(
+                result.call_identity,
+                success=False,
+                cost_seconds=max(0.0, elapsed_seconds),
+                error=f"{type(exc).__name__}: {exc}",
+            )
+            raise
+        self.finish_llm_call(
+            result.call_identity,
+            success=True,
+            cost_seconds=max(0.0, elapsed_seconds),
+        )
+        return committed
 
     def commit_execution_result(
         self,
