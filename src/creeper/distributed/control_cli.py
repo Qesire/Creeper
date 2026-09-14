@@ -48,6 +48,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     probe.add_argument("--provider", required=True)
     probe.add_argument("--hostname", required=True)
+    probe.add_argument("--region", required=True)
     probe.add_argument("--year", type=int, default=2001)
     probe.add_argument("--samples", type=int, default=3)
     probe.add_argument("--priority", type=float, default=100.0)
@@ -122,6 +123,7 @@ def main(argv: list[str] | None = None) -> int:
             task_id = store.admit_region_probe_work(
                 provider=args.provider,
                 probe_hostname=args.hostname,
+                target_region=args.region,
                 year=args.year,
                 samples=args.samples,
                 priority=args.priority,
