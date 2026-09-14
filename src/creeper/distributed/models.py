@@ -145,6 +145,7 @@ class ResultBatch:
 @dataclass(frozen=True)
 class ProviderPermit:
     permit_id: str
+    request_id: str
     provider: str
     worker_id: str
     task_id: str
