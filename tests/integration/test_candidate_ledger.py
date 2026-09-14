@@ -11,6 +11,45 @@ from creeper.storage.candidate_store import CandidateStore
 
 
 class CandidateLedgerTests(unittest.TestCase):
+    def test_rejects_invalid_candidate_identity_timing_and_batch_sizes(self):
+        with self.assertRaisesRegex(ValueError, "source_year"):
+            CandidateRecord(
+                hostname="example.com",
+                source_id="fixture",
+                scope=CandidateSourceScope.LOCAL_DISCOVERY,
+                source_year=1997.5,
+            )
+        with tempfile.TemporaryDirectory() as tmp:
+            store = CandidateStore(Path(tmp) / "candidates.sqlite3")
+            record = CandidateRecord(
+                hostname="example.com",
+                source_id="fixture",
+                scope=CandidateSourceScope.LOCAL_DISCOVERY,
+            )
+            try:
+                with self.assertRaisesRegex(ValueError, "observed_at"):
+                    store.record_observation(record, observed_at=float("nan"))
+                self.assertEqual(store.count(), 0)
+                with self.assertRaisesRegex(ValueError, "batch_size"):
+                    list(store.iter_entries(batch_size=1.5))
+                store.record_observation(record, observed_at=1.0)
+                with self.assertRaisesRegex(ValueError, "chunk_size"):
+                    store._transition_many(
+                        ["example.com"],
+                        CandidateStatus.BASELINE_OVERLAP,
+                        reason="test",
+                        chunk_size=True,
+                    )
+                self.assertEqual(
+                    store.get(
+                        "example.com",
+                        CandidateSourceScope.LOCAL_DISCOVERY,
+                    ).status,
+                    CandidateStatus.ACTIVE_CANDIDATE,
+                )
+            finally:
+                store.close()
+
     def test_duplicate_observation_updates_one_current_row(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = CandidateStore(Path(tmp) / "candidates.sqlite3", clock=lambda: 10.0)
