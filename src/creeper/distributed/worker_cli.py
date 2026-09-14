@@ -6,6 +6,7 @@ import argparse
 import asyncio
 from pathlib import Path
 
+from creeper.distributed.bulk_index import BulkHistoricalIndexProducer
 from creeper.distributed.config import load_worker_config
 from creeper.distributed.coordinator_client import CoordinatorClient
 from creeper.distributed.host_query import DistributedHostQueryProducer
@@ -32,9 +33,11 @@ async def _run(config_path: Path, *, once: bool) -> int:
     secret = config.load_secret()
     host_query = DistributedHostQueryProducer(config.cdx_providers)
     region_probe = RegionProbeProducer(config.cdx_providers)
+    bulk_index = BulkHistoricalIndexProducer()
     producers = {
         "HistoricalQueryProducer": host_query,
         "RegionProbeProducer": region_probe,
+        "BulkHistoricalIndexProducer": bulk_index,
     }
     async with CoordinatorClient(
         config.coordinator_url,
