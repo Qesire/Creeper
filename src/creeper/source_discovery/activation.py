@@ -67,6 +67,8 @@ def _adapter_kind(entrypoint: str) -> tuple[str, str]:
         return "ftp_sitelist", "structured_records"
     if parser_kind == "sbi_bbs_zip":
         return "sbi_bbs", "structured_records"
+    if parser_kind == "finnish_bbs_zip":
+        return "finnish_bbs", "structured_records"
     if parser_kind in {"mbox_urls", "squid_access", "dmoz_rdf_urls"}:
         return "structured", "structured_records"
 
