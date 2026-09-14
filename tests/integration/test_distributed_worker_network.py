@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import tempfile
 import unittest
@@ -9,6 +10,8 @@ from pathlib import Path
 import httpx
 from aiohttp.test_utils import TestServer
 
+from creeper.authority.baseline_index import BaselineIndex
+from creeper.authority.identity import authority_digest
 from creeper.distributed.authority_api import create_authority_app
 from creeper.distributed.authority_store import DistributedAuthorityStore
 from creeper.distributed.coordinator_client import CoordinatorClient
@@ -26,8 +29,43 @@ from creeper.evidence.providers.multi_cdx import CDXProviderConfig
 class DistributedWorkerNetworkTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
+        root = Path(self.tmp.name)
+        baseline_dir = root / "baseline-v1"
+        baseline_dir.mkdir()
+        for year in range(1996, 2002):
+            (baseline_dir / f"{year}.txt").write_text("", encoding="utf-8")
+        (baseline_dir / "candidate_pool.txt").write_text("", encoding="utf-8")
+        annual_hashes = {
+            f"{year}.txt": hashlib.sha256(
+                (baseline_dir / f"{year}.txt").read_bytes()
+            ).hexdigest()
+            for year in range(1996, 2002)
+        }
+        candidate_hash = hashlib.sha256(
+            (baseline_dir / "candidate_pool.txt").read_bytes()
+        ).hexdigest()
+        manifest = {
+            "baseline_id": baseline_dir.name,
+            "annual_file_hashes": annual_hashes,
+            "candidate_file_hash": candidate_hash,
+            "model_hash": "0" * 64,
+            "baseline_eed": "0",
+            "authority_digest": authority_digest(
+                baseline_id=baseline_dir.name,
+                annual_file_hashes=annual_hashes,
+                candidate_file_hash=candidate_hash,
+                model_hash="0" * 64,
+                baseline_eed="0",
+            ),
+        }
+        self.baseline = BaselineIndex.build(
+            baseline_dir=baseline_dir,
+            output_path=root / "baseline.sqlite3",
+            authority_manifest=manifest,
+        )
         self.store = DistributedAuthorityStore(
-            Path(self.tmp.name) / "authority.sqlite3"
+            root / "authority.sqlite3",
+            baseline_index=self.baseline,
         )
         self.credentials = {
             "worker-a": "secret-a",
@@ -42,6 +80,7 @@ class DistributedWorkerNetworkTests(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self) -> None:
         await self.server.close()
         self.store.close()
+        self.baseline.close()
         self.tmp.cleanup()
 
     @staticmethod
