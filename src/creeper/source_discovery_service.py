@@ -1182,6 +1182,17 @@ def _unified_research_directive_provider(
                 root_id,
                 cooldown_satisfied=True,
             )
+            exact_request = bridge.build_root_research_request(context)
+            prior = research.connection.execute(
+                """
+                SELECT state
+                FROM research_llm_call_claims
+                WHERE call_identity=?
+                """,
+                (exact_request.call_identity,),
+            ).fetchone()
+            if prior is not None and str(prior["state"]) == "COMPLETE":
+                continue
             active, last_started, failures = bridge.llm_gate_state(
                 context.context_hash
             )
