@@ -18,7 +18,7 @@ from .base import (
     SearchPage,
     is_retryable,
     response_json,
-    retry_after_seconds,
+    retry_delay_seconds,
 )
 
 DEFAULT_API_ENDPOINT = "https://partner.archive-it.org/api/collection"
@@ -160,7 +160,7 @@ class ArchiveItAdapter:
             return SearchPage(
                 next_checkpoint=cp,
                 terminal=False,
-                retry_after=retry_after_seconds(response),
+                retry_after=retry_delay_seconds(response),
             )
         if not 200 <= status < 300:
             # A missing/private API is not root failure: deterministically switch to
@@ -202,7 +202,7 @@ class ArchiveItAdapter:
             return SearchPage(
                 next_checkpoint=cp,
                 terminal=False,
-                retry_after=retry_after_seconds(response),
+                retry_after=retry_delay_seconds(response),
             )
         if not 200 <= status < 300:
             return SearchPage(terminal=True)
