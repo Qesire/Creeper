@@ -181,7 +181,7 @@ class MeasuredYieldScoutTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(measurement.observed_host_year_pairs, 3)
         # known.com exists only in the 1996 baseline, so 1998 remains novel.
         self.assertEqual(measurement.novel_host_year_pairs, 3)
-        self.assertEqual(measurement.direct_host_years, 0)
+        self.assertEqual(measurement.direct_host_years, 3)
 
     async def test_dmoz_scout_uses_exact_dump_year_as_ranking_hint(self) -> None:
         raw = (
@@ -274,7 +274,7 @@ class MeasuredYieldScoutTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(measurement.unique_hosts, 2)
         self.assertEqual(measurement.observed_host_year_pairs, 2)
         self.assertEqual(measurement.novel_host_year_pairs, 2)
-        self.assertEqual(measurement.direct_host_years, 0)
+        self.assertEqual(measurement.direct_host_years, 2)
 
     async def test_ircache_sanitized_access_name_uses_squid_parser(self) -> None:
         raw = (
@@ -321,7 +321,7 @@ class MeasuredYieldScoutTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(measurement.unique_hosts, 2)
         self.assertEqual(measurement.observed_host_year_pairs, 2)
         self.assertEqual(measurement.novel_host_year_pairs, 2)
-        self.assertEqual(measurement.direct_host_years, 0)
+        self.assertEqual(measurement.direct_host_years, 2)
 
     async def test_csv_sample_is_measured_but_low_novelty_holds(self) -> None:
         body = b"hostname,other\nknown.com,1\nknown.com,2\nnovel.org,3\n"
