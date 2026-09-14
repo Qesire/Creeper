@@ -5,6 +5,7 @@ from unittest.mock import patch
 
 from creeper.authority.baseline_index import YEAR_BITS
 from creeper.evidence.contracts import (
+    MBOX_MESSAGE_DIRECT_CONTRACT,
     SQUID_ACCESS_DIRECT_CONTRACT,
     bind_contract_to_adapter_id,
 )
@@ -53,13 +54,81 @@ class _OpenFile:
 
 
 class StructuredProductionAdapterTests(unittest.TestCase):
-    def test_mailbox_adapter_persists_only_urls_and_year_hints(self):
+    @staticmethod
+    def _mbox_message(
+        *,
+        year: int,
+        url: str,
+        day: int = 16,
+    ) -> bytes:
+        return (
+            f"From sender@example.test Fri Oct {day:02d} 04:31:23 {year}\n"
+            f"Date: Fri, {day:02d} Oct {year} 04:31:23 -0400\n"
+            "From: Person <person@example.net>\n"
+            "Subject: historical URL\n"
+            "Content-Type: text/plain; charset=utf-8\n"
+            "\n"
+            f"{url}\n"
+        ).encode("utf-8")
+
+    def test_mailbox_message_date_is_direct_evidence(self):
         reservoir = Reservoir(
             reservoir_id="reservoir:mbox",
             domain_id="domain:mbox",
-            adapter_id="structured:mbox",
+            adapter_id=bind_contract_to_adapter_id(
+                "structured:mbox",
+                MBOX_MESSAGE_DIRECT_CONTRACT,
+            ),
             root_locator=(
-                "https://lists.gnu.org/archive/mbox/lynx-dev/1998-03"
+                "https://lists.gnu.org/archive/mbox/lynx-dev/1998-10"
+            ),
+            enumeration_kind="structured_records",
+            capacity_lower=0,
+            evidence_mode="direct_year",
+            state=ReservoirState.READY,
+        )
+        adapter = StructuredProductionAdapter(
+            reservoir,
+            temporal_scope=(1998, 1998),
+        )
+
+        record = adapter._mbox_record(
+            self._mbox_message(
+                year=1998,
+                url="http://expect.nist.gov/",
+            ),
+            locator="fixture:1",
+        )
+        self.assertIsNotNone(record)
+        assert record is not None
+        record = adapter._apply_contract_authority(record)
+
+        self.assertEqual(record.payload, "http://expect.nist.gov/")
+        self.assertEqual(record.record_type, "MAILBOX_MESSAGE_URLS")
+        self.assertEqual(record.source_year, 1998)
+        self.assertEqual(record.source_time, "1998-10-16T08:31:23+00:00")
+        self.assertEqual(record.direct_year_mask, YEAR_BITS[1998])
+        self.assertEqual(record.year_hint_mask, 0)
+        self.assertEqual(
+            record.evidence_contract_id,
+            MBOX_MESSAGE_DIRECT_CONTRACT.contract_id,
+        )
+
+        observations = tuple(adapter.extract_hosts(record))
+        self.assertEqual([item.hostname for item in observations], ["expect.nist.gov"])
+        self.assertEqual(observations[0].direct_year_mask, YEAR_BITS[1998])
+        self.assertEqual(
+            observations[0].source_time,
+            "1998-10-16T08:31:23+00:00",
+        )
+
+    def test_legacy_mailbox_reservoir_does_not_silently_gain_authority(self):
+        reservoir = Reservoir(
+            reservoir_id="reservoir:mbox-legacy",
+            domain_id="domain:mbox-legacy",
+            adapter_id="structured:mbox-legacy",
+            root_locator=(
+                "https://lists.gnu.org/archive/mbox/lynx-dev/1998-10"
             ),
             enumeration_kind="structured_records",
             capacity_lower=0,
@@ -70,37 +139,102 @@ class StructuredProductionAdapterTests(unittest.TestCase):
             reservoir,
             temporal_scope=(1998, 1998),
         )
-
-        record = adapter._generic_record(
-            (
-                "From: Person <person@example.net> see "
-                "http://old.example/a and https://www.example.org/b."
+        record = adapter._mbox_record(
+            self._mbox_message(
+                year=1998,
+                url="http://legacy.example/",
             ),
-            locator="fixture:1",
+            locator="fixture:legacy",
         )
         self.assertIsNotNone(record)
         assert record is not None
         record = adapter._apply_contract_authority(record)
 
-        self.assertNotIn("person@", record.payload)
-        self.assertNotIn("From:", record.payload)
-        self.assertEqual(
-            record.payload.split("\t"),
-            ["http://old.example/a", "https://www.example.org/b"],
-        )
         self.assertEqual(record.direct_year_mask, 0)
         self.assertEqual(record.year_hint_mask, YEAR_BITS[1998])
+        self.assertEqual(record.source_year, 1998)
 
-        observations = tuple(adapter.extract_hosts(record))
-        self.assertEqual(
-            {item.hostname for item in observations},
-            {"old.example", "www.example.org"},
+    def test_mailbox_stream_cursor_commits_only_at_message_boundaries(self):
+        first = self._mbox_message(
+            year=1998,
+            url="http://first.example/",
+            day=16,
         )
-        self.assertTrue(
-            all(item.direct_year_mask == 0 for item in observations)
+        second = self._mbox_message(
+            year=1999,
+            url="http://second.example/",
+            day=17,
         )
-        self.assertTrue(
-            all(item.year_hint_mask == YEAR_BITS[1998] for item in observations)
+        payload = first + second
+        files = []
+
+        def fake_open(_source, _mode, **options):
+            file = _OpenFile(payload, seekable=options["block_size"] == 0)
+            files.append(file)
+            return file
+
+        reservoir = Reservoir(
+            reservoir_id="reservoir:mbox-stream",
+            domain_id="domain:mbox-stream",
+            adapter_id=bind_contract_to_adapter_id(
+                "structured:mbox-stream",
+                MBOX_MESSAGE_DIRECT_CONTRACT,
+            ),
+            root_locator=(
+                "https://lists.gnu.org/archive/mbox/lynx-dev/1998-10"
+            ),
+            enumeration_kind="structured_records",
+            capacity_lower=2,
+            evidence_mode="direct_year",
+            state=ReservoirState.READY,
+        )
+        adapter = StructuredProductionAdapter(
+            reservoir,
+            temporal_scope=(1996, 2001),
+        )
+
+        first_lease = WorkLease.create(
+            reservoir_id=reservoir.reservoir_id,
+            cursor_start="byte:0",
+            max_records=1,
+            max_requests=1,
+            max_bytes=4096,
+            max_seconds=30,
+        ).grant(owner="test")
+        first_records = []
+        with patch("creeper.sources.production.fsspec.open", side_effect=fake_open):
+            first_result = adapter.execute_stream(first_lease, first_records.append)
+
+            self.assertEqual(first_result.next_cursor, f"byte:{len(first)}")
+            self.assertEqual(len(first_records), 1)
+            first_observation = tuple(adapter.extract_hosts(first_records[0]))[0]
+            self.assertEqual(first_observation.hostname, "first.example")
+            self.assertEqual(first_observation.source_year, 1998)
+            self.assertEqual(first_observation.direct_year_mask, YEAR_BITS[1998])
+
+            second_lease = WorkLease.create(
+                reservoir_id=reservoir.reservoir_id,
+                cursor_start=first_result.next_cursor,
+                max_records=1,
+                max_requests=1,
+                max_bytes=4096,
+                max_seconds=30,
+            ).grant(owner="test")
+            second_records = []
+            second_result = adapter.execute_stream(
+                second_lease,
+                second_records.append,
+            )
+
+        self.assertIsNone(second_result.next_cursor)
+        self.assertEqual(len(second_records), 1)
+        second_observation = tuple(adapter.extract_hosts(second_records[0]))[0]
+        self.assertEqual(second_observation.hostname, "second.example")
+        self.assertEqual(second_observation.source_year, 1999)
+        self.assertEqual(second_observation.direct_year_mask, YEAR_BITS[1999])
+        self.assertNotEqual(
+            first_observation.source_time,
+            second_observation.source_time,
         )
 
     def test_dmoz_adapter_keeps_dump_year_as_hint_not_evidence(self):

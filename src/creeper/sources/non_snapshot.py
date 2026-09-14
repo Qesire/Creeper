@@ -8,6 +8,9 @@ cross into Creeper SourceRecord payloads.
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from email import policy as email_policy
+from email.parser import BytesParser
+from email.utils import parsedate_to_datetime
 import html
 import re
 from urllib.parse import urlsplit
@@ -105,6 +108,103 @@ def extract_http_urls(
             break
     return tuple(result)
 
+
+def iter_mbox_messages(
+    payload: bytes,
+    *,
+    include_truncated_tail: bool = True,
+):
+    """Yield complete Unix-mbox messages from one bounded byte buffer.
+
+    A mbox message begins at a line whose first five bytes are b"From ".
+    Quoted body lines use >From and therefore do not create boundaries.
+    When a network sample is known to end mid-file, callers can set
+    include_truncated_tail=False so the final partial message is ignored.
+    """
+    if not payload:
+        return
+    starts = [
+        match.start()
+        for match in re.finditer(br"(?m)^From ", payload)
+    ]
+    if not starts:
+        return
+    for index, start in enumerate(starts):
+        if index + 1 < len(starts):
+            end = starts[index + 1]
+        else:
+            if not include_truncated_tail:
+                break
+            end = len(payload)
+        if end > start:
+            yield start, payload[start:end]
+
+
+def parse_mbox_message(
+    message: bytes,
+    *,
+    max_urls: int = 64,
+) -> tuple[tuple[str, ...], int | None, str | None]:
+    """Extract body URLs and the message-level observation timestamp.
+
+    Only text message bodies are inspected; envelope/header addresses and
+    attachment payloads are excluded. The returned timestamp is normalized
+    to UTC ISO-8601. A missing or malformed Date header leaves the URLs
+    usable for discovery but grants no direct annual evidence.
+    """
+    if max_urls < 1:
+        raise ValueError("max_urls must be positive")
+    try:
+        parsed = BytesParser(policy=email_policy.default).parsebytes(message)
+    except (TypeError, ValueError):
+        return (), None, None
+
+    raw_date = parsed.get("Date")
+    year: int | None = None
+    source_time: str | None = None
+    if raw_date is not None:
+        try:
+            observed_at = parsedate_to_datetime(str(raw_date))
+        except (TypeError, ValueError, OverflowError):
+            observed_at = None
+        if observed_at is not None:
+            if observed_at.tzinfo is None:
+                observed_at = observed_at.replace(tzinfo=timezone.utc)
+            observed_at = observed_at.astimezone(timezone.utc)
+            if 1996 <= observed_at.year <= 2001:
+                year = observed_at.year
+                source_time = observed_at.isoformat()
+
+    body = parsed.get_body(preferencelist=("plain", "html"))
+    if body is None and (
+        parsed.get_content_maintype() == "text"
+        and (parsed.get_content_disposition() or "").lower() != "attachment"
+    ):
+        body = parsed
+
+    body_text = ""
+    if body is not None:
+        try:
+            value = body.get_content()
+        except (LookupError, UnicodeError, ValueError):
+            raw = body.get_payload(decode=True)
+            if raw is None:
+                value = body.get_payload()
+                body_text = value if isinstance(value, str) else ""
+            else:
+                charset = body.get_content_charset() or "utf-8"
+                try:
+                    body_text = raw.decode(charset, errors="replace")
+                except LookupError:
+                    body_text = raw.decode("utf-8", errors="replace")
+        else:
+            body_text = value if isinstance(value, str) else ""
+
+    urls = extract_http_urls(
+        html.unescape(body_text),
+        max_urls=max_urls,
+    )
+    return urls, year, source_time
 
 def is_dmoz_content_locator(locator: str) -> bool:
     """Recognize DMOZ/ODP content dumps without claiming generic RDF files."""

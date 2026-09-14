@@ -193,6 +193,18 @@ SQUID_ACCESS_DIRECT_CONTRACT = SourceEvidenceContract(
 )
 
 
+MBOX_MESSAGE_DIRECT_CONTRACT = SourceEvidenceContract(
+    contract_id="mailbox-message-url-observation-v1",
+    authority=EvidenceAuthority.DIRECT_WEB_YEAR,
+    parser_kind="mbox_urls",
+    temporal_semantics="message_date_header_timestamp",
+    evidence_type="dated_mailbox_url_observation",
+    hostname_field="message_url",
+    timestamp_field="date_header",
+    policy_version="mailbox-message-contract-v1",
+)
+
+
 def parser_kind_from_locator(locator: str) -> str:
     path = urlsplit(locator).path.lower()
     if is_mailbox_url_locator(locator):
@@ -283,6 +295,8 @@ def resolve_source_evidence_contract(
         return CDXJ_DIRECT_CONTRACT
     if actual_parser == "squid_access":
         return SQUID_ACCESS_DIRECT_CONTRACT
+    if actual_parser == "mbox_urls":
+        return MBOX_MESSAGE_DIRECT_CONTRACT
     return discovery_only_contract(actual_parser)
 
 
