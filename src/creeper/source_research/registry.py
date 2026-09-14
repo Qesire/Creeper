@@ -395,6 +395,90 @@ class ResearchRegistry:
         with self.connection:
             return self._register_query_locked(program_id, query, now)
 
+    def get_root(self, root_id: str) -> RootSurface:
+        row = self.connection.execute(
+            "SELECT * FROM research_roots WHERE root_id=? AND active=1",
+            (root_id,),
+        ).fetchone()
+        if row is None:
+            raise KeyError(root_id)
+        return RootSurface(
+            root_id=str(row["root_id"]),
+            kind=str(row["kind"]),
+            canonical_locator=str(row["canonical_locator"]),
+            capabilities=tuple(_load(row["capabilities_json"], [])),
+            metadata=_load(row["metadata_json"], {}),
+        )
+
+    def get_query(self, query_id: str) -> tuple[RootQuery, str]:
+        row = self.get_query_row(query_id)
+        return (
+            RootQuery(
+                root_id=str(row["root_id"]),
+                query_text=str(row["query_text"]),
+                max_pages=int(row["max_pages"]),
+                max_wall_seconds=float(row["max_wall_seconds"]),
+                page_size=int(row["page_size"]),
+                native_filters=_load(row["native_filters_json"], {}),
+                expected_signal=str(row["expected_signal"]),
+                expected_artifact_family=str(row["expected_artifact_family"]),
+                query_id=str(row["query_id"]),
+            ),
+            str(row["program_id"]),
+        )
+
+    def ensure_query_frontier(self, *, limit: int = 100) -> int:
+        """Create idempotent durable QUERY tasks for executable query rows."""
+        if limit < 1:
+            return 0
+        now = float(self.clock())
+        rows = self.connection.execute(
+            """
+            SELECT q.query_id
+            FROM research_queries AS q
+            JOIN research_query_programs AS p
+              ON p.program_id=q.program_id
+            JOIN research_roots AS r
+              ON r.root_id=q.root_id
+            WHERE q.state IN ('READY','RETRYABLE')
+              AND (q.retry_at IS NULL OR q.retry_at<=?)
+              AND p.state='READY'
+              AND r.active=1
+            ORDER BY q.updated_at, q.query_id
+            LIMIT ?
+            """,
+            (now, int(limit)),
+        ).fetchall()
+        inserted = 0
+        for row in rows:
+            query_id = str(row["query_id"])
+            task_id = stable_hash("frontier-query", query_id)
+            before = self.connection.total_changes
+            self.enqueue_frontier(
+                FrontierTask(
+                    task_id=task_id,
+                    task_kind="QUERY",
+                    entity_id=query_id,
+                )
+            )
+            inserted += int(self.connection.total_changes > before)
+        return inserted
+
+    def latest_decision_for_task(self, task_id: str) -> DecisionRecord | None:
+        row = self.connection.execute(
+            """
+            SELECT decision_id
+            FROM research_decisions
+            WHERE task_id=?
+            ORDER BY chosen_at DESC, decision_id DESC
+            LIMIT 1
+            """,
+            (task_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return self.get_decision(str(row["decision_id"]))
+
     def query_checkpoint(self, query_id: str) -> SearchCheckpoint | None:
         row = self.connection.execute(
             "SELECT checkpoint_json FROM research_queries WHERE query_id=?",
