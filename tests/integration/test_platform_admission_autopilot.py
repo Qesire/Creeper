@@ -53,6 +53,7 @@ class PlatformAdmissionAutopilotIntegrationTests(unittest.TestCase):
                 max_requests=1,
                 max_bytes=1024,
                 max_seconds=30,
+                now=0.0,
             )
             control.save_lease(lease)
             keys = (
