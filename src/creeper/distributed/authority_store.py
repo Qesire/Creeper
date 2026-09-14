@@ -2977,21 +2977,43 @@ class DistributedAuthorityStore:
                 """
             ).fetchall()
         ]
-        providers = [
+        providers = []
+        for row in self.connection.execute(
+            """
+            SELECT * FROM distributed_provider_budgets
+            ORDER BY provider
+            """
+        ).fetchall():
+            snapshot = self.provider_budget_snapshot(str(row["provider"]))
+            providers.append(
+                {
+                    "provider": str(row["provider"]),
+                    "requests_per_second": float(row["requests_per_second"]),
+                    "max_global_inflight": int(row["max_global_inflight"]),
+                    "active_inflight": int(snapshot["active_inflight"]),
+                    "require_qualified_region": bool(
+                        row["require_qualified_region"]
+                    ),
+                    "next_request_at": float(row["next_request_at"]),
+                    "cooldown_until": float(row["cooldown_until"]),
+                }
+            )
+        provider_regions = [
             {
                 "provider": str(row["provider"]),
-                "requests_per_second": float(row["requests_per_second"]),
-                "max_global_inflight": int(row["max_global_inflight"]),
-                "require_qualified_region": bool(
-                    row["require_qualified_region"]
-                ),
-                "next_request_at": float(row["next_request_at"]),
-                "cooldown_until": float(row["cooldown_until"]),
+                "region": str(row["region"]),
+                "state": str(row["state"]),
+                "samples": int(row["samples"]),
+                "successes": int(row["successes"]),
+                "timeouts": int(row["timeouts"]),
+                "policy_blocks": int(row["policy_blocks"]),
+                "response_bytes": int(row["response_bytes"]),
+                "updated_at": float(row["updated_at"]),
             }
             for row in self.connection.execute(
                 """
-                SELECT * FROM distributed_provider_budgets
-                ORDER BY provider
+                SELECT * FROM distributed_provider_regions
+                ORDER BY provider, region
                 """
             ).fetchall()
         ]
@@ -3002,6 +3024,7 @@ class DistributedAuthorityStore:
             "source_candidates_by_state": candidate_states,
             "workers": workers,
             "provider_budgets": providers,
+            "provider_regions": provider_regions,
         }
 
     def task_row(self, task_id: str) -> sqlite3.Row | None:
