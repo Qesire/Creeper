@@ -323,6 +323,27 @@ class ResearchRegistry:
                 CHECK(requests_started >= 0)
                 """
             )
+            # Earlier revisions persisted query attempts but did not persist
+            # the program-wide request counter. Backfill conservatively from
+            # attempts so an upgrade never grants an already-used program a
+            # fresh network budget. attempts may overcount retry transitions;
+            # fail-closed overcount is preferable to exceeding the hard cap.
+            self.connection.execute(
+                """
+                UPDATE research_query_programs
+                SET requests_started = MIN(
+                    hard_max_requests,
+                    COALESCE(
+                        (
+                            SELECT SUM(q.attempts)
+                            FROM research_queries AS q
+                            WHERE q.program_id=research_query_programs.program_id
+                        ),
+                        0
+                    )
+                )
+                """
+            )
 
         query_columns = {
             str(row["name"])
