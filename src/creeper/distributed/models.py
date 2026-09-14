@@ -41,6 +41,7 @@ class WorkerDescriptor:
     capabilities: tuple[str, ...]
     producers: tuple[str, ...] = ()
     allowed_providers: tuple[str, ...] = ()
+    daily_egress_budget_bytes: int = 0
     protocol_version: str = FABRIC_PROTOCOL_VERSION
     edition_version: str = FABRIC_EDITION_VERSION
 
@@ -69,6 +70,8 @@ class WorkerDescriptor:
             raise ValueError("worker allowed providers must be unique")
         if any(not provider.strip() for provider in self.allowed_providers):
             raise ValueError("worker allowed provider names must be non-empty")
+        if self.daily_egress_budget_bytes < 0:
+            raise ValueError("worker daily egress budget must be non-negative")
         if not self.protocol_version.strip() or not self.edition_version.strip():
             raise ValueError("worker fabric version identity is required")
 
