@@ -281,6 +281,19 @@ FABRIC_CLOUDFLARE_WORKER_URL=https://creeper-fabric-thin.<account>.workers.dev \
   bash deploy/fabric/cloudflare-worker/smoke.sh
 ```
 
+Then submit one real exact-year thin task from the Local Authority host:
+
+```bash
+sudo -u creeper-fabric "$CONTROL" --config "$CONFIG" thin \
+  --hostname example.com \
+  --provider internet_archive \
+  --year 2001
+```
+
+The Cloudflare Cron should claim at most one eligible thin task per invocation.
+This lane is positive-only: an empty provider response completes the task but
+does not create negative resolution coverage.
+
 ## 9. End-to-end deployment order
 
 For a fresh deployment, use this exact order:
