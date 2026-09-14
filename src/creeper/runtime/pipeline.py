@@ -378,6 +378,14 @@ class SyncRuntime:
             if direct_capsules:
                 capsules += self.evidence_store.put_many(direct_capsules)
             assert result is not None
+            if not running.allows_result(result):
+                raise RuntimeError(
+                    "adapter result does not match lease identity or budget"
+                )
+            if result.records != source_records:
+                raise RuntimeError(
+                    "adapter result record count does not match emitted records"
+                )
             self.control_store.finalize_lease(
                 running,
                 next_cursor=result.next_cursor,
