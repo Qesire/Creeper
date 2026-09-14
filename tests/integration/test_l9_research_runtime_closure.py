@@ -4,6 +4,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import httpx
+
 from creeper.source_discovery.models import SourceCandidate, SourceLevel
 from creeper.source_discovery.registry import SourceDiscoveryRegistry
 from creeper.source_discovery.research_trigger import (
@@ -25,6 +27,7 @@ from creeper.source_research.models import (
     RootSurface,
 )
 from creeper.source_research.registry import ResearchRegistry
+from creeper.source_discovery_service import _root_query_runtime_adapters
 from creeper.storage.control_store import ControlStore
 
 
@@ -199,6 +202,109 @@ class L9ResearchRuntimeClosureTests(unittest.IsolatedAsyncioTestCase):
                     exposure_lineage[0]["decision_id"],
                     decision.decision_id,
                 )
+            finally:
+                control.close()
+
+    async def test_service_runtime_consumes_durable_root_query_frontier(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            control = ControlStore(Path(tmp) / "control.sqlite3")
+            calls: list[str] = []
+            try:
+                discovery = SourceDiscoveryRegistry(control)
+                research = ResearchRegistry(control)
+                bridge = ResearchIntegrationBridge(research, discovery)
+                research.upsert_root(
+                    RootSurface(
+                        root_id="datacite",
+                        kind=RootKind.STRUCTURED_REPOSITORY,
+                        canonical_locator="https://api.datacite.org/dois",
+                        capabilities=("search", "artifacts"),
+                    )
+                )
+                query = RootQuery(
+                    root_id="datacite",
+                    query_text="historical web index",
+                    max_pages=1,
+                    max_wall_seconds=30.0,
+                    page_size=10,
+                    expected_artifact_family="CDXJ",
+                )
+                program = QueryProgram(
+                    root_id="datacite",
+                    strategy="seed",
+                    queries=(query,),
+                    hard_max_requests=1,
+                    stop_conditions=("terminal_page",),
+                )
+                research.register_program(program)
+
+                def handler(request: httpx.Request) -> httpx.Response:
+                    calls.append(str(request.url))
+                    return httpx.Response(
+                        200,
+                        json={
+                            "data": [
+                                {
+                                    "id": "10.1234/root-runtime",
+                                    "attributes": {
+                                        "titles": [{"title": "historical index"}],
+                                        "contentUrl": [
+                                            "https://objects.example/history.cdxj"
+                                        ],
+                                    },
+                                }
+                            ],
+                            "links": {"next": None},
+                        },
+                    )
+
+                async with httpx.AsyncClient(
+                    transport=httpx.MockTransport(handler),
+                    trust_env=False,
+                ) as client:
+                    planner, executor = _root_query_runtime_adapters(
+                        research,
+                        bridge,
+                        client,
+                        parallelism=1,
+                    )
+                    tasks = planner()
+                    self.assertEqual(len(tasks), 1)
+                    self.assertEqual(tasks[0].state, FrontierState.CLAIMED)
+
+                    result = await executor(tasks[0])
+                    self.assertTrue(result.terminal)
+                    self.assertEqual(result.sources_inserted, 1)
+                    self.assertEqual(len(calls), 1)
+
+                    query_row = research.get_query_row(query.query_id)
+                    self.assertEqual(query_row["state"], QueryState.COMPLETE.value)
+                    self.assertEqual(
+                        research.get_frontier(tasks[0].task_id).state,
+                        FrontierState.DONE,
+                    )
+                    candidates = discovery.list_candidates()
+                    self.assertEqual(len(candidates), 1)
+                    self.assertEqual(
+                        candidates[0].canonical_entrypoint,
+                        "https://objects.example/history.cdxj",
+                    )
+                    self.assertEqual(candidates[0].direct_evidence_prior, 1.0)
+                    self.assertEqual(
+                        candidates[0].discovery_strategy,
+                        "structured_root_artifact",
+                    )
+                    lineage = research.artifact_lineage(
+                        source_key=candidates[0].source_key
+                    )
+                    self.assertEqual(len(lineage), 1)
+                    self.assertEqual(lineage[0]["query_id"], query.query_id)
+                    self.assertEqual(lineage[0]["program_id"], program.program_id)
+                    self.assertEqual(lineage[0]["root_id"], "datacite")
+
+                    # Terminal durable work is not replayed on the next cycle.
+                    self.assertEqual(planner(), ())
+                    self.assertEqual(len(calls), 1)
             finally:
                 control.close()
 
