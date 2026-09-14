@@ -152,6 +152,10 @@ class CommandAgentSearchExecutorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(request["target_year_from"], 1996)
         self.assertEqual(request["target_year_to"], 2001)
         self.assertTrue(request["requirements"]["prefer_metasources"])
+        self.assertFalse(request["requirements"]["prefer_direct_evidence_bulk"])
+        self.assertFalse(
+            request["requirements"]["prefer_catalogs_that_enumerate_direct_evidence_bulk"]
+        )
 
     async def test_hypothesis_template_is_expanded_and_attributed(self) -> None:
         executor = self.executor("hypothesis")
