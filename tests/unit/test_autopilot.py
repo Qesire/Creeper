@@ -18,6 +18,7 @@ from creeper.autopilot import (
     run_autopilot,
 )
 from creeper.runtime.resource_governor import GovernorState, ResourceSample
+from creeper.evidence.providers.multi_cdx import CDXProviderConfig
 from creeper.source_cli import SourceProducerMode
 
 
@@ -87,6 +88,53 @@ class AutopilotTests(unittest.TestCase):
         self.assertIn("30.0", evidence)
         self.assertIn("--requests-per-second", evidence)
         self.assertIn("0.5", evidence)
+
+    def test_evidence_worker_receives_all_physical_cdx_providers(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            evidence_policy = EvidenceServicePolicy(
+                cdx_providers=(
+                    CDXProviderConfig(
+                        name="internet_archive",
+                        endpoint="https://web.archive.org/cdx/search/cdx",
+                        requests_per_second=0.5,
+                        max_inflight=2,
+                    ),
+                    CDXProviderConfig(
+                        name="arquivo_pt",
+                        endpoint="https://arquivo.pt/wayback/cdx",
+                        requests_per_second=1.0,
+                        max_inflight=3,
+                    ),
+                )
+            )
+            config = AutopilotConfig(
+                source_discovery_config=root / "discovery.toml",
+                source_producer_config=root / "producer.toml",
+                runtime_data_root=root / "runtime",
+                supervisor=SupervisorPolicy(),
+                evidence=evidence_policy,
+            )
+            specs = build_child_specs(config)
+
+        evidence = specs[2].argv
+        self.assertEqual(evidence.count("--cdx-provider-json"), 2)
+        payloads = [
+            json.loads(evidence[index + 1])
+            for index, value in enumerate(evidence)
+            if value == "--cdx-provider-json"
+        ]
+        self.assertEqual(
+            {payload["name"] for payload in payloads},
+            {"internet_archive", "arquivo_pt"},
+        )
+        self.assertEqual(
+            {payload["endpoint"] for payload in payloads},
+            {
+                "https://web.archive.org/cdx/search/cdx",
+                "https://arquivo.pt/wayback/cdx",
+            },
+        )
 
     def test_platform_harvest_uses_independent_supervised_budget(self):
         with tempfile.TemporaryDirectory() as tmp:
