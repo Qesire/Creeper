@@ -7,6 +7,7 @@ from pathlib import Path
 from creeper.distributed.authority_store import (
     BatchConflictError,
     DistributedAuthorityStore,
+    ProviderRegionNotQualifiedError,
     StaleLeaseError,
 )
 from creeper.distributed.identity import (
@@ -307,6 +308,7 @@ class DistributedAuthorityTests(unittest.TestCase):
             "internet_archive",
             requests_per_second=1_000_000.0,
             max_global_inflight=1,
+            require_qualified_region=False,
         )
         self.store.admit_work(self.work("a.example"))
         self.store.admit_work(self.work("b.example"))
@@ -343,6 +345,50 @@ class DistributedAuthorityTests(unittest.TestCase):
             generation=lease_b.generation,
         )
         self.assertIsNotNone(permit_b)
+
+    def test_formal_provider_permit_requires_qualified_region(self) -> None:
+        self.store.configure_provider_budget(
+            "internet_archive",
+            requests_per_second=10.0,
+            max_global_inflight=1,
+        )
+        self.store.admit_work(self.work("formal.example"))
+        lease = self.store.claim_work(self.worker_a.worker_id)
+        assert lease is not None
+
+        with self.assertRaises(ProviderRegionNotQualifiedError):
+            self.store.issue_provider_permit(
+                "internet_archive",
+                worker_id=lease.worker_id,
+                task_id=lease.task_id,
+                generation=lease.generation,
+            )
+
+    def test_probe_task_can_access_provider_before_region_is_qualified(self) -> None:
+        self.store.configure_provider_budget(
+            "internet_archive",
+            requests_per_second=10.0,
+            max_global_inflight=1,
+        )
+        probe = WorkDefinition(
+            producer="RegionProbeProducer",
+            task_class=TaskClass.PROBE,
+            input_identity="internet_archive",
+            coverage={"provider": "internet_archive"},
+            partition="qualification",
+            algorithm_version="probe-v1",
+            required_capabilities=(Capability.ONLINE_QUERY.value,),
+        )
+        self.store.admit_work(probe)
+        lease = self.store.claim_work(self.worker_a.worker_id)
+        assert lease is not None
+        permit = self.store.issue_provider_permit(
+            "internet_archive",
+            worker_id=lease.worker_id,
+            task_id=lease.task_id,
+            generation=lease.generation,
+        )
+        self.assertIsNotNone(permit)
 
     def test_resolution_coverage_subtracts_overlapping_intervals(self) -> None:
         self.store.admit_work(self.work("coverage.example"))
@@ -449,6 +495,7 @@ class DistributedAuthorityTests(unittest.TestCase):
             "internet_archive",
             requests_per_second=1_000_000.0,
             max_global_inflight=2,
+            require_qualified_region=False,
         )
         self.store.admit_work(self.work("a.example"))
         self.store.admit_work(self.work("b.example"))
