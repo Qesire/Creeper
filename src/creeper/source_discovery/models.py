@@ -153,24 +153,43 @@ class SourceCandidate:
         object.__setattr__(self, "state", SourceState(self.state))
         if not isinstance(self.state_reason, str):
             raise ValueError("state_reason must be a string")
-        if self.activation_retry_at is not None and self.activation_retry_at < 0:
-            raise ValueError("activation_retry_at must be non-negative")
-        if self.activation_attempts < 0:
-            raise ValueError("activation_attempts must be non-negative")
-        if not self.source_family.strip():
+        if self.activation_retry_at is not None and (
+            isinstance(self.activation_retry_at, bool)
+            or not isinstance(self.activation_retry_at, (int, float))
+            or not math.isfinite(float(self.activation_retry_at))
+            or self.activation_retry_at < 0
+        ):
+            raise ValueError("activation_retry_at must be finite and non-negative")
+        if (
+            isinstance(self.activation_attempts, bool)
+            or not isinstance(self.activation_attempts, int)
+            or self.activation_attempts < 0
+        ):
+            raise ValueError("activation_attempts must be a non-negative integer")
+        if not isinstance(self.source_family, str) or not self.source_family.strip():
             raise ValueError("source_family is required")
-        if not self.discovered_by.strip() or not self.discovery_strategy.strip():
+        if any(
+            not isinstance(value, str) or not value.strip()
+            for value in (self.discovered_by, self.discovery_strategy)
+        ):
             raise ValueError("source discovery attribution is required")
         if (self.expected_year_from is None) != (self.expected_year_to is None):
             raise ValueError("expected year bounds must be both set or both omitted")
-        if (
-            self.expected_year_from is not None
-            and self.expected_year_to is not None
-            and self.expected_year_from > self.expected_year_to
+        if self.expected_year_from is not None:
+            if any(
+                isinstance(value, bool) or not isinstance(value, int)
+                for value in (self.expected_year_from, self.expected_year_to)
+            ):
+                raise ValueError("expected year bounds must be integers")
+            assert self.expected_year_to is not None
+            if self.expected_year_from > self.expected_year_to:
+                raise ValueError("expected year range is reversed")
+        if self.expected_volume is not None and (
+            isinstance(self.expected_volume, bool)
+            or not isinstance(self.expected_volume, int)
+            or self.expected_volume < 0
         ):
-            raise ValueError("expected year range is reversed")
-        if self.expected_volume is not None and self.expected_volume < 0:
-            raise ValueError("expected_volume must be non-negative")
+            raise ValueError("expected_volume must be a non-negative integer")
         for name in (
             "temporal_semantics_prior",
             "enumerability_prior",
@@ -178,11 +197,17 @@ class SourceCandidate:
             "baseline_overlap_prior",
             "confidence",
         ):
-            value = float(getattr(self, name))
+            raw = getattr(self, name)
+            if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+                raise ValueError(f"{name} must be numeric within [0, 1]")
+            value = float(raw)
             if not math.isfinite(value) or not 0.0 <= value <= 1.0:
                 raise ValueError(f"{name} must be within [0, 1]")
         for name in ("access_cost_prior", "adapter_cost_prior"):
-            value = float(getattr(self, name))
+            raw = getattr(self, name)
+            if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+                raise ValueError(f"{name} must be a finite non-negative number")
+            value = float(raw)
             if not math.isfinite(value) or value < 0:
                 raise ValueError(f"{name} must be finite and non-negative")
 
@@ -289,20 +314,26 @@ class ScoutMeasurement:
             "singleton_observations",
             "doubleton_observations",
         ):
-            if getattr(self, name) < 0:
-                raise ValueError(f"{name} must be non-negative")
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError(f"{name} must be a non-negative integer")
         if self.novel_hosts > self.unique_hosts:
             raise ValueError("novel_hosts cannot exceed unique_hosts")
         if self.novel_host_year_pairs > self.observed_host_year_pairs:
             raise ValueError("novel_host_year_pairs cannot exceed observed_host_year_pairs")
-        if not math.isfinite(self.elapsed_seconds) or self.elapsed_seconds < 0:
-            raise ValueError("elapsed_seconds must be finite and non-negative")
-        if not math.isfinite(self.novel_eed) or self.novel_eed < 0:
-            raise ValueError("novel_eed must be finite and non-negative")
-        if not math.isfinite(self.novel_pair_eed) or self.novel_pair_eed < 0:
-            raise ValueError("novel_pair_eed must be finite and non-negative")
+        for name in ("elapsed_seconds", "novel_eed", "novel_pair_eed"):
+            value = getattr(self, name)
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(float(value))
+                or value < 0
+            ):
+                raise ValueError(f"{name} must be finite and non-negative")
         if (
-            not math.isfinite(self.estimated_unseen_fraction)
+            isinstance(self.estimated_unseen_fraction, bool)
+            or not isinstance(self.estimated_unseen_fraction, (int, float))
+            or not math.isfinite(float(self.estimated_unseen_fraction))
             or not 0.0 <= self.estimated_unseen_fraction <= 1.0
         ):
             raise ValueError(
