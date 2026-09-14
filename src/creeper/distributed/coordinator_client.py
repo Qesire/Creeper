@@ -99,17 +99,22 @@ class CoordinatorClient:
             timestamp=timestamp,
             nonce=nonce,
         )
-        response = await self.client.post(
-            path,
-            content=body,
-            headers={
-                "Content-Type": "application/json",
-                "X-Creeper-Worker": self.worker_id,
-                "X-Creeper-Timestamp": timestamp,
-                "X-Creeper-Nonce": nonce,
-                "X-Creeper-Signature": signature,
-            },
-        )
+        try:
+            response = await self.client.post(
+                path,
+                content=body,
+                headers={
+                    "Content-Type": "application/json",
+                    "X-Creeper-Worker": self.worker_id,
+                    "X-Creeper-Timestamp": timestamp,
+                    "X-Creeper-Nonce": nonce,
+                    "X-Creeper-Signature": signature,
+                },
+            )
+        except (httpx.TimeoutException, httpx.TransportError) as exc:
+            raise CoordinatorError(
+                f"Authority transport unavailable: {type(exc).__name__}"
+            ) from exc
         try:
             value = response.json()
         except ValueError as exc:
