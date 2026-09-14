@@ -51,7 +51,10 @@ def main(argv: list[str] | None = None) -> int:
         config.host,
         allow_public_bind=bool(args.allow_public_bind),
     )
-    credentials = load_worker_credentials(config.credentials_file)
+    credentials = load_worker_credentials(
+        config.credentials_file,
+        allow_empty=True,
+    )
     if not config.baseline_index.is_file():
         raise FileNotFoundError(config.baseline_index)
     baseline = BaselineIndex(config.baseline_index)
