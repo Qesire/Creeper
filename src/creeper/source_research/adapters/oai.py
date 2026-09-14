@@ -6,7 +6,7 @@ from typing import Any
 from urllib.parse import urlparse
 import xml.etree.ElementTree as ET
 
-from .base import RootCapabilityReport, SearchCheckpoint, SearchHit, SearchPage, is_retryable, retry_after_seconds
+from .base import RootCapabilityReport, SearchCheckpoint, SearchHit, SearchPage, is_retryable, retry_delay_seconds
 
 _OAI_NS = "{http://www.openarchives.org/OAI/2.0/}"
 
@@ -82,7 +82,7 @@ class OAIAdapter:
         response = await self.transport(self.base_url, params, {"Accept": "text/xml, application/xml"})
         status = int(getattr(response, "status_code", 200))
         if is_retryable(response):
-            return SearchPage(next_checkpoint=cp, terminal=False, retry_after=retry_after_seconds(response))
+            return SearchPage(next_checkpoint=cp, terminal=False, retry_after=retry_delay_seconds(response))
         if not 200 <= status < 300:
             self.dead_reason = f"HTTP_{status}"
             return SearchPage(terminal=True)
