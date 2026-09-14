@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -355,6 +356,34 @@ class L9ResearchRuntimeClosureTests(unittest.IsolatedAsyncioTestCase):
                         FrontierState.DONE,
                     )
                     self.assertEqual(planner(), ())
+            finally:
+                control.close()
+
+    def test_metadata_suppression_fails_closed_on_schema_fault(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            control = ControlStore(Path(tmp) / "control.sqlite3")
+            try:
+                discovery = SourceDiscoveryRegistry(control)
+                research = ResearchRegistry(control)
+                ResearchIntegrationBridge(research, discovery)
+                candidate, _ = discovery.register_proposal(
+                    SourceCandidate(
+                        canonical_entrypoint="https://objects.example/broken.pdf",
+                        source_family="GENERIC",
+                        level=SourceLevel.SOURCE,
+                        discovered_by="test",
+                        discovery_strategy="META_SOURCE_SEARCH",
+                        confidence=1.0,
+                    )
+                )
+                control.connection.execute(
+                    """
+                    ALTER TABLE research_artifact_prefilter
+                    RENAME COLUMN locator TO broken_locator
+                    """
+                )
+                with self.assertRaises(sqlite3.OperationalError):
+                    discovery.suppression_reason(candidate)
             finally:
                 control.close()
 
