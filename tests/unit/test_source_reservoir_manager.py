@@ -111,7 +111,7 @@ class SourceReservoirManagerTests(unittest.TestCase):
         self.assertEqual(self.registry.get_candidate(fast.source_key).state, SourceState.WARM)
         self.assertFalse(plan.needs_search)
 
-    def test_direct_bulk_without_volume_hint_scouts_before_generic_source(self) -> None:
+    def test_direct_bulk_uses_background_scout_instead_of_foreground_slot(self) -> None:
         direct = SourceCandidate(
             canonical_entrypoint="https://archive.example/index.cdxj",
             source_family="BULK_ARTIFACT",
@@ -159,7 +159,54 @@ class SourceReservoirManagerTests(unittest.TestCase):
 
         plan = manager.plan()
 
-        self.assertEqual(plan.scout_source_keys, (direct.source_key,))
+        self.assertEqual(plan.scout_source_keys, (generic.source_key,))
+        self.assertEqual(
+            plan.background_scout_source_keys,
+            (direct.source_key,),
+        )
+
+    def test_arquivo_cdx_catalog_is_background_but_loc_root_stays_foreground(self) -> None:
+        arquivo = SourceCandidate(
+            canonical_entrypoint="https://arquivo.pt/datasets/cdxj/",
+            source_family="PUBLIC_ARCHIVE_INDEX_CATALOG",
+            level=SourceLevel.METASOURCE,
+            discovered_by="curated-official-seed",
+            discovery_strategy="CURATED_DIRECT_CATALOG",
+            confidence=1.0,
+        )
+        loc = SourceCandidate(
+            canonical_entrypoint=(
+                "https://data.labs.loc.gov/us-elections/"
+                "by-year/2000/manifest.html"
+            ),
+            source_family="PUBLIC_ARCHIVE_INDEX_CATALOG",
+            level=SourceLevel.METASOURCE,
+            discovered_by="curated-official-seed",
+            discovery_strategy="CURATED_DIRECT_CATALOG",
+            confidence=1.0,
+        )
+        self.registry.register_proposal(arquivo)
+        self.registry.register_proposal(loc)
+        manager = SourceReservoirManager(
+            self.registry,
+            targets=SourcePoolTargets(
+                active_min=0,
+                active_target=0,
+                warm_min=0,
+                warm_target=0,
+                cold_min=0,
+                cold_target=0,
+                triage_batch=1,
+            ),
+        )
+
+        plan = manager.plan()
+
+        self.assertEqual(plan.triage_source_keys, (loc.source_key,))
+        self.assertEqual(
+            plan.background_triage_source_keys,
+            (arquivo.source_key,),
+        )
 
     def test_existing_cold_reserve_is_consumed_before_agent_search(self) -> None:
         first = self.candidate("cold-a", confidence=0.9)
@@ -215,7 +262,7 @@ class SourceReservoirManagerTests(unittest.TestCase):
         self.assertEqual(len(siblings), 2353)
         self.assertEqual(manager._effective_cold_count(siblings), 12)
 
-    def test_same_origin_flood_with_no_direct_inventory_forces_direct_search(self) -> None:
+    def test_same_origin_flood_does_not_reserve_cdx_search_arm(self) -> None:
         for index in range(20):
             self.to_scout_ready(
                 self.candidate(
@@ -241,11 +288,13 @@ class SourceReservoirManagerTests(unittest.TestCase):
 
         self.assertEqual(plan.cold_count, 20)
         self.assertEqual(plan.effective_cold_count, 12)
-        self.assertEqual(
-            [item.strategy for item in plan.search_directives],
-            ["DIRECT_EVIDENCE_BULK"],
+        self.assertFalse(plan.needs_search)
+        self.assertFalse(
+            any(
+                item.strategy == "DIRECT_EVIDENCE_BULK"
+                for item in plan.search_directives
+            )
         )
-        self.assertEqual(plan.search_directives[0].desired_candidates, 1)
 
     def test_hold_metasource_bypasses_leaf_cold_gate(self) -> None:
         direct = self.candidate(
@@ -395,9 +444,11 @@ class SourceReservoirManagerTests(unittest.TestCase):
         plan = manager.plan()
 
         self.assertLessEqual(len(plan.search_directives), 2)
-        self.assertEqual(
-            plan.search_directives[0].strategy,
-            "DIRECT_EVIDENCE_BULK",
+        self.assertFalse(
+            any(
+                item.strategy in {"DIRECT_EVIDENCE_BULK", "EXPLOIT_DIRECT_ORIGIN"}
+                for item in plan.search_directives
+            )
         )
 
     def test_suppressed_candidate_receives_no_effective_cold_credit(self) -> None:
@@ -458,26 +509,47 @@ class SourceReservoirManagerTests(unittest.TestCase):
 
         plan = manager.plan()
 
-        self.assertEqual(
-            [directive.kind for directive in plan.search_directives],
-            [
-                SearchDirectiveKind.DIRECT_EVIDENCE,
-                SearchDirectiveKind.EXPLOIT_SOURCE_FAMILY,
-                SearchDirectiveKind.REFILL_RESERVOIR,
-            ],
+        self.assertEqual(len(plan.search_directives), 3)
+        self.assertFalse(
+            any(
+                directive.strategy
+                in {"DIRECT_EVIDENCE_BULK", "EXPLOIT_DIRECT_ORIGIN"}
+                for directive in plan.search_directives
+            )
         )
-        self.assertEqual(plan.search_directives[0].strategy, "DIRECT_EVIDENCE_BULK")
-        self.assertEqual(plan.search_directives[1].subject, "HIGH_YIELD_FAMILY")
-        self.assertEqual(plan.search_directives[1].strategy, "EXPLOIT_SUCCESS")
-        self.assertEqual(plan.search_directives[2].strategy, "META_SOURCE_SEARCH")
-        self.assertEqual(len({item.dedup_key for item in plan.search_directives}), 3)
+        exploit = next(
+            directive
+            for directive in plan.search_directives
+            if directive.kind is SearchDirectiveKind.EXPLOIT_SOURCE_FAMILY
+        )
+        self.assertEqual(exploit.subject, "HIGH_YIELD_FAMILY")
+        self.assertEqual(exploit.strategy, "EXPLOIT_SUCCESS")
+        self.assertTrue(
+            any(
+                directive.kind is SearchDirectiveKind.REFILL_RESERVOIR
+                for directive in plan.search_directives
+            )
+        )
+        self.assertTrue(
+            any(
+                directive.kind is SearchDirectiveKind.DISCOVER_NEW_FAMILY
+                for directive in plan.search_directives
+            )
+        )
 
-    def test_cold_refill_exploits_proven_direct_origin(self) -> None:
-        proven = self.candidate(
-            "index.cdxj",
-            family="BULK_ARTIFACT",
+    def test_proven_cdxj_stays_background_and_never_drives_agent_search(self) -> None:
+        proven = SourceCandidate(
+            canonical_entrypoint="https://archive.example/index.cdxj",
+            source_family="BULK_ARTIFACT",
+            level=SourceLevel.SOURCE,
+            discovered_by="arquivo-catalog:test",
+            discovery_strategy="DETERMINISTIC_AUDITED_CATALOG_EXPANSION",
+            expected_volume=100_000,
+            temporal_semantics_prior=1.0,
+            enumerability_prior=1.0,
             direct_evidence_prior=1.0,
-            origin="https://archive.example",
+            baseline_overlap_prior=0.5,
+            confidence=1.0,
         )
         self.to_warm(
             proven,
@@ -501,16 +573,15 @@ class SourceReservoirManagerTests(unittest.TestCase):
         plan = manager.plan()
 
         self.assertEqual(
-            plan.search_directives[0].strategy,
-            "DIRECT_EVIDENCE_BULK",
+            plan.background_activate_source_keys,
+            (proven.source_key,),
         )
-        self.assertEqual(
-            plan.search_directives[1].strategy,
-            "EXPLOIT_DIRECT_ORIGIN",
-        )
-        self.assertEqual(
-            plan.search_directives[1].subject,
-            "https://archive.example",
+        self.assertFalse(
+            any(
+                directive.strategy
+                in {"DIRECT_EVIDENCE_BULK", "EXPLOIT_DIRECT_ORIGIN"}
+                for directive in plan.search_directives
+            )
         )
 
     def test_refill_uses_best_observed_search_strategy(self) -> None:

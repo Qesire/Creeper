@@ -147,6 +147,9 @@ class CoordinatorCycleReport:
     search_candidates_dropped: int = 0
     search_failures: int = 0
     search_backoff_skipped: int = 0
+    background_bulk_steps: int = 0
+    background_bulk_deferred: int = 0
+    background_activated: int = 0
 
 
 T = TypeVar("T")
@@ -659,6 +662,9 @@ class SourceDiscoveryCoordinator:
                 "search_candidates_dropped": 0,
                 "search_failures": 0,
                 "search_backoff_skipped": search_backoff_skipped,
+                "background_bulk_steps": 0,
+                "background_bulk_deferred": 0,
+                "background_activated": 0,
             }
 
             for source_key in plan.activate_source_keys:
@@ -676,15 +682,67 @@ class SourceDiscoveryCoordinator:
             ]
             scout_candidates = self._claim_scouts(plan.scout_source_keys)
 
-            # Search, triage, and scout I/O are independent pipeline stages and
-            # run concurrently. No executor receives the SQLite connection.
+            # Deterministic bulk catalogs/shards are background work. They never
+            # consume a foreground triage/scout/search slot. Exactly one
+            # background step may run only when the foreground plan is empty.
+            background_triage_candidates: list[SourceCandidate] = []
+            background_scout_candidates: list[SourceCandidate] = []
+            has_background = bool(
+                plan.background_triage_source_keys
+                or plan.background_scout_source_keys
+                or plan.background_activate_source_keys
+            )
+            foreground_busy = bool(
+                plan.activate_source_keys
+                or triage_candidates
+                or scout_candidates
+                or search_directives
+            )
+            if has_background and foreground_busy:
+                counts["background_bulk_deferred"] += 1
+            elif plan.background_activate_source_keys:
+                source_key = plan.background_activate_source_keys[0]
+                candidate = self.registry.get_candidate(source_key)
+                if candidate is not None and candidate.state is SourceState.WARM:
+                    self.registry.begin_activation(source_key)
+                    counts["activated"] += 1
+                    counts["background_activated"] += 1
+                    counts["background_bulk_steps"] += 1
+            elif plan.background_scout_source_keys:
+                background_scout_candidates = self._claim_scouts(
+                    plan.background_scout_source_keys[:1]
+                )
+                counts["background_bulk_steps"] += len(
+                    background_scout_candidates
+                )
+            elif plan.background_triage_source_keys:
+                candidate = self.registry.get_candidate(
+                    plan.background_triage_source_keys[0]
+                )
+                if (
+                    candidate is not None
+                    and candidate.state is SourceState.DISCOVERED
+                    and self.registry.suppression_reason(candidate) is None
+                ):
+                    background_triage_candidates = [candidate]
+                    counts["background_bulk_steps"] += 1
+
+            all_triage_candidates = (
+                triage_candidates + background_triage_candidates
+            )
+            all_scout_candidates = (
+                scout_candidates + background_scout_candidates
+            )
+
+            # Foreground search/triage/scout work still overlaps. Background
+            # bulk work appears here only when those foreground lists are empty.
             triage_task = self._bounded_batch(
-                triage_candidates,
+                all_triage_candidates,
                 self.triage_executor,
                 self.triage_parallelism,
             )
             scout_task = self._bounded_batch(
-                scout_candidates,
+                all_scout_candidates,
                 self.scout_executor,
                 self.scout_parallelism,
             )
@@ -701,8 +759,8 @@ class SourceDiscoveryCoordinator:
 
             # All durable mutations return to this coordinator task. This keeps
             # the sqlite3 connection thread-confined while external I/O remains concurrent.
-            self._commit_triage(triage_candidates, triage_outcomes, counts)
-            self._commit_scouts(scout_candidates, scout_outcomes, counts)
+            self._commit_triage(all_triage_candidates, triage_outcomes, counts)
+            self._commit_scouts(all_scout_candidates, scout_outcomes, counts)
             self._commit_searches(search_directives, search_outcomes, counts)
 
             return CoordinatorCycleReport(**counts)

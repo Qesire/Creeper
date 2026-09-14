@@ -923,6 +923,84 @@ class SourceProducerTests(unittest.TestCase):
         self.assertIsNotNone(granted)
         self.assertEqual(granted[0].source_key, "new-source")
 
+    def test_background_bulk_never_leapfrogs_foreground_source(self):
+        class Registry:
+            def source_run_count(self, _source_key):
+                return 0
+
+        runtime, _adapter, base = self.build_direct_runtime(
+            backlog_capacities={},
+            owner="background-priority-test",
+        )
+        foreground = replace(
+            base,
+            source_key="foreground-source",
+            expected_novel_eed=1.0,
+            lease=replace(base.lease, resource_class="default"),
+        )
+        background_reservoir = replace(
+            base.reservoir,
+            reservoir_id="background-bulk-reservoir",
+        )
+        self.control.save_reservoir(background_reservoir)
+        background = replace(
+            base,
+            reservoir_id=background_reservoir.reservoir_id,
+            reservoir=background_reservoir,
+            source_key="background-source",
+            expected_novel_eed=1000.0,
+            production_value_score=1000.0,
+            lease=replace(
+                base.lease,
+                reservoir_id=background_reservoir.reservoir_id,
+                resource_class="background-bulk",
+            ),
+        )
+        runtime.candidates = (background, foreground)
+        runtime.source_registry = Registry()
+
+        granted = runtime._grant_fresh_lease()
+
+        self.assertIsNotNone(granted)
+        self.assertEqual(granted[0].source_key, "foreground-source")
+        self.assertEqual(granted[1].resource_class, "default")
+
+    def test_background_bulk_uses_capacity_when_foreground_is_backpressured(self):
+        occupied = EvidenceQueryKey(
+            "occupied.example", TemporalScope(1997, 1997), "wayback", "cdx-v1"
+        )
+        self.control.enqueue_evidence_tasks([occupied])
+        runtime, _adapter = self.build_runtime(backlog_capacity=1)
+        foreground = runtime.candidates[0]
+        background_reservoir = replace(
+            foreground.reservoir,
+            reservoir_id="idle-background-reservoir",
+            evidence_mode="direct_year",
+        )
+        self.control.save_reservoir(background_reservoir)
+        background = replace(
+            foreground,
+            reservoir_id=background_reservoir.reservoir_id,
+            reservoir=background_reservoir,
+            source_key="idle-background-source",
+            evidence_mode="direct_year",
+            expected_evidence_tasks=0,
+            reservation_evidence_tasks=0,
+            lease=replace(
+                foreground.lease,
+                reservoir_id=background_reservoir.reservoir_id,
+                resource_class="background-bulk",
+                expected_evidence_tasks=0,
+            ),
+        )
+        runtime.candidates = (foreground, background)
+
+        granted = runtime._grant_fresh_lease()
+
+        self.assertIsNotNone(granted)
+        self.assertEqual(granted[0].source_key, "idle-background-source")
+        self.assertEqual(granted[1].resource_class, "background-bulk")
+
     def test_full_backlog_blocks_source_before_adapter_execution(self):
         occupied = EvidenceQueryKey(
             "occupied.example", TemporalScope(1997, 1997), "wayback", "cdx-v1"

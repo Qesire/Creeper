@@ -25,8 +25,8 @@ class CuratedSourceSeedTests(unittest.TestCase):
         )
         self.assertTrue(
             any(
-                "data.labs.loc.gov/us-elections/by-year/2000/manifest.html"
-                in item.canonical_entrypoint
+                item.canonical_entrypoint
+                == "https://data.labs.loc.gov/us-elections/"
                 for item in seeds
             )
         )

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import fcntl
+import os
 import tempfile
 import threading
 import unittest
@@ -476,9 +478,36 @@ class HistoricalIndexOptimizerTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(index_region_optimizer_eligible(indexes[0]))
             self.assertEqual(runtime._eligible_ready_indexes(), [])
 
+    async def test_background_optimizer_defers_while_discovery_cycle_is_active(
+        self,
+    ) -> None:
+        lock_path = self.runtime / "source-discovery" / "coordinator.lock"
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        try:
+            config = self._config()
+            async with HistoricalIndexOptimizerRuntime(
+                config,
+                owner="background-gate-test",
+            ) as runtime:
+                report = await runtime.run_once()
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
+
+        self.assertTrue(report.background_deferred)
+        self.assertIn(
+            "source-discovery coordinator",
+            report.background_defer_reason or "",
+        )
+        self.assertEqual(report.probe_requests, 0)
+        self.assertEqual(report.harvest_requests, 0)
+
     def test_disabled_config_is_explicit_and_non_destructive(self) -> None:
         config = self._config(enabled=False)
         self.assertFalse(config.enabled)
+        self.assertTrue(config.background_only)
 
 
 if __name__ == "__main__":

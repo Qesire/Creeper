@@ -10,6 +10,7 @@ from creeper.source_discovery.models import (
     SourceCandidate,
     SourceLevel,
     SourceState,
+    is_background_bulk_candidate,
 )
 from creeper.source_discovery.overlap import MinHashSketch
 from creeper.source_discovery.registry import SourceDiscoveryRegistry
@@ -100,6 +101,9 @@ class ReservoirPlan:
     scout_source_keys: tuple[str, ...]
     activate_source_keys: tuple[str, ...]
     search_directives: tuple[SearchDirective, ...]
+    background_triage_source_keys: tuple[str, ...] = ()
+    background_scout_source_keys: tuple[str, ...] = ()
+    background_activate_source_keys: tuple[str, ...] = ()
 
     @property
     def needs_search(self) -> bool:
@@ -111,9 +115,8 @@ class SourceReservoirManager:
 
     Search is consumption-driven, but cold inventory receives bounded credit
     per origin so thousands of sibling shards cannot masquerade as independent
-    discovery opportunities. Direct-inventory starvation and structural HOLD
-    metasources may bypass the ordinary cold refill gate while retaining the
-    existing bounded search concurrency and cooldown controls.
+    discovery opportunities. Deterministic CDX/CDXJ work is excluded from this
+    foreground inventory and advances only on the idle background lane.
     """
 
     _COLD_STATES = frozenset(
@@ -166,7 +169,10 @@ class SourceReservoirManager:
         """
         per_origin: dict[str, int] = {}
         for candidate in candidates:
-            if candidate.state not in self._COLD_STATES:
+            if (
+                candidate.state not in self._COLD_STATES
+                or is_background_bulk_candidate(candidate)
+            ):
                 continue
             per_origin[candidate.origin] = per_origin.get(candidate.origin, 0) + 1
         cap = self.targets.max_cold_credit_per_origin
@@ -189,10 +195,13 @@ class SourceReservoirManager:
                 state=SourceState.HOLD
             )
             if (
-                candidate.source_family
-                in {"RESOURCE_CATALOG", "RESOURCE_DIRECTORY"}
-                or candidate.level
-                in {SourceLevel.COLLECTION, SourceLevel.METASOURCE}
+                (
+                    candidate.source_family
+                    in {"RESOURCE_CATALOG", "RESOURCE_DIRECTORY"}
+                    or candidate.level
+                    in {SourceLevel.COLLECTION, SourceLevel.METASOURCE}
+                )
+                and not is_background_bulk_candidate(candidate)
             )
             and self.registry.suppression_reason(candidate) is None
         ]
@@ -409,12 +418,8 @@ class SourceReservoirManager:
         candidates: list[SourceCandidate],
     ) -> tuple[SearchDirective, ...]:
         ordinary_refill = effective_cold_count < self.targets.cold_min
-        direct_starved = not any(
-            self._is_productive_direct_inventory(candidate)
-            for candidate in candidates
-        )
         structural_holds = self._structural_holds()
-        if not ordinary_refill and not direct_starved and not structural_holds:
+        if not ordinary_refill and not structural_holds:
             return ()
 
         # Normal refill demand is measured against the diversity-bounded pool.
@@ -450,25 +455,6 @@ class SourceReservoirManager:
             seen.add(dedup_key)
             specs.append((kind, strategy, subject, reason, task_type))
 
-        # Direct timestamp-bearing bulk indexes bypass the scarce per-host
-        # Wayback evidence lane. Keep this arm for ordinary refill and reserve
-        # it as an emergency when no WARM/ACTIVE direct inventory exists.
-        if ordinary_refill or direct_starved:
-            direct_reason = (
-                "no WARM/ACTIVE direct-evidence source is available; reserve "
-                "one bounded direct-source discovery arm"
-                if direct_starved
-                else "prioritize timestamp-bearing bulk indexes that can "
-                "directly produce host-year evidence"
-            )
-            add_spec(
-                SearchDirectiveKind.DIRECT_EVIDENCE,
-                "DIRECT_EVIDENCE_BULK",
-                "cdx/cdxj archive indexes and manifests",
-                direct_reason,
-                SourceIntelligenceTask.DISCOVER_NEW_SOURCE,
-            )
-
         if structural_holds:
             subject_candidate = structural_holds[0]
             add_spec(
@@ -483,20 +469,6 @@ class SourceReservoirManager:
             )
 
         if ordinary_refill:
-            best_direct_origin = self._best_measured_direct_origin(candidates)
-            if best_direct_origin is not None:
-                origin, value = best_direct_origin
-                add_spec(
-                    SearchDirectiveKind.DIRECT_EVIDENCE,
-                    "EXPLOIT_DIRECT_ORIGIN",
-                    origin,
-                    (
-                        "search the same archive origin for sibling CDX/CDXJ "
-                        f"resources; measured direct yield={value:.6g} novel EED/s"
-                    ),
-                    SourceIntelligenceTask.EXPLOIT_SUCCESS_PATTERN,
-                )
-
             best_family = self._best_measured_family(candidates)
             if projected_warm < self.targets.warm_min and best_family is not None:
                 family, value = best_family
@@ -536,14 +508,9 @@ class SourceReservoirManager:
                     SourceIntelligenceTask.RECOVER_STAGNATION,
                 )
 
-        # Keep the two operationally necessary arms stable:
-        # (1) direct timestamp-bearing evidence, (2) generic reservoir refill.
-        # The remaining opportunity slots are learned from final-EED/cost UCB.
-        direct = [
-            spec
-            for spec in specs
-            if spec[1] == "DIRECT_EVIDENCE_BULK"
-        ][:1]
+        # Search capacity is reserved for genuinely new source discovery and
+        # structural recovery. Deterministic CDX/CDXJ work advances on the
+        # background lane and never reserves an agent-search arm.
         refill = [
             spec
             for spec in specs
@@ -552,7 +519,7 @@ class SourceReservoirManager:
         optional = [
             spec
             for spec in specs
-            if spec not in direct and spec not in refill
+            if spec not in refill
         ]
         stagnating = self._is_stagnating()
         optional.sort(
@@ -582,8 +549,6 @@ class SourceReservoirManager:
                 SourceIntelligenceTask,
             ]
         ] = []
-        if direct and len(selected) < capacity:
-            selected.extend(direct)
         optional_slots = max(
             0,
             capacity - len(selected) - (1 if refill else 0),
@@ -623,8 +588,9 @@ class SourceReservoirManager:
         )
 
     def plan(self) -> ReservoirPlan:
-        # Terminal historical rows are audit state, not scheduling inventory.
-        # Keep the hot planner proportional to the live reservoir pool.
+        # Deterministic bulk artifacts/catalogs are not source-search inventory.
+        # They are still durable candidates, but progress only through the
+        # coordinator's idle background lane.
         schedulable_states = (
             SourceState.DISCOVERED,
             SourceState.TRIAGED,
@@ -636,16 +602,33 @@ class SourceReservoirManager:
         candidates = self._usable(
             self.registry.list_candidates_in_states(schedulable_states)
         )
+        foreground = [
+            candidate
+            for candidate in candidates
+            if not is_background_bulk_candidate(candidate)
+        ]
+        background = [
+            candidate
+            for candidate in candidates
+            if is_background_bulk_candidate(candidate)
+        ]
+
         by_state: dict[SourceState, list[SourceCandidate]] = {
             state: [] for state in SourceState
         }
-        for candidate in candidates:
+        for candidate in foreground:
             by_state[candidate.state].append(candidate)
+
+        background_by_state: dict[SourceState, list[SourceCandidate]] = {
+            state: [] for state in SourceState
+        }
+        for candidate in background:
+            background_by_state[candidate.state].append(candidate)
 
         active = by_state[SourceState.ACTIVE]
         warm = by_state[SourceState.WARM]
         cold_count = sum(len(by_state[state]) for state in self._COLD_STATES)
-        effective_cold_count = self._effective_cold_count(candidates)
+        effective_cold_count = self._effective_cold_count(foreground)
 
         warm_ranked = self._rank_warm(warm, active=active)
         activation_slots = max(0, self.targets.active_target - len(active))
@@ -677,8 +660,24 @@ class SourceReservoirManager:
         directives = self._search_directives(
             effective_cold_count=effective_cold_count,
             projected_warm=projected_warm,
-            candidates=candidates,
+            candidates=foreground,
         )
+
+        # Background work is intentionally serialized. The coordinator will
+        # execute at most one of these steps only when foreground work is empty.
+        background_triage = sorted(
+            background_by_state[SourceState.DISCOVERED],
+            key=lambda item: item.source_key,
+        )[:1]
+        background_scout = sorted(
+            background_by_state[SourceState.SCOUT_READY],
+            key=lambda item: item.source_key,
+        )[:1]
+        background_activate = self._rank_warm(
+            background_by_state[SourceState.WARM],
+            active=background_by_state[SourceState.ACTIVE],
+        )[:1]
+
         return ReservoirPlan(
             active_count=len(active),
             warm_count=len(warm),
@@ -688,4 +687,14 @@ class SourceReservoirManager:
             scout_source_keys=tuple(item.source_key for item in scout),
             activate_source_keys=tuple(item.source_key for item in activate),
             search_directives=directives,
+            background_triage_source_keys=tuple(
+                item.source_key for item in background_triage
+            ),
+            background_scout_source_keys=tuple(
+                item.source_key for item in background_scout
+            ),
+            background_activate_source_keys=tuple(
+                item.source_key for item in background_activate
+            ),
         )
+

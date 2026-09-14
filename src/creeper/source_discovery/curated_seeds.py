@@ -34,10 +34,7 @@ def curated_direct_catalogs() -> tuple[SourceCandidate, ...]:
             state=SourceState.DISCOVERED,
         ),
         SourceCandidate(
-            canonical_entrypoint=(
-                "https://data.labs.loc.gov/us-elections/"
-                "by-year/2000/manifest.html"
-            ),
+            canonical_entrypoint="https://data.labs.loc.gov/us-elections/",
             source_family="PUBLIC_ARCHIVE_INDEX_CATALOG",
             level=SourceLevel.METASOURCE,
             discovered_by="curated-official-seed",

@@ -194,20 +194,23 @@ class CommandAgentSearchExecutor:
             "target_year_to": 2001,
             "requirements": {
                 "prefer_metasources": True,
-                "prefer_direct_evidence_bulk": True,
+                # Deterministic CDX/CDXJ artifacts are background bulk work.
+                # Search capacity should find new roots/families, not spend an
+                # agent call rediscovering shards we can enumerate directly.
+                "prefer_direct_evidence_bulk": False,
                 "direct_evidence_suffixes": [
                     ".cdx", ".cdx.gz", ".cdxj", ".cdxj.gz"
                 ],
                 "direct_evidence_semantics": (
                     "capture timestamp + original URL rows for 1996-2001"
                 ),
-                "prefer_catalogs_that_enumerate_direct_evidence_bulk": True,
+                "prefer_catalogs_that_enumerate_direct_evidence_bulk": False,
                 "resource_priority": [
-                    "official archive directory or manifest enumerating CDX/CDXJ",
-                    "exact CDX/CDXJ bulk index with target-period captures",
-                    "archive collection manifest enumerating WARC/ARC or indexes",
-                    "large historical URL/domain dump overlapping 1996-2001",
-                    "generic historical source only if no bulk enumerator exists",
+                    "new official archive or historical-data metasource",
+                    "new archive collection root with machine-readable inventory",
+                    "new public dataset family overlapping 1996-2001",
+                    "large historical URL/domain source not already enumerated",
+                    "CDX/CDXJ only when surfaced incidentally by a new root",
                 ],
                 "search_targets": [
                     "national libraries and web archives",

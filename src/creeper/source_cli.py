@@ -40,6 +40,7 @@ from creeper.source_discovery.index_optimization import (
     index_region_optimizer_eligible,
 )
 from creeper.source_discovery.production_value import ProductionValueModel
+from creeper.source_discovery.models import is_direct_evidence_entrypoint
 from creeper.source_discovery.registry import SourceDiscoveryRegistry
 from creeper.storage.candidate_store import CandidateStore
 from creeper.storage.control_store import ControlStore
@@ -665,6 +666,11 @@ class ActivatedSourceRuntime:
                 max_requests=self.max_requests,
                 max_bytes=self.max_bytes,
                 max_seconds=self.max_seconds,
+                resource_class=(
+                    "background-bulk"
+                    if is_direct_evidence_entrypoint(spec.root_locator)
+                    else "default"
+                ),
                 expected_evidence_tasks=expected_tasks,
                 expected_novel_eed=expected_eed,
             )
