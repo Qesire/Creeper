@@ -25,6 +25,18 @@ def _text_event(text: str) -> str:
     return json.dumps({"type": "text", "part": {"type": "text", "text": text}})
 
 
+class SystemPolicyTests(unittest.TestCase):
+    def test_policy_binds_measured_negative_feedback(self) -> None:
+        self.assertIn(
+            "measured zero-yield terminal sources",
+            subagent._SYSTEM_POLICY,
+        )
+        self.assertIn(
+            "Never infer hostname opportunity from page/document/graph-node",
+            subagent._SYSTEM_POLICY,
+        )
+
+
 class ExtractFinalTextTests(unittest.TestCase):
     def test_concatenates_text_parts_joined_by_newline(self) -> None:
         stream = "\n".join(
