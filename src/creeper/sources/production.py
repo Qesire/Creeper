@@ -31,6 +31,7 @@ from creeper.sources.archive.warc_source import WarcSourceLeaseExecutor
 from creeper.sources.archive.cdxj import parse_cdxj_line
 from creeper.sources.archive.cdx import parse_cdx_line
 from creeper.sources.ftp_sitelist import parse_ftp_sitelist_zip
+from creeper.sources.mailbox_records import parse_mbox_messages
 from creeper.sources.non_snapshot import (
     extract_http_urls,
     parse_dmoz_external_page_line,
@@ -832,6 +833,220 @@ class StructuredProductionAdapter:
         return tuple(result)
 
 
+class MboxMessageProductionAdapter:
+    """Bounded message-level reader for monthly historical mbox shards."""
+
+    def __init__(
+        self,
+        reservoir: Reservoir,
+        *,
+        evidence_contract: SourceEvidenceContract | None = None,
+    ) -> None:
+        self.adapter_id = reservoir.adapter_id
+        self.source_id = reservoir.reservoir_id
+        self.source = reservoir.root_locator
+        bound_contract = contract_from_adapter_id(reservoir.adapter_id)
+        if (
+            evidence_contract is not None
+            and bound_contract is not None
+            and evidence_contract != bound_contract
+        ):
+            raise ProductionAdapterError(
+                "explicit evidence contract conflicts with durable adapter binding"
+            )
+        resolved_contract = (
+            evidence_contract
+            or bound_contract
+            or resolve_source_evidence_contract(
+                self.source,
+                parser_kind="mbox_urls",
+            )
+        )
+        if (
+            evidence_contract is None
+            and bound_contract is None
+            and reservoir.evidence_mode == "discovery_only"
+            and resolved_contract.evidence_mode == "direct_year"
+        ):
+            resolved_contract = discovery_only_contract("mbox_urls")
+        if resolved_contract.parser_kind != "mbox_urls":
+            raise ProductionAdapterError(
+                "evidence contract parser_kind does not match mbox source"
+            )
+        if reservoir.evidence_mode != resolved_contract.evidence_mode:
+            raise ProductionAdapterError(
+                "reservoir evidence_mode disagrees with frozen evidence contract"
+            )
+        self.evidence_contract = resolved_contract
+        self._records = None
+
+    @staticmethod
+    def _cursor_index(cursor: str | None) -> int:
+        if cursor is None:
+            return 0
+        if not cursor.startswith("message_record:"):
+            raise ProductionAdapterError("invalid mbox message cursor")
+        raw = cursor.removeprefix("message_record:")
+        if not raw.isdigit():
+            raise ProductionAdapterError("invalid mbox message cursor")
+        return int(raw)
+
+    def _load(self, *, max_bytes: int) -> tuple[int, int]:
+        if self._records is not None:
+            return 0, 0
+        if max_bytes < 1:
+            raise ProductionAdapterError(
+                "mbox first lease requires a positive byte budget"
+            )
+        try:
+            with fsspec.open(
+                self.source,
+                "rb",
+                block_size=0,
+            ).open() as stream:
+                payload = stream.read(max_bytes + 1)
+        except (OSError, ValueError) as exc:
+            raise ProductionAdapterError("unable to read mbox artifact") from exc
+        if len(payload) > max_bytes:
+            raise ProductionAdapterError("mbox artifact exceeds lease max_bytes")
+        self._records = parse_mbox_messages(
+            payload,
+            locator=self.source,
+            allow_truncated_tail=False,
+        )
+        return 1, len(payload)
+
+    def close(self) -> None:
+        return None
+
+    def execute_stream(
+        self,
+        lease: WorkLease,
+        emit_record: Callable[[SourceRecord], None],
+    ) -> LeaseResult:
+        started = time.monotonic()
+        start = self._cursor_index(lease.cursor_start)
+        if lease.max_records <= 0 or lease.max_seconds <= 0:
+            return LeaseResult(
+                lease.lease_id,
+                next_cursor=lease.cursor_start or "message_record:0",
+            )
+        if self._records is None and lease.max_requests <= 0:
+            return LeaseResult(
+                lease.lease_id,
+                next_cursor=lease.cursor_start or "message_record:0",
+            )
+
+        opened, bytes_read = self._load(max_bytes=lease.max_bytes)
+        assert self._records is not None
+        if start > len(self._records):
+            raise ProductionAdapterError("mbox cursor exceeds record count")
+
+        emitted = 0
+        index = start
+        downstream_wait_seconds = 0.0
+        while index < len(self._records) and emitted < lease.max_records:
+            if (
+                time.monotonic() - started - downstream_wait_seconds
+                >= lease.max_seconds
+            ):
+                break
+            item = self._records[index]
+            index += 1
+            bit = YEAR_BITS.get(item.year, 0)
+            if not bit:
+                continue
+
+            direct = self.evidence_contract.grants_direct_web_year
+            locator = f"{self.source}:message:{item.message_index}"
+            record = SourceRecord(
+                source_id=self.source_id,
+                locator=locator,
+                payload="\t".join(item.urls),
+                scope=CandidateSourceScope.LOCAL_DISCOVERY,
+                source_year=item.year,
+                source_time=item.source_time,
+                record_type="MBOX_MESSAGE_URLS",
+                artifact_ref=self.source,
+                direct_year_mask=(bit if direct else 0),
+                year_hint_mask=(0 if direct else bit),
+                evidence_type=(
+                    self.evidence_contract.evidence_type if direct else ""
+                ),
+                temporal_semantics=(
+                    self.evidence_contract.temporal_semantics if direct else ""
+                ),
+                evidence_contract_id=(
+                    self.evidence_contract.contract_id if direct else ""
+                ),
+                evidence_contract_version=(
+                    self.evidence_contract.policy_version if direct else ""
+                ),
+            )
+            emit_started = time.monotonic()
+            emit_record(record)
+            downstream_wait_seconds += time.monotonic() - emit_started
+            emitted += 1
+
+        next_cursor = (
+            None
+            if index >= len(self._records)
+            else f"message_record:{index}"
+        )
+        return LeaseResult(
+            lease_id=lease.lease_id,
+            records=emitted,
+            requests=opened,
+            bytes_read=bytes_read,
+            elapsed_seconds=max(
+                0.0,
+                time.monotonic() - started - downstream_wait_seconds,
+            ),
+            next_cursor=next_cursor,
+        )
+
+    def execute(
+        self,
+        lease: WorkLease,
+    ) -> tuple[Iterator[SourceRecord], LeaseResult]:
+        records: list[SourceRecord] = []
+        result = self.execute_stream(lease, records.append)
+        return iter(records), result
+
+    def extract_hosts(
+        self,
+        record: SourceRecord,
+    ) -> Iterable[HostObservation]:
+        result: list[HostObservation] = []
+        seen: set[str] = set()
+        for raw in (item for item in record.payload.split("\t") if item):
+            parsed = urlsplit(raw)
+            hostname = normalize_official(parsed.hostname or "")
+            if hostname is None or hostname in seen:
+                continue
+            seen.add(hostname)
+            result.append(
+                HostObservation(
+                    hostname=hostname,
+                    source_id=record.source_id,
+                    locator=record.locator,
+                    scope=record.scope,
+                    source_year=record.source_year,
+                    source_time=record.source_time,
+                    record_type=record.record_type,
+                    artifact_ref=record.artifact_ref,
+                    direct_year_mask=record.direct_year_mask,
+                    year_hint_mask=record.year_hint_mask,
+                    original_url=raw,
+                    evidence_type=record.evidence_type,
+                    temporal_semantics=record.temporal_semantics,
+                    evidence_contract_id=record.evidence_contract_id,
+                    evidence_contract_version=record.evidence_contract_version,
+                )
+            )
+        return tuple(result)
+
+
 class FtpSitelistProductionAdapter:
     """Bounded reader for the audited Anonymous FTP Sitelist ZIP artifact."""
 
@@ -1056,6 +1271,11 @@ class ProductionAdapterFactory:
     ) -> object:
         if reservoir.adapter_id.startswith("warc_arc:"):
             return WarcProductionAdapter(reservoir)
+        if reservoir.adapter_id.startswith("mbox_messages:"):
+            return MboxMessageProductionAdapter(
+                reservoir,
+                evidence_contract=evidence_contract,
+            )
         if reservoir.adapter_id.startswith("ftp_sitelist:"):
             return FtpSitelistProductionAdapter(
                 reservoir,
