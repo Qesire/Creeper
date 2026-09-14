@@ -110,6 +110,13 @@ class SearchBatch:
     hypothesis_attribution: tuple[tuple[str, str], ...] = ()
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "candidates", tuple(self.candidates))
+        object.__setattr__(self, "hypotheses", tuple(self.hypotheses))
+        object.__setattr__(
+            self,
+            "hypothesis_attribution",
+            tuple(self.hypothesis_attribution),
+        )
         if not self.backend.strip() or not self.query.strip() or not self.actor.strip():
             raise ValueError("search batch attribution fields are required")
         if self.search_cost_seconds is not None and self.search_cost_seconds < 0:
@@ -118,6 +125,53 @@ class SearchBatch:
             raise ValueError("llm_episode_id must be non-empty when provided")
         if self.llm_episode_id is not None and not self.llm_task_type:
             raise ValueError("llm_task_type is required for LLM batches")
+        if self.llm_episode_id is None and (
+            self.hypotheses or self.hypothesis_attribution
+        ):
+            raise ValueError(
+                "LLM hypotheses/attribution require llm_episode_id"
+            )
+
+        hypothesis_ids: set[str] = set()
+        for hypothesis in self.hypotheses:
+            if not isinstance(hypothesis, dict):
+                raise ValueError("search batch hypotheses must be objects")
+            hypothesis_id = hypothesis.get("hypothesis_id")
+            if not isinstance(hypothesis_id, str) or not hypothesis_id.strip():
+                raise ValueError("search batch hypothesis_id is required")
+            hypothesis_id = hypothesis_id.strip()
+            if hypothesis_id in hypothesis_ids:
+                raise ValueError(
+                    f"duplicate search batch hypothesis_id: {hypothesis_id}"
+                )
+            hypothesis_ids.add(hypothesis_id)
+
+        candidate_keys = {candidate.source_key for candidate in self.candidates}
+        attributed_sources: set[str] = set()
+        for attribution in self.hypothesis_attribution:
+            if (
+                not isinstance(attribution, (tuple, list))
+                or len(attribution) != 2
+                or not all(isinstance(value, str) and value.strip() for value in attribution)
+            ):
+                raise ValueError(
+                    "hypothesis_attribution entries must be (source_key, hypothesis_id)"
+                )
+            source_key_value, hypothesis_id = attribution
+            if source_key_value not in candidate_keys:
+                raise ValueError(
+                    "hypothesis attribution references a candidate outside the batch"
+                )
+            if hypothesis_id not in hypothesis_ids:
+                raise ValueError(
+                    "hypothesis attribution references an unknown hypothesis_id"
+                )
+            if source_key_value in attributed_sources:
+                raise ValueError(
+                    "one candidate cannot be attributed to multiple hypotheses "
+                    "within one search batch"
+                )
+            attributed_sources.add(source_key_value)
 
 
 @dataclass(frozen=True)
