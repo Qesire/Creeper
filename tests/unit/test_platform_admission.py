@@ -93,6 +93,20 @@ class PlatformHarvestInvariantTests(unittest.TestCase):
                 next_resume_key="unexpected",
             )
 
+    def test_worker_rejects_empty_provider_set(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            control = ControlStore(Path(tmp) / "control.sqlite3")
+            try:
+                with self.assertRaisesRegex(ValueError, "at least one platform"):
+                    PlatformYearHarvestWorker(
+                        control_store=control,
+                        evidence_store=object(),
+                        providers={},
+                        owner="platform-worker",
+                    )
+            finally:
+                control.close()
+
     def test_retry_backoff_saturates_for_extreme_attempt_count(self):
         worker = PlatformYearHarvestWorker.__new__(PlatformYearHarvestWorker)
         worker.retry_base_seconds = 30.0
