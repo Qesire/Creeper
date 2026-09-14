@@ -81,12 +81,18 @@ class WorkerRuntimeConfig:
         if self.poll_seconds <= 0 or self.lease_seconds <= 0:
             raise ValueError("worker polling/lease intervals must be positive")
         capabilities = set(self.descriptor.capabilities)
+        exploration_caps = {"WEB_DISCOVERY", "SEARCH_QUERY"} & capabilities
+        if exploration_caps and "ONLINE_QUERY" not in capabilities:
+            raise ValueError(
+                "WEB_DISCOVERY/SEARCH_QUERY production workers require ONLINE_QUERY"
+            )
         if (
-            {"ONLINE_QUERY", "THIN_QUERY"} & capabilities
+            {"ONLINE_QUERY", "THIN_QUERY", "WEB_DISCOVERY", "SEARCH_QUERY"}
+            & capabilities
             and not self.cdx_providers
         ):
             raise ValueError(
-                "ONLINE_QUERY/THIN_QUERY workers require CDX providers"
+                "archive-aware production workers require CDX providers"
             )
         configured = {provider.name for provider in self.cdx_providers}
         allowed = set(self.descriptor.allowed_providers)
