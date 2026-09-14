@@ -712,9 +712,15 @@ class DistributedAuthorityStore:
         row: sqlite3.Row,
         *,
         worker_region: str,
+        worker_runtime_class: str,
         allowed_providers: set[str],
     ) -> bool:
         is_probe = str(row["task_class"]) == TaskClass.PROBE.value
+        is_cloudflare_thin = (
+            worker_runtime_class == "cloudflare_worker"
+            and str(row["producer"]) == "ThinHistoricalQueryProducer"
+            and str(row["task_class"]) == TaskClass.HOST_BATCH.value
+        )
         coverage = json.loads(str(row["coverage_json"]))
         if is_probe:
             target_region = str(coverage.get("target_region", "")).strip()
@@ -735,7 +741,7 @@ class DistributedAuthorityStore:
         for provider in providers:
             if provider not in allowed_providers:
                 return False
-            if is_probe:
+            if is_probe or is_cloudflare_thin:
                 continue
             budget = self.connection.execute(
                 """
@@ -1509,6 +1515,7 @@ class DistributedAuthorityStore:
                     if not self._work_region_eligible(
                         row,
                         worker_region=worker_region,
+                        worker_runtime_class=runtime_class,
                         allowed_providers=allowed_providers,
                     ):
                         continue
@@ -2686,24 +2693,39 @@ class DistributedAuthorityStore:
             ):
                 worker = self.connection.execute(
                     """
-                    SELECT region FROM distributed_workers
+                    SELECT region, runtime_class
+                    FROM distributed_workers
                     WHERE worker_id = ? AND revoked = 0
                     """,
                     (worker_id,),
                 ).fetchone()
                 if worker is None:
                     raise WorkerRejectedError(worker_id)
-                region = str(worker["region"])
-                qualified = self.connection.execute(
+                runtime_class = str(worker["runtime_class"])
+                is_cloudflare_thin = (
+                    runtime_class == "cloudflare_worker"
+                    and str(task_row["producer"]) == "ThinHistoricalQueryProducer"
+                    and str(task_row["task_class"]) == TaskClass.HOST_BATCH.value
+                )
+                if is_cloudflare_thin:
+                    qualified = {"state": "QUALIFIED"}
+                else:
+                    region = str(worker["region"])
+                    qualified = self.connection.execute(
                     """
                     SELECT state FROM distributed_provider_regions
                     WHERE provider = ? AND region = ?
                     """,
-                    (provider, region),
-                ).fetchone()
+                        (provider, region),
+                    ).fetchone()
                 if qualified is None or str(qualified["state"]) != "QUALIFIED":
+                    region_label = (
+                        "cloudflare-dynamic-edge"
+                        if is_cloudflare_thin
+                        else str(worker["region"])
+                    )
                     raise ProviderRegionNotQualifiedError(
-                        f"provider={provider} region={region}"
+                        f"provider={provider} region={region_label}"
                     )
 
             self.connection.execute(
