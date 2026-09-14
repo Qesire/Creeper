@@ -836,6 +836,14 @@ class SourceProducer:
                 for worker in extractors:
                     worker.join(timeout=5.0)
             assert result is not None
+            if not running.allows_result(result):
+                raise RuntimeError(
+                    "adapter result does not match lease identity or budget"
+                )
+            if result.records != source_records:
+                raise RuntimeError(
+                    "adapter result record count does not match emitted records"
+                )
             if (
                 result.records == 0
                 and result.next_cursor == running.cursor_start
