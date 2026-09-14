@@ -968,6 +968,108 @@ class ControlStoreTests(unittest.TestCase):
             )
             store.close()
 
+    def test_expired_evidence_owner_cannot_commit_before_or_after_reclaim(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            now = {"value": 100.0}
+            store = ControlStore(
+                Path(tmp) / "control.sqlite3",
+                clock=lambda: now["value"],
+            )
+            key = self._key()
+            store.enqueue_evidence_tasks([key])
+            first = store.claim_evidence_tasks(
+                owner="worker-1",
+                limit=1,
+                lease_seconds=10.0,
+            )
+            self.assertEqual(len(first), 1)
+
+            now["value"] = 111.0
+            with self.assertRaises(KeyError):
+                store.finish_evidence_task(
+                    key,
+                    CDXQueryState.PASS,
+                    owner="worker-1",
+                )
+            expired = store.get_evidence_task(key)
+            self.assertEqual(expired.state, CDXQueryState.PENDING)
+            self.assertEqual(expired.lease_owner, "worker-1")
+
+            second = store.claim_evidence_tasks(
+                owner="worker-2",
+                limit=1,
+                lease_seconds=10.0,
+            )
+            self.assertEqual(len(second), 1)
+            self.assertEqual(second[0].attempt, 2)
+            with self.assertRaises(KeyError):
+                store.finish_evidence_task(
+                    key,
+                    CDXQueryState.PASS,
+                    owner="worker-1",
+                )
+            store.finish_evidence_task(
+                key,
+                CDXQueryState.PASS,
+                owner="worker-2",
+            )
+            self.assertEqual(
+                store.get_evidence_task(key).state,
+                CDXQueryState.PASS,
+            )
+            store.close()
+
+    def test_expired_range_owner_cannot_commit_followups(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            now = {"value": 100.0}
+            store = ControlStore(
+                Path(tmp) / "control.sqlite3",
+                clock=lambda: now["value"],
+            )
+            key = EvidenceQueryKey(
+                "example.com",
+                TemporalScope(1996, 1998),
+                "wayback",
+                "v1",
+            )
+            store.enqueue_evidence_tasks([key])
+            store.claim_evidence_tasks(
+                owner="worker-1",
+                limit=1,
+                lease_seconds=10.0,
+            )
+            now["value"] = 111.0
+            with self.assertRaises(KeyError):
+                store.finish_range_task(
+                    key,
+                    CDXQueryState.EMPTY_EXHAUSTIVE,
+                    owner="worker-1",
+                )
+            self.assertEqual(
+                store.get_evidence_task(key).state,
+                CDXQueryState.PENDING,
+            )
+            store.close()
+
+    def test_evidence_finish_rejects_nonfinite_retry_deadline(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ControlStore(Path(tmp) / "control.sqlite3")
+            key = self._key()
+            store.enqueue_evidence_tasks([key])
+            store.claim_evidence_tasks(owner="worker-1", limit=1)
+            with self.assertRaisesRegex(ValueError, "retry_at"):
+                store.finish_evidence_task(
+                    key,
+                    CDXQueryState.TRANSIENT_ERROR,
+                    owner="worker-1",
+                    retry_at=float("nan"),
+                )
+            self.assertEqual(
+                store.get_evidence_task(key).state,
+                CDXQueryState.PENDING,
+            )
+            store.close()
+
     def test_finish_evidence_tasks_enforces_ownership_atomically(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = ControlStore(Path(tmp) / "control.sqlite3")
