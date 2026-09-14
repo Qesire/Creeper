@@ -104,6 +104,9 @@ class ReservoirPlan:
     background_triage_source_keys: tuple[str, ...] = ()
     background_scout_source_keys: tuple[str, ...] = ()
     background_activate_source_keys: tuple[str, ...] = ()
+    search_zero_new_streak: int = 0
+    search_adaptive_cooldown_seconds: float = 0.0
+    search_call_budget: int = 0
 
     @property
     def needs_search(self) -> bool:
@@ -772,6 +775,10 @@ class SourceReservoirManager:
             active=background_by_state[SourceState.ACTIVE],
         )[:1]
 
+        structural_hold = bool(self._structural_holds())
+        zero_new_streak, _recent_new_sources, _episodes = (
+            self._recent_search_supply()
+        )
         return ReservoirPlan(
             active_count=len(active),
             warm_count=len(warm),
@@ -789,6 +796,11 @@ class SourceReservoirManager:
             ),
             background_activate_source_keys=tuple(
                 item.source_key for item in background_activate
+            ),
+            search_zero_new_streak=zero_new_streak,
+            search_adaptive_cooldown_seconds=self._adaptive_search_cooldown(),
+            search_call_budget=self._adaptive_search_budget(
+                structural_hold=structural_hold
             ),
         )
 
