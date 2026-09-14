@@ -328,6 +328,87 @@ class MultiCDXProviderPoolTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.state, CDXQueryState.EMPTY_EXHAUSTIVE)
         self.assertEqual(result.provider_requests, 2)
 
+    async def test_mixed_empty_and_invalid_exact_is_terminal_invalid(self) -> None:
+        pool, first, second = self.make_pool()
+        key = EvidenceQueryKey(
+            "invalid-gap.example",
+            TemporalScope(2000, 2000),
+            "wayback",
+            "cdx-v1",
+        )
+        order = pool._provider_order(key)
+        clients = {"first": first, "second": second}
+        clients[order[0]].exact[key] = EvidenceQueryResult(
+            key.hostname,
+            2000,
+            CDXQueryState.EMPTY_EXHAUSTIVE,
+            provider_requests=1,
+            key=key,
+        )
+        clients[order[1]].exact[key] = EvidenceQueryResult(
+            key.hostname,
+            2000,
+            CDXQueryState.INVALID,
+            provider_requests=1,
+            error="provider rejected query permanently",
+            key=key,
+        )
+
+        result = await pool.query_key(key)
+
+        self.assertEqual(result.state, CDXQueryState.INVALID)
+        self.assertEqual(result.provider_requests, 2)
+        self.assertEqual(sum(len(client.calls) for client in clients.values()), 2)
+
+    async def test_range_preserves_positive_year_and_terminates_invalid_gap(self) -> None:
+        pool, first, second = self.make_pool()
+        key = EvidenceQueryKey(
+            "partial-invalid.example",
+            TemporalScope(1998, 1999),
+            "wayback",
+            "cdx-v1",
+        )
+        clients = {"first": first, "second": second}
+        for name, client in clients.items():
+            client.ranges[key] = RangeEvidenceQueryResult(
+                hostname=key.hostname,
+                key=key,
+                state=CDXQueryState.DECOMPOSED,
+                candidate_years=(1998,),
+                followup_years=(1999,),
+                capsules=(capsule(key.hostname, 1998, name),),
+                provider_requests=1,
+            )
+        exact = EvidenceQueryKey(
+            key.hostname,
+            TemporalScope(1999, 1999),
+            key.provider,
+            key.policy_version,
+        )
+        exact_order = pool._provider_order(exact)
+        clients[exact_order[0]].exact[exact] = EvidenceQueryResult(
+            key.hostname,
+            1999,
+            CDXQueryState.EMPTY_EXHAUSTIVE,
+            provider_requests=1,
+            key=exact,
+        )
+        clients[exact_order[1]].exact[exact] = EvidenceQueryResult(
+            key.hostname,
+            1999,
+            CDXQueryState.INVALID,
+            provider_requests=1,
+            error="provider rejected exact query permanently",
+            key=exact,
+        )
+
+        result = await pool.query_range(key)
+
+        self.assertEqual(result.state, CDXQueryState.INVALID)
+        self.assertEqual(result.candidate_years, (1998,))
+        self.assertEqual(tuple(item.year for item in result.capsules), (1998,))
+        self.assertEqual(result.followup_years, ())
+
     async def test_range_combines_disjoint_provider_years(self) -> None:
         pool, first, second = self.make_pool()
         key = EvidenceQueryKey(
