@@ -33,7 +33,24 @@ echo "coordinator=${COORDINATOR}"
 
 curl -fsS "${COORDINATOR%/}/healthz"
 echo
-curl -fsS "${COORDINATOR%/}/meta"
+META_JSON="$(curl -fsS "${COORDINATOR%/}/meta")"
+printf '%s\n' "${META_JSON}"
+PYTHON_BIN="${FABRIC_PYTHON:-/opt/creeper-fabric/.venv/bin/python}"
+if [[ -x "${PYTHON_BIN}" ]]; then
+  AUTHORITY_TIME="$(
+    printf '%s' "${META_JSON}" |
+      "${PYTHON_BIN}" -c \
+        'import json,sys; print(int(float(json.load(sys.stdin)["server_unix_time"])))'
+  )"
+  LOCAL_TIME="$(date +%s)"
+  CLOCK_SKEW=$(( LOCAL_TIME > AUTHORITY_TIME ? LOCAL_TIME - AUTHORITY_TIME : AUTHORITY_TIME - LOCAL_TIME ))
+  MAX_CLOCK_SKEW="${FABRIC_DEPLOY_MAX_CLOCK_SKEW_SECONDS:-240}"
+  echo "clock_skew_seconds=${CLOCK_SKEW}"
+  if (( CLOCK_SKEW > MAX_CLOCK_SKEW )); then
+    echo "clock skew too large for Fabric HMAC" >&2
+    exit 2
+  fi
+fi
 echo
 
 systemctl is-active "${SERVICE}"
