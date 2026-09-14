@@ -1088,6 +1088,18 @@ class DistributedAuthorityTests(unittest.TestCase):
         self.assertEqual(snapshot["success_rate"], 1.0)
         self.assertEqual(snapshot["mean_latency_ms"], 100.0)
 
+        status = self.store.fabric_status_snapshot()
+        region_rows = status["provider_regions"]
+        self.assertTrue(
+            any(
+                row["provider"] == "internet_archive"
+                and row["region"] == self.worker_a.region
+                and row["state"] == "QUALIFIED"
+                and row["samples"] == 3
+                for row in region_rows
+            )
+        )
+
     def test_429_cooldown_is_global_not_per_region(self) -> None:
         self.store.configure_provider_budget(
             "internet_archive",
