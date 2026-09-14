@@ -14,6 +14,7 @@ from creeper.source_research.adapters.base import (
 from creeper.source_research.integration import ResearchIntegrationBridge
 from creeper.source_research.models import (
     DecisionRecord,
+    FrontierTask,
     QueryProgram,
     RootKind,
     RootSurface,
@@ -85,6 +86,15 @@ class L9ResearchRuntimeClosureTests(unittest.IsolatedAsyncioTestCase):
                     program_id="program:repo:1",
                 )
                 research.register_program(program)
+
+                research.enqueue_frontier(
+                    FrontierTask(
+                        task_id="frontier:repo:1",
+                        task_kind="PATH",
+                        entity_id=query.query_id,
+                        policy_version="policy:test",
+                    )
+                )
 
                 decision = DecisionRecord(
                     decision_id="decision:repo:1",
