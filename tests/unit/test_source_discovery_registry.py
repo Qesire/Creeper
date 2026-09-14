@@ -158,6 +158,44 @@ class SourceDiscoveryRegistryTests(unittest.TestCase):
         self.assertEqual(rewards[0].strategy, "META_SOURCE_SEARCH")
         self.assertEqual(rewards[0].reward_per_cost, 3.0)
 
+    def test_registry_rejects_invalid_clock_before_durable_write(self) -> None:
+        bad = SourceDiscoveryRegistry(
+            self.control,
+            max_graph_hops=2,
+            clock=lambda: float("nan"),
+        )
+        with self.assertRaisesRegex(ValueError, "clock must be finite"):
+            bad.begin_search_episode(
+                strategy="META_SOURCE_SEARCH",
+                backend="test",
+                query="bad clock",
+                actor="agent:test",
+                episode_id="search:bad-clock",
+            )
+        row = self.control.connection.execute(
+            "SELECT COUNT(*) FROM source_search_episodes WHERE episode_id = ?",
+            ("search:bad-clock",),
+        ).fetchone()
+        self.assertEqual(int(row[0]), 0)
+
+    def test_registry_rejects_boolean_graph_hops_and_suppression_ttl(self) -> None:
+        with self.assertRaisesRegex(ValueError, "max_graph_hops"):
+            SourceDiscoveryRegistry(
+                self.control,
+                max_graph_hops=True,
+            )
+        with self.assertRaisesRegex(ValueError, "ttl_seconds"):
+            self.registry.suppress(
+                SuppressionScope.ORIGIN,
+                "https://example.com",
+                reason="test",
+                ttl_seconds=True,
+            )
+        row = self.control.connection.execute(
+            "SELECT COUNT(*) FROM source_suppressions"
+        ).fetchone()
+        self.assertEqual(int(row[0]), 0)
+
     def test_nonfinite_search_and_llm_rewards_are_rejected(self) -> None:
         episode = self.registry.begin_search_episode(
             strategy="META_SOURCE_SEARCH",
