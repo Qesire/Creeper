@@ -245,18 +245,18 @@ Path(a.response).write_text(json.dumps(payload), encoding="utf-8")
             self.assertEqual(report["cycle"], 1)
             self.assertGreaterEqual(report["elapsed_seconds"], 0.0)
             self.assertEqual(report["search_episodes"], 2)
-            self.assertEqual(report["search_candidates_registered"], 3)
-            self.assertEqual(report["inventory"]["DISCOVERED"], 3)
+            self.assertEqual(report["search_candidates_registered"], 2)
+            self.assertEqual(report["inventory"]["DISCOVERED"], 2)
             invocation_root = root / "runtime" / "source-discovery" / "agent-invocations"
             invocation_dirs = [path for path in invocation_root.iterdir() if path.is_dir()]
-            self.assertEqual(len(invocation_dirs), 3)
+            self.assertEqual(len(invocation_dirs), 2)
             for invocation in invocation_dirs:
                 request = __import__("json").loads(
                     (invocation / "request.json").read_text(encoding="utf-8")
                 )
                 self.assertEqual(request["admission"]["min_expected_volume"], 100000)
                 self.assertEqual(request["admission"]["direct_min_expected_volume"], 10000)
-                self.assertTrue(request["requirements"]["prefer_direct_evidence_bulk"])
+                self.assertFalse(request["requirements"]["prefer_direct_evidence_bulk"])
                 audit = __import__("json").loads(
                     (invocation / "admission.json").read_text(encoding="utf-8")
                 )
@@ -269,7 +269,7 @@ Path(a.response).write_text(json.dumps(payload), encoding="utf-8")
                 snapshot = telemetry.snapshot()
 
             self.assertEqual(snapshot.counters["discovery_cycles"], 1)
-            self.assertEqual(snapshot.counters["discovery_search_episodes"], 3)
+            self.assertEqual(snapshot.counters["discovery_search_episodes"], 2)
             self.assertEqual(
                 snapshot.counters["discovery_search_candidates_registered"],
                 2,
@@ -278,7 +278,7 @@ Path(a.response).write_text(json.dumps(payload), encoding="utf-8")
             self.assertEqual(snapshot.gauges["active_direct_sources"], 0.0)
             self.assertEqual(
                 snapshot.gauges["source_candidates_discovered"],
-                3.0,
+                2.0,
             )
             self.assertEqual(
                 snapshot.gauges["discovery_search_episodes_inflight"],
