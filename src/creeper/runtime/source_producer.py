@@ -925,11 +925,21 @@ class SourceProducer:
         sleep_fn=time.sleep,
     ) -> SourceProducerReport:
         """Continuously consume durable source leases until a stop is requested."""
-        if idle_backoff_seconds <= 0:
-            raise ValueError("idle_backoff_seconds must be positive")
-        if max_idle_backoff_seconds < idle_backoff_seconds:
+        if (
+            isinstance(idle_backoff_seconds, bool)
+            or not isinstance(idle_backoff_seconds, (int, float))
+            or not math.isfinite(float(idle_backoff_seconds))
+            or idle_backoff_seconds <= 0
+        ):
+            raise ValueError("idle_backoff_seconds must be finite and positive")
+        if (
+            isinstance(max_idle_backoff_seconds, bool)
+            or not isinstance(max_idle_backoff_seconds, (int, float))
+            or not math.isfinite(float(max_idle_backoff_seconds))
+            or max_idle_backoff_seconds < idle_backoff_seconds
+        ):
             raise ValueError(
-                "max_idle_backoff_seconds must not be below idle_backoff_seconds"
+                "max_idle_backoff_seconds must be finite and not below idle_backoff_seconds"
             )
 
         total = SourceProducerReport()
