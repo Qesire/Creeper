@@ -6,6 +6,7 @@ from pathlib import Path
 
 from creeper.evidence.contracts import (
     EvidenceAuthority,
+    MBOX_MESSAGE_DIRECT_CONTRACT,
     SQUID_ACCESS_DIRECT_CONTRACT,
     SourceEvidenceContract,
     bind_contract_to_adapter_id,
@@ -251,6 +252,85 @@ class DirectEvidenceContractTests(unittest.TestCase):
         self.assertEqual(
             capsule.evidence_type,
             SQUID_ACCESS_DIRECT_CONTRACT.evidence_type,
+        )
+
+    def test_mailbox_message_contract_is_direct_and_skips_external_provider(self) -> None:
+        locator = "https://lists.gnu.org/archive/mbox/lynx-dev/1998-10"
+        contract = resolve_source_evidence_contract(locator)
+        self.assertEqual(contract, MBOX_MESSAGE_DIRECT_CONTRACT)
+        self.assertTrue(contract.grants_direct_web_year)
+        self.assertEqual(contract.evidence_mode, "direct_year")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "1998-10.mbox"
+            path.write_bytes(
+                (
+                    b"From sender@example.test Fri Oct 16 04:31:23 1998\n"
+                    b"Date: Fri, 16 Oct 1998 04:31:23 -0400\n"
+                    b"From: Person <person@example.net>\n"
+                    b"Content-Type: text/plain; charset=utf-8\n\n"
+                    b"http://expect.nist.gov/\n"
+                )
+            )
+            reservoir = Reservoir(
+                reservoir_id="reservoir:mbox-direct",
+                domain_id="domain:mbox-direct",
+                adapter_id=bind_contract_to_adapter_id(
+                    "structured:mbox-direct",
+                    MBOX_MESSAGE_DIRECT_CONTRACT,
+                ),
+                root_locator=str(path),
+                enumeration_kind="structured_records",
+                capacity_lower=1,
+                evidence_mode="direct_year",
+                state=ReservoirState.READY,
+            )
+            adapter = ProductionAdapterFactory.open(
+                reservoir,
+                temporal_scope=(1996, 2001),
+            )
+            records, _result = adapter.execute(_lease(reservoir))
+            record = next(records)
+            observation = next(iter(adapter.extract_hosts(record)))
+            adapter.close()
+
+        self.assertEqual(observation.hostname, "expect.nist.gov")
+        self.assertEqual(observation.source_year, 1998)
+        self.assertEqual(
+            observation.source_time,
+            "1998-10-16T08:31:23+00:00",
+        )
+        self.assertEqual(observation.direct_year_mask, 1 << (1998 - 1996))
+        self.assertEqual(observation.year_hint_mask, 0)
+        self.assertEqual(
+            observation.evidence_contract_id,
+            MBOX_MESSAGE_DIRECT_CONTRACT.contract_id,
+        )
+
+        plan = EvidencePlanner().plan(
+            observation,
+            official_mask=0,
+            local_mask=0,
+            provider="wayback",
+            policy_version="runtime-policy",
+            allow_direct=True,
+        )
+        self.assertEqual(plan.external_keys, ())
+        self.assertEqual(len(plan.direct_capsules), 1)
+        capsule = plan.direct_capsules[0]
+        self.assertEqual(capsule.year, 1998)
+        self.assertEqual(
+            capsule.evidence_timestamp,
+            "1998-10-16T08:31:23+00:00",
+        )
+        self.assertEqual(capsule.original_url, "http://expect.nist.gov/")
+        self.assertEqual(
+            capsule.temporal_semantics,
+            MBOX_MESSAGE_DIRECT_CONTRACT.temporal_semantics,
+        )
+        self.assertEqual(
+            capsule.evidence_type,
+            MBOX_MESSAGE_DIRECT_CONTRACT.evidence_type,
         )
 
     def test_dmoz_content_dump_is_discovery_only_by_default(self) -> None:
