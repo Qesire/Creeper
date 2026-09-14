@@ -333,11 +333,6 @@ class DistributedAuthorityStore:
             ) WITHOUT ROWID;
             CREATE INDEX IF NOT EXISTS idx_distributed_provider_permit_active
                 ON distributed_provider_permits(provider, active, expires_at);
-            CREATE UNIQUE INDEX IF NOT EXISTS idx_distributed_provider_permit_request
-                ON distributed_provider_permits(
-                    provider, worker_id, task_id, generation, request_id
-                )
-                WHERE request_id IS NOT NULL;
             """
         )
         work_columns = {
@@ -432,16 +427,16 @@ class DistributedAuthorityStore:
                 ADD COLUMN request_id TEXT
                 """
             )
-            self.connection.execute(
-                """
-                CREATE UNIQUE INDEX IF NOT EXISTS
-                    idx_distributed_provider_permit_request
-                ON distributed_provider_permits(
-                    provider, worker_id, task_id, generation, request_id
-                )
-                WHERE request_id IS NOT NULL
-                """
+        self.connection.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS
+                idx_distributed_provider_permit_request
+            ON distributed_provider_permits(
+                provider, worker_id, task_id, generation, request_id
             )
+            WHERE request_id IS NOT NULL
+            """
+        )
         budget_columns = {
             str(row["name"])
             for row in self.connection.execute(
