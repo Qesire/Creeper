@@ -112,6 +112,54 @@ class ArquivoDialectTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("fl", params)
         self.assertNotIn("showResumeKey", params)
 
+    async def test_arquivo_host_range_queries_all_target_years_at_once(self) -> None:
+        seen: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(request)
+            return httpx.Response(
+                200,
+                json=[
+                    {
+                        "url": "http://arquivo.example/",
+                        "timestamp": "19970102030405",
+                        "status": "200",
+                    },
+                    {
+                        "url": "http://arquivo.example/a",
+                        "timestamp": "20010102030405",
+                        "status": "200",
+                    },
+                ],
+            )
+
+        client = AsyncArquivoCDXClient(
+            endpoint="https://arquivo.example/wayback/cdx",
+            provider="wayback",
+            source_id="arquivo_pt",
+            limit=100,
+            requests_per_second=0.0,
+            transport=httpx.MockTransport(handler),
+        )
+        key = EvidenceQueryKey(
+            "arquivo.example",
+            TemporalScope(1996, 2001),
+            "wayback",
+            "cdx-v1",
+        )
+        try:
+            result = await client.query_range(key)
+        finally:
+            await client.aclose()
+
+        self.assertEqual(result.state, CDXQueryState.PASS)
+        self.assertEqual(result.candidate_years, (1997, 2001))
+        self.assertEqual(len(seen), 1)
+        params = seen[0].url.params
+        self.assertEqual(params["matchType"], "host")
+        self.assertEqual(params["from"], "1996")
+        self.assertEqual(params["to"], "2001")
+
 
 class MultiCDXProviderPoolTests(unittest.IsolatedAsyncioTestCase):
     def make_pool(self):
