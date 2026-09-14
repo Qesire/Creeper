@@ -541,6 +541,12 @@ class ResearchIntegrationBridge:
                 node = self.research.upsert_hit(hit)
                 nodes[hit.provider_native_id] = node
                 for lead in await adapter.resolve(hit):
+                    # Some structured roots resolve only to another research
+                    # pivot/node. Repository metadata is useful graph state but
+                    # must never cross the L2 artifact boundary unless the
+                    # adapter emitted an explicit ArtifactLead.
+                    if not isinstance(lead, ArtifactLead):
+                        continue
                     artifact_id, _candidate, inserted = self.register_artifact_source(
                         lead,
                         node_id=node.node_id,
