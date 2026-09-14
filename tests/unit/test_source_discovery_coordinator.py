@@ -82,6 +82,40 @@ class SourceDiscoveryCoordinatorTests(unittest.IsolatedAsyncioTestCase):
         values.update(overrides)
         return SourceReservoirManager(self.registry, targets=SourcePoolTargets(**values))
 
+    def test_coordinator_rejects_invalid_parallelism_and_retry_timing(self) -> None:
+        common = dict(
+            registry=self.registry,
+            manager=self.manager(),
+            lock_path=self.lock_path,
+            triage_executor=lambda item: item,
+            scout_executor=lambda item: item,
+            search_executor=lambda item: item,
+        )
+        with self.assertRaisesRegex(ValueError, "triage_parallelism"):
+            SourceDiscoveryCoordinator(
+                **common,
+                triage_parallelism=True,
+            )
+        with self.assertRaisesRegex(ValueError, "failure_retry_seconds"):
+            SourceDiscoveryCoordinator(
+                **common,
+                failure_retry_seconds=float("nan"),
+            )
+
+    def test_coordinator_rejects_nonfinite_retry_clock_before_backoff_state(self) -> None:
+        coordinator = SourceDiscoveryCoordinator(
+            self.registry,
+            self.manager(),
+            lock_path=self.lock_path,
+            triage_executor=lambda item: item,
+            scout_executor=lambda item: item,
+            search_executor=lambda item: item,
+            retry_clock=lambda: float("nan"),
+        )
+        with self.assertRaisesRegex(ValueError, "retry clock must be finite"):
+            coordinator._eligible_search_directives(())
+        self.assertEqual(coordinator._search_retry_deadlines, {})
+
     def test_search_batch_rejects_nonfinite_cost_before_commit(self) -> None:
         with self.assertRaisesRegex(ValueError, "finite and non-negative"):
             SearchBatch(
