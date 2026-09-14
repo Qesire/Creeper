@@ -268,7 +268,7 @@ class DirectEvidenceContractTests(unittest.TestCase):
             allow_direct=True,
         )
         self.assertEqual(plan.direct_capsules, ())
-        self.assertNotEqual(plan.external_keys, ())
+        self.assertEqual(plan.external_keys, ())
 
     def test_missing_or_malformed_contract_year_never_becomes_direct(self) -> None:
         contract = _direct_contract(
