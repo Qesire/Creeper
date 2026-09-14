@@ -48,6 +48,56 @@ class _OpenFile:
 
 
 class StructuredProductionAdapterTests(unittest.TestCase):
+    def test_dmoz_rdf_external_page_becomes_discovery_url_record(self):
+        reservoir = Reservoir(
+            reservoir_id="reservoir:dmoz",
+            domain_id="domain:dmoz",
+            adapter_id="structured:dmoz",
+            root_locator="https://download.example/content.rdf.u8.gz",
+            enumeration_kind="structured_records",
+            capacity_lower=1,
+            capacity_upper=None,
+            evidence_mode="discovery_only",
+            state=ReservoirState.READY,
+        )
+        adapter = StructuredProductionAdapter(reservoir)
+
+        record = adapter._generic_record(
+            '<ExternalPage about="http://Example.COM/path?a=1&amp;b=2">',
+            locator="fixture:1",
+        )
+
+        self.assertIsNotNone(record)
+        assert record is not None
+        self.assertEqual(record.payload, "http://Example.COM/path?a=1&b=2")
+        self.assertEqual(record.record_type, "STRUCTURED_RDF_EXTERNAL_PAGE")
+        self.assertEqual(record.direct_year_mask, 0)
+        self.assertEqual(
+            [item.hostname for item in adapter.extract_hosts(record)],
+            ["example.com"],
+        )
+
+    def test_dmoz_rdf_topic_line_is_not_emitted_twice(self):
+        reservoir = Reservoir(
+            reservoir_id="reservoir:dmoz",
+            domain_id="domain:dmoz",
+            adapter_id="structured:dmoz",
+            root_locator="https://download.example/content.rdf.u8.gz",
+            enumeration_kind="structured_records",
+            capacity_lower=1,
+            capacity_upper=None,
+            evidence_mode="discovery_only",
+            state=ReservoirState.READY,
+        )
+        adapter = StructuredProductionAdapter(reservoir)
+
+        self.assertIsNone(
+            adapter._generic_record(
+                '<link r:resource="http://example.com/"/>',
+                locator="fixture:topic",
+            )
+        )
+
     def test_non_range_http_source_reopens_as_stream_and_skips_cursor(self):
         payload = b"ignored.example\nkept.example\n"
         files = []
