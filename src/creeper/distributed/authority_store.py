@@ -35,6 +35,10 @@ class BatchConflictError(RuntimeError):
     """Raised when one BatchID is replayed with different contents."""
 
 
+class BatchSequenceError(RuntimeError):
+    """Raised when a new ResultBatch arrives out of checkpoint order."""
+
+
 class WorkerRejectedError(RuntimeError):
     """Raised when an unknown or revoked worker attempts authority actions."""
 
@@ -120,6 +124,8 @@ class DistributedAuthorityStore:
                 lease_deadline REAL,
                 attempt INTEGER NOT NULL DEFAULT 0 CHECK(attempt >= 0),
                 cursor TEXT,
+                next_sequence_no INTEGER NOT NULL DEFAULT 0
+                    CHECK(next_sequence_no >= 0),
                 last_error TEXT,
                 created_at REAL NOT NULL,
                 updated_at REAL NOT NULL
@@ -250,6 +256,20 @@ class DistributedAuthorityStore:
                 ON distributed_provider_permits(provider, active, expires_at);
             """
         )
+        work_columns = {
+            str(row["name"])
+            for row in self.connection.execute(
+                "PRAGMA table_info(distributed_work)"
+            )
+        }
+        if "next_sequence_no" not in work_columns:
+            self.connection.execute(
+                """
+                ALTER TABLE distributed_work
+                ADD COLUMN next_sequence_no INTEGER NOT NULL DEFAULT 0
+                    CHECK(next_sequence_no >= 0)
+                """
+            )
         worker_columns = {
             str(row["name"])
             for row in self.connection.execute(
@@ -693,6 +713,7 @@ class DistributedAuthorityStore:
                     if chosen["cursor"] is None
                     else str(chosen["cursor"])
                 ),
+                next_sequence_no=int(chosen["next_sequence_no"]),
             )
         except Exception:
             self.connection.rollback()
@@ -772,6 +793,7 @@ class DistributedAuthorityStore:
                 attempt=int(row["attempt"]),
                 work=self._work_from_row(row),
                 cursor=None if row["cursor"] is None else str(row["cursor"]),
+                next_sequence_no=int(row["next_sequence_no"]),
             )
         except Exception:
             self.connection.rollback()
@@ -826,12 +848,18 @@ class DistributedAuthorityStore:
                 self.connection.commit()
                 return False
 
-            self._assert_active_lease(
+            task_row = self._assert_active_lease(
                 batch.task_id,
                 worker_id,
                 batch.generation,
                 now=now,
             )
+            expected_sequence = int(task_row["next_sequence_no"])
+            if int(batch.sequence_no) != expected_sequence:
+                raise BatchSequenceError(
+                    f"task={batch.task_id} expected={expected_sequence} "
+                    f"received={batch.sequence_no}"
+                )
             self.connection.execute(
                 """
                 INSERT INTO distributed_result_batches(
@@ -853,10 +881,17 @@ class DistributedAuthorityStore:
             self.connection.execute(
                 """
                 UPDATE distributed_work
-                SET cursor = COALESCE(?, cursor), updated_at = ?
+                SET cursor = COALESCE(?, cursor),
+                    next_sequence_no = ?,
+                    updated_at = ?
                 WHERE task_id = ?
                 """,
-                (batch.cursor_after, now, batch.task_id),
+                (
+                    batch.cursor_after,
+                    expected_sequence + 1,
+                    now,
+                    batch.task_id,
+                ),
             )
             self.connection.commit()
             return True
