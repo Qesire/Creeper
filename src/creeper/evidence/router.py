@@ -122,13 +122,10 @@ class EvidenceRouter:
         return tuple(routed)
 
     @staticmethod
-    def _reservation_amount(key: EvidenceQueryKey) -> int:
-        if key.provider == "rdap" or key.policy_version.startswith("cdx-domain-"):
-            return 1
-        return max(
-            1,
-            key.temporal_scope.year_to - key.temporal_scope.year_from + 1,
-        )
+    def _reservation_amount(_key: EvidenceQueryKey) -> int:
+        # One logical task is one durable backlog slot, independent of the
+        # number of competition years covered by a host-range query.
+        return 1
 
     def stage(self, needs: Iterable[EvidenceNeed]) -> int:
         rows = list(dict.fromkeys(needs))
