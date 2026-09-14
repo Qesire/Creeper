@@ -17,8 +17,11 @@ import os
 from pathlib import Path
 import signal
 
-from creeper.evidence.providers.async_cdx import AsyncWaybackCDXClient
 from creeper.evidence.providers.async_rdap import AsyncRDAPClient
+from creeper.evidence.providers.multi_cdx import (
+    AsyncCDXProviderPool,
+    CDXProviderConfig,
+)
 from creeper.evidence.worker import AsyncEvidenceWorker, EvidenceWorkerReport
 from creeper.storage.control_store import ControlStore
 from creeper.storage.evidence_store import EvidenceStore
@@ -48,6 +51,7 @@ async def run_service(
     rdap_endpoint: str = "https://rdap.org/domain",
     rdap_requests_per_second: float = 1.0,
     rdap_max_inflight: int = 2,
+    cdx_provider_specs: tuple[CDXProviderConfig, ...] | None = None,
 ) -> EvidenceWorkerReport:
     if poll_min_seconds <= 0 or poll_max_seconds < poll_min_seconds:
         raise ValueError("invalid evidence worker poll bounds")
@@ -84,17 +88,25 @@ async def run_service(
                 except (NotImplementedError, RuntimeError):
                     pass
 
-        async with (
-            AsyncWaybackCDXClient(
+        provider_configs = cdx_provider_specs or (
+            CDXProviderConfig(
+                name="internet_archive",
                 endpoint=endpoint,
-                provider="wayback",
-                timeout=timeout,
-                max_retries=max_retries,
                 requests_per_second=requests_per_second,
+                max_inflight=max_inflight,
                 max_connections=max_connections,
                 max_keepalive_connections=max_keepalive_connections,
                 keepalive_expiry_seconds=keepalive_expiry_seconds,
                 throttle_floor_seconds=throttle_floor_seconds,
+                timeout=timeout,
+                max_retries=max_retries,
+            ),
+        )
+
+        async with (
+            AsyncCDXProviderPool.from_configs(
+                provider_configs,
+                logical_provider="wayback",
             ) as provider,
             AsyncRDAPClient(
                 endpoint=rdap_endpoint,
@@ -110,7 +122,7 @@ async def run_service(
                 claim_batch_size=claim_batch_size,
                 lease_seconds=lease_seconds,
                 provider_inflight={
-                    "wayback": max_inflight,
+                    "wayback": provider.total_max_inflight,
                     "rdap": rdap_max_inflight,
                 },
                 retry_base_seconds=retry_base_seconds,
@@ -118,8 +130,9 @@ async def run_service(
             )
             telemetry.set_gauges(
                 {
-                    "wayback_configured_requests_per_second": requests_per_second,
-                    "wayback_max_inflight": max_inflight,
+                    "wayback_configured_requests_per_second": provider.requests_per_second,
+                    "wayback_max_inflight": provider.total_max_inflight,
+                    "wayback_physical_provider_count": len(provider.clients),
                     "rdap_configured_requests_per_second": rdap_requests_per_second,
                     "rdap_effective_requests_per_second": rdap_requests_per_second,
                     "rdap_max_inflight": rdap_max_inflight,
@@ -549,6 +562,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--timeout", type=float, default=30.0)
     parser.add_argument("--max-retries", type=int, default=3)
     parser.add_argument(
+        "--cdx-provider-json",
+        action="append",
+        default=[],
+        help=(
+            "repeatable JSON object describing one physical CDX endpoint; "
+            "when omitted the legacy --endpoint settings create one provider"
+        ),
+    )
+    parser.add_argument(
         "--rdap-endpoint",
         default="https://rdap.org/domain",
     )
@@ -561,6 +583,25 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     try:
+        provider_defaults = CDXProviderConfig(
+            name="internet_archive",
+            endpoint=args.endpoint,
+            requests_per_second=args.requests_per_second,
+            max_inflight=args.max_inflight,
+            max_connections=args.max_connections,
+            max_keepalive_connections=args.max_keepalive_connections,
+            keepalive_expiry_seconds=args.keepalive_expiry_seconds,
+            throttle_floor_seconds=args.throttle_floor_seconds,
+            timeout=args.timeout,
+            max_retries=args.max_retries,
+        )
+        cdx_provider_specs = tuple(
+            CDXProviderConfig.from_mapping(
+                json.loads(raw),
+                defaults=provider_defaults,
+            )
+            for raw in args.cdx_provider_json
+        )
         report = asyncio.run(
             run_service(
                 args.runtime_data_root,
@@ -584,6 +625,7 @@ def main(argv: list[str] | None = None) -> int:
                 poll_min_seconds=args.poll_min_seconds,
                 poll_max_seconds=args.poll_max_seconds,
                 keepalive_expiry_seconds=args.keepalive_expiry_seconds,
+                cdx_provider_specs=cdx_provider_specs or None,
             )
         )
     except (ValueError, RuntimeError) as exc:
