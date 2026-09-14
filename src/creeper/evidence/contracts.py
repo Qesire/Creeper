@@ -273,10 +273,11 @@ def resolve_source_evidence_contract(
 ) -> SourceEvidenceContract:
     """Resolve authority from immutable code/allowlist, never agent priors.
 
-    CDX/CDXJ are code-allowlisted because their dedicated parsers enforce exact
-    capture timestamp + original URL semantics.  Other structured sources are
-    discovery-only unless their exact locator is explicitly bound to a reviewed
-    contract.
+    CDX/CDXJ and parser families with explicit record-level semantics may be
+    code-allowlisted when their parser binds hostname/URL to a trustworthy
+    timestamp. Exact-locator sources such as the audited FTP sitelist stay
+    allowlisted by artifact identity; other structured sources remain
+    discovery-only unless explicitly reviewed.
     """
 
     actual_parser = (
