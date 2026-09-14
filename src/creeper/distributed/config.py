@@ -125,7 +125,11 @@ def _load_toml(path: Path) -> dict[str, Any]:
     return value
 
 
-def load_worker_credentials(path: Path) -> dict[str, str]:
+def load_worker_credentials(
+    path: Path,
+    *,
+    allow_empty: bool = False,
+) -> dict[str, str]:
     value = json.loads(Path(path).read_text(encoding="utf-8"))
     if not isinstance(value, dict):
         raise ValueError("credentials file must contain a JSON object")
@@ -136,7 +140,7 @@ def load_worker_credentials(path: Path) -> dict[str, str]:
         if not worker_id.strip() or not secret:
             raise ValueError("worker credential entries must be non-empty")
         result[worker_id] = secret
-    if not result:
+    if not result and not allow_empty:
         raise ValueError("credentials file must contain at least one worker")
     return result
 
