@@ -15,10 +15,12 @@ from creeper.distributed.authority_store import (
     BatchConflictError,
     BatchSequenceError,
     DistributedAuthorityStore,
+    FabricProtocolMismatchError,
     ProviderRegionNotQualifiedError,
     StaleLeaseError,
     WorkerRejectedError,
 )
+from creeper.distributed.edition import edition_metadata
 from creeper.distributed.models import (
     ResultBatch,
     TaskLease,
@@ -81,6 +83,11 @@ async def _error_middleware(request: web.Request, handler):
     except ProviderRegionNotQualifiedError as exc:
         return web.json_response(
             {"error": "REGION_NOT_QUALIFIED", "detail": str(exc)},
+            status=409,
+        )
+    except FabricProtocolMismatchError as exc:
+        return web.json_response(
+            {"error": "FABRIC_PROTOCOL_MISMATCH", "detail": str(exc)},
             status=409,
         )
     except StaleLeaseError as exc:
@@ -155,6 +162,9 @@ def create_authority_app(
     async def health(_request: web.Request) -> web.Response:
         return web.json_response({"status": "ok", "role": "local_authority"})
 
+    async def meta(_request: web.Request) -> web.Response:
+        return web.json_response(edition_metadata())
+
     async def register(request: web.Request) -> web.Response:
         data = _body(request)
         worker_id = str(request["worker_id"])
@@ -170,6 +180,8 @@ def create_authority_app(
             network_class=str(data.get("network_class", "")),
             capabilities=tuple(str(v) for v in data.get("capabilities", ())),
             producers=tuple(str(v) for v in data.get("producers", ())),
+            protocol_version=str(data.get("protocol_version", "")),
+            edition_version=str(data.get("edition_version", "")),
         )
         store.register_worker(worker)
         return web.json_response({"status": "REGISTERED", "worker_id": worker_id})
@@ -363,6 +375,7 @@ def create_authority_app(
         return web.json_response({"status": "RECORDED"})
 
     app.router.add_get("/healthz", health)
+    app.router.add_get("/meta", meta)
     app.router.add_post("/v1/workers/register", register)
     app.router.add_post("/v1/heartbeat", heartbeat)
     app.router.add_post("/v1/tasks/claim", claim)
