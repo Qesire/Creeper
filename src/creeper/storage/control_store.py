@@ -3181,6 +3181,10 @@ class ControlStore:
             or retry_at < 0
         ):
             raise ValueError("platform harvest retry_at must be finite and non-negative")
+        if result.state is PlatformHarvestState.RETRYABLE and retry_at is None:
+            raise ValueError("RETRYABLE platform harvest requires retry_at")
+        if result.state is not PlatformHarvestState.RETRYABLE and retry_at is not None:
+            raise ValueError("retry_at is only valid for RETRYABLE platform harvests")
         if result.state not in {
             PlatformHarvestState.PARTIAL,
             PlatformHarvestState.RETRYABLE,
