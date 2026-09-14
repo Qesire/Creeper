@@ -262,6 +262,26 @@ def create_authority_app(
         )
         return web.json_response({"results": results})
 
+    async def provider_observation(request: web.Request) -> web.Response:
+        data = _body(request)
+        state = store.record_provider_region_observation(
+            str(data["provider"]),
+            worker_id=str(request["worker_id"]),
+            task_id=str(data["task_id"]),
+            generation=int(data["generation"]),
+            connect_success=bool(data.get("connect_success", False)),
+            status_code=(
+                None
+                if data.get("status_code") is None
+                else int(data["status_code"])
+            ),
+            latency_ms=float(data.get("latency_ms", 0.0)),
+            response_bytes=int(data.get("response_bytes", 0)),
+            timeout=bool(data.get("timeout", False)),
+            policy_block=bool(data.get("policy_block", False)),
+        )
+        return web.json_response({"state": state})
+
     async def provider_permit(request: web.Request) -> web.Response:
         data = _body(request)
         permit = store.issue_provider_permit(
@@ -317,6 +337,7 @@ def create_authority_app(
     app.router.add_post("/v1/results/batch", commit_batch)
     app.router.add_post("/v1/results/hy-probe", hy_probe)
     app.router.add_post("/v1/results/hy-full", hy_full)
+    app.router.add_post("/v1/providers/observation", provider_observation)
     app.router.add_post("/v1/providers/permit", provider_permit)
     app.router.add_post("/v1/providers/report", provider_report)
     return app
