@@ -215,6 +215,7 @@ class SourceDiscoveryProducer:
                 row[0],
             )
         )
+        selected = classified[:max_links]
         results = [
             {
                 "kind": "SOURCE_CANDIDATE",
@@ -223,8 +224,28 @@ class SourceDiscoveryProducer:
                 "parser_kind": parser_kind,
                 "referrer_url": final_url,
             }
-            for url, candidate_type, parser_kind in classified[:max_links]
+            for url, candidate_type, parser_kind in selected
         ]
+
+        # Discovery no longer needs to infer a target year. Every hostname
+        # reachable from a bounded page is independently useful to the
+        # historical resolver.
+        seen_hosts: set[str] = set()
+        for url, _candidate_type, _parser_kind in selected:
+            hostname = (urlsplit(url).hostname or "").strip().lower().rstrip(".")
+            if not hostname or hostname in seen_hosts:
+                continue
+            seen_hosts.add(hostname)
+            results.append(
+                {
+                    "kind": "HOST_CANDIDATE",
+                    "hostname": hostname,
+                    "source": "source_page_link",
+                    "locator": url,
+                    "referrer_url": final_url,
+                }
+            )
+
         keeper.assert_owned()
         await coordinator.commit_batch(
             keeper.lease,
