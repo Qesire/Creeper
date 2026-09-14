@@ -166,12 +166,22 @@ class SyncRuntimeIntegrationTests(unittest.TestCase):
             report = runtime.run_once()
 
             self.assertEqual(report.leases_succeeded, 1)
-            self.assertEqual(report.evidence_tasks_completed, 1)
+            self.assertEqual(report.evidence_tasks_completed, 3)
             self.assertEqual(report.evidence_capsules_committed, 1)
             self.assertLessEqual(report.max_evidence_queue_depth, 2)
             self.assertEqual(
                 calls,
-                [("novel.example", year) for year in range(1996, 2002)],
+                [
+                    ("baseline.example", 1996),
+                    *[
+                        ("baseline.example", year)
+                        for year in range(1998, 2002)
+                    ],
+                    *[
+                        ("novel.example", year)
+                        for year in range(1996, 2002)
+                    ],
+                ],
             )
             # The fixture transport exposes a 1997 capture regardless of the
             # requested year, so only the matching exact-year probe contributes
