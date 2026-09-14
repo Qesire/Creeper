@@ -349,11 +349,15 @@ def create_authority_app(
 
     async def provider_permit(request: web.Request) -> web.Response:
         data = _body(request)
+        request_id = str(data.get("permit_request_id", "")).strip()
+        if not request_id:
+            raise ValueError("permit_request_id is required")
         permit = store.issue_provider_permit(
             str(data["provider"]),
             worker_id=str(request["worker_id"]),
             task_id=str(data["task_id"]),
             generation=int(data["generation"]),
+            request_id=request_id,
             ttl_seconds=float(data.get("ttl_seconds", 30.0)),
         )
         if permit is None:
@@ -367,6 +371,7 @@ def create_authority_app(
             {
                 "permit": {
                     "permit_id": permit.permit_id,
+                    "request_id": permit.request_id,
                     "provider": permit.provider,
                     "worker_id": permit.worker_id,
                     "task_id": permit.task_id,
