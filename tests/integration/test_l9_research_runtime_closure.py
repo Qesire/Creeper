@@ -78,7 +78,85 @@ class _OnePageRoot:
         return ()
 
 
+class _MetadataOnlyRoot:
+    async def search(self, query, checkpoint):
+        return SearchPage(
+            hits=(
+                SearchHit(
+                    root_id=query.root_id,
+                    query_id=query.query_id,
+                    provider_native_id="record:metadata-only",
+                    provider_url="https://repo.example/record/1",
+                    provider_type="RECORD",
+                    title="metadata-only artifact record",
+                    metadata={
+                        "files": (
+                            {
+                                "id": "file:metadata-only",
+                                "url": "https://repo.example/files/metadata.cdxj",
+                                "checksum": "sha256:metadata-only",
+                            },
+                        ),
+                    },
+                ),
+            ),
+            terminal=True,
+        )
+
+    async def resolve(self, hit):
+        return ()
+
+
 class L9ResearchRuntimeClosureTests(unittest.IsolatedAsyncioTestCase):
+    async def test_metadata_resolver_promotes_only_concrete_artifact_leads(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            control = ControlStore(Path(tmp) / "control.sqlite3")
+            try:
+                discovery = SourceDiscoveryRegistry(control)
+                research = ResearchRegistry(control)
+                bridge = ResearchIntegrationBridge(research, discovery)
+                root = RootSurface(
+                    root_id="root:metadata",
+                    kind=RootKind.STRUCTURED_REPOSITORY,
+                    canonical_locator="https://repo.example/api",
+                    capabilities=("search", "metadata"),
+                )
+                research.upsert_root(root)
+                query = AdapterRootQuery(
+                    "query:metadata",
+                    root.root_id,
+                    "historical metadata",
+                    1,
+                    10.0,
+                )
+                program = QueryProgram(
+                    root_id=root.root_id,
+                    strategy="metadata-resolution",
+                    queries=(query,),
+                    hard_max_requests=1,
+                    stop_conditions=("terminal_page",),
+                    program_id="program:metadata",
+                )
+                research.register_program(program)
+
+                result = await bridge.execute_root_query_page(
+                    _MetadataOnlyRoot(),
+                    query,
+                    program_id=program.program_id,
+                )
+                self.assertEqual(result.hits, 1)
+                self.assertEqual(result.artifacts, 1)
+                self.assertEqual(result.sources_inserted, 1)
+                candidates = discovery.list_candidates()
+                self.assertEqual(len(candidates), 1)
+                self.assertEqual(
+                    candidates[0].canonical_entrypoint,
+                    "https://repo.example/files/metadata.cdxj",
+                )
+                self.assertEqual(candidates[0].direct_evidence_prior, 1.0)
+            finally:
+                control.close()
+
     async def test_root_artifact_source_final_policy_closes_once(self):
         with tempfile.TemporaryDirectory() as tmp:
             control = ControlStore(Path(tmp) / "control.sqlite3")
