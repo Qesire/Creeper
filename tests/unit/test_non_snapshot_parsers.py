@@ -59,6 +59,27 @@ class NonSnapshotParserTests(unittest.TestCase):
         self.assertEqual(source_time, "1998-10-16T08:31:23+00:00")
         self.assertTrue(all("person@" not in value for value in urls))
 
+    def test_mbox_parser_excludes_attachment_urls(self) -> None:
+        message = (
+            b"From sender@example.test Fri Oct 16 04:31:23 1998\n"
+            b"Date: Fri, 16 Oct 1998 04:31:23 -0400\n"
+            b"Content-Type: multipart/mixed; boundary=BOUNDARY\n"
+            b"\n"
+            b"--BOUNDARY\n"
+            b"Content-Type: text/plain; charset=utf-8\n\n"
+            b"http://body.example/\n"
+            b"--BOUNDARY\n"
+            b"Content-Type: text/plain; charset=utf-8\n"
+            b"Content-Disposition: attachment; filename=links.txt\n\n"
+            b"http://attachment.example/\n"
+            b"--BOUNDARY--\n"
+        )
+
+        urls, year, _source_time = parse_mbox_message(message)
+
+        self.assertEqual(urls, ("http://body.example/",))
+        self.assertEqual(year, 1998)
+
     def test_mbox_boundaries_do_not_split_quoted_from_or_keep_partial_tail(self) -> None:
         first = (
             b"From first@example.test Fri Oct 16 04:31:23 1998\n"
