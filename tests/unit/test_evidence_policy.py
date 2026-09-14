@@ -2,8 +2,11 @@ import unittest
 
 from creeper.evidence.policies import (
     CDXQueryState,
+    DomainEvidenceQueryResult,
     EvidenceCapsule,
     EvidenceQueryKey,
+    EvidenceQueryResult,
+    RangeEvidenceQueryResult,
     TemporalScope,
 )
 from creeper.evidence.providers.cdx import query_missing_years, query_year
@@ -46,6 +49,56 @@ class EvidencePolicyTests(unittest.TestCase):
             policy_version="v1",
         )
         self.assertEqual(capsule.hostname, "example.com")
+
+    def test_provider_result_accounting_requires_exact_nonnegative_integers(self):
+        key = EvidenceQueryKey(
+            "example.com",
+            TemporalScope(1997, 1997),
+            "wayback",
+            "v1",
+        )
+        with self.assertRaisesRegex(ValueError, "non-negative integers"):
+            EvidenceQueryResult(
+                "example.com",
+                1997,
+                CDXQueryState.INCOMPLETE,
+                provider_requests=1.5,
+                key=key,
+            )
+        with self.assertRaisesRegex(ValueError, "non-negative integers"):
+            DomainEvidenceQueryResult(
+                "example.com",
+                EvidenceQueryKey(
+                    "example.com",
+                    TemporalScope(1996, 1997),
+                    "wayback",
+                    "v1",
+                ),
+                CDXQueryState.DECOMPOSED,
+                records_seen=True,
+            )
+
+    def test_range_result_rejects_fractional_or_duplicate_years(self):
+        key = EvidenceQueryKey(
+            "example.com",
+            TemporalScope(1996, 2001),
+            "wayback",
+            "v1",
+        )
+        with self.assertRaisesRegex(ValueError, "integer years"):
+            RangeEvidenceQueryResult(
+                "example.com",
+                key,
+                CDXQueryState.DECOMPOSED,
+                candidate_years=(1997.0,),
+            )
+        with self.assertRaisesRegex(ValueError, "must be unique"):
+            RangeEvidenceQueryResult(
+                "example.com",
+                key,
+                CDXQueryState.DECOMPOSED,
+                followup_years=(1998, 1998),
+            )
 
     def test_completed_second_empty_page_is_exhaustive(self):
         result = query_year("example.com", 1997, lambda h, y: [([], False), ([], True)])
