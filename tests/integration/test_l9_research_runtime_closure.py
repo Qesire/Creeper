@@ -454,7 +454,8 @@ class L9ResearchRuntimeClosureTests(unittest.IsolatedAsyncioTestCase):
                                     "attributes": {
                                         "titles": [{"title": "historical index"}],
                                         "contentUrl": [
-                                            "https://objects.example/history.cdxj"
+                                            "https://objects.example/history.cdxj",
+                                            "https://objects.example/paper.pdf",
                                         ],
                                     },
                                 }
@@ -480,6 +481,9 @@ class L9ResearchRuntimeClosureTests(unittest.IsolatedAsyncioTestCase):
                     result = await executor(tasks[0])
                     self.assertTrue(result.terminal)
                     self.assertEqual(result.sources_inserted, 1)
+                    self.assertEqual(result.metadata_accepted, 1)
+                    self.assertEqual(result.metadata_rejected, 1)
+                    self.assertEqual(result.metadata_held, 0)
                     self.assertEqual(len(calls), 1)
 
                     query_row = research.get_query_row(query.query_id)
@@ -506,6 +510,22 @@ class L9ResearchRuntimeClosureTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(lineage[0]["query_id"], query.query_id)
                     self.assertEqual(lineage[0]["program_id"], program.program_id)
                     self.assertEqual(lineage[0]["root_id"], "datacite")
+                    prefilter = research.connection.execute(
+                        """
+                        SELECT admission, locator
+                        FROM research_artifact_prefilter
+                        WHERE query_id=?
+                        ORDER BY locator
+                        """,
+                        (query.query_id,),
+                    ).fetchall()
+                    self.assertEqual(
+                        [(row["admission"], row["locator"]) for row in prefilter],
+                        [
+                            ("ACCEPT", "https://objects.example/history.cdxj"),
+                            ("REJECT", "https://objects.example/paper.pdf"),
+                        ],
+                    )
 
                     # Terminal durable work is not replayed on the next cycle.
                     self.assertEqual(planner(), ())
