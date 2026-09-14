@@ -116,6 +116,16 @@ class EvidenceCapsule:
             object.__setattr__(self, "extraction_method", "provider_record")
 
 
+def _validate_result_accounting(*values: object) -> None:
+    if any(
+        isinstance(value, bool) or not isinstance(value, int) or value < 0
+        for value in values
+    ):
+        raise ValueError(
+            "provider result accounting must use non-negative integers"
+        )
+
+
 @dataclass(frozen=True)
 class EvidenceQueryResult:
     hostname: str
@@ -128,6 +138,41 @@ class EvidenceQueryResult:
     provider_elapsed_milliseconds: int = 0
     error: str | None = None
     key: EvidenceQueryKey | None = None
+
+    def __post_init__(self) -> None:
+        normalized = normalize_official(self.hostname)
+        if normalized is None:
+            raise ValueError("invalid evidence result hostname")
+        if (
+            isinstance(self.year, bool)
+            or not isinstance(self.year, int)
+            or not 1996 <= self.year <= 2001
+        ):
+            raise ValueError(
+                "evidence result year must be an integer within 1996-2001"
+            )
+        object.__setattr__(self, "hostname", normalized)
+        object.__setattr__(self, "state", CDXQueryState(self.state))
+        _validate_result_accounting(
+            self.pages_seen,
+            self.records_seen,
+            self.provider_requests,
+            self.provider_elapsed_milliseconds,
+        )
+        if self.key is not None:
+            if self.key.hostname != normalized:
+                raise ValueError("evidence result hostname must match query key")
+            scope = self.key.temporal_scope
+            if not scope.year_from <= self.year <= scope.year_to:
+                raise ValueError("evidence result year must be inside query scope")
+        if self.capsule is not None:
+            if self.capsule.hostname != normalized or self.capsule.year != self.year:
+                raise ValueError("evidence capsule identity must match result")
+            if self.key is not None and (
+                self.capsule.provider != self.key.provider
+                or self.capsule.policy_version != self.key.policy_version
+            ):
+                raise ValueError("evidence capsule authority must match query key")
 
 
 @dataclass(frozen=True)
@@ -154,6 +199,15 @@ class DomainEvidenceQueryResult:
         normalized = normalize_official(self.domain)
         if normalized is None or normalized != self.key.hostname:
             raise ValueError("domain result must match normalized query hostname")
+        object.__setattr__(self, "domain", normalized)
+        object.__setattr__(self, "state", CDXQueryState(self.state))
+        object.__setattr__(self, "capsules", tuple(self.capsules))
+        _validate_result_accounting(
+            self.pages_seen,
+            self.records_seen,
+            self.provider_requests,
+            self.provider_elapsed_milliseconds,
+        )
         if self.key.temporal_scope.year_from == self.key.temporal_scope.year_to:
             raise ValueError("domain amplification requires a multi-year scope")
         if self.state not in {
@@ -204,19 +258,40 @@ class RangeEvidenceQueryResult:
     error: str | None = None
 
     def __post_init__(self) -> None:
-        if self.key.hostname != self.hostname:
+        normalized = normalize_official(self.hostname)
+        if normalized is None or self.key.hostname != normalized:
             raise ValueError("range result hostname must match query key")
+        object.__setattr__(self, "hostname", normalized)
+        object.__setattr__(self, "state", CDXQueryState(self.state))
+        object.__setattr__(self, "candidate_years", tuple(self.candidate_years))
+        object.__setattr__(self, "followup_years", tuple(self.followup_years))
+        object.__setattr__(self, "capsules", tuple(self.capsules))
+        _validate_result_accounting(
+            self.pages_seen,
+            self.records_seen,
+            self.provider_requests,
+            self.provider_elapsed_milliseconds,
+        )
         scope = self.key.temporal_scope
         if scope.year_from == scope.year_to:
             raise ValueError("range result requires a multi-year temporal scope")
-        if any(year not in range(scope.year_from, scope.year_to + 1) for year in self.candidate_years):
-            raise ValueError("range candidate years must be inside the query scope")
-        if any(year not in range(scope.year_from, scope.year_to + 1) for year in self.followup_years):
-            raise ValueError("range follow-up years must be inside the query scope")
+        for label, years in (
+            ("candidate", self.candidate_years),
+            ("follow-up", self.followup_years),
+        ):
+            if any(
+                isinstance(year, bool)
+                or not isinstance(year, int)
+                or year not in range(scope.year_from, scope.year_to + 1)
+                for year in years
+            ):
+                raise ValueError(
+                    f"range {label} years must be integer years inside the query scope"
+                )
+            if len(set(years)) != len(years):
+                raise ValueError(f"range {label} years must be unique")
         if set(self.candidate_years) & set(self.followup_years):
             raise ValueError("range positive and follow-up years must be disjoint")
-        if self.provider_requests < 0 or self.provider_elapsed_milliseconds < 0:
-            raise ValueError("provider request accounting must be non-negative")
         capsule_years: set[int] = set()
         for capsule in self.capsules:
             if capsule.hostname != self.hostname:
