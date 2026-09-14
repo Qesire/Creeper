@@ -114,13 +114,30 @@ class SourceDiscoveryRegistry:
         max_graph_hops: int = 4,
         clock=time.time,
     ) -> None:
-        if max_graph_hops < 1:
-            raise ValueError("max_graph_hops must be positive")
+        if (
+            isinstance(max_graph_hops, bool)
+            or not isinstance(max_graph_hops, int)
+            or max_graph_hops < 1
+        ):
+            raise ValueError("max_graph_hops must be a positive integer")
+        if not callable(clock):
+            raise ValueError("clock must be callable")
         self.control_store = control_store
         self.connection = control_store.connection
         self.max_graph_hops = max_graph_hops
         self.clock = clock
         self._ensure_schema()
+
+    def _now(self) -> float:
+        value = self.clock()
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(float(value))
+            or value < 0
+        ):
+            raise ValueError("source registry clock must be finite and non-negative")
+        return float(value)
 
     def _ensure_schema(self) -> None:
         self.connection.executescript(
@@ -630,7 +647,7 @@ class SourceDiscoveryRegistry:
                 (
                     baseline_signature,
                     model_signature,
-                    float(self.clock()),
+                    self._now(),
                 ),
             )
             self.connection.commit()
@@ -671,7 +688,7 @@ class SourceDiscoveryRegistry:
         if not all(isinstance(item, str) and item.strip() for item in (strategy, backend, query, actor)):
             raise ValueError("search episode fields must be non-empty strings")
         episode_id = episode_id or f"search:{uuid.uuid4().hex}"
-        started_at = float(self.clock())
+        started_at = self._now()
         with self.connection:
             self.connection.execute(
                 """
@@ -732,7 +749,7 @@ class SourceDiscoveryRegistry:
                 "search supply counts must be non-negative integers and "
                 "new_sources cannot exceed accepted_proposals"
             )
-        now = float(self.clock())
+        now = self._now()
         self.connection.execute("BEGIN IMMEDIATE")
         try:
             row = self.connection.execute(
@@ -851,7 +868,7 @@ class SourceDiscoveryRegistry:
                     actor,
                     context_hash,
                     prompt_version,
-                    float(self.clock()),
+                    self._now(),
                 ),
             )
 
@@ -875,7 +892,7 @@ class SourceDiscoveryRegistry:
                 SET finished_at = ?, cost_seconds = ?
                 WHERE episode_id = ? AND finished_at IS NULL
                 """,
-                (float(self.clock()), float(cost_seconds), episode_id),
+                (self._now(), float(cost_seconds), episode_id),
             ).rowcount
         if changed != 1:
             raise KeyError(f"unknown or finished LLM episode: {episode_id}")
@@ -918,7 +935,7 @@ class SourceDiscoveryRegistry:
                     action,
                     float(confidence),
                     raw_json,
-                    float(self.clock()),
+                    self._now(),
                 ),
             )
 
@@ -1009,7 +1026,7 @@ class SourceDiscoveryRegistry:
         values = (reservoir_id, lease_id, baseline_signature, model_signature)
         if any(not isinstance(value, str) or not value.strip() for value in values):
             raise ValueError("source-run identity and authority are required")
-        now = float(self.clock())
+        now = self._now()
         if read_started is not None and (
             isinstance(read_started, bool)
             or not isinstance(read_started, (int, float))
@@ -1119,7 +1136,7 @@ class SourceDiscoveryRegistry:
             raise ValueError("production exposure/source-run identity mismatch")
         if not lease_id.strip():
             raise ValueError("source-run lease identity is required")
-        now = float(self.clock())
+        now = self._now()
         if read_started is not None and (
             isinstance(read_started, bool)
             or not isinstance(read_started, (int, float))
@@ -1275,7 +1292,7 @@ class SourceDiscoveryRegistry:
             or read_finished < 0
         ):
             raise ValueError("read_finished must be finite and non-negative")
-        now = float(self.clock())
+        now = self._now()
         finished = (
             None
             if not read_complete and read_finished is None
@@ -1400,7 +1417,7 @@ class SourceDiscoveryRegistry:
             raise ValueError(
                 "source-run final reward and cost must be finite and non-negative"
             )
-        now = float(self.clock())
+        now = self._now()
         self.connection.execute("BEGIN IMMEDIATE")
         try:
             changed = self.connection.execute(
@@ -1533,7 +1550,7 @@ class SourceDiscoveryRegistry:
                 model_signature,
                 closed_runs,
                 zero_runs,
-                float(self.clock()),
+                self._now(),
             ),
         )
         self._attribute_search_reward_locked(
@@ -1639,7 +1656,7 @@ class SourceDiscoveryRegistry:
                 self.connection.commit()
                 return False
 
-            now = float(self.clock())
+            now = self._now()
             changed = self.connection.execute(
                 """
                 UPDATE source_run_outcomes
@@ -1714,7 +1731,7 @@ class SourceDiscoveryRegistry:
                 reason=reason,
                 authority=(baseline_signature, model_signature),
             )
-        now = float(self.clock())
+        now = self._now()
         self.connection.execute("BEGIN IMMEDIATE")
         try:
             changed = self.connection.execute(
@@ -1798,7 +1815,7 @@ class SourceDiscoveryRegistry:
             authority = self.current_scout_authority
             if authority is not None:
                 baseline_signature, model_signature = authority
-        now = float(self.clock())
+        now = self._now()
         with self.connection:
             self.connection.execute(
                 """
@@ -1952,7 +1969,7 @@ class SourceDiscoveryRegistry:
                     source_key,
                     len(values),
                     json.dumps(list(values), separators=(",", ":")),
-                    float(self.clock()),
+                    self._now(),
                 ),
             )
 
@@ -1991,7 +2008,7 @@ class SourceDiscoveryRegistry:
             raise ValueError(
                 "Common Crawl corpus is excluded from the active candidate pool"
             )
-        now = float(self.clock())
+        now = self._now()
         proposal_id = proposal_id or f"proposal:{uuid.uuid4().hex}"
         self.connection.execute("BEGIN IMMEDIATE")
         try:
@@ -2145,7 +2162,7 @@ class SourceDiscoveryRegistry:
 
     def begin_activation(self, source_key: str) -> SourceCandidate:
         """Claim one WARM candidate for durable, compiler-backed activation."""
-        now = float(self.clock())
+        now = self._now()
         self.connection.execute("BEGIN IMMEDIATE")
         try:
             row = self.connection.execute(
@@ -2226,7 +2243,7 @@ class SourceDiscoveryRegistry:
                 "retry_seconds must be finite and positive for transient failures"
             )
         target = SourceState.REJECTED if permanent else SourceState.HOLD
-        now = float(self.clock())
+        now = self._now()
         retry_at = None if permanent else now + float(retry_seconds)
         self.connection.execute("BEGIN IMMEDIATE")
         try:
@@ -2295,7 +2312,7 @@ class SourceDiscoveryRegistry:
 
     def transition(self, source_key: str, target: SourceState) -> SourceCandidate:
         target = SourceState(target)
-        now = float(self.clock())
+        now = self._now()
         self.connection.execute("BEGIN IMMEDIATE")
         try:
             row = self.connection.execute(
@@ -2501,7 +2518,7 @@ class SourceDiscoveryRegistry:
                     None
                     if range_supported is None
                     else int(range_supported),
-                    float(self.clock()),
+                    self._now(),
                 ),
             )
 
@@ -2593,7 +2610,7 @@ class SourceDiscoveryRegistry:
                 )
 
             if not preserve_current:
-                now = float(self.clock())
+                now = self._now()
                 self.connection.execute(
                     """
                     INSERT INTO source_scout_metrics(
@@ -2768,7 +2785,7 @@ class SourceDiscoveryRegistry:
             not math.isfinite(float(ttl_seconds)) or ttl_seconds < 0
         ):
             raise ValueError("ttl_seconds must be finite and non-negative")
-        now = float(self.clock())
+        now = self._now()
         expires_at = None if ttl_seconds is None else now + float(ttl_seconds)
         with self.connection:
             self.connection.execute(
@@ -2801,7 +2818,7 @@ class SourceDiscoveryRegistry:
         self.suppress(scope, key, reason=reason, ttl_seconds=ttl_seconds)
 
     def suppression_reason(self, candidate: SourceCandidate) -> str | None:
-        now = float(self.clock())
+        now = self._now()
         scopes = (
             (SuppressionScope.SOURCE.value, candidate.source_key),
             (SuppressionScope.FAMILY.value, candidate.source_family),
@@ -2825,7 +2842,7 @@ class SourceDiscoveryRegistry:
         with self.connection:
             self.connection.execute(
                 "DELETE FROM source_suppressions WHERE expires_at IS NOT NULL AND expires_at <= ?",
-                (float(self.clock()),),
+                (self._now(),),
             )
         return self.connection.total_changes - before
 
@@ -2922,7 +2939,7 @@ class SourceDiscoveryRegistry:
                 INSERT INTO source_edges(parent_key, child_key, relation, created_at)
                 VALUES (?, ?, ?, ?)
                 """,
-                (parent_key, child_key, relation, float(self.clock())),
+                (parent_key, child_key, relation, self._now()),
             )
             self.connection.commit()
             return True
