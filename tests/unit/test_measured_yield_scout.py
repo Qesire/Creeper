@@ -306,6 +306,7 @@ class MeasuredYieldScoutTests(unittest.IsolatedAsyncioTestCase):
                     "Novel System novel.org\n"
                     "IP Only 199.166.4.9 3004\n"
                     "TOTAL SYSTEMS LISTED: 3\n"
+                    "[END OF LIST]\n"
                 ),
             )
         body = raw.getvalue()
