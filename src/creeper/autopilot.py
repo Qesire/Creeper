@@ -474,6 +474,7 @@ def load_autopilot_config(config_path: Path) -> AutopilotConfig:
                 timeout=evidence.timeout,
                 max_retries=evidence.max_retries,
                 weight=1.0,
+                dialect="arquivo",
             ),
         )
     else:
