@@ -660,6 +660,13 @@ class ActivatedSourceRuntime:
                     host_fanout
                     * EvidencePlanner.MAX_BACKLOG_CAPACITY_PER_OBSERVATION
                 )
+                if capacity_per_record > self.backlog_capacity:
+                    raise ValueError(
+                        "evidence_backlog_capacity is below the adapter's "
+                        "minimum safe per-record evidence fanout: "
+                        f"capacity={self.backlog_capacity} required="
+                        f"{capacity_per_record} adapter={reservoir.adapter_id}"
+                    )
                 lease_records = min(
                     self.max_records,
                     wayback_headroom // capacity_per_record,
