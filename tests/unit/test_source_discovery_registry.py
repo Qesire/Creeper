@@ -158,6 +158,46 @@ class SourceDiscoveryRegistryTests(unittest.TestCase):
         self.assertEqual(rewards[0].strategy, "META_SOURCE_SEARCH")
         self.assertEqual(rewards[0].reward_per_cost, 3.0)
 
+    def test_nonfinite_search_and_llm_rewards_are_rejected(self) -> None:
+        episode = self.registry.begin_search_episode(
+            strategy="META_SOURCE_SEARCH",
+            backend="test",
+            query="finite accounting",
+            actor="agent:test",
+            episode_id="search:finite",
+        )
+        with self.assertRaisesRegex(ValueError, "finite and non-negative"):
+            self.registry.finish_search_episode(
+                episode.episode_id,
+                search_cost_seconds=float("nan"),
+            )
+        self.assertIsNone(
+            self.registry.get_search_episode(episode.episode_id).finished_at
+        )
+        self.registry.finish_search_episode(
+            episode.episode_id,
+            search_cost_seconds=1.0,
+        )
+        with self.assertRaisesRegex(ValueError, "finite and non-negative"):
+            self.registry.credit_search_episode(
+                episode.episode_id,
+                accepted_novel_eed=float("inf"),
+            )
+
+        self.registry.begin_llm_episode(
+            episode_id="llm:finite",
+            task_type="DISCOVER_NEW_SOURCE",
+            backend="test",
+            actor="agent:test",
+            context_hash="",
+            prompt_version="v1",
+        )
+        with self.assertRaisesRegex(ValueError, "finite and non-negative"):
+            self.registry.finish_llm_episode(
+                "llm:finite",
+                cost_seconds=float("nan"),
+            )
+
     def test_scout_measurement_credits_originating_search_once_and_updates_delta(self) -> None:
         episode = self.registry.begin_search_episode(
             strategy="META_SOURCE_SEARCH",
