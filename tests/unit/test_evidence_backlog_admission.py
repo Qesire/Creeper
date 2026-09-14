@@ -209,6 +209,20 @@ class EvidenceBacklogAdmissionTests(unittest.TestCase):
         self.assertIsNotNone(replacement)
         self.assertEqual(self.admission.reserved("wayback"), 2)
 
+    def test_boolean_capacity_and_amount_are_rejected(self):
+        with self.assertRaisesRegex(ValueError, "amount must be"):
+            self.admission.try_reserve(
+                provider="wayback",
+                amount=True,
+                capacity=1,
+                ttl_seconds=10,
+            )
+        with self.assertRaisesRegex(ValueError, "capacity must be"):
+            self.admission.available_capacity(
+                provider="wayback",
+                capacity=True,
+            )
+
     def test_nonfinite_clock_and_ttl_fail_without_reservation(self):
         with self.assertRaisesRegex(ValueError, "finite and positive"):
             self.admission.try_reserve(
