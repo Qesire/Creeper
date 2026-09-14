@@ -152,6 +152,103 @@ class SourceDiscoveryCoordinatorTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreaterEqual(len(searched), 1)
         self.assertEqual(searched[0].discovered_by, "agent:test")
 
+    async def test_background_cdxj_is_deferred_while_foreground_search_runs(self) -> None:
+        bulk = SourceCandidate(
+            canonical_entrypoint="https://archive.example/shard.cdxj",
+            source_family="BULK_ARTIFACT",
+            level=SourceLevel.SOURCE,
+            discovered_by="arquivo-catalog:test",
+            discovery_strategy="DETERMINISTIC_AUDITED_CATALOG_EXPANSION",
+            expected_volume=100_000,
+            temporal_semantics_prior=1.0,
+            enumerability_prior=1.0,
+            direct_evidence_prior=1.0,
+            confidence=1.0,
+        )
+        self.to_scout_ready(bulk)
+        scout_calls = 0
+        search_calls = 0
+
+        async def triage(_candidate: SourceCandidate) -> TriageResult:
+            return TriageResult(TriageDisposition.SCOUT)
+
+        async def scout(_candidate: SourceCandidate) -> ScoutResult:
+            nonlocal scout_calls
+            scout_calls += 1
+            return ScoutResult(ScoutDisposition.WARM, self.measurement())
+
+        async def search(_directive) -> SearchBatch:
+            nonlocal search_calls
+            search_calls += 1
+            return SearchBatch(backend="test", query="foreground", actor="test")
+
+        coordinator = SourceDiscoveryCoordinator(
+            self.registry,
+            self.manager(cold_min=1, cold_target=1),
+            lock_path=self.lock_path,
+            triage_executor=triage,
+            scout_executor=scout,
+            search_executor=search,
+        )
+
+        report = await coordinator.run_once()
+
+        self.assertGreaterEqual(search_calls, 1)
+        self.assertEqual(scout_calls, 0)
+        self.assertEqual(report.background_bulk_deferred, 1)
+        self.assertEqual(report.background_bulk_steps, 0)
+        self.assertEqual(
+            self.registry.get_candidate(bulk.source_key).state,
+            SourceState.SCOUT_READY,
+        )
+
+    async def test_background_cdxj_scout_runs_only_when_foreground_is_idle(self) -> None:
+        bulk = SourceCandidate(
+            canonical_entrypoint="https://archive.example/shard.cdxj",
+            source_family="BULK_ARTIFACT",
+            level=SourceLevel.SOURCE,
+            discovered_by="arquivo-catalog:test",
+            discovery_strategy="DETERMINISTIC_AUDITED_CATALOG_EXPANSION",
+            expected_volume=100_000,
+            temporal_semantics_prior=1.0,
+            enumerability_prior=1.0,
+            direct_evidence_prior=1.0,
+            confidence=1.0,
+        )
+        self.to_scout_ready(bulk)
+        scout_calls = 0
+
+        async def triage(_candidate: SourceCandidate) -> TriageResult:
+            raise AssertionError("no triage expected")
+
+        async def scout(candidate: SourceCandidate) -> ScoutResult:
+            nonlocal scout_calls
+            scout_calls += 1
+            self.assertEqual(candidate.source_key, bulk.source_key)
+            return ScoutResult(ScoutDisposition.WARM, self.measurement())
+
+        async def search(_directive) -> SearchBatch:
+            raise AssertionError("background CDXJ must not invoke search")
+
+        coordinator = SourceDiscoveryCoordinator(
+            self.registry,
+            self.manager(cold_min=0, cold_target=0),
+            lock_path=self.lock_path,
+            triage_executor=triage,
+            scout_executor=scout,
+            search_executor=search,
+        )
+
+        report = await coordinator.run_once()
+
+        self.assertEqual(scout_calls, 1)
+        self.assertEqual(report.background_bulk_steps, 1)
+        self.assertEqual(report.background_bulk_deferred, 0)
+        self.assertEqual(
+            self.registry.get_candidate(bulk.source_key).state,
+            SourceState.WARM,
+        )
+
     async def test_posix_flock_rejects_second_local_coordinator(self) -> None:
         candidate = self.candidate("blocking-triage")
         self.registry.register_proposal(candidate)
