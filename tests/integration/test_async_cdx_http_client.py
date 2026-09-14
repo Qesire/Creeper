@@ -128,14 +128,12 @@ class AsyncWaybackCDXClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(first_query["filter"], ["statuscode:[23][0-9][0-9]"])
         self.assertEqual(second_query["resumeKey"], ["resume-token!"])
 
-    async def test_exact_year_uses_one_row_pages_but_range_keeps_bulk_limit(self):
-        seen_limits = []
-        seen_collapse = []
+    async def test_exact_year_uses_one_row_but_host_range_returns_broad_page(self):
+        seen_queries = []
 
         async def handler(request):
             query = parse_qs(request.url.query.decode())
-            seen_limits.append(query["limit"][0])
-            seen_collapse.append(query.get("collapse", []))
+            seen_queries.append(query)
             payload = [
                 ["urlkey", "timestamp", "original", "statuscode"],
                 ["com,example)/", "19970102030405", "http://example.com/", "200"],
@@ -152,15 +150,24 @@ class AsyncWaybackCDXClientTests(unittest.IsolatedAsyncioTestCase):
         async with AsyncWaybackCDXClient(
             transport=httpx.MockTransport(handler),
             max_retries=0,
-            limit=1000,
+            limit=150_000,
         ) as client:
             exact = await client.query_key(self.key())
             ranged = await client.query_range(range_key)
 
         self.assertEqual(exact.state, CDXQueryState.PASS)
         self.assertEqual(ranged.state, CDXQueryState.PASS)
-        self.assertEqual(seen_limits, ["1", "1000"])
-        self.assertEqual(seen_collapse, [[], ["timestamp:4"]])
+        self.assertEqual(
+            [query["limit"][0] for query in seen_queries],
+            ["1", "150000"],
+        )
+        range_query = seen_queries[1]
+        self.assertNotIn("collapse", range_query)
+        self.assertNotIn("gzip", range_query)
+        self.assertEqual(
+            range_query["fl"],
+            ["urlkey,timestamp,original,statuscode"],
+        )
 
     async def test_non_retryable_http_error_is_invalid_without_retry(self):
         calls = 0
