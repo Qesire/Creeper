@@ -13,7 +13,7 @@ import hashlib
 import json
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from urllib.parse import urlsplit
 
@@ -97,12 +97,6 @@ class AsyncWaybackCDXClient:
         user_agent: str = "Creeper/2.2 (research; https://github.com/Qesire/Creeper)",
         client: httpx.AsyncClient | None = None,
         transport: httpx.AsyncBaseTransport | None = None,
-        request_permit: Callable[[], Awaitable[object]] | None = None,
-        request_report: Callable[
-            [object, int | None, httpx.Headers | None],
-            Awaitable[None],
-        ]
-        | None = None,
     ) -> None:
         if (
             limit < 1
@@ -127,8 +121,6 @@ class AsyncWaybackCDXClient:
         self.endpoint = endpoint
         self.provider = provider
         self.source_id = provider if source_id is None else source_id
-        self._request_permit = request_permit
-        self._request_report = request_report
         if not self.source_id.strip():
             raise ValueError("source_id must be non-empty")
         self.limit = limit
@@ -352,12 +344,8 @@ class AsyncWaybackCDXClient:
                 await self._raise_if_circuit_open()
 
                 async def request_once() -> httpx.Response:
-                    permit_token: object | None = None
-                    if self._request_permit is not None:
-                        permit_token = await self._request_permit()
                     loop = asyncio.get_running_loop()
                     started = loop.time()
-                    response_for_report: httpx.Response | None = None
                     if self._last_request_start is None:
                         self.request_start_segments += 1
                     else:
@@ -387,11 +375,10 @@ class AsyncWaybackCDXClient:
                     if accounting is not None:
                         accounting.requests += 1
                     try:
-                        response_for_report = await self.client.get(
+                        return await self.client.get(
                             self.endpoint,
                             params=params,
                         )
-                        return response_for_report
                     except (httpx.TimeoutException, httpx.TransportError) as exc:
                         self.transport_errors += 1
                         self.transport_error_counts[type(exc).__name__] += 1
@@ -422,23 +409,6 @@ class AsyncWaybackCDXClient:
                         else:
                             bucket = "gt_30s"
                         self.http_latency_buckets[bucket] += 1
-                        if (
-                            permit_token is not None
-                            and self._request_report is not None
-                        ):
-                            await self._request_report(
-                                permit_token,
-                                (
-                                    None
-                                    if response_for_report is None
-                                    else int(response_for_report.status_code)
-                                ),
-                                (
-                                    None
-                                    if response_for_report is None
-                                    else response_for_report.headers
-                                ),
-                            )
 
                 if self._limiter is None:
                     response = await request_once()
