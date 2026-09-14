@@ -232,6 +232,36 @@ def create_authority_app(
             }
         )
 
+    async def hy_probe(request: web.Request) -> web.Response:
+        data = _body(request)
+        probes = data.get("probes", ())
+        if not isinstance(probes, list):
+            raise ValueError("probes must be a list")
+        if any(not isinstance(item, Mapping) for item in probes):
+            raise ValueError("every HY probe must be a JSON object")
+        decisions = store.probe_host_years(
+            str(data["task_id"]),
+            worker_id=str(request["worker_id"]),
+            generation=int(data["generation"]),
+            probes=[dict(item) for item in probes],
+        )
+        return web.json_response({"decisions": decisions})
+
+    async def hy_full(request: web.Request) -> web.Response:
+        data = _body(request)
+        evidence = data.get("evidence", ())
+        if not isinstance(evidence, list):
+            raise ValueError("evidence must be a list")
+        if any(not isinstance(item, Mapping) for item in evidence):
+            raise ValueError("every HY evidence record must be a JSON object")
+        results = store.commit_full_host_year_evidence(
+            str(data["task_id"]),
+            worker_id=str(request["worker_id"]),
+            generation=int(data["generation"]),
+            evidence=[dict(item) for item in evidence],
+        )
+        return web.json_response({"results": results})
+
     async def provider_permit(request: web.Request) -> web.Response:
         data = _body(request)
         permit = store.issue_provider_permit(
@@ -285,6 +315,8 @@ def create_authority_app(
     app.router.add_post("/v1/tasks/fail", fail)
     app.router.add_post("/v1/tasks/finish", finish)
     app.router.add_post("/v1/results/batch", commit_batch)
+    app.router.add_post("/v1/results/hy-probe", hy_probe)
+    app.router.add_post("/v1/results/hy-full", hy_full)
     app.router.add_post("/v1/providers/permit", provider_permit)
     app.router.add_post("/v1/providers/report", provider_report)
     return app
