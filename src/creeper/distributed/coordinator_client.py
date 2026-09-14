@@ -148,6 +148,7 @@ class CoordinatorClient:
                 "network_class": descriptor.network_class,
                 "capabilities": list(descriptor.capabilities),
                 "producers": list(descriptor.producers),
+                "allowed_providers": list(descriptor.allowed_providers),
                 "protocol_version": descriptor.protocol_version,
                 "edition_version": descriptor.edition_version,
             },
