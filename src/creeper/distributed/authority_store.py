@@ -1705,7 +1705,7 @@ class DistributedAuthorityStore:
                 "HY admission requires a bound local baseline index"
             )
         now = float(self.clock())
-        prepared: list[tuple[str, int, str, str, str]] = []
+        prepared: list[tuple[str, int, str, str, str, str]] = []
         for item in evidence:
             raw_hostname = item.get("hostname")
             year = int(item.get("year", 0))
@@ -1737,7 +1737,9 @@ class DistributedAuthorityStore:
                 locator=locator,
             )
             canonical = _json(dict(item) | {"hostname": hostname, "year": year})
-            prepared.append((hostname, year, hyid, evid, canonical))
+            prepared.append(
+                (hostname, year, hyid, evid, locator, canonical)
+            )
 
         self.connection.execute("BEGIN IMMEDIATE")
         try:
@@ -1748,7 +1750,7 @@ class DistributedAuthorityStore:
                 now=now,
             )
             results: list[dict[str, object]] = []
-            for hostname, year, hyid, evid, canonical in prepared:
+            for hostname, year, hyid, evid, locator, canonical in prepared:
                 accepted = self.connection.execute(
                     """
                     SELECT evidence_id FROM distributed_host_year_ledger
@@ -1769,7 +1771,8 @@ class DistributedAuthorityStore:
 
                 probe = self.connection.execute(
                     """
-                    SELECT status FROM distributed_hy_probe_decisions
+                    SELECT status, locator
+                    FROM distributed_hy_probe_decisions
                     WHERE task_id = ? AND hy_id = ?
                     """,
                     (task_id, hyid),
@@ -1781,6 +1784,10 @@ class DistributedAuthorityStore:
                 if str(probe["status"]) != "NEED_FULL_EVIDENCE":
                     raise ValueError(
                         "full HY evidence was not admitted by HY_PROBE"
+                    )
+                if str(probe["locator"]) != locator:
+                    raise ValueError(
+                        "full HY evidence locator does not match HY_PROBE"
                     )
 
                 # Re-check immutable baseline at commit time. This is cheap and
