@@ -37,6 +37,9 @@ class AuthorityRuntimeConfig:
     host: str = "127.0.0.1"
     port: int = 8088
     max_clock_skew_seconds: float = 300.0
+    reconcile_interval_seconds: float = 5.0
+    promotion_batch_size: int = 64
+    auto_promote_source_pages: bool = False
     provider_budgets: tuple[ProviderBudgetConfig, ...] = ()
 
     def __post_init__(self) -> None:
@@ -44,6 +47,8 @@ class AuthorityRuntimeConfig:
             raise ValueError("invalid Authority listen address")
         if self.max_clock_skew_seconds <= 0:
             raise ValueError("max_clock_skew_seconds must be positive")
+        if self.reconcile_interval_seconds <= 0 or self.promotion_batch_size < 1:
+            raise ValueError("invalid Authority reconcile configuration")
 
 
 @dataclass(frozen=True)
@@ -136,6 +141,13 @@ def load_authority_config(path: Path) -> AuthorityRuntimeConfig:
         port=int(section.get("port", 8088)),
         max_clock_skew_seconds=float(
             section.get("max_clock_skew_seconds", 300.0)
+        ),
+        reconcile_interval_seconds=float(
+            section.get("reconcile_interval_seconds", 5.0)
+        ),
+        promotion_batch_size=int(section.get("promotion_batch_size", 64)),
+        auto_promote_source_pages=bool(
+            section.get("auto_promote_source_pages", False)
         ),
         provider_budgets=tuple(budgets),
     )
