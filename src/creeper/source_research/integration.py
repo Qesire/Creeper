@@ -592,6 +592,19 @@ class ResearchIntegrationBridge:
               AND r.exposure_id IS NOT NULL
               AND r.exposure_id!=''
               AND p.source_key IS NULL
+              AND (
+                  NOT EXISTS (
+                      SELECT 1
+                      FROM source_candidates AS sc
+                      WHERE sc.source_key=r.source_key
+                        AND sc.discovery_strategy='structured_root_artifact'
+                  )
+                  OR EXISTS (
+                      SELECT 1
+                      FROM research_artifact_lineage AS l
+                      WHERE l.source_key=r.source_key
+                  )
+              )
             ORDER BY r.closed_at, r.source_key, r.lease_id
             LIMIT ?
             """,
@@ -605,6 +618,21 @@ class ResearchIntegrationBridge:
             model = str(row["model_signature"])
             final_eed = float(row["final_accepted_eed"])
 
+            lineage_rows = self.research.artifact_lineage(
+                source_key=source_key
+            )
+            candidate = self.discovery.get_candidate(source_key)
+            if (
+                candidate is not None
+                and candidate.discovery_strategy == "structured_root_artifact"
+                and not lineage_rows
+            ):
+                # Defensive race guard. The SQL predicate above normally keeps
+                # this row out of the batch. If lineage visibility changes
+                # between selection and projection, leave the FINAL unprojected
+                # so the next cycle can attribute it to the full causal path.
+                continue
+
             # Every production exposure is a distinct delayed-reward
             # observation. Bind it additively to the complete causal source
             # lineage; do not overwrite an earlier exposure on the artifact row.
@@ -616,7 +644,7 @@ class ResearchIntegrationBridge:
             # Preserve the legacy single exposure column as a first-observation
             # audit hint only. The many-to-many table above is authoritative for
             # repeated production observations.
-            for lineage in self.research.artifact_lineage(source_key=source_key):
+            for lineage in lineage_rows:
                 if not str(lineage["source_exposure_id"] or ""):
                     self.research.bind_artifact_source(
                         str(lineage["artifact_id"]),
