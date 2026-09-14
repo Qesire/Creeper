@@ -758,6 +758,54 @@ class ResearchIntegrationBridge:
         )
         return artifact_id, stored, inserted
 
+    def _prefilter_artifact_lead(
+        self,
+        lead: ArtifactLead,
+        *,
+        node: Any,
+        query: RootQuery,
+    ) -> MetadataArtifactAdmission:
+        assessment = assess_artifact_metadata(
+            locator=lead.locator,
+            content_type=lead.content_type or None,
+            filename=lead.provider_native_id,
+            title=str(getattr(node, "title", "") or ""),
+            description=str(getattr(node, "description", "") or ""),
+            metadata=dict(getattr(node, "metadata", {}) or {}),
+            expected_artifact_family=query.expected_artifact_family,
+        )
+        with self.connection:
+            self.connection.execute(
+                """
+                INSERT INTO research_artifact_prefilter(
+                    artifact_identity,query_id,node_id,locator,admission,
+                    format_kind,reason,semantic_hits_json,evaluated_at
+                ) VALUES(?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(artifact_identity,query_id,node_id) DO UPDATE SET
+                    admission=excluded.admission,
+                    format_kind=excluded.format_kind,
+                    reason=excluded.reason,
+                    semantic_hits_json=excluded.semantic_hits_json,
+                    evaluated_at=excluded.evaluated_at
+                """,
+                (
+                    lead.artifact_identity,
+                    query.query_id,
+                    str(getattr(node, "node_id", "") or ""),
+                    lead.locator,
+                    assessment.admission.value,
+                    assessment.format_kind,
+                    assessment.reason,
+                    json.dumps(
+                        list(assessment.semantic_hits),
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ),
+                    float(self.clock()),
+                ),
+            )
+        return assessment.admission
+
     @staticmethod
     def _match_node(lead: ArtifactLead, nodes: dict[str, Any]) -> Any | None:
         if lead.provider_native_id in nodes:
