@@ -841,7 +841,26 @@ class ResearchIntegrationBridge:
             nodes: dict[str, Any] = {}
             artifacts = 0
             sources_inserted = 0
+            metadata_accepted = 0
+            metadata_held = 0
+            metadata_rejected = 0
             seen_lineages: set[tuple[str, str]] = set()
+
+            def admit_lead(lead: ArtifactLead, node: Any) -> bool:
+                nonlocal metadata_accepted, metadata_held, metadata_rejected
+                admission = self._prefilter_artifact_lead(
+                    lead,
+                    node=node,
+                    query=query,
+                )
+                if admission is MetadataArtifactAdmission.ACCEPT:
+                    metadata_accepted += 1
+                    return True
+                if admission is MetadataArtifactAdmission.HOLD:
+                    metadata_held += 1
+                else:
+                    metadata_rejected += 1
+                return False
 
             for hit in page.hits:
                 if hit.root_id != query.root_id or hit.query_id != query.query_id:
@@ -867,6 +886,8 @@ class ResearchIntegrationBridge:
                     )
                 }
                 for lead in lead_by_identity.values():
+                    if not admit_lead(lead, node):
+                        continue
                     artifact_id, _candidate, inserted = self.register_artifact_source(
                         lead,
                         node_id=node.node_id,
@@ -915,6 +936,8 @@ class ResearchIntegrationBridge:
                         provider_type="ARTIFACT",
                     )
                     node = self.research.upsert_hit(synthetic)
+                if not admit_lead(lead, node):
+                    continue
                 artifact_id, _candidate, inserted = self.register_artifact_source(
                     lead,
                     node_id=node.node_id,
@@ -956,6 +979,9 @@ class ResearchIntegrationBridge:
                 sources_inserted=sources_inserted,
                 terminal=bool(page.terminal),
                 retryable=retryable,
+                metadata_accepted=metadata_accepted,
+                metadata_held=metadata_held,
+                metadata_rejected=metadata_rejected,
             )
         except BaseException as exc:
             self.research.update_query_checkpoint(
