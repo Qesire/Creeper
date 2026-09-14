@@ -60,7 +60,11 @@ class SyncRuntimeIntegrationTests(unittest.TestCase):
             baseline_root.mkdir(parents=True)
             for year in range(1996, 2002):
                 (baseline_root / f"{year}.txt").write_text(
-                    "baseline.example\n" if year == 1997 else "",
+                    (
+                        "baseline.example\n"
+                        if year == 1997
+                        else "novel.example\n"
+                    ),
                     encoding="utf-8",
                 )
             (baseline_root / "candidate_pool.txt").write_text("", encoding="utf-8")
@@ -79,7 +83,6 @@ class SyncRuntimeIntegrationTests(unittest.TestCase):
                     locator="fixture://records/2",
                     payload="novel.example",
                     scope=CandidateSourceScope.LOCAL_DISCOVERY,
-                    source_year=1997,
                 ),
             ]
             adapter = FakeLocalReservoir(records)
