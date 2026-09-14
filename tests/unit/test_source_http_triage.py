@@ -49,6 +49,24 @@ class HttpSourceTriageExecutorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.disposition, TriageDisposition.SCOUT)
         self.assertEqual(requests, [("HEAD", None), ("GET", "bytes=0-0")])
 
+    async def test_head_404_is_verified_by_bounded_get_before_hold(self) -> None:
+        requests: list[tuple[str, str | None]] = []
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            requests.append((request.method, request.headers.get("Range")))
+            if request.method == "HEAD":
+                return httpx.Response(404, request=request)
+            return httpx.Response(206, request=request, content=b"x")
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            result = await HttpSourceTriageExecutor(client)(self.candidate())
+
+        self.assertEqual(result.disposition, TriageDisposition.SCOUT)
+        self.assertEqual(
+            requests,
+            [("HEAD", None), ("GET", "bytes=0-0")],
+        )
+
     async def test_permanent_missing_entrypoint_is_held_not_rejected(self) -> None:
         async def handler(request: httpx.Request) -> httpx.Response:
             return httpx.Response(404, request=request)
