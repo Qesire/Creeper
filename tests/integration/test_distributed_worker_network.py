@@ -21,6 +21,7 @@ from creeper.distributed.bulk_index import (
 from creeper.distributed.coordinator_client import CoordinatorClient
 from creeper.distributed.host_query import DistributedHostQueryProducer
 from creeper.distributed.region_probe import RegionProbeProducer
+from creeper.distributed.source_discovery import SourceDiscoveryProducer
 from creeper.distributed.models import (
     Capability,
     TaskClass,
@@ -195,6 +196,89 @@ class DistributedWorkerNetworkTests(unittest.IsolatedAsyncioTestCase):
             report = await worker.run_once()
 
         self.assertFalse(report.claimed)
+
+    async def test_source_discovery_worker_persists_deduplicated_candidates(self) -> None:
+        html = b"""
+        <html><body>
+          <a href="/archives/sample.cdxj.gz">bulk</a>
+          <a href="/archives/sample.cdxj.gz#duplicate">bulk duplicate</a>
+          <a href="/links/page.html">page</a>
+          <a href="mailto:test@example.com">mail</a>
+          <a href="#local">fragment</a>
+        </body></html>
+        """
+
+        async def discovery_handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                headers={"Content-Type": "text/html"},
+                content=html,
+                request=request,
+            )
+
+        self.store.configure_provider_budget(
+            "web_discovery",
+            requests_per_second=1000.0,
+            max_global_inflight=1,
+            require_qualified_region=False,
+        )
+        task_id = self.store.admit_source_page_work(
+            url="https://sources.test/index.html",
+            max_links=16,
+        )
+        producer = SourceDiscoveryProducer(
+            transport=httpx.MockTransport(discovery_handler)
+        )
+        descriptor = WorkerDescriptor(
+            worker_id="worker-a",
+            runtime_class="vm",
+            region="oci-test",
+            architecture="x86_64",
+            memory_bytes=1024**3,
+            cpu_count=2,
+            network_class="public",
+            capabilities=(Capability.WEB_DISCOVERY.value,),
+            allowed_providers=("web_discovery",),
+        )
+
+        async with CoordinatorClient(
+            self.base_url,
+            worker_id="worker-a",
+            secret=self.credentials["worker-a"],
+        ) as client:
+            worker = DistributedWorker(
+                client,
+                descriptor,
+                {"SourceDiscoveryProducer": producer},
+                lease_seconds=30,
+            )
+            report = await worker.run_once()
+
+        self.assertTrue(report.completed, report.error)
+        self.assertEqual(report.task_id, task_id)
+        self.assertEqual(self.store.source_candidate_count(), 2)
+        rows = self.store.source_candidate_rows()
+        by_url = {str(row["canonical_url"]): row for row in rows}
+        self.assertEqual(
+            by_url["https://sources.test/archives/sample.cdxj.gz"][
+                "candidate_type"
+            ],
+            "bulk_artifact",
+        )
+        self.assertEqual(
+            by_url["https://sources.test/archives/sample.cdxj.gz"][
+                "parser_kind"
+            ],
+            "cdxj",
+        )
+        self.assertEqual(
+            by_url["https://sources.test/links/page.html"]["candidate_type"],
+            "source_page",
+        )
+        self.assertEqual(self.store.batch_count(task_id), 1)
+        row = self.store.task_row(task_id)
+        self.assertEqual(row["state"], "COMPLETE")
+        self.assertEqual(row["cursor"], SourceDiscoveryProducer.EOF_CURSOR)
 
     async def test_region_probe_worker_qualifies_provider_region(self) -> None:
         calls = 0
