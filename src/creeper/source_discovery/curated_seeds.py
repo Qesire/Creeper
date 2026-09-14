@@ -6,10 +6,9 @@ against the configured baseline/EED model before activation.
 
 The research roots below were selected by live source-search calibration:
 queries that combine an explicit 1996-2001 period with a concrete source
-archetype (link list, URL map, directory, offline-Web collection) consistently
-returned higher-density enumerable resources than generic "web archive/CDX"
-queries.
-""
+archetype (link list, URL map, directory, crawl corpus) consistently returned
+higher-density enumerable resources than generic "web archive/CDX" queries.
+"""
 
 from __future__ import annotations
 
@@ -120,24 +119,6 @@ def curated_research_roots() -> tuple[SourceCandidate, ...]:
             state=SourceState.DISCOVERED,
         ),
         SourceCandidate(
-            canonical_entrypoint="https://zenodo.org/records/8408539",
-            source_family="EARLY_WEB_DIRECTORY_DERIVED_DATASET",
-            level=SourceLevel.METASOURCE,
-            discovered_by="curated-research-seed",
-            discovery_strategy="CURATED_YEAR_ARCHETYPE_SEARCH",
-            expected_year_from=1999,
-            expected_year_to=2001,
-            expected_volume=22_915,
-            temporal_semantics_prior=0.90,
-            enumerability_prior=1.0,
-            direct_evidence_prior=0.0,
-            baseline_overlap_prior=0.45,
-            access_cost_prior=0.10,
-            adapter_cost_prior=0.20,
-            confidence=0.98,
-            state=SourceState.DISCOVERED,
-        ),
-        SourceCandidate(
             canonical_entrypoint="https://archive95.net/sources",
             source_family="EARLY_WEB_SOURCE_CATALOG",
             level=SourceLevel.METASOURCE,
@@ -171,78 +152,6 @@ def curated_research_roots() -> tuple[SourceCandidate, ...]:
             access_cost_prior=0.10,
             adapter_cost_prior=0.20,
             confidence=1.0,
-            state=SourceState.DISCOVERED,
-        ),
-        SourceCandidate(
-            canonical_entrypoint="https://archive.org/details/pc-press-internet-cd",
-            source_family="EARLY_WEB_OFFLINE_COLLECTION",
-            level=SourceLevel.METASOURCE,
-            discovered_by="curated-research-seed",
-            discovery_strategy="CURATED_YEAR_ARCHETYPE_SEARCH",
-            expected_year_from=1996,
-            expected_year_to=1996,
-            expected_volume=34_580,
-            temporal_semantics_prior=0.95,
-            enumerability_prior=0.95,
-            direct_evidence_prior=0.0,
-            baseline_overlap_prior=0.40,
-            access_cost_prior=0.20,
-            adapter_cost_prior=0.45,
-            confidence=0.95,
-            state=SourceState.DISCOVERED,
-        ),
-        SourceCandidate(
-            canonical_entrypoint="https://archive.org/details/a-internet-em-cd-rom",
-            source_family="EARLY_WEB_OFFLINE_COLLECTION",
-            level=SourceLevel.METASOURCE,
-            discovered_by="curated-research-seed",
-            discovery_strategy="CURATED_YEAR_ARCHETYPE_SEARCH",
-            expected_year_from=1996,
-            expected_year_to=1996,
-            expected_volume=16_131,
-            temporal_semantics_prior=0.90,
-            enumerability_prior=0.80,
-            direct_evidence_prior=0.0,
-            baseline_overlap_prior=0.40,
-            access_cost_prior=0.20,
-            adapter_cost_prior=0.55,
-            confidence=0.90,
-            state=SourceState.DISCOVERED,
-        ),
-        SourceCandidate(
-            canonical_entrypoint="https://archive.org/details/amiga-plus-extra-cd-5-97",
-            source_family="EARLY_WEB_OFFLINE_COLLECTION",
-            level=SourceLevel.METASOURCE,
-            discovered_by="curated-research-seed",
-            discovery_strategy="CURATED_YEAR_ARCHETYPE_SEARCH",
-            expected_year_from=1997,
-            expected_year_to=1997,
-            expected_volume=12_808,
-            temporal_semantics_prior=0.95,
-            enumerability_prior=0.95,
-            direct_evidence_prior=0.0,
-            baseline_overlap_prior=0.40,
-            access_cost_prior=0.20,
-            adapter_cost_prior=0.45,
-            confidence=0.95,
-            state=SourceState.DISCOVERED,
-        ),
-        SourceCandidate(
-            canonical_entrypoint="https://archive.org/details/internet-on-a-cd",
-            source_family="EARLY_WEB_OFFLINE_COLLECTION",
-            level=SourceLevel.METASOURCE,
-            discovered_by="curated-research-seed",
-            discovery_strategy="CURATED_YEAR_ARCHETYPE_SEARCH",
-            expected_year_from=1998,
-            expected_year_to=1998,
-            expected_volume=11_275,
-            temporal_semantics_prior=0.95,
-            enumerability_prior=0.95,
-            direct_evidence_prior=0.0,
-            baseline_overlap_prior=0.40,
-            access_cost_prior=0.20,
-            adapter_cost_prior=0.45,
-            confidence=0.95,
             state=SourceState.DISCOVERED,
         ),
     )
