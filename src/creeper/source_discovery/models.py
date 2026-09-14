@@ -237,6 +237,23 @@ class SourceCandidate:
         )
 
 
+def is_background_bulk_candidate(candidate: SourceCandidate) -> bool:
+    """Return whether discovery work belongs to the opportunistic bulk lane.
+
+    Exact CDX/CDXJ artifacts are deterministic bulk inputs rather than search
+    opportunities. Curated direct catalogs are the bounded manifests that feed
+    those artifacts. Neither class should consume foreground search/scout
+    inventory; they advance only when the discovery coordinator is otherwise
+    idle.
+    """
+    if is_direct_evidence_entrypoint(candidate.canonical_entrypoint):
+        return True
+    return (
+        candidate.source_family == "PUBLIC_ARCHIVE_INDEX_CATALOG"
+        and candidate.discovery_strategy == "CURATED_DIRECT_CATALOG"
+    )
+
+
 @dataclass(frozen=True)
 class ScoutMeasurement:
     sampled_records: int
