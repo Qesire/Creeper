@@ -462,13 +462,12 @@ class SourceReservoirManagerTests(unittest.TestCase):
             [directive.kind for directive in plan.search_directives],
             [
                 SearchDirectiveKind.DIRECT_EVIDENCE,
-                SearchDirectiveKind.EXPLOIT_SOURCE_FAMILY,
+                SearchDirectiveKind.DISCOVER_NEW_FAMILY,
                 SearchDirectiveKind.REFILL_RESERVOIR,
             ],
         )
         self.assertEqual(plan.search_directives[0].strategy, "DIRECT_EVIDENCE_BULK")
-        self.assertEqual(plan.search_directives[1].subject, "HIGH_YIELD_FAMILY")
-        self.assertEqual(plan.search_directives[1].strategy, "EXPLOIT_SUCCESS")
+        self.assertEqual(plan.search_directives[1].strategy, "EXPLORE_NEW_FAMILY")
         self.assertEqual(plan.search_directives[2].strategy, "META_SOURCE_SEARCH")
         self.assertEqual(len({item.dedup_key for item in plan.search_directives}), 3)
 
@@ -502,7 +501,7 @@ class SourceReservoirManagerTests(unittest.TestCase):
 
         self.assertEqual(
             plan.search_directives[0].strategy,
-            "DIRECT_EVIDENCE_BULK",
+            "EXPLORE_NEW_FAMILY",
         )
         self.assertEqual(
             plan.search_directives[1].strategy,
@@ -511,6 +510,52 @@ class SourceReservoirManagerTests(unittest.TestCase):
         self.assertEqual(
             plan.search_directives[1].subject,
             "https://archive.example",
+        )
+        self.assertEqual(
+            plan.search_directives[2].kind,
+            SearchDirectiveKind.REFILL_RESERVOIR,
+        )
+        self.assertNotIn(
+            "DIRECT_EVIDENCE_BULK",
+            [directive.strategy for directive in plan.search_directives],
+        )
+
+    def test_healthy_direct_inventory_does_not_force_another_cdx_search(self) -> None:
+        direct = self.candidate(
+            "healthy-index.cdxj",
+            family="BULK_ARTIFACT",
+            direct_evidence_prior=1.0,
+            origin="https://archive.example",
+        )
+        self.to_warm(
+            direct,
+            novel_eed=5.0,
+            elapsed_seconds=1.0,
+            direct_host_years=10,
+        )
+        manager = SourceReservoirManager(
+            self.registry,
+            targets=SourcePoolTargets(
+                active_min=0,
+                active_target=0,
+                warm_min=0,
+                warm_target=0,
+                cold_min=3,
+                cold_target=5,
+                max_search_directives=2,
+            ),
+        )
+
+        plan = manager.plan()
+
+        strategies = [item.strategy for item in plan.search_directives]
+        self.assertNotIn("DIRECT_EVIDENCE_BULK", strategies)
+        self.assertIn("EXPLORE_NEW_FAMILY", strategies)
+        self.assertTrue(
+            any(
+                item.kind is SearchDirectiveKind.REFILL_RESERVOIR
+                for item in plan.search_directives
+            )
         )
 
     def test_refill_uses_best_observed_search_strategy(self) -> None:
