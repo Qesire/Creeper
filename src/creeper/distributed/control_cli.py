@@ -8,7 +8,10 @@ from pathlib import Path
 
 from creeper.authority.baseline_index import BaselineIndex
 from creeper.distributed.authority_store import DistributedAuthorityStore
+from creeper.authority.normalizer import normalize_official
 from creeper.distributed.config import load_authority_config
+from creeper.distributed.host_query import distributed_cdx_resolver_identity
+from creeper.distributed.provider_catalog import canonical_cdx_provider_configs
 from creeper.distributed.search_campaign import SearchCampaign
 
 
@@ -86,6 +89,36 @@ def build_parser() -> argparse.ArgumentParser:
     )
     seeded.add_argument("--priority", type=float, default=0.0)
 
+    host = sub.add_parser(
+        "host",
+        help="Admit one hostname for 1996-2001 archive resolution.",
+    )
+    host.add_argument("--hostname", required=True)
+    host.add_argument(
+        "--archive-providers",
+        type=_csv_tuple,
+        default=("internet_archive", "arquivo_pt"),
+        metavar="P1,P2",
+    )
+    host.add_argument("--year-from", type=int, default=1996)
+    host.add_argument("--year-to", type=int, default=2001)
+    host.add_argument("--priority", type=float, default=0.0)
+
+    hosts = sub.add_parser(
+        "hosts",
+        help="Stream one-hostname-per-line input into archive resolution.",
+    )
+    hosts.add_argument("--input", type=Path, required=True)
+    hosts.add_argument(
+        "--archive-providers",
+        type=_csv_tuple,
+        default=("internet_archive", "arquivo_pt"),
+        metavar="P1,P2",
+    )
+    hosts.add_argument("--year-from", type=int, default=1996)
+    hosts.add_argument("--year-to", type=int, default=2001)
+    hosts.add_argument("--priority", type=float, default=0.0)
+
     bulk = sub.add_parser(
         "bulk",
         help="Admit one structured CDX/CDXJ bulk source shard.",
@@ -155,6 +188,89 @@ def main(argv: list[str] | None = None) -> int:
                 priority=args.priority,
             )
             print(task_id)
+            return 0
+
+        if args.command in {"host", "hosts"}:
+            provider_configs = canonical_cdx_provider_configs(
+                args.archive_providers
+            )
+            (
+                _provider_set_digest,
+                coverage_provider,
+                resolver_version,
+            ) = distributed_cdx_resolver_identity(provider_configs)
+
+            if args.command == "host":
+                task_ids = store.admit_host_resolution_work(
+                    hostname=args.hostname,
+                    physical_providers=tuple(
+                        config.name for config in provider_configs
+                    ),
+                    coverage_provider=coverage_provider,
+                    resolver_version=resolver_version,
+                    year_from=args.year_from,
+                    year_to=args.year_to,
+                    priority=args.priority,
+                )
+                print(
+                    json.dumps(
+                        {
+                            "hostname": normalize_official(args.hostname),
+                            "task_ids": list(task_ids),
+                            "coverage_provider": coverage_provider,
+                            "resolver_version": resolver_version,
+                        },
+                        sort_keys=True,
+                    )
+                )
+                return 0
+
+            if not args.input.is_file():
+                raise FileNotFoundError(args.input)
+            totals = {
+                "input_lines": 0,
+                "valid_hostnames": 0,
+                "admitted_tasks": 0,
+                "already_covered": 0,
+                "invalid": 0,
+            }
+            with args.input.open("r", encoding="utf-8", errors="replace") as handle:
+                for raw in handle:
+                    totals["input_lines"] += 1
+                    value = raw.strip()
+                    if not value or value.startswith("#"):
+                        continue
+                    hostname = normalize_official(value)
+                    if hostname is None:
+                        totals["invalid"] += 1
+                        continue
+                    totals["valid_hostnames"] += 1
+                    task_ids = store.admit_host_resolution_work(
+                        hostname=hostname,
+                        physical_providers=tuple(
+                            config.name for config in provider_configs
+                        ),
+                        coverage_provider=coverage_provider,
+                        resolver_version=resolver_version,
+                        year_from=args.year_from,
+                        year_to=args.year_to,
+                        priority=args.priority,
+                    )
+                    if task_ids:
+                        totals["admitted_tasks"] += len(task_ids)
+                    else:
+                        totals["already_covered"] += 1
+            print(
+                json.dumps(
+                    {
+                        **totals,
+                        "coverage_provider": coverage_provider,
+                        "resolver_version": resolver_version,
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+            )
             return 0
 
         if args.command == "bulk":
