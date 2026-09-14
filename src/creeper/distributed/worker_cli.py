@@ -47,8 +47,8 @@ async def _run(config_path: Path, *, once: bool) -> int:
         while True:
             report = await worker.run_once()
             if once:
-                return 0 if not report.failed else 1
-            if not report.claimed:
+                return 1 if report.failed or report.lost_lease else 0
+            if not report.claimed or report.failed or report.lost_lease:
                 await asyncio.sleep(config.poll_seconds)
 
 
