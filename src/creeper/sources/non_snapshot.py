@@ -103,18 +103,19 @@ def parse_squid_access_line(line: str) -> tuple[str, int | None] | None:
     if len(fields) < 2:
         return None
 
-    year: int | None = None
     try:
         stamp = float(fields[0])
-        if stamp >= 0:
-            candidate_year = datetime.fromtimestamp(
-                stamp,
-                tz=timezone.utc,
-            ).year
-            if 1996 <= candidate_year <= 2001:
-                year = candidate_year
+        if stamp < 0:
+            return None
+        year = datetime.fromtimestamp(
+            stamp,
+            tz=timezone.utc,
+        ).year
     except (ValueError, OverflowError, OSError):
-        pass
+        return None
+    if not 1996 <= year <= 2001:
+        # A parseable off-window access is not an undated target-period URL.
+        return None
 
     url: str | None = None
     for field in fields[1:]:
