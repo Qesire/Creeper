@@ -276,6 +276,53 @@ class MeasuredYieldScoutTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(measurement.novel_host_year_pairs, 2)
         self.assertEqual(measurement.direct_host_years, 0)
 
+    async def test_ircache_sanitized_access_name_uses_squid_parser(self) -> None:
+        raw = (
+            b"952214400.000 1 192.0.2.1 TCP_MISS/200 10 GET "
+            b"http://known.com/a - DIRECT/x text/html\n"
+            b"952214401.000 1 192.0.2.2 TCP_MISS/200 10 GET "
+            b"https://novel.org/b - DIRECT/x text/html\n"
+        )
+        body = gzip.compress(raw)
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            return streamed_response(
+                206,
+                body,
+                headers={"content-type": "application/gzip"},
+            )
+
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler)
+        ) as client:
+            scout = MeasuredYieldScoutExecutor(
+                client,
+                self.baseline,
+                {"com": Decimal("1"), "org": Decimal("0.5")},
+                policy=self.policy(
+                    min_unique_hosts=2,
+                    min_novel_hosts=1,
+                    min_novel_fraction=0.1,
+                    min_novel_eed=0.5,
+                ),
+            )
+            result = await scout(
+                self.candidate(
+                    "https://mirror.example/Traces/"
+                    "uc.sanitized-access.20000312.gz"
+                )
+            )
+
+        self.assertEqual(result.disposition, ScoutDisposition.WARM)
+        self.assertIsNotNone(result.measurement)
+        measurement = result.measurement
+        assert measurement is not None
+        self.assertEqual(measurement.measurement_mode, MeasurementMode.HOST_YEAR)
+        self.assertEqual(measurement.unique_hosts, 2)
+        self.assertEqual(measurement.observed_host_year_pairs, 2)
+        self.assertEqual(measurement.novel_host_year_pairs, 2)
+        self.assertEqual(measurement.direct_host_years, 0)
+
     async def test_csv_sample_is_measured_but_low_novelty_holds(self) -> None:
         body = b"hostname,other\nknown.com,1\nknown.com,2\nnovel.org,3\n"
 
