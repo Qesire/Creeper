@@ -6,6 +6,10 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any, Mapping
 
+from creeper.distributed.edition import (
+    FABRIC_EDITION_VERSION,
+    FABRIC_PROTOCOL_VERSION,
+)
 from creeper.distributed.identity import batch_id, work_key
 
 
@@ -36,6 +40,8 @@ class WorkerDescriptor:
     network_class: str
     capabilities: tuple[str, ...]
     producers: tuple[str, ...] = ()
+    protocol_version: str = FABRIC_PROTOCOL_VERSION
+    edition_version: str = FABRIC_EDITION_VERSION
 
     def __post_init__(self) -> None:
         if not self.worker_id.strip():
@@ -58,6 +64,8 @@ class WorkerDescriptor:
             raise ValueError("worker producers must be unique")
         if any(not producer.strip() for producer in self.producers):
             raise ValueError("worker producer names must be non-empty")
+        if not self.protocol_version.strip() or not self.edition_version.strip():
+            raise ValueError("worker fabric version identity is required")
 
 
 @dataclass(frozen=True)
