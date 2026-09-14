@@ -9,6 +9,7 @@ from creeper.evidence.contracts import (
     SourceEvidenceContract,
     bind_contract_to_adapter_id,
     contract_from_adapter_id,
+    resolve_source_evidence_contract,
 )
 from creeper.evidence.planner import EvidencePlanner
 from creeper.scheduler.leases import WorkLease
