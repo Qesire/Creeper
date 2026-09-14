@@ -344,6 +344,45 @@ class DistributedAuthorityTests(unittest.TestCase):
         )
         self.assertIsNotNone(permit_b)
 
+    def test_provider_region_qualification_is_derived_from_worker_region(self) -> None:
+        probe_work = WorkDefinition(
+            producer="RegionProbeProducer",
+            task_class=TaskClass.PROBE,
+            input_identity="internet_archive",
+            coverage={"provider": "internet_archive"},
+            partition="qualification",
+            algorithm_version="probe-v1",
+            required_capabilities=(Capability.ONLINE_QUERY.value,),
+        )
+        self.store.admit_work(probe_work)
+        lease = self.store.claim_work(self.worker_a.worker_id)
+        assert lease is not None
+
+        states = []
+        for _ in range(3):
+            states.append(
+                self.store.record_provider_region_observation(
+                    "internet_archive",
+                    worker_id=lease.worker_id,
+                    task_id=lease.task_id,
+                    generation=lease.generation,
+                    connect_success=True,
+                    status_code=200,
+                    latency_ms=100.0,
+                    response_bytes=128,
+                )
+            )
+        self.assertEqual(states, ["UNKNOWN", "UNKNOWN", "QUALIFIED"])
+        snapshot = self.store.provider_region_snapshot(
+            "internet_archive",
+            self.worker_a.region,
+        )
+        assert snapshot is not None
+        self.assertEqual(snapshot["state"], "QUALIFIED")
+        self.assertEqual(snapshot["samples"], 3)
+        self.assertEqual(snapshot["success_rate"], 1.0)
+        self.assertEqual(snapshot["mean_latency_ms"], 100.0)
+
     def test_429_cooldown_is_global_not_per_region(self) -> None:
         self.store.configure_provider_budget(
             "internet_archive",
