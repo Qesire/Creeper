@@ -9,7 +9,10 @@ from uuid import uuid4
 
 import httpx
 
-from creeper.distributed.coordinator_client import CoordinatorClient
+from creeper.distributed.coordinator_client import (
+    CoordinatorClient,
+    CoordinatorTransportError,
+)
 from creeper.distributed.lease_keeper import LeaseKeeper
 from creeper.distributed.models import ProviderPermit
 
@@ -55,7 +58,7 @@ class DistributedProviderGate:
                     request_id=request_id,
                     ttl_seconds=self.permit_ttl_seconds,
                 )
-            except Exception:
+            except CoordinatorTransportError:
                 self.keeper.assert_owned()
                 await asyncio.sleep(self.budget_poll_seconds)
                 continue
