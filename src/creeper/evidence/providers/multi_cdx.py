@@ -226,6 +226,10 @@ class AsyncArquivoCDXClient(AsyncWaybackCDXClient):
             "to": str(year_to),
             "output": "json",
             "fl": "url,timestamp,status,mime,digest,length,offset,filename",
+            # Arquivo's CDX dialect uses pywb-style filter operators. Filter
+            # before limit so exact-year page_limit=1 cannot repeatedly select
+            # an unusable 4xx/5xx capture ahead of later valid evidence.
+            "filter": "~status:[23][0-9][0-9]",
             "limit": str(effective_limit),
         }
         response = await self._get(params, accounting=accounting)
