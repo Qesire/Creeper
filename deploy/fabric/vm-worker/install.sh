@@ -73,9 +73,18 @@ case "${FABRIC_PROFILE}" in
     ;;
 esac
 
-export DEBIAN_FRONTEND=noninteractive
-apt-get update
-apt-get install -y --no-install-recommends ca-certificates curl git
+if command -v apt-get >/dev/null 2>&1; then
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get update
+  apt-get install -y --no-install-recommends ca-certificates curl git
+elif command -v dnf >/dev/null 2>&1; then
+  dnf install -y ca-certificates curl git
+elif command -v yum >/dev/null 2>&1; then
+  yum install -y ca-certificates curl git
+else
+  echo "unsupported package manager; need apt, dnf, or yum" >&2
+  exit 2
+fi
 
 if ! command -v uv >/dev/null 2>&1; then
   curl -LsSf "https://astral.sh/uv/${UV_VERSION}/install.sh" |
@@ -83,7 +92,10 @@ if ! command -v uv >/dev/null 2>&1; then
 fi
 
 if ! id "${FABRIC_SERVICE_USER}" >/dev/null 2>&1; then
-  useradd --system --home-dir "${FABRIC_STATE_DIR}" --shell /usr/sbin/nologin     "${FABRIC_SERVICE_USER}"
+  NOLOGIN_SHELL="$(command -v nologin 2>/dev/null || true)"
+  : "${NOLOGIN_SHELL:=/sbin/nologin}"
+  useradd --system --home-dir "${FABRIC_STATE_DIR}" \
+    --shell "${NOLOGIN_SHELL}" "${FABRIC_SERVICE_USER}"
 fi
 
 mkdir -p "${FABRIC_INSTALL_ROOT}" "${FABRIC_STATE_DIR}" "${FABRIC_CONFIG_DIR}"
