@@ -18,7 +18,10 @@ from creeper.source_research.adapters.base import (
     SearchHit,
     SearchPage,
 )
-from creeper.source_research.integration import ResearchIntegrationBridge
+from creeper.source_research.integration import (
+    IntegratedResearchResult,
+    ResearchIntegrationBridge,
+)
 from creeper.source_research.models import (
     DecisionRecord,
     FrontierState,
@@ -28,6 +31,12 @@ from creeper.source_research.models import (
     RootKind,
     RootQuery,
     RootSurface,
+)
+from creeper.source_research.agent.protocol import (
+    ProposalEnvelope,
+    QueryProgramProposal,
+    RootQuery as ProposalRootQuery,
+    UnifiedLLMTask,
 )
 from creeper.source_research.registry import ResearchRegistry
 from creeper.source_discovery_service import _root_query_runtime_adapters
@@ -205,6 +214,110 @@ class L9ResearchRuntimeClosureTests(unittest.IsolatedAsyncioTestCase):
                     exposure_lineage[0]["decision_id"],
                     decision.decision_id,
                 )
+            finally:
+                control.close()
+
+    def test_l6_research_query_program_commits_back_to_durable_frontier(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            control = ControlStore(Path(tmp) / "control.sqlite3")
+            try:
+                discovery = SourceDiscoveryRegistry(control)
+                research = ResearchRegistry(control)
+                bridge = ResearchIntegrationBridge(research, discovery)
+                research.upsert_root(
+                    RootSurface(
+                        root_id="datacite",
+                        kind=RootKind.STRUCTURED_REPOSITORY,
+                        canonical_locator="https://api.datacite.org/dois",
+                        capabilities=("search", "cursor", "content_urls"),
+                    )
+                )
+                seed = RootQuery(
+                    root_id="datacite",
+                    query_text="seed web archive",
+                    max_pages=1,
+                    max_wall_seconds=30.0,
+                    page_size=10,
+                )
+                research.register_program(
+                    QueryProgram(
+                        root_id="datacite",
+                        strategy="seed",
+                        queries=(seed,),
+                        hard_max_requests=1,
+                        stop_conditions=("terminal_page",),
+                    )
+                )
+                research.update_query_checkpoint(
+                    seed.query_id,
+                    checkpoint=None,
+                    state=QueryState.COMPLETE,
+                    pages_delta=1,
+                )
+
+                context = bridge.build_root_research_context(
+                    "datacite",
+                    cooldown_satisfied=True,
+                )
+                self.assertTrue(context.seed_current_program_exhausted)
+                self.assertFalse(context.equivalent_unexecuted_program)
+                self.assertTrue(context.metrics_available)
+
+                request = bridge.build_root_research_request(context)
+                self.assertTrue(bridge.try_claim_llm_call(request))
+                proposal = QueryProgramProposal(
+                    proposal_id="proposal:next",
+                    root_id="datacite",
+                    strategy="orthogonal structured query",
+                    queries=(
+                        ProposalRootQuery(
+                            query="historical crawl corpus",
+                            filters={},
+                            expected_signal="reusable artifact",
+                            expected_family="",
+                            max_pages=1,
+                        ),
+                    ),
+                    hard_max_requests=1,
+                    stop_conditions=("terminal_page",),
+                    reuse_key="reuse:next",
+                    context_hash=context.context_hash,
+                )
+                result = IntegratedResearchResult(
+                    call_identity=request.call_identity,
+                    envelope=ProposalEnvelope(
+                        query="compile next root query",
+                        task_type=UnifiedLLMTask.COMPILE_ROOT_QUERY_PROGRAM,
+                        context_hash=context.context_hash,
+                        proposals=(proposal,),
+                    ),
+                    typed_context=context,
+                )
+                self.assertEqual(
+                    bridge.commit_root_research_result(
+                        result,
+                        elapsed_seconds=0.1,
+                    ),
+                    1,
+                )
+                new_rows = research.connection.execute(
+                    """
+                    SELECT query_id, state
+                    FROM research_queries
+                    WHERE root_id='datacite' AND query_text=?
+                    """,
+                    ("historical crawl corpus",),
+                ).fetchall()
+                self.assertEqual(len(new_rows), 1)
+                self.assertEqual(new_rows[0]["state"], QueryState.READY.value)
+                self.assertEqual(research.ensure_query_frontier(limit=10), 1)
+                ready = [
+                    task
+                    for task in research.ready_frontier()
+                    if task.task_kind == "QUERY"
+                    and task.entity_id == str(new_rows[0]["query_id"])
+                ]
+                self.assertEqual(len(ready), 1)
             finally:
                 control.close()
 
