@@ -17,6 +17,7 @@ from uuid import uuid4
 from creeper.authority.baseline_index import BaselineIndex, YEAR_BITS
 from creeper.authority.normalizer import normalize_official
 from creeper.distributed.identity import evidence_id, host_year_id
+from creeper.evidence.contracts import resolve_source_evidence_contract
 from creeper.distributed.models import (
     ProviderPermit,
     ResultBatch,
@@ -553,6 +554,56 @@ class DistributedAuthorityStore:
             )
         self.connection.commit()
         return task_id
+
+    def admit_bulk_source_work(
+        self,
+        *,
+        source_id: str,
+        source_locator: str,
+        partition: str,
+        cursor_end: str | None = None,
+        priority: float = 0.0,
+        algorithm_version: str = "distributed-bulk-v1",
+    ) -> str:
+        """Admit one direct-year structured source shard.
+
+        The Authority, not the worker, decides whether the source parser is
+        allowed to create annual evidence.
+        """
+
+        source_id = source_id.strip()
+        source_locator = source_locator.strip()
+        partition = partition.strip()
+        if not source_id or not source_locator or not partition:
+            raise ValueError("bulk source identity, locator and partition are required")
+        contract = resolve_source_evidence_contract(source_locator)
+        if not contract.grants_direct_web_year:
+            raise ValueError(
+                "bulk direct-year admission requires a DIRECT_WEB_YEAR contract"
+            )
+        coverage: dict[str, object] = {
+            "source_id": source_id,
+            "source_locator": source_locator,
+            "evidence_contract_id": contract.contract_id,
+            "evidence_contract_version": contract.policy_version,
+            "parser_kind": contract.parser_kind,
+        }
+        if cursor_end is not None:
+            value = str(cursor_end).strip()
+            if not value:
+                raise ValueError("cursor_end must be non-empty when supplied")
+            coverage["cursor_end"] = value
+        work = WorkDefinition(
+            producer="BulkHistoricalIndexProducer",
+            task_class=TaskClass.SOURCE_SHARD,
+            input_identity=source_id,
+            coverage=coverage,
+            partition=partition,
+            algorithm_version=algorithm_version,
+            required_capabilities=("STREAMING_BULK",),
+            priority=float(priority),
+        )
+        return self.admit_work(work)
 
     def admit_host_resolution_work(
         self,
