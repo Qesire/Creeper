@@ -52,11 +52,20 @@ def is_mailbox_url_locator(locator: str) -> bool:
 
 
 def is_target_mailbox_shard(locator: str) -> bool:
-    return mailbox_year_from_locator(locator) is not None
+    return (
+        is_mailbox_url_locator(locator)
+        and mailbox_year_from_locator(locator) is not None
+    )
 
 
-def extract_http_urls(text: str) -> tuple[str, ...]:
-    """Extract normalized HTTP(S) URL strings without retaining surrounding text."""
+def extract_http_urls(
+    text: str,
+    *,
+    max_urls: int = 64,
+) -> tuple[str, ...]:
+    """Extract bounded HTTP(S) URLs without retaining surrounding text."""
+    if max_urls < 1:
+        raise ValueError("max_urls must be positive")
     result: list[str] = []
     seen: set[str] = set()
     for match in _HTTP_URL_RE.finditer(text):
@@ -71,6 +80,8 @@ def extract_http_urls(text: str) -> tuple[str, ...]:
             continue
         seen.add(value)
         result.append(value)
+        if len(result) >= max_urls:
+            break
     return tuple(result)
 
 
