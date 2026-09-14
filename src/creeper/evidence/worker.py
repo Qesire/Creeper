@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import math
 import time
 from collections.abc import AsyncIterator, Callable, Iterable, Mapping
 from dataclasses import dataclass
@@ -82,7 +83,12 @@ class AsyncEvidenceWorker:
             raise ValueError("claim_batch_size must be positive")
         if lease_seconds <= 0:
             raise ValueError("lease_seconds must be positive")
-        if retry_base_seconds < 0 or retry_max_seconds < retry_base_seconds:
+        if (
+            not math.isfinite(retry_base_seconds)
+            or not math.isfinite(retry_max_seconds)
+            or retry_base_seconds < 0
+            or retry_max_seconds < retry_base_seconds
+        ):
             raise ValueError("invalid persistent retry bounds")
         if not providers:
             raise ValueError("at least one evidence provider is required")
@@ -205,10 +211,21 @@ class AsyncEvidenceWorker:
 
     def _retry_at(self, attempt: int) -> float:
         exponent = max(0, int(attempt) - 1)
-        delay = min(
-            self.retry_max_seconds,
-            self.retry_base_seconds * (2**exponent),
-        )
+        base = self.retry_base_seconds
+        maximum = self.retry_max_seconds
+        if base <= 0.0 or maximum <= 0.0:
+            delay = 0.0
+        elif base >= maximum:
+            delay = maximum
+        else:
+            # Clamp before exponentiation. Durable attempts are unbounded, and
+            # computing 2**attempt first can overflow float conversion long
+            # after the configured retry ceiling should already have applied.
+            cap_exponent = max(0, math.ceil(math.log2(maximum / base)))
+            delay = min(
+                maximum,
+                base * (2.0 ** min(exponent, cap_exponent)),
+            )
         return float(self.clock()) + delay
 
     @staticmethod
