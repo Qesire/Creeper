@@ -7,9 +7,9 @@ architecture = "aarch64"
 memory_bytes = 12884901888
 cpu_count = 2
 network_class = "public"
-capabilities = ["ONLINE_QUERY", "STREAMING_BULK", "WEB_DISCOVERY", "RDAP"]
+capabilities = ["ONLINE_QUERY", "STREAMING_BULK", "WEB_DISCOVERY", "SEARCH_QUERY", "RDAP"]
 # Fail-closed egress/provider policy enforced by Local Authority.
-allowed_providers = ["internet_archive", "arquivo_pt", "web_discovery"]
+allowed_providers = ["internet_archive", "arquivo_pt", "web_discovery", "web_search"]
 # 0 = unlimited. Constrained workers (for example GCP free-tier nodes) should
 # set a finite daily raw response-byte budget.
 daily_egress_budget_bytes = 0
