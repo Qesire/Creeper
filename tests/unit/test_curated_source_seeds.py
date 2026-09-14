@@ -6,6 +6,7 @@ from pathlib import Path
 
 from creeper.source_discovery.curated_seeds import (
     curated_direct_catalogs,
+    curated_non_snapshot_roots,
     curated_research_roots,
     curated_source_seeds,
     ensure_curated_direct_catalogs,
@@ -43,16 +44,45 @@ class CuratedSourceSeedTests(unittest.TestCase):
         self.assertTrue(all(item.expected_year_to >= 1996 for item in roots))
         self.assertTrue(all(item.expected_year_from <= 2001 for item in roots))
 
+    def test_non_snapshot_roots_are_audited_mailbox_catalogs(self):
+        roots = curated_non_snapshot_roots()
+
+        self.assertEqual(len(roots), 3)
+        self.assertEqual(
+            {item.source_family for item in roots},
+            {"HISTORICAL_MAILBOX_CATALOG"},
+        )
+        self.assertTrue(
+            all(
+                item.canonical_entrypoint.startswith(
+                    "https://lists.gnu.org/archive/mbox/"
+                )
+                for item in roots
+            )
+        )
+        self.assertTrue(all(item.expected_volume is None for item in roots))
+        self.assertTrue(all(item.direct_evidence_prior == 0.0 for item in roots))
+        self.assertTrue(all(item.enumerability_prior == 1.0 for item in roots))
+        self.assertTrue(
+            any("lynx-dev" in item.canonical_entrypoint for item in roots)
+        )
+        self.assertTrue(
+            any("emacs-devel" in item.canonical_entrypoint for item in roots)
+        )
+        self.assertTrue(
+            any("bug-findutils" in item.canonical_entrypoint for item in roots)
+        )
+
     def test_all_curated_seeds_are_idempotent(self):
         seeds = curated_source_seeds()
-        self.assertEqual(len(seeds), 5)
+        self.assertEqual(len(seeds), 8)
         with tempfile.TemporaryDirectory() as tmp:
             control = ControlStore(Path(tmp) / "control.sqlite3")
             registry = SourceDiscoveryRegistry(control)
             try:
-                self.assertEqual(ensure_curated_source_seeds(registry), 5)
+                self.assertEqual(ensure_curated_source_seeds(registry), 8)
                 self.assertEqual(ensure_curated_source_seeds(registry), 0)
-                self.assertEqual(len(registry.list_candidates()), 5)
+                self.assertEqual(len(registry.list_candidates()), 8)
             finally:
                 control.close()
 
