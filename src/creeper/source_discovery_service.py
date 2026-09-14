@@ -1118,6 +1118,44 @@ def _unified_research_directive_provider(
         }:
             return base
 
+        # Never let an exhausted known root monopolize the slow LLM
+        # budget. Between two generic/non-root research starts, admit at most
+        # one root-query compiler call. This preserves source-family discovery
+        # even when known structured repositories can always suggest another
+        # query variant.
+        last_non_root = research.connection.execute(
+            """
+            SELECT MAX(started_at) AS started_at
+            FROM research_llm_call_claims
+            WHERE task_type!='COMPILE_ROOT_QUERY_PROGRAM'
+            """
+        ).fetchone()
+        last_non_root_at = (
+            None
+            if last_non_root is None or last_non_root["started_at"] is None
+            else float(last_non_root["started_at"])
+        )
+        if last_non_root_at is None:
+            root_calls_since_non_root = research.connection.execute(
+                """
+                SELECT COUNT(*) AS n
+                FROM research_llm_call_claims
+                WHERE task_type='COMPILE_ROOT_QUERY_PROGRAM'
+                """
+            ).fetchone()
+        else:
+            root_calls_since_non_root = research.connection.execute(
+                """
+                SELECT COUNT(*) AS n
+                FROM research_llm_call_claims
+                WHERE task_type='COMPILE_ROOT_QUERY_PROGRAM'
+                  AND started_at>?
+                """,
+                (last_non_root_at,),
+            ).fetchone()
+        if int(root_calls_since_non_root["n"] or 0) >= 1:
+            return base
+
         rows = research.connection.execute(
             """
             SELECT r.root_id, MAX(q.updated_at) AS last_query_at
