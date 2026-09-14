@@ -3020,8 +3020,10 @@ class ControlStore:
     ) -> list[PlatformYearHarvestTask]:
         """Claim resumable platform work with compare-and-fence ownership."""
 
-        if not owner:
+        if not isinstance(owner, str) or not owner.strip():
             raise ValueError("platform harvest owner is required")
+        if isinstance(limit, bool) or not isinstance(limit, int):
+            raise ValueError("platform harvest claim limit must be an integer")
         if limit < 1:
             return []
         if lease_seconds is None:
@@ -3031,7 +3033,20 @@ class ControlStore:
                 "platform harvest lease_seconds must be finite and positive"
             )
         provider_values = tuple(dict.fromkeys(providers or ()))
-        now = float(self.clock())
+        if any(
+            not isinstance(provider, str) or not provider.strip()
+            for provider in provider_values
+        ):
+            raise ValueError("platform harvest providers must be non-empty strings")
+        now_raw = self.clock()
+        if (
+            isinstance(now_raw, bool)
+            or not isinstance(now_raw, (int, float))
+            or not math.isfinite(float(now_raw))
+            or now_raw < 0
+        ):
+            raise ValueError("platform harvest clock must be finite and non-negative")
+        now = float(now_raw)
         lease_expires_at = now + float(lease_seconds)
         params: list[object] = [
             PlatformHarvestState.READY.value,
@@ -3106,7 +3121,7 @@ class ControlStore:
         owner: str,
         lease_seconds: float | None = None,
     ) -> float:
-        if not owner:
+        if not isinstance(owner, str) or not owner.strip():
             raise ValueError("platform harvest owner is required")
         if lease_seconds is None:
             lease_seconds = self.default_lease_seconds
@@ -3114,7 +3129,15 @@ class ControlStore:
             raise ValueError(
                 "platform harvest lease_seconds must be finite and positive"
             )
-        now = float(self.clock())
+        now_raw = self.clock()
+        if (
+            isinstance(now_raw, bool)
+            or not isinstance(now_raw, (int, float))
+            or not math.isfinite(float(now_raw))
+            or now_raw < 0
+        ):
+            raise ValueError("platform harvest clock must be finite and non-negative")
+        now = float(now_raw)
         lease_expires_at = now + float(lease_seconds)
         with self.connection:
             cursor = self.connection.execute(
@@ -3149,8 +3172,15 @@ class ControlStore:
     ) -> PlatformYearHarvestTask:
         """Commit one page outcome and continuation under the live owner fence."""
 
-        if not owner:
+        if not isinstance(owner, str) or not owner.strip():
             raise ValueError("platform harvest owner is required")
+        if retry_at is not None and (
+            isinstance(retry_at, bool)
+            or not isinstance(retry_at, (int, float))
+            or not math.isfinite(float(retry_at))
+            or retry_at < 0
+        ):
+            raise ValueError("platform harvest retry_at must be finite and non-negative")
         if result.state not in {
             PlatformHarvestState.PARTIAL,
             PlatformHarvestState.RETRYABLE,
