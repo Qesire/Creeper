@@ -50,11 +50,11 @@ def build_readiness_report(
     if not run_id.strip():
         raise ValueError("run_id must be non-empty")
     elapsed = Decimal(str(elapsed_seconds))
-    if elapsed <= 0:
-        raise ValueError("elapsed_seconds must be positive")
+    if not elapsed.is_finite() or elapsed <= 0:
+        raise ValueError("elapsed_seconds must be finite and positive")
     baseline_total = Decimal(str(baseline_eed))
-    if baseline_total < 0:
-        raise ValueError("baseline_eed must be non-negative")
+    if not baseline_total.is_finite() or baseline_total < 0:
+        raise ValueError("baseline_eed must be finite and non-negative")
     dispatch = Decimal(str(dispatch_threshold))
     if not dispatch.is_finite() or not Decimal("0.05") <= dispatch <= Decimal("1"):
         raise ValueError("dispatch_threshold must be between 0.05 and 1")
