@@ -26,10 +26,14 @@ AUDITED_FINNISH_BBS_LOCATORS = frozenset(
     {
         "https://files.mpoli.fi/software/TEXTS/MISC/FI980225.ZIP",
         "https://files.mpoli.fi/software/TEXTS/MISC/030698.ZIP",
+        "https://files.mpoli.fi/software/TEXTS/COMPUTER/FI980701.ZIP",
+        "https://files.mpoli.fi/software/TEXTS/COMPUTER/FI980916.ZIP",
     }
 )
 
-_FINNISH_ZIP_NAMES = frozenset({"fi980225.zip", "030698.zip"})
+_FINNISH_ZIP_NAMES = frozenset(
+    {"fi980225.zip", "030698.zip", "fi980701.zip", "fi980916.zip"}
+)
 _BANNER = "Elektroniset 24h postilaatikot Suomessa"
 _EDITION_RE = re.compile(
     r"^\s*Tilanne\s*:\s*(?P<day>\d{1,2})\.(?P<month>\d{1,2})\."
