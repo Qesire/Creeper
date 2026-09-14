@@ -62,6 +62,14 @@ class WorkerRuntimeConfig:
             raise ValueError("worker polling/lease intervals must be positive")
         if not self.cdx_providers:
             raise ValueError("at least one distributed CDX provider is required")
+        configured = {provider.name for provider in self.cdx_providers}
+        allowed = set(self.descriptor.allowed_providers)
+        missing = configured - allowed
+        if missing:
+            raise ValueError(
+                "configured CDX providers are not allowed by worker policy: "
+                + ",".join(sorted(missing))
+            )
 
     def load_secret(self) -> str:
         value = os.environ.get(self.secret_env, "")
