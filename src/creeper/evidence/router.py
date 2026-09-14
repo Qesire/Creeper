@@ -10,6 +10,7 @@ provider admission.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from typing import Iterable, Mapping
 
 from creeper.evidence.policies import EvidenceQueryKey, TemporalScope
@@ -23,6 +24,14 @@ class EvidenceNeed:
     source_key: str
     reservoir_id: str
     lease_id: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.key, EvidenceQueryKey):
+            raise ValueError("key must be an EvidenceQueryKey")
+        for name in ("source_key", "reservoir_id", "lease_id"):
+            value = getattr(self, name)
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"{name} is required")
 
 
 @dataclass(frozen=True)
@@ -48,7 +57,10 @@ class EvidenceRouter:
         backlog_capacities: Mapping[str, int],
         generic_archive_provider: str = "wayback",
     ) -> None:
-        if not generic_archive_provider.strip():
+        if (
+            not isinstance(generic_archive_provider, str)
+            or not generic_archive_provider.strip()
+        ):
             raise ValueError("generic_archive_provider is required")
         capacities = dict(backlog_capacities)
         if any(
@@ -101,7 +113,7 @@ class EvidenceRouter:
             if preferred_provider is None
             else preferred_provider
         )
-        if not provider.strip():
+        if not isinstance(provider, str) or not provider.strip():
             raise ValueError("preferred_provider must be non-empty")
         routed: list[EvidenceQueryKey] = []
         for key in dict.fromkeys(keys):
@@ -131,7 +143,15 @@ class EvidenceRouter:
         rows = list(dict.fromkeys(needs))
         if not rows:
             return 0
-        now = float(self.control_store.clock())
+        now_raw = self.control_store.clock()
+        if (
+            isinstance(now_raw, bool)
+            or not isinstance(now_raw, (int, float))
+            or not math.isfinite(float(now_raw))
+            or now_raw < 0
+        ):
+            raise ValueError("evidence router clock must be finite and non-negative")
+        now = float(now_raw)
         before = self.connection.total_changes
         with self.connection:
             self.connection.executemany(
@@ -323,8 +343,15 @@ class EvidenceRouter:
         ttl_seconds: float,
         max_needs: int = 256,
     ) -> int:
-        if ttl_seconds <= 0:
-            raise ValueError("ttl_seconds must be positive")
+        if (
+            isinstance(ttl_seconds, bool)
+            or not isinstance(ttl_seconds, (int, float))
+            or not math.isfinite(float(ttl_seconds))
+            or ttl_seconds <= 0
+        ):
+            raise ValueError("ttl_seconds must be finite and positive")
+        if isinstance(max_needs, bool) or not isinstance(max_needs, int):
+            raise ValueError("max_needs must be an integer")
         if max_needs < 1:
             return 0
         rows = self.connection.execute(
@@ -335,7 +362,7 @@ class EvidenceRouter:
             ORDER BY created_at, provider, hostname, year_from, year_to
             LIMIT ?
             """,
-            (int(max_needs),),
+            (max_needs,),
         ).fetchall()
         needs = [
             EvidenceNeed(
