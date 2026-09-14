@@ -23,6 +23,7 @@ from ..models import (
     RootQuery as _KernelRootQuery,
     SearchCheckpoint as _KernelSearchCheckpoint,
     SearchHit as _KernelSearchHit,
+    stable_hash,
 )
 
 
@@ -56,9 +57,18 @@ class RootQuery(_KernelRootQuery):
         native = dict(native_filters or {})
         if any(not isinstance(key, str) or not isinstance(value, str) for key, value in native.items()):
             raise TypeError("native_filters keys and values must be strings")
+        compat_query_text = str(query_text)
+        # Some repository APIs (notably Archive-It seed/resource listing) are
+        # filter-only: an empty textual query is meaningful and bounded by the
+        # native resource filters. L3 intentionally requires non-empty free-text
+        # queries, so the L4 ABI shim initializes the canonical value object with
+        # a private sentinel and then restores the externally visible empty
+        # query. Identity properties below remain deterministic without relaxing
+        # the L3 kernel contract.
+        kernel_query_text = compat_query_text if compat_query_text.strip() else "__filter_only__"
         super().__init__(
             root_id=str(root_id),
-            query_text=str(query_text),
+            query_text=kernel_query_text,
             max_pages=int(max_pages),
             max_wall_seconds=float(max_wall_seconds),
             page_size=int(page_size),
@@ -66,6 +76,26 @@ class RootQuery(_KernelRootQuery):
             expected_signal=str(expected_signal),
             expected_artifact_family=str(expected_artifact_family),
             query_id=str(query_id),
+        )
+        if not compat_query_text.strip():
+            object.__setattr__(self, "query_text", "")
+
+    @property
+    def query_hash(self) -> str:
+        if self.query_text:
+            return super().query_hash
+        return stable_hash("query-hash", "", dict(self.native_filters))
+
+    @property
+    def seed_identity(self) -> str:
+        if self.query_text:
+            return super().seed_identity
+        return stable_hash(
+            "seed",
+            self.root_id,
+            self.seed_library_version,
+            "",
+            dict(self.native_filters),
         )
 
 
@@ -94,9 +124,51 @@ class SearchHit(_KernelSearchHit):
         object.__setattr__(self, "metadata", dict(self.metadata))
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, init=False)
 class ArtifactLead(_KernelArtifactLead):
-    """Structured-root artifact lead with L3 identity and lineage semantics."""
+    """Structured-root artifact lead with L3 identity and lineage semantics.
+
+    L4 never exposed an annual-evidence field. Keep that constructor boundary
+    closed even though the canonical L3 model retains an explicit fail-closed
+    evidence_year=None compatibility slot.
+    """
+
+    def __init__(
+        self,
+        root_id: str,
+        provider_native_id: str,
+        locator: str,
+        content_type: str = "",
+        size: int | None = None,
+        checksum: str | None = None,
+        persistent_id: str | None = None,
+        parent_persistent_id: str | None = None,
+        kind: str = "ARTIFACT_LEAD",
+        immutable_identity: str | None = None,
+        source_node_id: str = "",
+        query_id: str = "",
+        program_id: str = "",
+        pivot_id: str = "",
+        decision_id: str = "",
+    ) -> None:
+        _KernelArtifactLead.__init__(
+            self,
+            root_id=root_id,
+            provider_native_id=provider_native_id,
+            locator=locator,
+            content_type=content_type,
+            size=size,
+            checksum=checksum,
+            persistent_id=persistent_id,
+            parent_persistent_id=parent_persistent_id,
+            kind=kind,
+            immutable_identity=immutable_identity,
+            source_node_id=source_node_id,
+            query_id=query_id,
+            program_id=program_id,
+            pivot_id=pivot_id,
+            decision_id=decision_id,
+        )
 
     def __post_init__(self) -> None:
         if not self.root_id.strip() or not self.provider_native_id.strip():
