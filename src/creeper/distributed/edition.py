@@ -11,6 +11,15 @@ FABRIC_AUTHORITY_SCHEMA_VERSION = 1
 FABRIC_THIN_MAX_PROVIDER_REQUESTS = 1
 FABRIC_THIN_MAX_ESTIMATED_RESPONSE_BYTES = 256 * 1024
 
+# Production exploration keeps raw URLs/hostnames/frontier state task-local.
+# The Local Authority receives only HY admission traffic plus empty checkpoints.
+FABRIC_EVIDENCE_ONLY_PRODUCERS = frozenset(
+    {
+        "HistoricalCrawlerProducer",
+        "SeededExplorationProducer",
+    }
+)
+
 # The derivative may reuse these stable, mostly dependency-free core primitives.
 # Any new dependency on the monolithic runtime must be reviewed explicitly.
 ALLOWED_CORE_IMPORTS = frozenset(
