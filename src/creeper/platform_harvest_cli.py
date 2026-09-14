@@ -74,7 +74,7 @@ def admit_platform_year_once(
     budget: int,
     policy_version: str = "platform-v1",
 ) -> PlatformAdmissionReport:
-    """Admit bounded platform work from durable source host-year evidence."""
+    """Admit platform work only from durable undated-host fallback evidence."""
 
     if budget < 1:
         raise ValueError("platform admission budget must be positive")
@@ -86,23 +86,26 @@ def admit_platform_year_once(
             return PlatformAdmissionReport()
         rows = control.connection.execute(
             """
-            SELECT DISTINCT hostname, year, source_key, reservoir_id
-            FROM (
-                SELECT o.hostname, o.year, o.source_key, o.reservoir_id
-                FROM evidence_host_year_origin_units AS o
-                JOIN source_activations AS a
-                  ON a.source_key = o.source_key
-                 AND a.reservoir_id = o.reservoir_id
-                WHERE a.activation_state = 'ACTIVE'
-                UNION ALL
-                SELECT o.hostname, o.year, o.source_key, o.reservoir_id
-                FROM evidence_host_year_origins AS o
-                JOIN source_activations AS a
-                  ON a.source_key = o.source_key
-                 AND a.reservoir_id = o.reservoir_id
-                WHERE a.activation_state = 'ACTIVE'
-            )
-            ORDER BY source_key, reservoir_id, hostname, year
+            SELECT DISTINCT
+                   o.hostname, o.year, o.source_key, o.reservoir_id
+            FROM evidence_host_year_origins AS o
+            JOIN source_activations AS a
+              ON a.source_key = o.source_key
+             AND a.reservoir_id = o.reservoir_id
+            WHERE a.activation_state = 'ACTIVE'
+              -- Platform traversal is an optional continuation of the ordinary
+              -- undated-host fallback lane only. Direct/date-bearing source
+              -- evidence must never seed another Wayback traversal.
+              AND o.evidence_provider = 'wayback'
+              AND o.task_year_from IS NOT NULL
+              AND o.task_year_to IS NOT NULL
+              -- Do not recursively amplify a previous domain-amplification
+              -- result; one explicit platform admission is enough.
+              AND (
+                  o.task_policy_version IS NULL
+                  OR o.task_policy_version NOT LIKE 'cdx-domain-%'
+              )
+            ORDER BY o.source_key, o.reservoir_id, o.hostname, o.year
             LIMIT ?
             """,
             (max(1, int(budget) * 4),),
