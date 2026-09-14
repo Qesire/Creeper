@@ -156,8 +156,16 @@ class CommandAgentSearchExecutorTests(unittest.IsolatedAsyncioTestCase):
             "high_density_refill",
         )
         self.assertIn(
-            '"2001" web crawl URL corpus dataset',
+            '"1996-2001" proxy cache access log URL hostname dataset',
             request["requirements"]["calibrated_search_profile"]["query_examples"],
+        )
+        self.assertNotIn(
+            "crawl",
+            " ".join(
+                request["requirements"]["calibrated_search_profile"][
+                    "query_examples"
+                ]
+            ).lower(),
         )
         self.assertTrue(request["requirements"]["prefer_metasources"])
         self.assertFalse(request["requirements"]["prefer_direct_evidence_bulk"])
