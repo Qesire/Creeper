@@ -169,6 +169,42 @@ class DistributedAuthorityTests(unittest.TestCase):
         )
         self.assertEqual(self.store.batch_count(second.task_id), 1)
 
+    def test_authority_restart_preserves_generation_and_batch_idempotence(self) -> None:
+        task_id = self.store.admit_work(self.work("restart.example"))
+        first = self.store.claim_work(self.worker_a.worker_id, lease_seconds=5)
+        assert first is not None
+        batch = ResultBatch(
+            task_id=task_id,
+            generation=first.generation,
+            sequence_no=0,
+            results=({"kind": "H", "hostname": "restart.example"},),
+            cursor_after="cursor:1",
+        )
+        self.assertTrue(
+            self.store.commit_result_batch(batch, worker_id=first.worker_id)
+        )
+
+        path = Path(self.tmp.name) / "distributed.sqlite3"
+        self.store.close()
+        self.clock.advance(6)
+        self.store = DistributedAuthorityStore(path, clock=self.clock)
+
+        second = self.store.claim_work(self.worker_b.worker_id, lease_seconds=30)
+        assert second is not None
+        self.assertEqual(second.task_id, task_id)
+        self.assertEqual(second.generation, first.generation + 1)
+        replay = ResultBatch(
+            task_id=task_id,
+            generation=second.generation,
+            sequence_no=0,
+            results=({"kind": "H", "hostname": "restart.example"},),
+            cursor_after="cursor:1",
+        )
+        self.assertFalse(
+            self.store.commit_result_batch(replay, worker_id=second.worker_id)
+        )
+        self.assertEqual(self.store.batch_count(task_id), 1)
+
     def test_result_batch_replay_has_exactly_once_logical_effect(self) -> None:
         self.store.admit_work(self.work())
         lease = self.store.claim_work(self.worker_a.worker_id, lease_seconds=30)
