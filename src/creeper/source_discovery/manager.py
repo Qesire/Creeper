@@ -373,15 +373,7 @@ class SourceReservoirManager:
             """,
             (self.stagnation_window,),
         ).fetchall()
-        zero_streak = 0
-        new_sources = 0
-        for row in rows:
-            count = int(row["new_sources"] or 0)
-            new_sources += count
-            if zero_streak == len(rows[:zero_streak + 1]) - 1 and count == 0:
-                zero_streak += 1
-        # The expression above deliberately stops streak growth after the first
-        # productive episode; normalize it defensively for readability.
+        new_sources = sum(int(row["new_sources"] or 0) for row in rows)
         zero_streak = 0
         for row in rows:
             if int(row["new_sources"] or 0) > 0:
@@ -622,12 +614,14 @@ class SourceReservoirManager:
         optional.sort(
             key=lambda spec: (
                 0
+                if spec[4] is SourceIntelligenceTask.INTERPRET_STRUCTURE
+                else 1
                 if (
                     stagnating
                     and spec[4]
                     is SourceIntelligenceTask.RECOVER_STAGNATION
                 )
-                else 1,
+                else 2,
                 -self._llm_task_ucb(spec[4]),
             )
         )
