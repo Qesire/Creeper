@@ -29,6 +29,10 @@ from creeper.scheduler.leases import LeaseResult, WorkLease
 from creeper.sources.archive.warc_source import WarcSourceLeaseExecutor
 from creeper.sources.archive.cdxj import parse_cdxj_line
 from creeper.sources.archive.cdx import parse_cdx_line
+from creeper.sources.non_snapshot import (
+    extract_http_urls,
+    parse_squid_access_line,
+)
 from creeper.sources.reservoirs import Reservoir
 
 
@@ -433,7 +437,27 @@ class StructuredProductionAdapter:
         record_type = "STRUCTURED_LINE"
         contract_direct_year: int | None = None
 
-        if self.kind == "jsonl":
+        if self.kind == "mbox_urls":
+            urls = extract_http_urls(payload)
+            if not urls:
+                return None
+            # Privacy boundary: the durable pipeline sees only extracted URLs,
+            # never mailbox authors, addresses, subjects, or surrounding text.
+            payload = "\t".join(urls)
+            record_type = "MAILBOX_URL_LINE"
+
+        elif self.kind == "squid_access":
+            parsed_access = parse_squid_access_line(payload)
+            if parsed_access is None:
+                return None
+            payload, access_year = parsed_access
+            if access_year is not None:
+                source_year = access_year
+            # Access time is a discovery hint only.  The discovery-only
+            # evidence contract below clears direct authority.
+            record_type = "SQUID_ACCESS_URL"
+
+        elif self.kind == "jsonl":
             try:
                 value = json.loads(payload)
             except json.JSONDecodeError:
@@ -751,30 +775,39 @@ class StructuredProductionAdapter:
         return iter(records), result
 
     def extract_hosts(self, record: SourceRecord) -> Iterable[HostObservation]:
-        raw = record.payload.strip()
-        parsed = urlsplit(raw)
-        hostname = normalize_official(parsed.hostname or raw)
-        if hostname is None:
-            return ()
-        return (
-            HostObservation(
-                hostname=hostname,
-                source_id=record.source_id,
-                locator=record.locator,
-                scope=record.scope,
-                source_year=record.source_year,
-                source_time=record.source_time,
-                record_type=record.record_type,
-                artifact_ref=record.artifact_ref,
-                direct_year_mask=record.direct_year_mask,
-                year_hint_mask=record.year_hint_mask,
-                original_url=record.payload,
-                evidence_type=record.evidence_type,
-                temporal_semantics=record.temporal_semantics,
-                evidence_contract_id=record.evidence_contract_id,
-                evidence_contract_version=record.evidence_contract_version,
-            ),
+        values = (
+            tuple(item for item in record.payload.split("\t") if item)
+            if self.kind == "mbox_urls"
+            else (record.payload.strip(),)
         )
+        result: list[HostObservation] = []
+        seen: set[str] = set()
+        for raw in values:
+            parsed = urlsplit(raw)
+            hostname = normalize_official(parsed.hostname or raw)
+            if hostname is None or hostname in seen:
+                continue
+            seen.add(hostname)
+            result.append(
+                HostObservation(
+                    hostname=hostname,
+                    source_id=record.source_id,
+                    locator=record.locator,
+                    scope=record.scope,
+                    source_year=record.source_year,
+                    source_time=record.source_time,
+                    record_type=record.record_type,
+                    artifact_ref=record.artifact_ref,
+                    direct_year_mask=record.direct_year_mask,
+                    year_hint_mask=record.year_hint_mask,
+                    original_url=raw,
+                    evidence_type=record.evidence_type,
+                    temporal_semantics=record.temporal_semantics,
+                    evidence_contract_id=record.evidence_contract_id,
+                    evidence_contract_version=record.evidence_contract_version,
+                )
+            )
+        return tuple(result)
 
 
 class ProductionAdapterFactory:
