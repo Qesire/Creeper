@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 from pathlib import Path
 
 from aiohttp import web
@@ -14,12 +15,13 @@ from creeper.distributed.config import (
     load_authority_config,
     load_worker_credentials,
 )
+from creeper.distributed.reconcile import AuthorityReconciler
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="creeper-distributed-authority",
-        description="Run the local Creeper distributed Authority API.",
+        prog="creeper-fabric-authority",
+        description="Run the local Creeper Fabric Authority API.",
     )
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument(
@@ -83,11 +85,32 @@ def main(argv: list[str] | None = None) -> int:
         credentials,
         max_clock_skew_seconds=config.max_clock_skew_seconds,
     )
+    reconciler = AuthorityReconciler(
+        store,
+        promotion_batch_size=config.promotion_batch_size,
+        include_source_pages=config.auto_promote_source_pages,
+    )
+
+    async def reconciliation_context(_app: web.Application):
+        stop = asyncio.Event()
+        task = asyncio.create_task(
+            reconciler.run_forever(
+                interval_seconds=config.reconcile_interval_seconds,
+                stop=stop,
+            ),
+            name="creeper-fabric-authority-reconcile",
+        )
+        try:
+            yield
+        finally:
+            stop.set()
+            await task
 
     async def cleanup(_app: web.Application) -> None:
         store.close()
         baseline.close()
 
+    app.cleanup_ctx.append(reconciliation_context)
     app.on_cleanup.append(cleanup)
     web.run_app(
         app,
