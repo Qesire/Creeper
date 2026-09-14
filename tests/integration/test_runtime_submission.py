@@ -247,7 +247,15 @@ class RuntimeSubmissionIntegrationTests(unittest.TestCase):
             baseline_dir = task_root / "merged260912-3"
             baseline_dir.mkdir(parents=True)
             for year in range(1996, 2002):
-                (baseline_dir / f"{year}.txt").write_text("", encoding="utf-8")
+                # The runtime fixture is intentionally undated. Baseline
+                # coverage leaves exactly one unresolved competition year so
+                # the legacy synchronous runner executes one exact fallback;
+                # multi-year Wayback work belongs to AsyncEvidenceWorker.
+                payload = "" if year == 1999 else "novel.example\n"
+                (baseline_dir / f"{year}.txt").write_text(
+                    payload,
+                    encoding="utf-8",
+                )
             (baseline_dir / "candidate_pool.txt").write_text("", encoding="utf-8")
             model = root / "model.json"
             model.write_text(
