@@ -178,6 +178,7 @@ class CoordinatorClient:
             attempt=int(raw["attempt"]),
             work=work,
             cursor=None if raw.get("cursor") is None else str(raw["cursor"]),
+            next_sequence_no=int(raw.get("next_sequence_no", 0)),
         )
 
     async def claim(self, *, lease_seconds: float = 300.0) -> TaskLease | None:
