@@ -74,6 +74,9 @@ async def _run(config_path: Path, *, once: bool) -> int:
             config.descriptor,
             producers,
             lease_seconds=config.lease_seconds,
+            claim_wait_seconds=(
+                0.0 if once else config.claim_wait_seconds
+            ),
         )
         while True:
             report = await worker.run_once()
