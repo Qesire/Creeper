@@ -76,6 +76,20 @@ class SourceIntelligenceContextTests(unittest.TestCase):
                     ],
                     True,
                 )
+                memory = context["research_memory"]
+                by_id = {item["lead_id"]: item for item in memory}
+                self.assertEqual(
+                    by_id["ucb-home-ip-1996-public-trace"]["status"],
+                    "REJECT_IDENTITY_LOSS",
+                )
+                self.assertEqual(
+                    by_id["nlanr-uc-20000714"]["status"],
+                    "RECOVER_PUBLIC_MIRROR",
+                )
+                self.assertEqual(
+                    by_id["nus-nlanr-sample"]["status"],
+                    "HOLD_PROVENANCE",
+                )
             finally:
                 control.close()
 
