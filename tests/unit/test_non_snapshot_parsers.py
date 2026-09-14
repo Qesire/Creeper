@@ -4,9 +4,11 @@ import unittest
 
 from creeper.sources.non_snapshot import (
     extract_http_urls,
+    is_dmoz_content_locator,
     is_mailbox_url_locator,
     is_squid_access_locator,
     mailbox_year_from_locator,
+    parse_dmoz_external_page_line,
     parse_squid_access_line,
 )
 
@@ -55,6 +57,46 @@ class NonSnapshotParserTests(unittest.TestCase):
                 "https://example.test/archive/1999-04.mbox.gz"
             ),
             1999,
+        )
+
+    def test_dmoz_content_locator_is_specific_to_content_dumps(self) -> None:
+        self.assertTrue(
+            is_dmoz_content_locator(
+                "https://mirror.example/dmoz/2001-01-22/content.rdf.u8.gz"
+            )
+        )
+        self.assertTrue(
+            is_dmoz_content_locator(
+                "https://mirror.example/dmoz/kt-content.rdf.u8"
+            )
+        )
+        self.assertFalse(
+            is_dmoz_content_locator(
+                "https://mirror.example/dmoz/structure.rdf.u8.gz"
+            )
+        )
+        self.assertFalse(
+            is_dmoz_content_locator(
+                "https://mirror.example/data/arbitrary.rdf.gz"
+            )
+        )
+
+    def test_dmoz_parser_extracts_only_external_page_url(self) -> None:
+        self.assertEqual(
+            parse_dmoz_external_page_line(
+                '<ExternalPage about="http://old.example/path?a=1&amp;b=2">'
+            ),
+            "http://old.example/path?a=1&b=2",
+        )
+        self.assertIsNone(
+            parse_dmoz_external_page_line(
+                '<link r:resource="http://old.example/path"/>'
+            )
+        )
+        self.assertIsNone(
+            parse_dmoz_external_page_line(
+                '<RDF xmlns:r="http://www.w3.org/1999/02/22-rdf-syntax-ns#">'
+            )
         )
 
     def test_squid_access_parser_keeps_url_and_target_year_only(self) -> None:

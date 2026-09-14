@@ -37,8 +37,10 @@ from creeper.sources.archive.cdx import parse_cdx_line
 from creeper.sources.archive.warc import WarcFormatError, iter_warc_target_records
 from creeper.sources.non_snapshot import (
     extract_http_urls,
+    is_dmoz_content_locator,
     is_mailbox_url_locator,
     is_squid_access_locator,
+    parse_dmoz_external_page_line,
     parse_squid_access_line,
 )
 
@@ -511,6 +513,26 @@ def _extract_hosts(
             observation_keys=tuple(observations),
         )
 
+    if is_dmoz_content_locator(url):
+        for line in lines:
+            observed_url = parse_dmoz_external_page_line(line)
+            if observed_url is None:
+                continue
+            sampled += 1
+            if sampled > policy.max_records:
+                break
+            hostname = _hostname_from_scalar(observed_url)
+            if hostname is not None:
+                hosts.add(hostname)
+                observations.append(hostname)
+        return ParsedHostSample(
+            sampled_records=min(sampled, policy.max_records),
+            hosts=hosts,
+            host_year_pairs=set(),
+            measurement_mode=MeasurementMode.HOST_ONLY,
+            observation_keys=tuple(observations),
+        )
+
     if is_squid_access_locator(url):
         for line in lines:
             parsed_access = parse_squid_access_line(line)
@@ -722,7 +744,11 @@ class MeasuredYieldScoutExecutor:
     @staticmethod
     def _windowable_line_resource(url: str) -> bool:
         suffix, compressed = _suffix(urlsplit(url).path)
-        if is_mailbox_url_locator(url) or is_squid_access_locator(url):
+        if (
+            is_mailbox_url_locator(url)
+            or is_squid_access_locator(url)
+            or is_dmoz_content_locator(url)
+        ):
             return not compressed
         return (not compressed) and suffix in {
             ".cdx",

@@ -99,6 +99,46 @@ class StructuredProductionAdapterTests(unittest.TestCase):
             all(item.year_hint_mask == YEAR_BITS[1998] for item in observations)
         )
 
+    def test_dmoz_adapter_keeps_dump_year_as_hint_not_evidence(self):
+        reservoir = Reservoir(
+            reservoir_id="reservoir:dmoz",
+            domain_id="domain:dmoz",
+            adapter_id="structured:dmoz",
+            root_locator=(
+                "https://mirror.example/dmoz/2001-01-22/content.rdf.u8.gz"
+            ),
+            enumeration_kind="structured_records",
+            capacity_lower=0,
+            evidence_mode="discovery_only",
+            state=ReservoirState.READY,
+        )
+        adapter = StructuredProductionAdapter(
+            reservoir,
+            temporal_scope=(2001, 2001),
+        )
+
+        record = adapter._generic_record(
+            '<ExternalPage about="http://directory.example/path">',
+            locator="fixture:1",
+        )
+        self.assertIsNotNone(record)
+        assert record is not None
+        record = adapter._apply_contract_authority(record)
+
+        self.assertEqual(record.payload, "http://directory.example/path")
+        self.assertEqual(record.record_type, "CURATED_DIRECTORY_URL")
+        self.assertEqual(record.source_year, 2001)
+        self.assertEqual(record.direct_year_mask, 0)
+        self.assertEqual(record.year_hint_mask, YEAR_BITS[2001])
+
+        observations = tuple(adapter.extract_hosts(record))
+        self.assertEqual(
+            [item.hostname for item in observations],
+            ["directory.example"],
+        )
+        self.assertEqual(observations[0].direct_year_mask, 0)
+        self.assertEqual(observations[0].year_hint_mask, YEAR_BITS[2001])
+
     def test_squid_adapter_keeps_access_year_as_hint_not_evidence(self):
         reservoir = Reservoir(
             reservoir_id="reservoir:squid",

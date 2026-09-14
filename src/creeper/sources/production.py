@@ -31,6 +31,7 @@ from creeper.sources.archive.cdxj import parse_cdxj_line
 from creeper.sources.archive.cdx import parse_cdx_line
 from creeper.sources.non_snapshot import (
     extract_http_urls,
+    parse_dmoz_external_page_line,
     parse_squid_access_line,
 )
 from creeper.sources.reservoirs import Reservoir
@@ -456,6 +457,13 @@ class StructuredProductionAdapter:
             # Access time is a discovery hint only.  The discovery-only
             # evidence contract below clears direct authority.
             record_type = "SQUID_ACCESS_URL"
+
+        elif self.kind == "dmoz_rdf_urls":
+            parsed_url = parse_dmoz_external_page_line(payload)
+            if parsed_url is None:
+                return None
+            payload = parsed_url
+            record_type = "CURATED_DIRECTORY_URL"
 
         elif self.kind == "jsonl":
             try:
