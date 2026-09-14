@@ -162,6 +162,9 @@ class CoordinatorCycleReport:
     root_queries_completed: int = 0
     root_queries_terminal: int = 0
     root_query_sources_registered: int = 0
+    root_query_metadata_accepted: int = 0
+    root_query_metadata_held: int = 0
+    root_query_metadata_rejected: int = 0
     root_query_failures: int = 0
     research_active: bool = False
     research_started: int = 0
@@ -886,6 +889,15 @@ class SourceDiscoveryCoordinator:
             counts["root_query_sources_registered"] += int(
                 getattr(value, "sources_inserted", 0)
             )
+            counts["root_query_metadata_accepted"] += int(
+                getattr(value, "metadata_accepted", 0)
+            )
+            counts["root_query_metadata_held"] += int(
+                getattr(value, "metadata_held", 0)
+            )
+            counts["root_query_metadata_rejected"] += int(
+                getattr(value, "metadata_rejected", 0)
+            )
 
     def _current_research_snapshot(self) -> ResearchTriggerSnapshot | None:
         if self.research_snapshot_provider is None:
@@ -1041,6 +1053,9 @@ class SourceDiscoveryCoordinator:
                 "root_queries_completed": 0,
                 "root_queries_terminal": 0,
                 "root_query_sources_registered": 0,
+                "root_query_metadata_accepted": 0,
+                "root_query_metadata_held": 0,
+                "root_query_metadata_rejected": 0,
                 "root_query_failures": 0,
                 "research_active": False,
                 "research_started": 0,
