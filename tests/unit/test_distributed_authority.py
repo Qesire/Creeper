@@ -344,6 +344,67 @@ class DistributedAuthorityTests(unittest.TestCase):
         )
         self.assertIsNotNone(permit_b)
 
+    def test_resolution_coverage_subtracts_overlapping_intervals(self) -> None:
+        self.store.admit_work(self.work("coverage.example"))
+        lease = self.store.claim_work(self.worker_a.worker_id)
+        assert lease is not None
+
+        self.assertEqual(
+            self.store.uncovered_resolution_intervals(
+                hostname="coverage.example",
+                provider="cdx-pool:test",
+                scope="HOST",
+                resolver_version="resolver-v1",
+                year_from=1998,
+                year_to=2001,
+            ),
+            ((1998, 2001),),
+        )
+        self.store.record_complete_resolution_coverage(
+            lease.task_id,
+            worker_id=lease.worker_id,
+            generation=lease.generation,
+            hostname="coverage.example",
+            provider="cdx-pool:test",
+            scope="HOST",
+            resolver_version="resolver-v1",
+            year_from=1996,
+            year_to=1999,
+        )
+        self.assertEqual(
+            self.store.uncovered_resolution_intervals(
+                hostname="coverage.example",
+                provider="cdx-pool:test",
+                scope="HOST",
+                resolver_version="resolver-v1",
+                year_from=1998,
+                year_to=2001,
+            ),
+            ((2000, 2001),),
+        )
+        self.store.record_complete_resolution_coverage(
+            lease.task_id,
+            worker_id=lease.worker_id,
+            generation=lease.generation,
+            hostname="coverage.example",
+            provider="cdx-pool:test",
+            scope="HOST",
+            resolver_version="resolver-v1",
+            year_from=2000,
+            year_to=2001,
+        )
+        self.assertEqual(
+            self.store.uncovered_resolution_intervals(
+                hostname="coverage.example",
+                provider="cdx-pool:test",
+                scope="HOST",
+                resolver_version="resolver-v1",
+                year_from=1998,
+                year_to=2001,
+            ),
+            (),
+        )
+
     def test_provider_region_qualification_is_derived_from_worker_region(self) -> None:
         probe_work = WorkDefinition(
             producer="RegionProbeProducer",
