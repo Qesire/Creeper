@@ -245,14 +245,14 @@ class LinkPromotionAccumulator:
                 family = "HISTORICAL_MAILBOX_URL_CORPUS"
                 level = SourceLevel.SOURCE
                 enumerability = 1.0
-                direct = False
-                temporal = 0.9
+                direct = True
+                temporal = 1.0
             elif squid_trace:
                 family = "HISTORICAL_PROXY_URL_TRACE"
                 level = SourceLevel.SOURCE
                 enumerability = 1.0
-                direct = False
-                temporal = 0.9
+                direct = True
+                temporal = 1.0
             elif aggregate.bulk_artifact:
                 family = "BULK_ARTIFACT"
                 level = SourceLevel.SOURCE
@@ -290,9 +290,7 @@ class LinkPromotionAccumulator:
                 expected_year_to=inferred_year,
                 temporal_semantics_prior=temporal,
                 enumerability_prior=enumerability,
-                direct_evidence_prior=(
-                    1.0 if is_direct_evidence_entrypoint(url) else 0.0
-                ),
+                direct_evidence_prior=(1.0 if direct else 0.0),
                 baseline_overlap_prior=0.5,
                 access_cost_prior=(
                     0.10
