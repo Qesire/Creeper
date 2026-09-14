@@ -41,11 +41,12 @@ class DistributedWorker:
         producers: dict[str, ProducerExecutor],
         *,
         lease_seconds: float = 300.0,
+        claim_wait_seconds: float = 0.0,
     ) -> None:
         if client.worker_id != descriptor.worker_id:
             raise ValueError("worker descriptor/client identity mismatch")
-        if lease_seconds <= 0:
-            raise ValueError("lease_seconds must be positive")
+        if lease_seconds <= 0 or not 0 <= claim_wait_seconds <= 25:
+            raise ValueError("invalid lease/claim wait configuration")
         self.client = client
         self.producers = dict(producers)
         advertised = tuple(sorted(self.producers))
@@ -55,6 +56,7 @@ class DistributedWorker:
             )
         self.descriptor = replace(descriptor, producers=advertised)
         self.lease_seconds = float(lease_seconds)
+        self.claim_wait_seconds = float(claim_wait_seconds)
         self._registered = False
 
     async def register(self) -> None:
@@ -65,7 +67,10 @@ class DistributedWorker:
         if not self._registered:
             await self.register()
         await self.client.heartbeat()
-        lease = await self.client.claim(lease_seconds=self.lease_seconds)
+        lease = await self.client.claim(
+            lease_seconds=self.lease_seconds,
+            wait_seconds=self.claim_wait_seconds,
+        )
         if lease is None:
             return WorkerRunReport(claimed=False)
 
