@@ -991,6 +991,110 @@ def _region_runtime_adapters(
     return plan_regions, execute_region
 
 
+def _ensure_structured_root_seed_programs(
+    research: ResearchRegistry,
+) -> int:
+    """Install a small, diverse, finite deterministic root portfolio.
+
+    This is used only when unified nonblocking research replaces legacy
+    foreground search. Seeds are repository/topic queries, not CDX dataset
+    names, so source discovery retains orthogonal structured surfaces.
+    """
+
+    from creeper.source_research.models import (
+        QueryProgram,
+        RootKind,
+        RootQuery,
+        RootSurface,
+    )
+
+    seed_version = "structured-portfolio-v1"
+    topics = (
+        "web archive dataset",
+        "historical web crawl",
+        "early web corpus",
+    )
+    roots: list[tuple[RootSurface, tuple[str, ...]]] = [
+        (
+            RootSurface(
+                root_id="datacite",
+                kind=RootKind.STRUCTURED_REPOSITORY,
+                canonical_locator="https://api.datacite.org/dois",
+                capabilities=("search", "cursor", "content_urls"),
+                metadata={"seed_portfolio": seed_version},
+            ),
+            topics,
+        ),
+        (
+            RootSurface(
+                root_id="zenodo",
+                kind=RootKind.STRUCTURED_REPOSITORY,
+                canonical_locator="https://zenodo.org/api/records/",
+                capabilities=("search", "pagination", "files"),
+                metadata={"seed_portfolio": seed_version},
+            ),
+            topics,
+        ),
+        (
+            RootSurface(
+                root_id="archiveit",
+                kind=RootKind.ARCHIVE,
+                canonical_locator="https://partner.archive-it.org/api/collection",
+                capabilities=("search", "collections", "explore_fallback"),
+                metadata={"seed_portfolio": seed_version},
+            ),
+            ("early web", "web history"),
+        ),
+    ]
+    if os.environ.get("GITHUB_TOKEN"):
+        roots.append(
+            (
+                RootSurface(
+                    root_id="github-code",
+                    kind=RootKind.CODE,
+                    canonical_locator="https://api.github.com/search/code",
+                    capabilities=("code_search", "text_matches"),
+                    metadata={"seed_portfolio": seed_version},
+                ),
+                (
+                    '"web archive" dataset',
+                    '"historical web" corpus',
+                ),
+            )
+        )
+
+    before = research.connection.total_changes
+    for root, queries in roots:
+        research.upsert_root(root)
+        program_queries = tuple(
+            RootQuery(
+                root_id=root.root_id,
+                query_text=query_text,
+                max_pages=1,
+                max_wall_seconds=30.0,
+                page_size=100,
+                expected_signal=(
+                    "reusable historical artifact, manifest, dataset, or pivot"
+                ),
+                seed_library_version=seed_version,
+            )
+            for query_text in queries
+        )
+        research.register_program(
+            QueryProgram(
+                root_id=root.root_id,
+                strategy="deterministic-structured-portfolio",
+                queries=program_queries,
+                hard_max_requests=len(program_queries),
+                stop_conditions=("terminal_page", "page_budget"),
+                seed_library_version=seed_version,
+                compiler_version="l9-structured-seed-v1",
+                source="DETERMINISTIC_SEED",
+            )
+        )
+    return research.connection.total_changes - before
+
+
 def _root_query_runtime_adapters(
     research: ResearchRegistry,
     bridge: ResearchIntegrationBridge,
@@ -1189,6 +1293,8 @@ async def _open_runtime(config: SourceDiscoveryServiceConfig):
                 research_registry,
                 registry,
             )
+            if config.coordinator.nonblocking_research:
+                _ensure_structured_root_seed_programs(research_registry)
             if config.measurement is not None:
                 authority = (
                     AuthoritySnapshot.from_manifest_path(config.measurement.authority_manifest)
