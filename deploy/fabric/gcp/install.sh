@@ -8,7 +8,9 @@ if [[ -z "${FABRIC_REGION:-}" ]]; then
       curl -fsS -H 'Metadata-Flavor: Google'         http://metadata.google.internal/computeMetadata/v1/instance/zone         2>/dev/null || true
     )"
     if [[ -n "${ZONE}" ]]; then
-      FABRIC_REGION="gcp-${ZONE##*/}"
+      ZONE_NAME="${ZONE##*/}"
+      REGION_NAME="${ZONE_NAME%-*}"
+      FABRIC_REGION="gcp-${REGION_NAME}"
     fi
   fi
 fi
