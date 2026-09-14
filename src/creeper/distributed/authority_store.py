@@ -503,8 +503,7 @@ class DistributedAuthorityStore:
         worker_region: str,
         allowed_providers: set[str],
     ) -> bool:
-        if str(row["task_class"]) == TaskClass.PROBE.value:
-            return True
+        is_probe = str(row["task_class"]) == TaskClass.PROBE.value
         coverage = json.loads(str(row["coverage_json"]))
         raw_providers = coverage.get("providers")
         if raw_providers is None:
@@ -521,6 +520,8 @@ class DistributedAuthorityStore:
         for provider in providers:
             if provider not in allowed_providers:
                 return False
+            if is_probe:
+                continue
             budget = self.connection.execute(
                 """
                 SELECT require_qualified_region
