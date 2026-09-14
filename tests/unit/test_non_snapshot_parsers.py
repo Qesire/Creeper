@@ -41,6 +41,29 @@ class NonSnapshotParserTests(unittest.TestCase):
             )
         )
 
+    def test_ietf_mail_archive_months_are_recognized_without_false_variants(self) -> None:
+        extensionless = (
+            "https://www.ietf.org/ietf-ftp/ietf-mail-archive/ietf/1996-01"
+        )
+        mail_suffix = (
+            "https://www.ietf.org/ietf-ftp/ietf-mail-archive/ietf/2001-07.mail"
+        )
+
+        self.assertTrue(is_mailbox_url_locator(extensionless))
+        self.assertEqual(mailbox_year_from_locator(extensionless), 1996)
+        self.assertTrue(is_mailbox_url_locator(mail_suffix))
+        self.assertEqual(mailbox_year_from_locator(mail_suffix), 2001)
+        self.assertFalse(
+            is_mailbox_url_locator(
+                "https://www.ietf.org/ietf-ftp/ietf-mail-archive/ietf/2001-07.mail.1"
+            )
+        )
+        self.assertFalse(
+            is_mailbox_url_locator(
+                "https://www.ietf.org/ietf-ftp/ietf-mail-archive/ietf/2002-01"
+            )
+        )
+
     def test_generic_target_month_filename_is_not_a_mailbox(self) -> None:
         self.assertFalse(
             is_mailbox_url_locator("https://data.example/releases/1998-03")
