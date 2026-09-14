@@ -607,6 +607,7 @@ def _requeue_unexpanded_audited_arquivo_catalog(
 def _research_snapshot(
     registry: SourceDiscoveryRegistry,
     production_value: ProductionValueModel,
+    research_bridge: ResearchIntegrationBridge | None = None,
 ) -> ResearchTriggerSnapshot:
     """Build a bounded scheduler snapshot without exposing authority handles."""
 
@@ -684,6 +685,16 @@ def _research_snapshot(
     context_hash = __import__("hashlib").sha256(
         json.dumps(context_payload, sort_keys=True).encode("utf-8")
     ).hexdigest()
+    active_llm_episode_id: str | None = None
+    last_llm_started_at: float | None = None
+    same_context_failures = 0
+    if research_bridge is not None:
+        (
+            active_llm_episode_id,
+            last_llm_started_at,
+            same_context_failures,
+        ) = research_bridge.llm_gate_state(context_hash)
+
     return ResearchTriggerSnapshot(
         executable_regions=executable_regions,
         pending_region_count=pending_regions,
@@ -696,6 +707,9 @@ def _research_snapshot(
         closed_source_runs=final.closed_source_runs,
         unknown_structure_blockers=len(structure_blockers),
         unknown_contract_blockers=len(contract_blockers),
+        active_llm_episode_id=active_llm_episode_id,
+        last_llm_started_at=last_llm_started_at,
+        same_context_failures=same_context_failures,
         context_hash=context_hash,
         subject=subject,
     )
@@ -1137,7 +1151,13 @@ async def _open_runtime(config: SourceDiscoveryServiceConfig):
                     region_parallelism=config.coordinator.region_parallelism,
                     failure_retry_seconds=config.coordinator.failure_retry_seconds,
                     research_snapshot_provider=(
-                        (lambda: _research_snapshot(registry, production_value))
+                        (
+                            lambda: _research_snapshot(
+                                registry,
+                                production_value,
+                                research_bridge,
+                            )
+                        )
                         if background_research is not None
                         else None
                     ),
