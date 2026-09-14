@@ -250,14 +250,18 @@ class SourceProducer:
             ownership_ttl = float(template.max_seconds) + postprocess_ttl
             reservation: CapacityReservation | None = None
             if not direct_source:
-                capacity = self.backlog_capacities.get(provider, 0)
-                if capacity <= 0:
-                    continue
                 reservation_amount = (
                     candidate.expected_evidence_tasks
                     if candidate.reservation_evidence_tasks is None
                     else candidate.reservation_evidence_tasks
                 )
+                capacity = self.backlog_capacities.get(provider, 0)
+                # Known-dated discovery sources deliberately reserve zero
+                # external work. They must not depend on Wayback being
+                # configured or having headroom. If an unexpected undated
+                # observation later appears, enqueue_reserved fails closed.
+                if reservation_amount > 0 and capacity <= 0:
+                    continue
                 reservation = self.admission.try_reserve(
                     provider=provider,
                     amount=reservation_amount,
