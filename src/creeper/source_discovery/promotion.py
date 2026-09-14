@@ -241,6 +241,7 @@ class LinkPromotionAccumulator:
         for score, url, aggregate in ranked[: self.policy.max_promotions]:
             mailbox_shard = is_target_mailbox_shard(url)
             squid_trace = is_squid_access_locator(url)
+            direct = False
             if mailbox_shard:
                 family = "HISTORICAL_MAILBOX_URL_CORPUS"
                 level = SourceLevel.SOURCE
