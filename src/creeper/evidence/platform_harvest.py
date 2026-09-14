@@ -468,6 +468,13 @@ class PlatformYearHarvestWorker:
             or retry_max_seconds < retry_base_seconds
         ):
             raise ValueError("invalid retry policy")
+        if not providers:
+            raise ValueError("at least one platform harvest provider is required")
+        if any(
+            not isinstance(name, str) or not name.strip() or provider is None
+            for name, provider in providers.items()
+        ):
+            raise ValueError("platform harvest providers must be named instances")
         self.control_store = control_store
         self.evidence_store = evidence_store
         self.providers = dict(providers)
