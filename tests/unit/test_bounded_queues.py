@@ -5,6 +5,15 @@ from creeper.runtime.queues import BoundedQueues
 
 
 class BoundedQueuesTests(unittest.TestCase):
+    def test_boolean_capacity_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "positive integers"):
+            BoundedQueues(
+                source_records=True,
+                observations=1,
+                evidence_tasks=1,
+                commits=1,
+            )
+
     def test_named_queues_have_configured_capacities(self):
         queues = BoundedQueues(
             source_records=1,
