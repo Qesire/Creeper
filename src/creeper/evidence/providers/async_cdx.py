@@ -565,19 +565,27 @@ class AsyncWaybackCDXClient:
         normalized = normalize_official(subject)
         if normalized is None:
             raise ValueError("platform harvest subject must be a valid hostname")
-        if not 1996 <= int(target_year) <= 2001:
-            raise ValueError("platform harvest year must be within 1996-2001")
+        if (
+            isinstance(target_year, bool)
+            or not isinstance(target_year, int)
+            or not 1996 <= target_year <= 2001
+        ):
+            raise ValueError(
+                "platform harvest year must be an integer within 1996-2001"
+            )
+        if not isinstance(policy_version, str) or not policy_version.strip():
+            raise ValueError("platform harvest policy_version is required")
         payload = json.dumps(
             {
                 "template_version": "wayback-platform-year-v1",
                 "provider": self.provider,
                 "endpoint": self.endpoint,
                 "subject": normalized,
-                "target_year": int(target_year),
+                "target_year": target_year,
                 "policy_version": policy_version,
                 "matchType": "domain",
-                "from": f"{int(target_year)}0101000000",
-                "to": f"{int(target_year)}1231235959",
+                "from": f"{target_year}0101000000",
+                "to": f"{target_year}1231235959",
                 "output": "json",
                 "fl": "urlkey,timestamp,original,statuscode,digest,length",
                 "filter": "statuscode:[23][0-9][0-9]",
