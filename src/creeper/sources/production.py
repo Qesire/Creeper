@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable, Iterator
 import csv
 from dataclasses import replace
+import html
 import io
 import json
 from pathlib import Path
@@ -433,7 +434,26 @@ class StructuredProductionAdapter:
         record_type = "STRUCTURED_LINE"
         contract_direct_year: int | None = None
 
-        if self.kind == "jsonl":
+        if self.kind == "rdf_links":
+            # DMOZ/Open Directory content dumps are line-oriented XML-ish RDF.
+            # ExternalPage is the canonical site record; matching only that
+            # element avoids emitting every Topic <link> again.
+            if "externalpage" not in payload.lower():
+                return None
+            match = re.search(
+                r"""\b(?:rdf:)?about\s*=\s*["']([^"']+)["']""",
+                payload,
+                flags=re.IGNORECASE,
+            )
+            if match is None:
+                return None
+            selected = html.unescape(match.group(1)).strip()
+            if self._hostname_from_scalar(selected) is None:
+                return None
+            payload = selected
+            record_type = "STRUCTURED_RDF_EXTERNAL_PAGE"
+
+        elif self.kind == "jsonl":
             try:
                 value = json.loads(payload)
             except json.JSONDecodeError:
