@@ -65,7 +65,9 @@ def _adapter_kind(entrypoint: str) -> tuple[str, str]:
     parser_kind = parser_kind_from_locator(entrypoint)
     if parser_kind == "ftp_sitelist_zip":
         return "ftp_sitelist", "structured_records"
-    if parser_kind in {"mbox_urls", "squid_access", "dmoz_rdf_urls"}:
+    if parser_kind == "mbox_urls":
+        return "mbox_messages", "structured_records"
+    if parser_kind in {"squid_access", "dmoz_rdf_urls"}:
         return "structured", "structured_records"
 
     path = PurePosixPath(urlsplit(entrypoint).path.lower())

@@ -26,6 +26,7 @@ from creeper.source_discovery.models import (
     SourceLevel,
     source_origin,
 )
+from creeper.sources.non_snapshot import is_mailbox_url_locator
 
 
 class SourceAccessMode(StrEnum):
@@ -317,6 +318,8 @@ def _source_format(entrypoint: str) -> tuple[str, bool, bool]:
     """Return format, timestamp-bearing, sorted-index semantics."""
 
     name = PurePosixPath(urlsplit(entrypoint).path.lower()).name
+    if is_mailbox_url_locator(entrypoint):
+        return "MBOX", True, False
     if name == "ftp-list.zip":
         return "FTP_SITELIST", True, False
     if name.endswith(".cdxj.gz") or name.endswith(".cdxj"):
