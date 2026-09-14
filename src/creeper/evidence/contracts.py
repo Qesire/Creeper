@@ -31,6 +31,9 @@ _PARSER_KINDS = frozenset(
         "jsonl",
         "delimited",
         "lines",
+        "host_link_graph",
+        "domain_inventory",
+        "rdf_directory",
         "warc_arc",
     }
 )
@@ -175,6 +178,7 @@ CDXJ_DIRECT_CONTRACT = SourceEvidenceContract(
 
 def parser_kind_from_locator(locator: str) -> str:
     path = urlsplit(locator).path.lower()
+    name = path.rsplit("/", 1)[-1]
     if path.endswith((".warc.gz", ".arc.gz", ".warc", ".arc")):
         return "warc_arc"
     if path.endswith((".cdxj", ".cdxj.gz")):
@@ -183,6 +187,25 @@ def parser_kind_from_locator(locator: str) -> str:
         return "cdx"
     if path.endswith((".jsonl", ".jsonl.gz")):
         return "jsonl"
+
+    # Historical-Web datasets commonly expose machine-readable structures
+    # whose semantics are richer than their generic .tsv/.txt suffix. These
+    # parsers remain discovery-only unless an exact reviewed contract grants
+    # stronger authority.
+    if (
+        "host-linkage" in name
+        or "host_linkage" in name
+        or "host-link-graph" in name
+    ):
+        return "host_link_graph"
+    if name.endswith((".rdf", ".rdf.gz", ".rdf.u8", ".rdf.u8.gz")):
+        return "rdf_directory"
+    if (
+        name.endswith((".zone", ".zone.gz"))
+        or name.startswith(("domain-info.", "domain-list", "hosts."))
+    ):
+        return "domain_inventory"
+
     if path.endswith((".csv", ".csv.gz", ".tsv", ".tsv.gz")):
         return "delimited"
     return "lines"
