@@ -33,6 +33,29 @@ class DistributedDeployAssetTests(unittest.TestCase):
                 f"{script}: {completed.stderr}",
             )
 
+    def test_cloud_provider_region_bootstrap_is_stable(self) -> None:
+        root = Path(__file__).resolve().parents[2]
+        oci = (root / "deploy/fabric/oci/install.sh").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("Authorization: Bearer Oracle", oci)
+        self.assertIn("/opc/v2/instance/canonicalRegionName", oci)
+        self.assertIn('FABRIC_REGION="oci-${OCI_REGION}"', oci)
+
+        gcp = (root / "deploy/fabric/gcp/install.sh").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("metadata.google.internal", gcp)
+        self.assertIn('REGION_NAME="${ZONE_NAME%-*}"', gcp)
+        self.assertIn('FABRIC_REGION="gcp-${REGION_NAME}"', gcp)
+
+    def test_cloudflare_declares_required_hmac_secret(self) -> None:
+        root = Path(__file__).resolve().parents[2]
+        config = (
+            root / "deploy/fabric/cloudflare-worker/wrangler.jsonc.example"
+        ).read_text(encoding="utf-8")
+        self.assertIn('"required": ["CREEPER_WORKER_SECRET"]', config)
+
     def test_production_worker_profiles_do_not_embed_secrets(self) -> None:
         root = Path(__file__).resolve().parents[2]
         for path in (
