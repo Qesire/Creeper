@@ -822,6 +822,11 @@ class SourceProducer:
                 and result.next_cursor is not None
             ):
                 raise RuntimeError("lease made no cursor progress")
+            # Revalidate ownership immediately before publishing read
+            # completion and advancing the durable reservoir cursor. A long
+            # tail in downstream post-processing must not let an expired
+            # producer commit success after its visibility deadline.
+            keep_ownership_live(force=True)
             if (
                 self.source_registry is not None
                 and candidate.source_key is not None
