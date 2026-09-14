@@ -19,6 +19,10 @@ from creeper.distributed.bulk_index import (
     BulkHistoricalIndexProducer,
 )
 from creeper.distributed.coordinator_client import CoordinatorClient
+from creeper.distributed.exploration import (
+    ExplorationLimits,
+    HistoricalCrawlerProducer,
+)
 from creeper.distributed.host_query import DistributedHostQueryProducer
 from creeper.distributed.region_probe import RegionProbeProducer
 from creeper.distributed.search_campaign import SearchCampaign
@@ -199,6 +203,125 @@ class DistributedWorkerNetworkTests(unittest.IsolatedAsyncioTestCase):
             report = await worker.run_once()
 
         self.assertFalse(report.claimed)
+
+    async def test_historical_crawler_consumes_hostnames_remotely_into_hy(self) -> None:
+        web_calls: list[str] = []
+        cdx_hosts: list[str] = []
+
+        async def web_handler(request: httpx.Request) -> httpx.Response:
+            web_calls.append(str(request.url))
+            host = request.url.host
+            if host == "root.example":
+                html = (
+                    '<html><body>'
+                    '<a href="https://historic.example/links.html">links</a>'
+                    '<a href="https://modern.example/">modern</a>'
+                    '</body></html>'
+                )
+            else:
+                html = "<html><body></body></html>"
+            return httpx.Response(
+                200,
+                headers={"Content-Type": "text/html"},
+                content=html.encode(),
+                request=request,
+            )
+
+        async def cdx_handler(request: httpx.Request) -> httpx.Response:
+            queried = request.url.params.get("url", "")
+            cdx_hosts.append(queried)
+            if "historic.example" in queried:
+                payload = [
+                    ["timestamp", "original", "statuscode"],
+                    [
+                        "19980102030405",
+                        "http://historic.example/",
+                        "200",
+                    ],
+                ]
+            else:
+                payload = [["timestamp", "original", "statuscode"]]
+            return httpx.Response(
+                200,
+                content=json.dumps(payload).encode(),
+                request=request,
+            )
+
+        for provider in ("web_discovery", "internet_archive"):
+            self.store.configure_provider_budget(
+                provider,
+                requests_per_second=1000.0,
+                max_global_inflight=2,
+                require_qualified_region=False,
+            )
+        task_id = self.store.admit_historical_exploration_work(
+            url="https://root.example/",
+            archive_providers=("internet_archive",),
+            seed=7,
+        )
+        config = CDXProviderConfig(
+            name="internet_archive",
+            endpoint="https://ia.test/cdx",
+            requests_per_second=1000.0,
+            max_inflight=2,
+            max_connections=2,
+            max_keepalive_connections=1,
+            max_retries=0,
+            row_limit=100,
+        )
+        producer = HistoricalCrawlerProducer(
+            (config,),
+            limits=ExplorationLimits(
+                max_pages=4,
+                max_hosts=8,
+                max_depth=2,
+                max_links_per_page=16,
+                max_response_bytes=1024 * 1024,
+            ),
+            web_transport=httpx.MockTransport(web_handler),
+            cdx_transports={
+                "internet_archive": httpx.MockTransport(cdx_handler),
+            },
+        )
+        descriptor = WorkerDescriptor(
+            worker_id="worker-a",
+            runtime_class="vm",
+            region="crawler-test",
+            architecture="x86_64",
+            memory_bytes=1024**3,
+            cpu_count=2,
+            network_class="public",
+            capabilities=(
+                Capability.WEB_DISCOVERY.value,
+                Capability.ONLINE_QUERY.value,
+            ),
+            allowed_providers=("web_discovery", "internet_archive"),
+        )
+
+        async with CoordinatorClient(
+            self.base_url,
+            worker_id="worker-a",
+            secret=self.credentials["worker-a"],
+        ) as client:
+            worker = DistributedWorker(
+                client,
+                descriptor,
+                {"HistoricalCrawlerProducer": producer},
+                lease_seconds=30,
+            )
+            report = await worker.run_once()
+
+        self.assertTrue(report.completed, report.error)
+        self.assertEqual(report.task_id, task_id)
+        self.assertGreaterEqual(len(cdx_hosts), 3)
+        self.assertGreaterEqual(len(web_calls), 2)
+        self.assertEqual(self.store.accepted_host_year_count(), 1)
+        self.assertEqual(self.store.host_candidate_count(), 0)
+        self.assertEqual(self.store.source_candidate_count(), 0)
+        self.assertEqual(self.store.batch_count(task_id), 1)
+        row = self.store.task_row(task_id)
+        self.assertEqual(row["state"], "COMPLETE")
+        self.assertEqual(row["cursor"], "EOF")
 
     async def test_source_discovery_worker_persists_deduplicated_candidates(self) -> None:
         html = b"""
