@@ -306,6 +306,7 @@ class SourceProducer:
                     expected_novel_eed=candidate.expected_novel_eed,
                     now=float(self.control_store.clock()),
                     lease_ttl_seconds=ownership_ttl,
+                    initial_cursor=template.cursor_start,
                 )
                 if lease is None:
                     self.admission.release(reservation)
