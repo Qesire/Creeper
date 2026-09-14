@@ -17,7 +17,12 @@ from uuid import uuid4
 from creeper.authority.baseline_index import BaselineIndex, YEAR_BITS
 from creeper.authority.normalizer import normalize_official
 from creeper.distributed.edition import FABRIC_PROTOCOL_VERSION
-from creeper.distributed.identity import evidence_id, host_year_id
+from creeper.distributed.identity import (
+    evidence_id,
+    host_year_id,
+    source_candidate_id,
+)
+from creeper.distributed.urlcanon import canonical_http_url
 from creeper.evidence.contracts import resolve_source_evidence_contract
 from creeper.distributed.models import (
     ProviderPermit,
@@ -158,6 +163,23 @@ class DistributedAuthorityStore:
                 UNIQUE(task_id, sequence_no),
                 FOREIGN KEY(task_id) REFERENCES distributed_work(task_id)
             ) WITHOUT ROWID;
+
+            CREATE TABLE IF NOT EXISTS distributed_source_candidates (
+                candidate_id TEXT PRIMARY KEY,
+                canonical_url TEXT NOT NULL UNIQUE,
+                candidate_type TEXT NOT NULL,
+                parser_kind TEXT NOT NULL,
+                first_task_id TEXT NOT NULL,
+                first_referrer_url TEXT NOT NULL,
+                discovery_count INTEGER NOT NULL DEFAULT 1
+                    CHECK(discovery_count >= 1),
+                state TEXT NOT NULL DEFAULT 'DISCOVERED',
+                first_seen_at REAL NOT NULL,
+                last_seen_at REAL NOT NULL,
+                FOREIGN KEY(first_task_id) REFERENCES distributed_work(task_id)
+            ) WITHOUT ROWID;
+            CREATE INDEX IF NOT EXISTS idx_distributed_source_candidates_state
+                ON distributed_source_candidates(state, candidate_type);
 
             CREATE TABLE IF NOT EXISTS distributed_resolution_coverage (
                 hostname TEXT NOT NULL,
@@ -619,6 +641,53 @@ class DistributedAuthorityStore:
         self.connection.commit()
         return task_id
 
+    def admit_source_page_work(
+        self,
+        *,
+        url: str,
+        max_bytes: int = 2 * 1024 * 1024,
+        max_links: int = 512,
+        priority: float = 0.0,
+        algorithm_version: str = "fabric-source-discovery-v1",
+    ) -> str:
+        canonical_url = canonical_http_url(url)
+        if max_bytes < 1024 or max_links < 1:
+            raise ValueError("invalid source page admission limits")
+        work = WorkDefinition(
+            producer="SourceDiscoveryProducer",
+            task_class=TaskClass.SOURCE_PAGE,
+            input_identity=canonical_url,
+            coverage={
+                "url": canonical_url,
+                "provider": "web_discovery",
+                "max_bytes": int(max_bytes),
+                "max_links": int(max_links),
+            },
+            partition="page",
+            algorithm_version=algorithm_version,
+            required_capabilities=("WEB_DISCOVERY",),
+            priority=float(priority),
+        )
+        return self.admit_work(work)
+
+    def source_candidate_count(self) -> int:
+        return int(
+            self.connection.execute(
+                "SELECT COUNT(*) FROM distributed_source_candidates"
+            ).fetchone()[0]
+        )
+
+    def source_candidate_rows(self) -> list[dict[str, object]]:
+        return [
+            dict(row)
+            for row in self.connection.execute(
+                """
+                SELECT * FROM distributed_source_candidates
+                ORDER BY candidate_type, canonical_url
+                """
+            ).fetchall()
+        ]
+
     def admit_bulk_source_work(
         self,
         *,
@@ -917,6 +986,99 @@ class DistributedAuthorityStore:
             raise
 
     @staticmethod
+    def _source_candidate_from_result(
+        item: Mapping[str, object],
+    ) -> tuple[str, str, str, str, str] | None:
+        if str(item.get("kind", "")) != "SOURCE_CANDIDATE":
+            return None
+        canonical_url = canonical_http_url(str(item.get("url", "")))
+        candidate_type = str(item.get("candidate_type", "")).strip()
+        parser_kind = str(item.get("parser_kind", "")).strip()
+        referrer_url = canonical_http_url(str(item.get("referrer_url", "")))
+        if candidate_type not in {"bulk_artifact", "source_page"}:
+            raise ValueError("invalid source candidate type")
+        if parser_kind not in {
+            "",
+            "cdx",
+            "cdxj",
+            "warc_arc",
+            "jsonl",
+            "delimited",
+            "lines",
+        }:
+            raise ValueError("invalid source candidate parser kind")
+        if candidate_type == "bulk_artifact" and not parser_kind:
+            raise ValueError("bulk artifact candidate requires parser_kind")
+        candidate_id = source_candidate_id(canonical_url)
+        return (
+            candidate_id,
+            canonical_url,
+            candidate_type,
+            parser_kind,
+            referrer_url,
+        )
+
+    def _commit_source_candidates(
+        self,
+        task_id: str,
+        results: tuple[Mapping[str, object], ...],
+        *,
+        now: float,
+    ) -> None:
+        unique: dict[str, tuple[str, str, str, str]] = {}
+        for item in results:
+            parsed = self._source_candidate_from_result(item)
+            if parsed is None:
+                continue
+            candidate_id, canonical_url, candidate_type, parser_kind, referrer = parsed
+            unique[candidate_id] = (
+                canonical_url,
+                candidate_type,
+                parser_kind,
+                referrer,
+            )
+
+        for candidate_id, (
+            canonical_url,
+            candidate_type,
+            parser_kind,
+            referrer,
+        ) in unique.items():
+            self.connection.execute(
+                """
+                INSERT INTO distributed_source_candidates(
+                    candidate_id, canonical_url, candidate_type, parser_kind,
+                    first_task_id, first_referrer_url, discovery_count,
+                    state, first_seen_at, last_seen_at
+                ) VALUES (?, ?, ?, ?, ?, ?, 1, 'DISCOVERED', ?, ?)
+                ON CONFLICT(candidate_id) DO UPDATE SET
+                    candidate_type = CASE
+                        WHEN excluded.candidate_type = 'bulk_artifact'
+                            THEN excluded.candidate_type
+                        ELSE distributed_source_candidates.candidate_type
+                    END,
+                    parser_kind = CASE
+                        WHEN excluded.parser_kind <> ''
+                            THEN excluded.parser_kind
+                        ELSE distributed_source_candidates.parser_kind
+                    END,
+                    discovery_count =
+                        distributed_source_candidates.discovery_count + 1,
+                    last_seen_at = excluded.last_seen_at
+                """,
+                (
+                    candidate_id,
+                    canonical_url,
+                    candidate_type,
+                    parser_kind,
+                    task_id,
+                    referrer,
+                    now,
+                    now,
+                ),
+            )
+
+    @staticmethod
     def _batch_payload(batch: ResultBatch) -> str:
         return _json(
             {
@@ -994,6 +1156,11 @@ class DistributedAuthorityStore:
                     batch.cursor_after,
                     now,
                 ),
+            )
+            self._commit_source_candidates(
+                batch.task_id,
+                batch.results,
+                now=now,
             )
             self.connection.execute(
                 """
