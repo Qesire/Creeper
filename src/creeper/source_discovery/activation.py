@@ -62,6 +62,10 @@ class ProductionSourceSpec:
 
 
 def _adapter_kind(entrypoint: str) -> tuple[str, str]:
+    parser_kind = parser_kind_from_locator(entrypoint)
+    if parser_kind in {"mbox_urls", "squid_access"}:
+        return "structured", "structured_records"
+
     path = PurePosixPath(urlsplit(entrypoint).path.lower())
     name = path.name
     suffixes = (".warc.gz", ".arc.gz", ".warc", ".arc")
