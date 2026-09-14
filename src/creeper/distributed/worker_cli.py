@@ -17,8 +17,8 @@ from creeper.distributed.worker import DistributedWorker
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="creeper-distributed-worker",
-        description="Run a pull-based Creeper distributed worker.",
+        prog="creeper-fabric-worker",
+        description="Run a pull-based Creeper Fabric worker.",
     )
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument(
