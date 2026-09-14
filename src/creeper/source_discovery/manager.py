@@ -600,10 +600,11 @@ class SourceReservoirManager:
         ] = []
         if direct and len(selected) < capacity:
             selected.extend(direct)
+        explore_min_capacity = 3 if direct else 2
         if (
             explore
             and not stagnating
-            and capacity >= 2
+            and capacity >= explore_min_capacity
             and len(selected) < capacity
         ):
             selected.extend(explore)
