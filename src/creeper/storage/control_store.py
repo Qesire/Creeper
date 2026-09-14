@@ -3766,13 +3766,35 @@ class ControlStore:
         return changed == 1
 
     def save_lease(self, lease: Any) -> None:
-        from creeper.scheduler.leases import LeaseState
+        from creeper.scheduler.leases import LeaseState, WorkLease
 
-        state = self._value(self._field(lease, "state"), "created")
+        raw_state = self._value(
+            self._field(lease, "state", LeaseState.CREATED),
+            LeaseState.CREATED.value,
+        )
+        validated = WorkLease(
+            lease_id=self._field(lease, "lease_id"),
+            reservoir_id=self._field(lease, "reservoir_id"),
+            cursor_start=self._field(lease, "cursor_start"),
+            cursor_end=self._field(lease, "cursor_end"),
+            max_records=self._field(lease, "max_records"),
+            max_requests=self._field(lease, "max_requests"),
+            max_bytes=self._field(lease, "max_bytes"),
+            max_seconds=self._field(lease, "max_seconds"),
+            resource_class=self._field(lease, "resource_class", "general"),
+            expected_evidence_tasks=self._field(
+                lease, "expected_evidence_tasks", 0
+            ),
+            expected_novel_eed=self._field(lease, "expected_novel_eed", 0.0),
+            owner=self._field(lease, "owner"),
+            expires_at=self._field(lease, "expires_at"),
+            state=LeaseState(raw_state),
+        )
+        state = validated.state.value
         if state == LeaseState.RUNNING.value:
             row = self.connection.execute(
                 "SELECT state FROM work_leases WHERE lease_id = ?",
-                (self._field(lease, "lease_id"),),
+                (validated.lease_id,),
             ).fetchone()
             if row is None or row["state"] != LeaseState.GRANTED.value:
                 raise ValueError("a lease must be persisted as GRANTED before RUNNING")
@@ -3795,14 +3817,14 @@ class ControlStore:
                     expires_at=excluded.expires_at, state=excluded.state
                 """,
                 (
-                    self._field(lease, "lease_id"), self._field(lease, "reservoir_id"),
-                    self._field(lease, "cursor_start"), self._field(lease, "cursor_end"),
-                    self._field(lease, "max_records"), self._field(lease, "max_requests"),
-                    self._field(lease, "max_bytes"), self._field(lease, "max_seconds"),
-                    self._value(self._field(lease, "resource_class"), "general"),
-                    self._field(lease, "expected_evidence_tasks", 0),
-                    self._field(lease, "expected_novel_eed", 0.0),
-                    self._field(lease, "owner"), self._field(lease, "expires_at"), state,
+                    validated.lease_id, validated.reservoir_id,
+                    validated.cursor_start, validated.cursor_end,
+                    validated.max_records, validated.max_requests,
+                    validated.max_bytes, validated.max_seconds,
+                    validated.resource_class,
+                    validated.expected_evidence_tasks,
+                    validated.expected_novel_eed,
+                    validated.owner, validated.expires_at, state,
                 ),
             )
 
