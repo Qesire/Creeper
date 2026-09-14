@@ -130,6 +130,9 @@ class CoordinatorCycleReport:
     usable_cold_count: int = 0
     effective_cold_count: int = 0
     search_directives_planned: int = 0
+    search_zero_new_streak: int = 0
+    search_adaptive_cooldown_seconds: float = 0.0
+    search_call_budget: int = 0
     activated: int = 0
     triaged_to_scout: int = 0
     triaged_hold: int = 0
@@ -651,6 +654,11 @@ class SourceDiscoveryCoordinator:
                 "usable_cold_count": plan.cold_count,
                 "effective_cold_count": plan.effective_cold_count,
                 "search_directives_planned": len(plan.search_directives),
+                "search_zero_new_streak": plan.search_zero_new_streak,
+                "search_adaptive_cooldown_seconds": (
+                    plan.search_adaptive_cooldown_seconds
+                ),
+                "search_call_budget": plan.search_call_budget,
                 "activated": 0,
                 "triaged_to_scout": 0,
                 "triaged_hold": 0,
