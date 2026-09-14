@@ -19,6 +19,7 @@ from creeper.distributed.authority_store import (
     ProviderAccessDeniedError,
     ProviderRegionNotQualifiedError,
     StaleLeaseError,
+    WorkerEgressBudgetExceededError,
     WorkerRejectedError,
 )
 from creeper.distributed.edition import edition_metadata
@@ -95,6 +96,11 @@ async def _error_middleware(request: web.Request, handler):
         return web.json_response(
             {"error": "PROVIDER_ACCESS_DENIED", "detail": str(exc)},
             status=403,
+        )
+    except WorkerEgressBudgetExceededError as exc:
+        return web.json_response(
+            {"error": "EGRESS_BUDGET_EXHAUSTED", "detail": str(exc)},
+            status=429,
         )
     except StaleLeaseError as exc:
         return web.json_response(
@@ -188,6 +194,9 @@ def create_authority_app(
             producers=tuple(str(v) for v in data.get("producers", ())),
             allowed_providers=tuple(
                 str(v) for v in data.get("allowed_providers", ())
+            ),
+            daily_egress_budget_bytes=int(
+                data.get("daily_egress_budget_bytes", 0)
             ),
             protocol_version=str(data.get("protocol_version", "")),
             edition_version=str(data.get("edition_version", "")),
@@ -380,6 +389,7 @@ def create_authority_app(
                 else int(data["status_code"])
             ),
             cooldown_seconds=float(data.get("cooldown_seconds", 0.0)),
+            response_bytes=int(data.get("response_bytes", 0)),
         )
         return web.json_response({"status": "RECORDED"})
 
