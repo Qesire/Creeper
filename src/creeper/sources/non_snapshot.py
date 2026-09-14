@@ -9,8 +9,10 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 import html
+import io
 import re
 from urllib.parse import urlsplit
+import zipfile
 
 
 _TARGET_YEAR_RE = re.compile(r"^(199[6-9]|200[01])-(0[1-9]|1[0-2])$")
@@ -45,6 +47,12 @@ _DMOZ_EXTERNAL_PAGE_RE = re.compile(
     [^>]*\babout\s*=\s*
     ["']([^"']+)["']
     """
+)
+_FTP_SITELIST_ZIP_NAMES = frozenset({"ftp-list.zip"})
+_FTP_SITELIST_SITE_RE = re.compile(r"^\s*Site\s*:\s*(\S+)\s*$", re.IGNORECASE)
+_FTP_SITELIST_DATE_RE = re.compile(
+    r"^\s*Date\s*:\s*(\d{1,2}-[A-Za-z]{3}-\d{2,4})\b",
+    re.IGNORECASE,
 )
 
 
@@ -105,6 +113,107 @@ def extract_http_urls(
             break
     return tuple(result)
 
+
+def is_ftp_sitelist_zip_locator(locator: str) -> bool:
+    """Recognize the Perry Rovers Anonymous FTP sitelist package only."""
+    path = urlsplit(locator).path.lower().rstrip("/")
+    if not path:
+        return False
+    return path.rsplit("/", 1)[-1] in _FTP_SITELIST_ZIP_NAMES
+
+
+def parse_ftp_sitelist_records(
+    text: str,
+) -> tuple[tuple[str, str, int, int], ...]:
+    """Parse Site + record Date pairs from one sitelist text member.
+
+    Returns (site, date_text, year, site_line). The date is the sitelist
+    record last-modification date, not the package publication date.
+    """
+    records: list[tuple[str, str, int, int]] = []
+    site: str | None = None
+    site_line = 0
+    date_text: str | None = None
+    year: int | None = None
+
+    def flush() -> None:
+        nonlocal site, site_line, date_text, year
+        if site is not None and date_text is not None and year is not None:
+            try:
+                parsed = urlsplit("ftp://" + site)
+            except ValueError:
+                parsed = None
+            if parsed is not None and parsed.hostname:
+                records.append((parsed.hostname, date_text, year, site_line))
+        site = None
+        site_line = 0
+        date_text = None
+        year = None
+
+    for line_number, line in enumerate(text.splitlines(), 1):
+        site_match = _FTP_SITELIST_SITE_RE.match(line)
+        if site_match is not None:
+            flush()
+            site = site_match.group(1).strip().rstrip(".").lower()
+            site_line = line_number
+            continue
+        if site is None:
+            continue
+        date_match = _FTP_SITELIST_DATE_RE.match(line)
+        if date_match is None:
+            continue
+        raw_date = date_match.group(1)
+        parsed_date = None
+        for fmt in ("%d-%b-%y", "%d-%b-%Y"):
+            try:
+                parsed_date = datetime.strptime(raw_date, fmt)
+                break
+            except ValueError:
+                continue
+        if parsed_date is not None:
+            date_text = raw_date
+            year = parsed_date.year
+    flush()
+    return tuple(records)
+
+
+def parse_ftp_sitelist_zip(
+    payload: bytes,
+    *,
+    max_entries: int = 128,
+    max_uncompressed_bytes: int = 16 * 1024 * 1024,
+) -> tuple[tuple[str, int, str, int, str], ...]:
+    """Safely parse an in-memory ftp-list.zip package.
+
+    Returns (member, site_line, hostname, year, date_text) tuples without
+    extracting archive paths to disk.
+    """
+    if max_entries < 1 or max_uncompressed_bytes < 1:
+        raise ValueError("zip parser limits must be positive")
+    try:
+        archive = zipfile.ZipFile(io.BytesIO(payload))
+    except zipfile.BadZipFile as exc:
+        raise ValueError("invalid ftp sitelist zip") from exc
+    with archive:
+        infos = [item for item in archive.infolist() if not item.is_dir()]
+        if len(infos) > max_entries:
+            raise ValueError("ftp sitelist zip has too many members")
+        total = sum(item.file_size for item in infos)
+        if total > max_uncompressed_bytes:
+            raise ValueError("ftp sitelist zip exceeds decompressed budget")
+        result: list[tuple[str, int, str, int, str]] = []
+        for info in infos:
+            if info.flag_bits & 0x1:
+                raise ValueError("encrypted ftp sitelist zip member")
+            if info.file_size > max_uncompressed_bytes:
+                raise ValueError("ftp sitelist member exceeds decompressed budget")
+            raw = archive.read(info)
+            text = raw.decode("utf-8", errors="replace")
+            for hostname, date_text, record_year, site_line in parse_ftp_sitelist_records(text):
+                result.append(
+                    (info.filename, site_line, hostname, record_year, date_text)
+                )
+        return tuple(result)
 
 def is_dmoz_content_locator(locator: str) -> bool:
     """Recognize DMOZ/ODP content dumps without claiming generic RDF files."""
