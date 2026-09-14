@@ -100,6 +100,49 @@ class LinkPromotionTests(unittest.TestCase):
         self.assertEqual(candidate.expected_year_to, 1998)
         self.assertEqual(candidate.direct_evidence_prior, 0.0)
 
+    def test_ietf_target_mailbox_shards_are_promoted_without_backup_duplicates(self) -> None:
+        for url, expected_year in (
+            (
+                "https://www.ietf.org/ietf-ftp/ietf-mail-archive/ietf/1996-01",
+                1996,
+            ),
+            (
+                "https://www.ietf.org/ietf-ftp/ietf-mail-archive/ietf/2001-07.mail",
+                2001,
+            ),
+        ):
+            acc = LinkPromotionAccumulator()
+            acc.add(
+                self.link(
+                    url,
+                    page="https://www.ietf.org/ietf-ftp/ietf-mail-archive/ietf/",
+                    same_site=True,
+                    anchor=url.rsplit("/", 1)[-1],
+                )
+            )
+
+            promoted = acc.promoted()
+
+            self.assertEqual(len(promoted), 1)
+            candidate = promoted[0].candidate
+            self.assertEqual(
+                candidate.source_family,
+                "HISTORICAL_MAILBOX_URL_CORPUS",
+            )
+            self.assertEqual(candidate.expected_year_from, expected_year)
+            self.assertEqual(candidate.expected_year_to, expected_year)
+
+        duplicate = LinkPromotionAccumulator()
+        duplicate.add(
+            self.link(
+                "https://www.ietf.org/ietf-ftp/ietf-mail-archive/ietf/1998-07.mail.1",
+                page="https://www.ietf.org/ietf-ftp/ietf-mail-archive/ietf/",
+                same_site=True,
+                anchor="1998-07.mail.1",
+            )
+        )
+        self.assertEqual(duplicate.promoted(), [])
+
     def test_off_window_mailbox_navigation_is_not_promoted(self) -> None:
         acc = LinkPromotionAccumulator()
         acc.add(
