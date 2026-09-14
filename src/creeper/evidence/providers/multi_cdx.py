@@ -574,7 +574,13 @@ class AsyncCDXProviderPool:
 
         if states and all(state is CDXQueryState.EMPTY_EXHAUSTIVE for state in states):
             state = CDXQueryState.EMPTY_EXHAUSTIVE
-        elif states and all(state is CDXQueryState.INVALID for state in states):
+        elif states and all(
+            state in {CDXQueryState.EMPTY_EXHAUSTIVE, CDXQueryState.INVALID}
+            for state in states
+        ) and CDXQueryState.INVALID in states:
+            # INVALID is permanent. If every provider is already terminal and
+            # at least one cannot answer this query, retrying the same logical
+            # task cannot improve coverage.
             state = CDXQueryState.INVALID
         elif CDXQueryState.TRANSIENT_ERROR in states:
             state = CDXQueryState.TRANSIENT_ERROR
@@ -710,6 +716,7 @@ class AsyncCDXProviderPool:
             resolved_years.update(missing_years)
         exact_attempts: list[tuple[str, EvidenceQueryResult]] = []
         exact_saw_transient = False
+        exact_invalid_years: set[int] = set()
         if missing_years and not all_physical_exhaustive:
             exact_keys = tuple(
                 EvidenceQueryKey(
@@ -739,6 +746,8 @@ class AsyncCDXProviderPool:
                     resolved_years.add(year)
                 elif result.state is CDXQueryState.EMPTY_EXHAUSTIVE:
                     resolved_years.add(year)
+                elif result.state is CDXQueryState.INVALID:
+                    exact_invalid_years.add(year)
                 elif result.state is CDXQueryState.TRANSIENT_ERROR:
                     exact_saw_transient = True
 
@@ -752,19 +761,12 @@ class AsyncCDXProviderPool:
                 if positive_years
                 else CDXQueryState.EMPTY_EXHAUSTIVE
             )
-        elif (
-            not positive_years
-            and attempts
-            and all(
-                result.state is CDXQueryState.INVALID
-                for _name, result in attempts
-            )
-            and exact_attempts
-            and all(
-                result.state is CDXQueryState.INVALID
-                for _name, result in exact_attempts
-            )
+        elif unresolved_years and set(unresolved_years).issubset(
+            exact_invalid_years
         ):
+            # Exact-year fallback already exhausted all configured providers
+            # into permanent INVALID/empty outcomes for every unresolved year.
+            # Preserve any positive capsules but terminate the impossible gap.
             state = CDXQueryState.INVALID
         else:
             state = (
