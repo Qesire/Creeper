@@ -13,6 +13,7 @@ from creeper.source_discovery import (
     SuppressionScope,
 )
 from creeper.source_discovery.manager import (
+    SearchDirective,
     SearchDirectiveKind,
     SourceIntelligenceTask,
     SourcePoolTargets,
