@@ -30,6 +30,47 @@ class WorkLeaseTests(unittest.TestCase):
         self.assertFalse(lease.allows(records=1, requests=1, bytes_read=4096, elapsed_seconds=1))
         self.assertFalse(lease.allows(records=1, requests=1, bytes_read=1, elapsed_seconds=30))
 
+    def test_constructor_rejects_nonfinite_or_fractional_limits(self):
+        with self.assertRaisesRegex(ValueError, "max_seconds"):
+            WorkLease.create(
+                reservoir_id="arquivo:demo",
+                max_records=10,
+                max_requests=2,
+                max_bytes=4096,
+                max_seconds=float("nan"),
+            )
+        with self.assertRaisesRegex(ValueError, "max_records"):
+            WorkLease.create(
+                reservoir_id="arquivo:demo",
+                max_records=1.5,
+                max_requests=2,
+                max_bytes=4096,
+                max_seconds=30,
+            )
+        with self.assertRaisesRegex(ValueError, "expected_novel_eed"):
+            WorkLease.create(
+                reservoir_id="arquivo:demo",
+                max_records=10,
+                max_requests=2,
+                max_bytes=4096,
+                max_seconds=30,
+                expected_novel_eed=float("inf"),
+            )
+        with self.assertRaisesRegex(ValueError, "expires_at"):
+            WorkLease.create(
+                reservoir_id="arquivo:demo",
+                max_records=10,
+                max_requests=2,
+                max_bytes=4096,
+                max_seconds=30,
+                expires_at=float("nan"),
+            )
+
+    def test_expire_rejects_nonfinite_clock_value(self):
+        lease = self._lease().grant(owner="worker-1")
+        with self.assertRaisesRegex(ValueError, "now must be finite"):
+            lease.expire(float("nan"))
+
     def test_state_transitions_are_guarded_and_immutable(self):
         created = self._lease()
         granted = created.grant(owner="worker-1")
