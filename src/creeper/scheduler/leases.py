@@ -126,6 +126,14 @@ class WorkLease:
             raise ValueError("now must be finite and non-negative")
         if expires_at is None and now is not None:
             expires_at = float(now) + float(max_seconds)
+        elif expires_at is not None and now is not None:
+            if (
+                isinstance(expires_at, bool)
+                or not isinstance(expires_at, (int, float))
+                or not math.isfinite(float(expires_at))
+                or expires_at < now
+            ):
+                raise ValueError("expires_at must be finite and not precede now")
         return cls(str(uuid4()), reservoir_id, cursor_start, cursor_end, max_records,
                    max_requests, max_bytes, max_seconds, resource_class,
                    expected_evidence_tasks, expected_novel_eed, None, expires_at)
@@ -194,16 +202,38 @@ class WorkLease:
             raise StateTransitionError(f"invalid lease transition: {self.state} -> {LeaseState.GRANTED}")
         return replace(self, state=LeaseState.GRANTED)
 
-    def retry(self) -> "WorkLease":
+    def retry(
+        self,
+        *,
+        now: float,
+        expires_at: float | None = None,
+    ) -> "WorkLease":
         if self.state not in {LeaseState.EXPIRED, LeaseState.ABORTED, LeaseState.PREEMPTED}:
             raise StateTransitionError("only ended leases can be retried")
-        # A retry is a fresh lease identity. Carrying the terminal lease's old
-        # deadline would make an expired lease immediately expire again after
-        # it is granted. The caller/control plane must assign a new deadline.
+        if (
+            isinstance(now, bool)
+            or not isinstance(now, (int, float))
+            or not math.isfinite(float(now))
+            or now < 0
+        ):
+            raise ValueError("retry time must be finite and non-negative")
+        if expires_at is None:
+            new_expiry = float(now) + float(self.max_seconds)
+        else:
+            if (
+                isinstance(expires_at, bool)
+                or not isinstance(expires_at, (int, float))
+                or not math.isfinite(float(expires_at))
+                or expires_at < now
+            ):
+                raise ValueError(
+                    "retry expires_at must be finite and not precede retry time"
+                )
+            new_expiry = float(expires_at)
         return replace(
             self,
             lease_id=str(uuid4()),
             state=LeaseState.CREATED,
             owner=None,
-            expires_at=None,
+            expires_at=new_expiry,
         )
