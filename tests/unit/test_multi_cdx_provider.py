@@ -313,6 +313,35 @@ class MultiCDXProviderPoolTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.followup_years, ())
         self.assertEqual(result.provider_requests, 2)
 
+    async def test_exhaustive_range_treats_missing_years_as_proven_empty(self) -> None:
+        pool, first, second = self.make_pool()
+        key = EvidenceQueryKey(
+            "sparse-years.example",
+            TemporalScope(1998, 1999),
+            "wayback",
+            "cdx-v1",
+        )
+        clients = {"first": first, "second": second}
+        for name, client in clients.items():
+            client.ranges[key] = RangeEvidenceQueryResult(
+                hostname=key.hostname,
+                key=key,
+                state=CDXQueryState.PASS,
+                candidate_years=(1998,),
+                capsules=(capsule(key.hostname, 1998, name),),
+                provider_requests=1,
+            )
+
+        result = await pool.query_range(key)
+
+        self.assertEqual(result.state, CDXQueryState.PASS)
+        self.assertEqual(result.candidate_years, (1998,))
+        self.assertEqual(result.followup_years, ())
+        self.assertEqual(result.provider_requests, 2)
+        self.assertFalse(
+            any(call[0] == "exact" for client in clients.values() for call in client.calls)
+        )
+
     async def test_partial_range_closes_missing_year_inside_same_host_task(self) -> None:
         pool, first, second = self.make_pool()
         key = EvidenceQueryKey(
