@@ -14,6 +14,10 @@ from creeper.authority.baseline_index import BaselineIndex
 from creeper.authority.identity import authority_digest
 from creeper.distributed.authority_api import create_authority_app
 from creeper.distributed.authority_store import DistributedAuthorityStore
+from creeper.distributed.bulk_index import (
+    BulkChunkLimits,
+    BulkHistoricalIndexProducer,
+)
 from creeper.distributed.coordinator_client import CoordinatorClient
 from creeper.distributed.host_query import DistributedHostQueryProducer
 from creeper.distributed.region_probe import RegionProbeProducer
@@ -356,6 +360,68 @@ class DistributedWorkerNetworkTests(unittest.IsolatedAsyncioTestCase):
         )
         budget = self.store.provider_budget_snapshot("internet_archive")
         self.assertEqual(budget["active_inflight"], 0)
+
+    async def test_bulk_index_streams_probe_full_and_durable_eof_checkpoint(self) -> None:
+        source = Path(self.tmp.name) / "fixture.cdxj"
+        source.write_text(
+            "\n".join(
+                [
+                    'com,example)/ 19970102030405 {"url":"http://bulk.example/a","status":"200"}',
+                    'com,example)/ 19970103030405 {"url":"http://bulk.example/b","status":"200"}',
+                    'com,other)/ 19980102030405 {"url":"http://other.example/","status":"200"}',
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        task_id = self.store.admit_bulk_source_work(
+            source_id="fixture-cdxj",
+            source_locator=str(source),
+            partition="all",
+        )
+        producer = BulkHistoricalIndexProducer(
+            limits=BulkChunkLimits(
+                max_records=2,
+                max_bytes=1024 * 1024,
+                max_seconds=2.0,
+                probe_batch_size=16,
+            )
+        )
+        descriptor = WorkerDescriptor(
+            worker_id="worker-a",
+            runtime_class="vm",
+            region="oci-test",
+            architecture="x86_64",
+            memory_bytes=1024**3,
+            cpu_count=2,
+            network_class="public",
+            capabilities=(Capability.STREAMING_BULK.value,),
+        )
+
+        async with CoordinatorClient(
+            self.base_url,
+            worker_id="worker-a",
+            secret=self.credentials["worker-a"],
+        ) as client:
+            worker = DistributedWorker(
+                client,
+                descriptor,
+                {"BulkHistoricalIndexProducer": producer},
+                lease_seconds=30,
+            )
+            report = await worker.run_once()
+
+        self.assertTrue(report.completed, report.error)
+        self.assertEqual(report.task_id, task_id)
+        self.assertEqual(self.store.accepted_host_year_count(), 2)
+        row = self.store.task_row(task_id)
+        self.assertEqual(row["state"], "COMPLETE")
+        self.assertEqual(row["cursor"], BulkHistoricalIndexProducer.EOF_CURSOR)
+        self.assertGreaterEqual(int(row["next_sequence_no"]), 2)
+        self.assertEqual(
+            self.store.batch_count(task_id),
+            int(row["next_sequence_no"]),
+        )
 
     async def test_worker_producer_failure_returns_task_to_ready(self) -> None:
         task_id = self.store.admit_work(
