@@ -11,6 +11,7 @@ from creeper.distributed.config import load_worker_config
 from creeper.distributed.coordinator_client import CoordinatorClient
 from creeper.distributed.host_query import DistributedHostQueryProducer
 from creeper.distributed.region_probe import RegionProbeProducer
+from creeper.distributed.seeded_search import SeededSearchProducer
 from creeper.distributed.source_discovery import SourceDiscoveryProducer
 from creeper.distributed.thin_query import ThinHistoricalQueryProducer
 from creeper.distributed.worker import DistributedWorker
@@ -37,12 +38,14 @@ async def _run(config_path: Path, *, once: bool) -> int:
     region_probe = RegionProbeProducer(config.cdx_providers)
     bulk_index = BulkHistoricalIndexProducer()
     source_discovery = SourceDiscoveryProducer()
+    seeded_search = SeededSearchProducer()
     thin_query = ThinHistoricalQueryProducer(config.cdx_providers)
     producers = {
         "HistoricalQueryProducer": host_query,
         "RegionProbeProducer": region_probe,
         "BulkHistoricalIndexProducer": bulk_index,
         "SourceDiscoveryProducer": source_discovery,
+        "SeededSearchProducer": seeded_search,
         "ThinHistoricalQueryProducer": thin_query,
     }
     async with CoordinatorClient(
