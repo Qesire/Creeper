@@ -528,6 +528,22 @@ class L9ResearchRuntimeClosureTests(unittest.IsolatedAsyncioTestCase):
                         ],
                     )
 
+                    rejected, inserted = discovery.register_proposal(
+                        SourceCandidate(
+                            canonical_entrypoint="https://objects.example/paper.pdf",
+                            source_family="GENERIC",
+                            level=SourceLevel.SOURCE,
+                            discovered_by="legacy-agent:test",
+                            discovery_strategy="META_SOURCE_SEARCH",
+                            confidence=1.0,
+                        )
+                    )
+                    self.assertTrue(inserted)
+                    self.assertIn(
+                        "metadata prefilter reject",
+                        discovery.suppression_reason(rejected) or "",
+                    )
+
                     # Terminal durable work is not replayed on the next cycle.
                     self.assertEqual(planner(), ())
                     self.assertEqual(len(calls), 1)
