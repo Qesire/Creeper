@@ -77,10 +77,13 @@ class CuratedSourceSeedTests(unittest.TestCase):
     def test_direct_record_seed_is_live_ftp_sitelist_artifact(self):
         roots = curated_direct_record_sources()
 
-        self.assertEqual(len(roots), 2)
+        self.assertEqual(len(roots), 4)
         self.assertEqual(
             {root.source_family for root in roots},
-            {"HISTORICAL_FTP_SITELIST"},
+            {
+                "HISTORICAL_FTP_SITELIST",
+                "HISTORICAL_SBI_BBS_DIRECTORY",
+            },
         )
         self.assertEqual(
             {root.canonical_entrypoint for root in roots},
@@ -93,11 +96,17 @@ class CuratedSourceSeedTests(unittest.TestCase):
                     "https://ftp.zx.net.nz/pub/archive/simtel.net/pub/simtelnet/"
                     "msdos/info/ftp-list.zip"
                 ),
+                "https://files.mpoli.fi/software/TEXTS/MISC/SBI0197.ZIP",
+                (
+                    "https://ftp.zx.net.nz/pub/mirror/files.mpoli.fi/pub/software/"
+                    "TEXTS/MISC/SBI0197.ZIP"
+                ),
             },
         )
         self.assertTrue(
             all(
-                (root.expected_year_from, root.expected_year_to) == (1996, 1997)
+                root.expected_year_from >= 1996
+                and root.expected_year_to <= 1997
                 for root in roots
             )
         )
@@ -113,14 +122,14 @@ class CuratedSourceSeedTests(unittest.TestCase):
 
     def test_all_curated_seeds_are_idempotent(self):
         seeds = curated_source_seeds()
-        self.assertEqual(len(seeds), 10)
+        self.assertEqual(len(seeds), 12)
         with tempfile.TemporaryDirectory() as tmp:
             control = ControlStore(Path(tmp) / "control.sqlite3")
             registry = SourceDiscoveryRegistry(control)
             try:
-                self.assertEqual(ensure_curated_source_seeds(registry), 10)
+                self.assertEqual(ensure_curated_source_seeds(registry), 12)
                 self.assertEqual(ensure_curated_source_seeds(registry), 0)
-                self.assertEqual(len(registry.list_candidates()), 10)
+                self.assertEqual(len(registry.list_candidates()), 12)
             finally:
                 control.close()
 
