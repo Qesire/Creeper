@@ -111,6 +111,7 @@ class ArquivoDialectTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(params["matchType"], "host")
         self.assertIn("fl", params)
         self.assertNotIn("fields", params)
+        self.assertEqual(params["filter"], "~status:[23][0-9][0-9]")
         self.assertNotIn("showResumeKey", params)
 
     async def test_arquivo_accepts_wayback_style_header_rows(self) -> None:
