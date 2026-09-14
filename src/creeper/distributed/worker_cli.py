@@ -9,10 +9,12 @@ from pathlib import Path
 from creeper.distributed.bulk_index import BulkHistoricalIndexProducer
 from creeper.distributed.config import load_worker_config
 from creeper.distributed.coordinator_client import CoordinatorClient
+from creeper.distributed.exploration import (
+    HistoricalCrawlerProducer,
+    SeededExplorationProducer,
+)
 from creeper.distributed.host_query import DistributedHostQueryProducer
 from creeper.distributed.region_probe import RegionProbeProducer
-from creeper.distributed.seeded_search import SeededSearchProducer
-from creeper.distributed.source_discovery import SourceDiscoveryProducer
 from creeper.distributed.thin_query import ThinHistoricalQueryProducer
 from creeper.distributed.worker import DistributedWorker
 
@@ -50,10 +52,18 @@ async def _run(config_path: Path, *, once: bool) -> int:
         )
     if "STREAMING_BULK" in capabilities:
         producers["BulkHistoricalIndexProducer"] = BulkHistoricalIndexProducer()
-    if "WEB_DISCOVERY" in capabilities:
-        producers["SourceDiscoveryProducer"] = SourceDiscoveryProducer()
-    if "SEARCH_QUERY" in capabilities:
-        producers["SeededSearchProducer"] = SeededSearchProducer()
+    if {"WEB_DISCOVERY", "ONLINE_QUERY"}.issubset(capabilities):
+        producers["HistoricalCrawlerProducer"] = HistoricalCrawlerProducer(
+            config.cdx_providers
+        )
+    if {
+        "SEARCH_QUERY",
+        "WEB_DISCOVERY",
+        "ONLINE_QUERY",
+    }.issubset(capabilities):
+        producers["SeededExplorationProducer"] = SeededExplorationProducer(
+            config.cdx_providers
+        )
     async with CoordinatorClient(
         config.coordinator_url,
         worker_id=config.descriptor.worker_id,
