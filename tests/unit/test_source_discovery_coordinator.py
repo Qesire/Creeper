@@ -82,6 +82,43 @@ class SourceDiscoveryCoordinatorTests(unittest.IsolatedAsyncioTestCase):
         values.update(overrides)
         return SourceReservoirManager(self.registry, targets=SourcePoolTargets(**values))
 
+    def test_search_batch_rejects_llm_lineage_without_episode(self) -> None:
+        with self.assertRaisesRegex(ValueError, "require llm_episode_id"):
+            SearchBatch(
+                backend="test",
+                query="bad lineage",
+                actor="agent:test",
+                hypotheses=(
+                    {
+                        "hypothesis_id": "h1",
+                        "action": "DISCOVER",
+                        "confidence": 0.5,
+                    },
+                ),
+            )
+
+    def test_search_batch_rejects_unknown_hypothesis_attribution(self) -> None:
+        candidate = self.candidate("lineage")
+        with self.assertRaisesRegex(ValueError, "unknown hypothesis_id"):
+            SearchBatch(
+                backend="test",
+                query="bad attribution",
+                actor="agent:test",
+                candidates=(candidate,),
+                llm_episode_id="llm:test",
+                llm_task_type="DISCOVER_NEW_SOURCE",
+                hypotheses=(
+                    {
+                        "hypothesis_id": "llm:test:h1",
+                        "action": "DISCOVER",
+                        "confidence": 0.5,
+                    },
+                ),
+                hypothesis_attribution=(
+                    (candidate.source_key, "llm:test:missing"),
+                ),
+            )
+
     async def test_search_triage_and_scout_io_overlap_but_commits_complete_serially(self) -> None:
         discovered = self.candidate("triage")
         self.registry.register_proposal(discovered)
