@@ -162,6 +162,7 @@ def create_authority_app(
             cpu_count=int(data.get("cpu_count", 0)),
             network_class=str(data.get("network_class", "")),
             capabilities=tuple(str(v) for v in data.get("capabilities", ())),
+            producers=tuple(str(v) for v in data.get("producers", ())),
         )
         store.register_worker(worker)
         return web.json_response({"status": "REGISTERED", "worker_id": worker_id})
