@@ -141,7 +141,17 @@ class SyncRuntime:
         synchronous claim batch; a zero-capacity provider leaves all tasks
         durable for a later evidence worker.
         """
-        ordered = list(keys)
+        # This legacy synchronous runner owns only the exact-year CDX
+        # transport contract. Never reinterpret a durable multi-year fallback
+        # task as a query for its first year: range work stays PENDING for the
+        # AsyncEvidenceWorker, whose provider interface has explicit
+        # query_range semantics. This is both semantically correct and avoids
+        # multiplying Wayback requests in the compatibility runtime.
+        ordered = [
+            key
+            for key in keys
+            if key.temporal_scope.year_from == key.temporal_scope.year_to
+        ]
         if not ordered:
             return 0, 0, 0, 0
         capacity = self.scheduler.ledger.balance(provider).capacity
