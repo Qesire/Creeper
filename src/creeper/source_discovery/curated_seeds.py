@@ -72,7 +72,10 @@ def curated_research_roots() -> tuple[SourceCandidate, ...]:
             discovery_strategy="CURATED_YEAR_ARCHETYPE_SEARCH",
             expected_year_from=2000,
             expected_year_to=2000,
-            expected_volume=325_557,
+            # 325,557 is the published Web-graph vertex/page count, not a
+            # verified hostname reservoir. Keep volume unknown so it cannot
+            # inflate pre-scout priority.
+            expected_volume=None,
             temporal_semantics_prior=1.0,
             enumerability_prior=1.0,
             direct_evidence_prior=0.0,
@@ -93,7 +96,10 @@ def curated_research_roots() -> tuple[SourceCandidate, ...]:
             discovery_strategy="CURATED_YEAR_ARCHETYPE_SEARCH",
             expected_year_from=2001,
             expected_year_to=2001,
-            expected_volume=118_142_155,
+            # 118,142,155 is the published Web-graph node/URL count, not a
+            # hostname ceiling. Deterministic scout measurement must establish
+            # the useful host reservoir instead of inheriting page-count scale.
+            expected_volume=None,
             temporal_semantics_prior=1.0,
             enumerability_prior=1.0,
             direct_evidence_prior=0.0,
