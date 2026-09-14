@@ -24,6 +24,7 @@ from urllib.parse import urlsplit
 
 import httpx
 from creeper.authority.baseline_index import BaselineIndex, YEAR_BITS
+from creeper.evidence.contracts import resolve_source_evidence_contract
 from creeper.authority.normalizer import normalize_official
 from creeper.source_discovery.coordinator import ScoutDisposition, ScoutResult
 from creeper.source_discovery.overlap import build_minhash
@@ -962,6 +963,7 @@ class MeasuredYieldScoutExecutor:
         bytes_read: int,
         elapsed: float,
         requests: int = 1,
+        direct_host_years: int = 0,
     ) -> ScoutMeasurement:
         resolved = self.baseline.resolve_batch(parsed.hosts)
         novel = [
@@ -1006,7 +1008,7 @@ class MeasuredYieldScoutExecutor:
             sampled_records=parsed.sampled_records,
             unique_hosts=len(parsed.hosts),
             novel_hosts=len(novel),
-            direct_host_years=0,
+            direct_host_years=direct_host_years,
             requests=requests,
             bytes_read=bytes_read,
             elapsed_seconds=elapsed,
@@ -1081,11 +1083,19 @@ class MeasuredYieldScoutExecutor:
             policy=self.policy,
         )
         elapsed = max(0.0, float(self.clock()) - started)
+        contract = resolve_source_evidence_contract(
+            candidate.canonical_entrypoint
+        )
         measurement = self._measurement(
             parsed=parsed,
             bytes_read=download.bytes_read,
             elapsed=elapsed,
             requests=download.requests,
+            direct_host_years=(
+                len(parsed.host_year_pairs)
+                if contract.grants_direct_web_year
+                else 0
+            ),
         )
         observed_count = measurement.observed_count_for_threshold
         novel_count = measurement.novel_count_for_threshold
