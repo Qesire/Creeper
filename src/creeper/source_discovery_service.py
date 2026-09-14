@@ -1468,6 +1468,7 @@ async def _open_runtime(config: SourceDiscoveryServiceConfig):
                         config.coordinator.region_parallelism,
                     ),
                     failure_retry_seconds=config.coordinator.failure_retry_seconds,
+                    retry_clock=time.time,
                     research_snapshot_provider=(
                         (
                             lambda: _research_snapshot(
