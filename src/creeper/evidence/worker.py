@@ -457,45 +457,34 @@ class AsyncEvidenceWorker:
                     if result.state in {
                         CDXQueryState.PASS,
                         CDXQueryState.EMPTY_EXHAUSTIVE,
-                        CDXQueryState.DECOMPOSED,
                         CDXQueryState.INVALID,
                     }:
-                        followups = ()
-                        if result.state is CDXQueryState.DECOMPOSED:
-                            followups = tuple(
-                                EvidenceQueryKey(
-                                    result.hostname,
-                                    TemporalScope(year, year),
-                                    result.key.provider,
-                                    result.key.policy_version,
-                                )
-                                for year in result.followup_years
-                            )
-                        elif result.state is CDXQueryState.PASS:
-                            followups = tuple(
-                                EvidenceQueryKey(
-                                    result.hostname,
-                                    TemporalScope(year, year),
-                                    result.key.provider,
-                                    result.key.policy_version,
-                                )
-                                for year in result.candidate_years
-                                if year not in capsule_years
-                            )
+                        # Host-range work remains one durable task. Production
+                        # providers resolve missing years internally, so a
+                        # terminal range never fans out backlog children.
                         self.control_store.finish_range_task(
                             result.key,
                             result.state,
-                            followup_keys=followups,
+                            followup_keys=(),
                             owner=self.owner,
                         )
                         terminal += 1
                     elif result.state in {
+                        CDXQueryState.DECOMPOSED,
                         CDXQueryState.INCOMPLETE,
                         CDXQueryState.TRANSIENT_ERROR,
                     }:
+                        # DECOMPOSED is retained for provider compatibility but
+                        # no longer means durable child expansion. Retry the
+                        # same host task after preserving any positive capsules.
+                        retry_state = (
+                            CDXQueryState.INCOMPLETE
+                            if result.state is CDXQueryState.DECOMPOSED
+                            else result.state
+                        )
                         self.control_store.finish_evidence_task(
                             result.key,
-                            result.state,
+                            retry_state,
                             owner=self.owner,
                             retry_at=self._retry_at(task.attempt),
                         )
@@ -727,45 +716,28 @@ class AsyncEvidenceWorker:
                         if result.state in {
                             CDXQueryState.PASS,
                             CDXQueryState.EMPTY_EXHAUSTIVE,
-                            CDXQueryState.DECOMPOSED,
                             CDXQueryState.INVALID,
                         }:
-                            followups = ()
-                            if result.state is CDXQueryState.DECOMPOSED:
-                                followups = tuple(
-                                    EvidenceQueryKey(
-                                        result.hostname,
-                                        TemporalScope(year, year),
-                                        result.key.provider,
-                                        result.key.policy_version,
-                                    )
-                                    for year in result.followup_years
-                                )
-                            elif result.state is CDXQueryState.PASS:
-                                followups = tuple(
-                                    EvidenceQueryKey(
-                                        result.hostname,
-                                        TemporalScope(year, year),
-                                        result.key.provider,
-                                        result.key.policy_version,
-                                    )
-                                    for year in result.candidate_years
-                                    if year not in capsule_years
-                                )
                             self.control_store.finish_range_task(
                                 result.key,
                                 result.state,
-                                followup_keys=followups,
+                                followup_keys=(),
                                 owner=self.owner,
                             )
                             terminal += 1
                         elif result.state in {
+                            CDXQueryState.DECOMPOSED,
                             CDXQueryState.INCOMPLETE,
                             CDXQueryState.TRANSIENT_ERROR,
                         }:
+                            retry_state = (
+                                CDXQueryState.INCOMPLETE
+                                if result.state is CDXQueryState.DECOMPOSED
+                                else result.state
+                            )
                             self.control_store.finish_evidence_task(
                                 result.key,
-                                result.state,
+                                retry_state,
                                 owner=self.owner,
                                 retry_at=self._retry_at(task.attempt),
                             )
