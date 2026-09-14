@@ -25,10 +25,9 @@ class EvidencePlanner:
 
     A record-level ``direct_year_mask`` is only a temporal claim. It becomes
     accepted direct evidence when the control plane explicitly authorizes the
-    owning Reservoir for direct-year evidence. ISC/Network Wizards reference
-    records and Common Crawl corpus records are never eligible for that
-    authorization; their claimed years are conservatively demoted to external
-    evidence hints.
+    owning Reservoir for direct-year evidence. Source-family labels do not
+    override a frozen record-level evidence contract. Only explicitly excluded
+    corpus scopes remain ineligible for direct evidence.
 
     Over the six competition years, any unresolved-year bit mask can contain at
     most three disjoint contiguous runs (for example 1996/1998/2000). This is
@@ -65,16 +64,20 @@ class EvidencePlanner:
 
         suppressed_mask = official_mask | local_mask
         claimed_direct_mask = observation.direct_year_mask & ~suppressed_mask
-        restricted_source = observation.scope in {
-            CandidateSourceScope.ISC_REFERENCE,
-            CandidateSourceScope.COMMON_CRAWL_CORPUS_EXCLUDED,
-        }
-        direct_mask = claimed_direct_mask if allow_direct and not restricted_source else 0
+        excluded_source = (
+            observation.scope
+            is CandidateSourceScope.COMMON_CRAWL_CORPUS_EXCLUDED
+        )
+        direct_mask = (
+            claimed_direct_mask
+            if allow_direct and not excluded_source
+            else 0
+        )
         hint_mask = observation.year_hint_mask
         if observation.source_year in YEAR_BITS:
             hint_mask |= YEAR_BITS[observation.source_year]
 
-        if not allow_direct or restricted_source:
+        if not allow_direct or excluded_source:
             # Discovery-only temporal metadata is a *discovery provenance*, not
             # an evidence boundary. Since the production provider now resolves
             # 1996-2001 with one logical host-range task, paying for only the

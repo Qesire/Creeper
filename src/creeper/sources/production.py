@@ -20,6 +20,7 @@ from creeper.evidence.contracts import (
     EvidenceAuthority,
     SourceEvidenceContract,
     contract_from_adapter_id,
+    discovery_only_contract,
     parser_kind_from_locator,
     resolve_source_evidence_contract,
 )
@@ -160,7 +161,7 @@ class StructuredProductionAdapter:
             raise ProductionAdapterError(
                 "explicit evidence contract conflicts with durable adapter binding"
             )
-        self.evidence_contract = (
+        resolved_contract = (
             evidence_contract
             or bound_contract
             or resolve_source_evidence_contract(
@@ -168,6 +169,16 @@ class StructuredProductionAdapter:
                 parser_kind=self.kind,
             )
         )
+        if (
+            evidence_contract is None
+            and bound_contract is None
+            and reservoir.evidence_mode == "discovery_only"
+            and resolved_contract.evidence_mode == "direct_year"
+        ):
+            # Legacy reservoirs created before contract tokens were frozen must
+            # not silently gain evidence authority on process restart.
+            resolved_contract = discovery_only_contract(self.kind)
+        self.evidence_contract = resolved_contract
         if self.evidence_contract.parser_kind != self.kind:
             raise ProductionAdapterError(
                 "evidence contract parser_kind does not match structured source"
@@ -459,14 +470,16 @@ class StructuredProductionAdapter:
             record_type = "MAILBOX_URL_LINE"
 
         elif self.kind == "squid_access":
+            raw_access_time = payload.split(None, 1)[0] if payload else ""
             parsed_access = parse_squid_access_line(payload)
             if parsed_access is None:
                 return None
             payload, access_year = parsed_access
             if access_year is not None:
                 source_year = access_year
-            # Access time is a discovery hint only.  The discovery-only
-            # evidence contract below clears direct authority.
+                source_time = raw_access_time
+                if self.evidence_contract.grants_direct_web_year:
+                    contract_direct_year = access_year
             record_type = "SQUID_ACCESS_URL"
 
         elif self.kind == "dmoz_rdf_urls":
