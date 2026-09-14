@@ -6,6 +6,10 @@ from pathlib import Path
 
 from creeper.source_discovery.models import SourceCandidate, SourceLevel
 from creeper.source_discovery.registry import SourceDiscoveryRegistry
+from creeper.source_discovery.research_trigger import (
+    ResearchDirective,
+    ResearchTriggerReason,
+)
 from creeper.source_research.adapters.base import (
     ArtifactLead,
     RootQuery,
@@ -195,6 +199,59 @@ class L9ResearchRuntimeClosureTests(unittest.IsolatedAsyncioTestCase):
                     exposure_lineage[0]["decision_id"],
                     decision.decision_id,
                 )
+            finally:
+                control.close()
+
+    def test_llm_gate_state_survives_bridge_reconstruction(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            now = [100.0]
+            control = ControlStore(Path(tmp) / "control.sqlite3")
+            try:
+                discovery = SourceDiscoveryRegistry(control)
+                research = ResearchRegistry(control)
+                bridge = ResearchIntegrationBridge(
+                    research,
+                    discovery,
+                    clock=lambda: now[0],
+                )
+                directive = ResearchDirective(
+                    task_type="DISCOVER_NEW_SOURCE",
+                    trigger_reason=ResearchTriggerReason.FRONTIER_EXHAUSTED,
+                    strategy="META_SOURCE_SEARCH",
+                    subject=None,
+                    desired_regions=1,
+                    reason="no deterministic frontier remains",
+                    context_key="ctx:persistent-gate",
+                )
+                request = bridge.build_execution_request(directive)
+                self.assertTrue(bridge.try_claim_llm_call(request))
+                active, last_started, failures = bridge.llm_gate_state(
+                    request.context_hash
+                )
+                self.assertEqual(active, request.call_identity)
+                self.assertEqual(last_started, 100.0)
+                self.assertEqual(failures, 0)
+
+                now[0] = 101.0
+                bridge.finish_llm_call(
+                    request.call_identity,
+                    success=False,
+                    cost_seconds=1.0,
+                    error="fixture failure",
+                )
+
+                # Reconstruct the integration object as a process restart would.
+                reopened = ResearchIntegrationBridge(
+                    research,
+                    discovery,
+                    clock=lambda: now[0],
+                )
+                active, last_started, failures = reopened.llm_gate_state(
+                    request.context_hash
+                )
+                self.assertIsNone(active)
+                self.assertEqual(last_started, 100.0)
+                self.assertEqual(failures, 1)
             finally:
                 control.close()
 
