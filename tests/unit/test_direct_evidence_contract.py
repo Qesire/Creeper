@@ -6,6 +6,7 @@ from pathlib import Path
 
 from creeper.evidence.contracts import (
     EvidenceAuthority,
+    SQUID_ACCESS_DIRECT_CONTRACT,
     SourceEvidenceContract,
     bind_contract_to_adapter_id,
     contract_from_adapter_id,
@@ -180,6 +181,77 @@ class DirectEvidenceContractTests(unittest.TestCase):
 
         self.assertEqual(observation.direct_year_mask, 0)
         self.assertEqual(observation.year_hint_mask, 1 << (1998 - 1996))
+
+    def test_squid_access_contract_is_direct_and_skips_external_provider(self) -> None:
+        locator = "https://trace.example/data/old.squid.log"
+        contract = resolve_source_evidence_contract(locator)
+        self.assertEqual(contract, SQUID_ACCESS_DIRECT_CONTRACT)
+        self.assertTrue(contract.grants_direct_web_year)
+        self.assertEqual(contract.evidence_mode, "direct_year")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "old.squid.log"
+            path.write_text(
+                (
+                    "915148800.123 42 192.0.2.9 TCP_MISS/200 1234 GET "
+                    "http://proxy-direct.example/path - "
+                    "DIRECT/203.0.113.8 text/html\n"
+                ),
+                encoding="utf-8",
+            )
+            reservoir = Reservoir(
+                reservoir_id="reservoir:squid-direct",
+                domain_id="domain:squid-direct",
+                adapter_id=bind_contract_to_adapter_id(
+                    "structured:squid-direct",
+                    SQUID_ACCESS_DIRECT_CONTRACT,
+                ),
+                root_locator=str(path.with_name("old.squid.log")),
+                enumeration_kind="structured_records",
+                capacity_lower=1,
+                evidence_mode="direct_year",
+                state=ReservoirState.READY,
+            )
+            adapter = ProductionAdapterFactory.open(reservoir)
+            records, _result = adapter.execute(_lease(reservoir))
+            observation = next(iter(adapter.extract_hosts(next(records))))
+            adapter.close()
+
+        self.assertEqual(observation.hostname, "proxy-direct.example")
+        self.assertEqual(observation.source_year, 1999)
+        self.assertEqual(observation.source_time, "915148800.123")
+        self.assertEqual(observation.direct_year_mask, 1 << (1999 - 1996))
+        self.assertEqual(observation.year_hint_mask, 0)
+        self.assertEqual(
+            observation.evidence_contract_id,
+            SQUID_ACCESS_DIRECT_CONTRACT.contract_id,
+        )
+
+        plan = EvidencePlanner().plan(
+            observation,
+            official_mask=0,
+            local_mask=0,
+            provider="wayback",
+            policy_version="runtime-policy",
+            allow_direct=True,
+        )
+        self.assertEqual(plan.external_keys, ())
+        self.assertEqual(len(plan.direct_capsules), 1)
+        capsule = plan.direct_capsules[0]
+        self.assertEqual(capsule.year, 1999)
+        self.assertEqual(capsule.evidence_timestamp, "915148800.123")
+        self.assertEqual(
+            capsule.original_url,
+            "http://proxy-direct.example/path",
+        )
+        self.assertEqual(
+            capsule.temporal_semantics,
+            SQUID_ACCESS_DIRECT_CONTRACT.temporal_semantics,
+        )
+        self.assertEqual(
+            capsule.evidence_type,
+            SQUID_ACCESS_DIRECT_CONTRACT.evidence_type,
+        )
 
     def test_dmoz_content_dump_is_discovery_only_by_default(self) -> None:
         locator = "https://mirror.example/2001/content.rdf.u8.gz"
