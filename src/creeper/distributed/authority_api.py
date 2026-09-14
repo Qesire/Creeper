@@ -176,7 +176,9 @@ def create_authority_app(
         return web.json_response({"status": "ok", "role": "local_authority"})
 
     async def meta(_request: web.Request) -> web.Response:
-        return web.json_response(edition_metadata())
+        payload = edition_metadata()
+        payload["server_unix_time"] = float(store.clock())
+        return web.json_response(payload)
 
     async def register(request: web.Request) -> web.Response:
         data = _body(request)
