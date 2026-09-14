@@ -175,30 +175,33 @@ def parse_mbox_message(
                 year = observed_at.year
                 source_time = observed_at.isoformat()
 
-    bodies: list[str] = []
-    parts = parsed.walk() if parsed.is_multipart() else (parsed,)
-    for part in parts:
-        if part.is_multipart():
-            continue
-        if part.get_content_maintype() != "text":
-            continue
-        disposition = (part.get_content_disposition() or "").lower()
-        if disposition == "attachment":
-            continue
-        raw = part.get_payload(decode=True)
-        if raw is None:
-            value = part.get_payload()
-            if isinstance(value, str):
-                bodies.append(value)
-            continue
-        charset = part.get_content_charset() or "utf-8"
+    body = parsed.get_body(preferencelist=("plain", "html"))
+    if body is None and (
+        parsed.get_content_maintype() == "text"
+        and (parsed.get_content_disposition() or "").lower() != "attachment"
+    ):
+        body = parsed
+
+    body_text = ""
+    if body is not None:
         try:
-            bodies.append(raw.decode(charset, errors="replace"))
-        except LookupError:
-            bodies.append(raw.decode("utf-8", errors="replace"))
+            value = body.get_content()
+        except (LookupError, UnicodeError, ValueError):
+            raw = body.get_payload(decode=True)
+            if raw is None:
+                value = body.get_payload()
+                body_text = value if isinstance(value, str) else ""
+            else:
+                charset = body.get_content_charset() or "utf-8"
+                try:
+                    body_text = raw.decode(charset, errors="replace")
+                except LookupError:
+                    body_text = raw.decode("utf-8", errors="replace")
+        else:
+            body_text = value if isinstance(value, str) else ""
 
     urls = extract_http_urls(
-        html.unescape("\n".join(bodies)),
+        html.unescape(body_text),
         max_urls=max_urls,
     )
     return urls, year, source_time
