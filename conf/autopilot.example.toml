@@ -67,6 +67,10 @@ requests_per_second = 0.5
 max_inflight = 4
 max_connections = 8
 max_keepalive_connections = 4
+# One logical hostname query should return as much of the 1996-2001 host
+# result set as the provider allows. archive.org's CDX server documents a
+# default absolute single-query maximum of 150000 rows.
+row_limit = 150000
 weight = 0.5
 
 [[evidence.cdx_providers]]
@@ -77,6 +81,9 @@ requests_per_second = 1.0
 max_inflight = 4
 max_connections = 8
 max_keepalive_connections = 4
+# Arquivo's public docs expose limit= but do not publish the same fixed maximum;
+# keep this provider-specific and tune from live telemetry if necessary.
+row_limit = 100000
 weight = 1.0
 
 [readiness]
