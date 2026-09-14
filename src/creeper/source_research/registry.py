@@ -669,7 +669,7 @@ class ResearchRegistry:
                 UPDATE research_queries SET
                     checkpoint_json=?, state=?,
                     pages_completed=pages_completed+?,
-                    attempts=attempts+CASE WHEN ? IN ('RUNNING','RETRYABLE','FAILED') THEN 1 ELSE 0 END,
+                    attempts=attempts+CASE WHEN ?='RUNNING' THEN 1 ELSE 0 END,
                     wall_seconds_used=wall_seconds_used+?,
                     retry_at=?, last_error=?, updated_at=?
                 WHERE query_id=?
