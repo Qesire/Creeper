@@ -814,6 +814,50 @@ class ResearchRegistry:
             raise
         return self.get_frontier(str(row["task_id"]))
 
+    def claim_frontier_task(
+        self,
+        task_id: str,
+        *,
+        owner: str,
+        lease_seconds: float,
+        now: float | None = None,
+    ) -> FrontierTask | None:
+        if not task_id or not owner or lease_seconds <= 0:
+            raise ValueError("task_id, owner and positive lease_seconds are required")
+        now = self.clock() if now is None else now
+        try:
+            self.connection.execute("BEGIN IMMEDIATE")
+            row = self.connection.execute(
+                """
+                SELECT *
+                FROM research_frontier_tasks
+                WHERE task_id=?
+                  AND state IN ('READY','RETRYABLE')
+                  AND (retry_at IS NULL OR retry_at<=?)
+                """,
+                (task_id, now),
+            ).fetchone()
+            if row is None:
+                self.connection.commit()
+                return None
+            changed = self.connection.execute(
+                """
+                UPDATE research_frontier_tasks
+                SET state='CLAIMED', lease_owner=?, lease_until=?,
+                    attempt=attempt+1, updated_at=?
+                WHERE task_id=? AND state IN ('READY','RETRYABLE')
+                """,
+                (owner, now + lease_seconds, now, task_id),
+            ).rowcount
+            if changed != 1:
+                self.connection.rollback()
+                return None
+            self.connection.commit()
+        except BaseException:
+            self.connection.rollback()
+            raise
+        return self.get_frontier(task_id)
+
     def get_frontier(self, task_id: str) -> FrontierTask:
         row = self.connection.execute(
             "SELECT * FROM research_frontier_tasks WHERE task_id=?", (task_id,)
@@ -984,6 +1028,42 @@ class ResearchRegistry:
             (policy_version,),
         ).fetchone()
         return row is not None
+
+    def active_policy_snapshot(self) -> PolicySnapshot | None:
+        row = self.connection.execute(
+            """
+            SELECT *
+            FROM research_policy_snapshots
+            WHERE active=1
+            ORDER BY created_at DESC, snapshot_id DESC
+            LIMIT 1
+            """
+        ).fetchone()
+        if row is None:
+            return None
+        return PolicySnapshot(
+            snapshot_id=str(row["snapshot_id"]),
+            policy_version=str(row["policy_version"]),
+            schema_version=int(row["schema_version"]),
+            parameters=_load(row["parameters_json"], {}),
+            created_at=float(row["created_at"]),
+            active=True,
+        )
+
+    def latest_decision_for_arm(self, arm_id: str) -> DecisionRecord | None:
+        row = self.connection.execute(
+            """
+            SELECT decision_id
+            FROM research_decisions
+            WHERE arm_id=?
+            ORDER BY chosen_at DESC, decision_id DESC
+            LIMIT 1
+            """,
+            (arm_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return self.get_decision(str(row["decision_id"]))
 
     def upsert_policy_snapshot(self, snapshot: PolicySnapshot) -> None:
         with self.connection:
