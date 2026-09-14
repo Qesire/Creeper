@@ -99,6 +99,7 @@ class DistributedWorkerNetworkTests(unittest.IsolatedAsyncioTestCase):
             cpu_count=2,
             network_class="public",
             capabilities=(Capability.ONLINE_QUERY.value,),
+            allowed_providers=("internet_archive", "arquivo_pt"),
         )
 
     async def test_two_network_workers_execute_one_work_key_once(self) -> None:
@@ -396,6 +397,7 @@ class DistributedWorkerNetworkTests(unittest.IsolatedAsyncioTestCase):
             cpu_count=2,
             network_class="public",
             capabilities=(Capability.STREAMING_BULK.value,),
+            allowed_providers=(),
         )
 
         async with CoordinatorClient(
