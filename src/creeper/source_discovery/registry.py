@@ -2821,6 +2821,27 @@ class SourceDiscoveryRegistry:
             ).fetchone()
             if row is not None:
                 return str(row["reason"])
+
+        # L9 structured-root metadata rejection is canonical-locator knowledge,
+        # not merely one query's local disposition.  Prevent a later legacy
+        # agent/region proposal from reintroducing the same clearly irrelevant
+        # object and paying HEAD/Range cost.  HOLD is intentionally not global:
+        # another path may later provide stronger deterministic metadata.
+        try:
+            row = self.connection.execute(
+                """
+                SELECT admission, reason
+                FROM research_artifact_prefilter
+                WHERE locator=?
+                ORDER BY evaluated_at DESC
+                LIMIT 1
+                """,
+                (candidate.canonical_entrypoint,),
+            ).fetchone()
+        except sqlite3.OperationalError:
+            row = None
+        if row is not None and str(row["admission"]) == "REJECT":
+            return "metadata prefilter reject: " + str(row["reason"])
         return None
 
     def prune_expired_suppressions(self) -> int:
