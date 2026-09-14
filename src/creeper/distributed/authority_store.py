@@ -27,6 +27,7 @@ from creeper.distributed.identity import (
     host_year_id,
     source_candidate_id,
 )
+from creeper.distributed.search_campaign import SearchCampaign
 from creeper.distributed.urlcanon import canonical_http_url
 from creeper.evidence.contracts import resolve_source_evidence_contract
 from creeper.distributed.models import (
@@ -803,6 +804,57 @@ class DistributedAuthorityStore:
             )
         self.connection.commit()
         return task_id
+
+    def admit_search_slice(
+        self,
+        *,
+        campaign: SearchCampaign,
+        seed: int,
+        slot_start: int,
+        slot_count: int,
+        search_endpoint: str,
+        query_param: str = "q",
+        provider: str = "web_search",
+        max_response_bytes: int = 1024 * 1024,
+        max_links_per_query: int = 128,
+        priority: float = 0.0,
+        algorithm_version: str = "fabric-seeded-search-v1",
+    ) -> str:
+        endpoint = canonical_http_url(search_endpoint)
+        query_param = query_param.strip()
+        provider = provider.strip()
+        if (
+            int(seed) < 0
+            or int(slot_start) < 0
+            or not 1 <= int(slot_count) <= 16
+            or not query_param
+            or not provider
+            or int(max_response_bytes) < 4096
+            or int(max_links_per_query) < 1
+        ):
+            raise ValueError("invalid seeded search admission")
+        work = WorkDefinition(
+            producer="SeededSearchProducer",
+            task_class=TaskClass.SEARCH_SLICE,
+            input_identity=campaign.campaign_id,
+            coverage={
+                "campaign_id": campaign.campaign_id,
+                "campaign": campaign.as_dict(),
+                "seed": int(seed),
+                "slot_start": int(slot_start),
+                "slot_count": int(slot_count),
+                "search_endpoint": endpoint,
+                "query_param": query_param,
+                "provider": provider,
+                "max_response_bytes": int(max_response_bytes),
+                "max_links_per_query": int(max_links_per_query),
+            },
+            partition=f"{int(seed)}:{int(slot_start)}:{int(slot_count)}",
+            algorithm_version=algorithm_version,
+            required_capabilities=("SEARCH_QUERY",),
+            priority=float(priority),
+        )
+        return self.admit_work(work)
 
     def admit_source_page_work(
         self,
