@@ -4092,18 +4092,35 @@ class ControlStore:
         owner = self._field(lease, "owner")
         if not lease_id or not owner:
             raise ValueError("an owned lease is required")
-        current_raw = self.clock() if now is None else now
-        if (
-            isinstance(current_raw, bool)
-            or not isinstance(current_raw, (int, float))
-            or not math.isfinite(float(current_raw))
-            or current_raw < 0
-        ):
-            raise ValueError("lease renewal time must be finite and non-negative")
-        current = float(current_raw)
-        new_expiry = current + float(ttl_seconds)
+        requested_now: float | None = None
+        if now is not None:
+            if (
+                isinstance(now, bool)
+                or not isinstance(now, (int, float))
+                or not math.isfinite(float(now))
+                or now < 0
+            ):
+                raise ValueError(
+                    "lease renewal time must be finite and non-negative"
+                )
+            requested_now = float(now)
+
         self.connection.execute("BEGIN IMMEDIATE")
         try:
+            clock_now = self.clock()
+            if (
+                isinstance(clock_now, bool)
+                or not isinstance(clock_now, (int, float))
+                or not math.isfinite(float(clock_now))
+                or clock_now < 0
+            ):
+                raise ValueError(
+                    "lease renewal time must be finite and non-negative"
+                )
+            current = float(clock_now)
+            if requested_now is not None:
+                current = max(current, requested_now)
+            new_expiry = current + float(ttl_seconds)
             row = self.connection.execute(
                 """
                 SELECT state, owner, expires_at
