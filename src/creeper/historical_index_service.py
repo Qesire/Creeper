@@ -42,7 +42,10 @@ from creeper.source_discovery.harvest import (
     RegionHarvestExecutor,
     RegionHarvestPolicy,
 )
-from creeper.source_discovery.harvest_service import RegionHarvestService
+from creeper.source_discovery.harvest_service import (
+    RegionHarvestService,
+    RegionHarvestServiceReport,
+)
 from creeper.source_discovery.index_optimization import (
     TERMINAL_LEAF_STATES,
     index_region_optimizer_eligible,
@@ -76,6 +79,7 @@ class HistoricalIndexOptimizerConfig:
     eed_model: Path
     authority_manifest: Path | None = None
     enabled: bool = False
+    background_only: bool = True
     max_indexes_per_cycle: int = 4
     max_probe_actions_per_index: int = 4
     probe_parallelism: int = 4
@@ -124,6 +128,8 @@ class HistoricalIndexCycleReport:
     exhausted_reservoirs: int
     recovered_expired_claims: int
     errors: tuple[str, ...]
+    background_deferred: bool = False
+    background_defer_reason: str | None = None
 
     @property
     def made_progress(self) -> bool:
@@ -255,6 +261,10 @@ def load_historical_index_optimizer_config(
         enabled=_strict_bool(
             raw.get("enabled", False),
             name="historical_index.enabled",
+        ),
+        background_only=_strict_bool(
+            raw.get("background_only", True),
+            name="historical_index.background_only",
         ),
         max_indexes_per_cycle=_positive_int(
             raw.get("max_indexes_per_cycle", 4),
@@ -534,6 +544,101 @@ class HistoricalIndexOptimizerRuntime:
             harvest_executor=self.harvest_executor,
         )
 
+    def _foreground_busy_reason(self) -> str | None:
+        """Return why background index I/O must yield to foreground work."""
+        if not self.config.background_only:
+            return None
+
+        # The discovery coordinator holds this lock across triage/scout/search
+        # I/O. Probe it non-blockingly so deterministic index work cannot share
+        # the same machine/network window with foreground source discovery.
+        lock_path = (
+            self.config.runtime_data_root
+            / "source-discovery"
+            / "coordinator.lock"
+        )
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return "source-discovery coordinator is active"
+            else:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
+
+        now = float(self.control.clock())
+        row = self.control.connection.execute(
+            """
+            SELECT resource_class
+            FROM work_leases
+            WHERE state IN ('GRANTED', 'RUNNING')
+              AND expires_at > ?
+              AND resource_class != 'historical-index'
+            LIMIT 1
+            """,
+            (now,),
+        ).fetchone()
+        if row is not None:
+            return (
+                "source producer lease is active "
+                f"(resource_class={row['resource_class']})"
+            )
+        return None
+
+    @staticmethod
+    def _empty_harvest_report() -> RegionHarvestServiceReport:
+        return RegionHarvestServiceReport(
+            selected_regions=(),
+            claim_skipped_regions=(),
+            completed_regions=(),
+            incomplete_regions=(),
+            failed_regions=(),
+            errors=(),
+            bytes_read=0,
+            requests=0,
+            direct_capsules_planned=0,
+            direct_capsules_inserted=0,
+            baseline_suppressed_host_years=0,
+            existing_evidence_suppressed_host_years=0,
+            portfolio_estimated_marginal_eed=0.0,
+            portfolio_estimated_harvest_bytes=0,
+            recovered_expired_claims=0,
+        )
+
+    def _deferred_cycle(self, reason: str) -> HistoricalIndexCycleReport:
+        self.telemetry.add_counters(
+            {
+                "historical_index_cycles": 1,
+                "historical_index_background_deferred": 1,
+            }
+        )
+        return HistoricalIndexCycleReport(
+            compiled_active_sources=0,
+            compile_failures=0,
+            eligible_ready_indexes=0,
+            selected_probe_indexes=(),
+            probe_attempts=0,
+            probes_succeeded=0,
+            probes_failed=0,
+            probe_bytes_read=0,
+            probe_requests=0,
+            harvest_selected_regions=(),
+            harvest_completed_regions=(),
+            harvest_incomplete_regions=(),
+            harvest_failed_regions=(),
+            harvest_bytes_read=0,
+            harvest_requests=0,
+            direct_capsules_inserted=0,
+            exhausted_reservoirs=0,
+            recovered_expired_claims=0,
+            errors=(),
+            background_deferred=True,
+            background_defer_reason=reason,
+        )
+
     async def close(self) -> None:
         if self._owns_client:
             await self.client.aclose()
@@ -796,6 +901,10 @@ class HistoricalIndexOptimizerRuntime:
 
     async def run_once(self) -> HistoricalIndexCycleReport:
         cycle_started = time.perf_counter()
+        busy_reason = self._foreground_busy_reason()
+        if busy_reason is not None:
+            return self._deferred_cycle(busy_reason)
+
         compiled, compile_errors = self._compile_active_sources()
         errors = list(compile_errors)
         eligible = self._eligible_ready_indexes()
@@ -803,7 +912,11 @@ class HistoricalIndexOptimizerRuntime:
 
         probe_attempts = probes_succeeded = probes_failed = 0
         probe_bytes = probe_requests = 0
+        deferred_reason: str | None = None
         for index, _reservoir in selected:
+            deferred_reason = self._foreground_busy_reason()
+            if deferred_reason is not None:
+                break
             try:
                 report = await self.tomography_service.run_once(
                     index.index_key,
@@ -821,27 +934,33 @@ class HistoricalIndexOptimizerRuntime:
             probe_requests += report.requests
             errors.extend(report.errors)
 
-        # Re-evaluate and atomically claim reservoir ownership after probes.
-        # Region claims alone are insufficient because the ordinary producer
-        # owns work at the reservoir cursor layer.
-        harvest_pairs = self._eligible_ready_indexes()
-        claimed_harvest_sources = self._claim_harvest_reservoirs(
-            harvest_pairs
-        )
-        allowed = {
-            index.index_key
-            for index, _reservoir, _lease in claimed_harvest_sources
-        }
-        try:
-            harvest = self.harvest_service.run_once(
-                max_regions=self.config.max_harvest_regions_per_cycle,
-                byte_budget=self.config.harvest_byte_budget,
-                index_keys=allowed,
-                continue_on_error=True,
+        # Re-evaluate the foreground gate before the larger harvest phase.
+        # A foreground worker may have become active while small tomography
+        # probes were running; in that case stop at this safe boundary.
+        deferred_reason = deferred_reason or self._foreground_busy_reason()
+        if deferred_reason is not None:
+            harvest = self._empty_harvest_report()
+        else:
+            # Region claims alone are insufficient because the ordinary producer
+            # owns work at the reservoir cursor layer.
+            harvest_pairs = self._eligible_ready_indexes()
+            claimed_harvest_sources = self._claim_harvest_reservoirs(
+                harvest_pairs
             )
-            errors.extend(harvest.errors)
-        finally:
-            self._release_harvest_reservoirs(claimed_harvest_sources)
+            allowed = {
+                index.index_key
+                for index, _reservoir, _lease in claimed_harvest_sources
+            }
+            try:
+                harvest = self.harvest_service.run_once(
+                    max_regions=self.config.max_harvest_regions_per_cycle,
+                    byte_budget=self.config.harvest_byte_budget,
+                    index_keys=allowed,
+                    continue_on_error=True,
+                )
+                errors.extend(harvest.errors)
+            finally:
+                self._release_harvest_reservoirs(claimed_harvest_sources)
         exhausted = self._finish_terminal_indexes(
             self._eligible_ready_indexes()
         )
@@ -868,6 +987,8 @@ class HistoricalIndexOptimizerRuntime:
             exhausted_reservoirs=exhausted,
             recovered_expired_claims=harvest.recovered_expired_claims,
             errors=tuple(errors),
+            background_deferred=deferred_reason is not None,
+            background_defer_reason=deferred_reason,
         )
         elapsed_ms = max(
             0,
@@ -897,6 +1018,9 @@ class HistoricalIndexOptimizerRuntime:
                 ),
                 "historical_index_compile_failures": cycle.compile_failures,
                 "historical_index_wall_milliseconds": elapsed_ms,
+                "historical_index_background_deferred": int(
+                    cycle.background_deferred
+                ),
             }
         )
         self.telemetry.set_gauges(
