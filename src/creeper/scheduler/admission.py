@@ -236,8 +236,13 @@ class EvidenceBacklogAdmission:
         against backlog capacity. An already-expired reservation must fail
         closed because another producer may have consumed that capacity.
         """
-        if ttl_seconds <= 0:
-            raise ValueError("ttl_seconds must be positive")
+        if (
+            isinstance(ttl_seconds, bool)
+            or not isinstance(ttl_seconds, (int, float))
+            or not math.isfinite(float(ttl_seconds))
+            or ttl_seconds <= 0
+        ):
+            raise ValueError("ttl_seconds must be finite and positive")
         if reservation.reservation_id is None:
             return CapacityReservation(
                 None,
@@ -429,5 +434,17 @@ class EvidenceBacklogAdmission:
 
     def reserved(self, provider: str, *, now: float | None = None) -> int:
         """Return all live capacity held outside durable backlog rows."""
-        current = self._now() if now is None else float(now)
+        if not isinstance(provider, str) or not provider.strip():
+            raise ValueError("provider is required")
+        if now is None:
+            current = self._now()
+        else:
+            if (
+                isinstance(now, bool)
+                or not isinstance(now, (int, float))
+                or not math.isfinite(float(now))
+                or now < 0
+            ):
+                raise ValueError("reservation time must be finite and non-negative")
+            current = float(now)
         return self._reserved_locked(provider, current)
