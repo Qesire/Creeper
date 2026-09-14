@@ -448,14 +448,16 @@ class StructuredProductionAdapter:
             record_type = "MAILBOX_URL_LINE"
 
         elif self.kind == "squid_access":
+            raw_access_time = payload.split(None, 1)[0] if payload else ""
             parsed_access = parse_squid_access_line(payload)
             if parsed_access is None:
                 return None
             payload, access_year = parsed_access
             if access_year is not None:
                 source_year = access_year
-            # Access time is a discovery hint only.  The discovery-only
-            # evidence contract below clears direct authority.
+                source_time = raw_access_time
+                if self.evidence_contract.grants_direct_web_year:
+                    contract_direct_year = access_year
             record_type = "SQUID_ACCESS_URL"
 
         elif self.kind == "dmoz_rdf_urls":
