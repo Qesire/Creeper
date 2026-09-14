@@ -8,6 +8,7 @@ from creeper.distributed.authority_store import (
     BatchConflictError,
     BatchSequenceError,
     DistributedAuthorityStore,
+    ProviderAccessDeniedError,
     ProviderRegionNotQualifiedError,
     StaleLeaseError,
 )
@@ -57,6 +58,7 @@ class DistributedAuthorityTests(unittest.TestCase):
                 Capability.ONLINE_QUERY.value,
                 Capability.RDAP.value,
             ),
+            allowed_providers=("internet_archive", "arquivo_pt"),
         )
         self.worker_b = WorkerDescriptor(
             worker_id="worker-eu",
@@ -67,6 +69,7 @@ class DistributedAuthorityTests(unittest.TestCase):
             cpu_count=2,
             network_class="public",
             capabilities=(Capability.ONLINE_QUERY.value,),
+            allowed_providers=("internet_archive", "arquivo_pt"),
         )
         self.store.register_worker(self.worker_a)
         self.store.register_worker(self.worker_b)
@@ -378,6 +381,59 @@ class DistributedAuthorityTests(unittest.TestCase):
         self.assertIsNotNone(claimed)
         assert claimed is not None
         self.assertEqual(claimed.work.task_class, TaskClass.SOURCE_SHARD)
+
+    def test_worker_provider_allowlist_blocks_claim_and_permit(self) -> None:
+        restricted = WorkerDescriptor(
+            worker_id="worker-restricted-provider",
+            runtime_class="vm",
+            region="restricted-region",
+            architecture="x86_64",
+            memory_bytes=1024**3,
+            cpu_count=2,
+            network_class="public",
+            capabilities=(Capability.ONLINE_QUERY.value,),
+            producers=("HistoricalQueryProducer",),
+            allowed_providers=("arquivo_pt",),
+        )
+        self.store.register_worker(restricted)
+        self.store.configure_provider_budget(
+            "internet_archive",
+            requests_per_second=10.0,
+            max_global_inflight=1,
+            require_qualified_region=False,
+        )
+        task_id = self.store.admit_host_resolution_work(
+            hostname="restricted.example",
+            physical_providers=("internet_archive",),
+            coverage_provider="cdx-pool:restricted",
+            resolver_version="resolver-v1",
+            year_from=1997,
+            year_to=1997,
+        )
+        self.assertEqual(len(task_id), 1)
+        self.assertIsNone(self.store.claim_work(restricted.worker_id))
+
+        manual = self.store.admit_work(
+            WorkDefinition(
+                producer="HistoricalQueryProducer",
+                task_class=TaskClass.HOST_BATCH,
+                input_identity="manual.example",
+                coverage={"year_from": 1997, "year_to": 1997},
+                partition="0",
+                algorithm_version="resolver-v1",
+                required_capabilities=(Capability.ONLINE_QUERY.value,),
+            )
+        )
+        lease = self.store.claim_work(restricted.worker_id)
+        assert lease is not None
+        self.assertEqual(lease.task_id, manual)
+        with self.assertRaises(ProviderAccessDeniedError):
+            self.store.issue_provider_permit(
+                "internet_archive",
+                worker_id=lease.worker_id,
+                task_id=lease.task_id,
+                generation=lease.generation,
+            )
 
     def test_provider_inflight_budget_is_global_across_regions(self) -> None:
         self.store.configure_provider_budget(
