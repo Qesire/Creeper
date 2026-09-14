@@ -67,6 +67,7 @@ class SourceReservoirManagerTests(unittest.TestCase):
         novel_eed: float,
         elapsed_seconds: float,
         direct_host_years: int = 0,
+        minhash_values: tuple[int, ...] = (),
     ) -> None:
         self.to_scout_ready(candidate)
         self.registry.transition(candidate.source_key, SourceState.SCOUTING)
@@ -81,6 +82,7 @@ class SourceReservoirManagerTests(unittest.TestCase):
                 bytes_read=20_000,
                 elapsed_seconds=elapsed_seconds,
                 novel_eed=novel_eed,
+                minhash_values=minhash_values,
             ),
         )
         self.registry.transition(candidate.source_key, SourceState.WARM)
@@ -110,6 +112,49 @@ class SourceReservoirManagerTests(unittest.TestCase):
         self.assertEqual(plan.activate_source_keys, (fast.source_key,))
         self.assertEqual(self.registry.get_candidate(fast.source_key).state, SourceState.WARM)
         self.assertFalse(plan.needs_search)
+
+    def test_activation_slots_greedily_avoid_near_duplicate_warm_sources(self) -> None:
+        primary = self.candidate("primary")
+        mirror = self.candidate("mirror")
+        distinct = self.candidate("distinct")
+        same = tuple(range(64))
+        different = tuple(range(10_000, 10_064))
+        self.to_warm(
+            primary,
+            novel_eed=12.0,
+            elapsed_seconds=1.0,
+            minhash_values=same,
+        )
+        self.to_warm(
+            mirror,
+            novel_eed=11.0,
+            elapsed_seconds=1.0,
+            minhash_values=same,
+        )
+        self.to_warm(
+            distinct,
+            novel_eed=8.0,
+            elapsed_seconds=1.0,
+            minhash_values=different,
+        )
+        manager = SourceReservoirManager(
+            self.registry,
+            targets=SourcePoolTargets(
+                active_min=0,
+                active_target=2,
+                warm_min=0,
+                warm_target=0,
+                cold_min=0,
+                cold_target=0,
+            ),
+        )
+
+        plan = manager.plan()
+
+        self.assertEqual(
+            plan.activate_source_keys,
+            (primary.source_key, distinct.source_key),
+        )
 
     def test_direct_bulk_uses_background_scout_instead_of_foreground_slot(self) -> None:
         direct = SourceCandidate(
