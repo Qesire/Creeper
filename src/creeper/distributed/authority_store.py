@@ -43,6 +43,10 @@ class AuthorityNotReadyError(RuntimeError):
     """Required local authority state is unavailable; fail closed."""
 
 
+class ProviderRegionNotQualifiedError(RuntimeError):
+    """A formal provider request was attempted from an unqualified region."""
+
+
 def _json(value) -> str:
     return json.dumps(
         value,
@@ -215,6 +219,8 @@ class DistributedAuthorityStore:
                     CHECK(requests_per_second > 0),
                 max_global_inflight INTEGER NOT NULL
                     CHECK(max_global_inflight >= 1),
+                require_qualified_region INTEGER NOT NULL DEFAULT 1
+                    CHECK(require_qualified_region IN (0, 1)),
                 next_request_at REAL NOT NULL DEFAULT 0,
                 cooldown_until REAL NOT NULL DEFAULT 0,
                 updated_at REAL NOT NULL
@@ -243,6 +249,21 @@ class DistributedAuthorityStore:
                 ON distributed_provider_permits(provider, active, expires_at);
             """
         )
+        budget_columns = {
+            str(row["name"])
+            for row in self.connection.execute(
+                "PRAGMA table_info(distributed_provider_budgets)"
+            )
+        }
+        if "require_qualified_region" not in budget_columns:
+            self.connection.execute(
+                """
+                ALTER TABLE distributed_provider_budgets
+                ADD COLUMN require_qualified_region INTEGER
+                    NOT NULL DEFAULT 1
+                    CHECK(require_qualified_region IN (0, 1))
+                """
+            )
         self.connection.commit()
 
     def close(self) -> None:
@@ -1312,6 +1333,7 @@ class DistributedAuthorityStore:
         *,
         requests_per_second: float,
         max_global_inflight: int,
+        require_qualified_region: bool = True,
     ) -> None:
         if (
             not provider.strip()
@@ -1324,17 +1346,20 @@ class DistributedAuthorityStore:
             """
             INSERT INTO distributed_provider_budgets(
                 provider, requests_per_second, max_global_inflight,
+                require_qualified_region,
                 next_request_at, cooldown_until, updated_at
-            ) VALUES (?, ?, ?, 0, 0, ?)
+            ) VALUES (?, ?, ?, ?, 0, 0, ?)
             ON CONFLICT(provider) DO UPDATE SET
                 requests_per_second = excluded.requests_per_second,
                 max_global_inflight = excluded.max_global_inflight,
+                require_qualified_region = excluded.require_qualified_region,
                 updated_at = excluded.updated_at
             """,
             (
                 provider.strip(),
                 float(requests_per_second),
                 int(max_global_inflight),
+                1 if require_qualified_region else 0,
                 now,
             ),
         )
@@ -1361,7 +1386,7 @@ class DistributedAuthorityStore:
         now = float(self.clock())
         self.connection.execute("BEGIN IMMEDIATE")
         try:
-            self._assert_active_lease(
+            task_row = self._assert_active_lease(
                 task_id,
                 worker_id,
                 generation,
@@ -1376,6 +1401,32 @@ class DistributedAuthorityStore:
             ).fetchone()
             if budget is None:
                 raise KeyError(f"provider budget not configured: {provider}")
+
+            if (
+                int(budget["require_qualified_region"])
+                and str(task_row["task_class"]) != TaskClass.PROBE.value
+            ):
+                worker = self.connection.execute(
+                    """
+                    SELECT region FROM distributed_workers
+                    WHERE worker_id = ? AND revoked = 0
+                    """,
+                    (worker_id,),
+                ).fetchone()
+                if worker is None:
+                    raise WorkerRejectedError(worker_id)
+                region = str(worker["region"])
+                qualified = self.connection.execute(
+                    """
+                    SELECT state FROM distributed_provider_regions
+                    WHERE provider = ? AND region = ?
+                    """,
+                    (provider, region),
+                ).fetchone()
+                if qualified is None or str(qualified["state"]) != "QUALIFIED":
+                    raise ProviderRegionNotQualifiedError(
+                        f"provider={provider} region={region}"
+                    )
 
             self.connection.execute(
                 """
@@ -1541,6 +1592,7 @@ class DistributedAuthorityStore:
         return {
             "requests_per_second": float(row["requests_per_second"]),
             "max_global_inflight": int(row["max_global_inflight"]),
+            "require_qualified_region": int(row["require_qualified_region"]),
             "active_inflight": active,
             "next_request_at": float(row["next_request_at"]),
             "cooldown_until": float(row["cooldown_until"]),
