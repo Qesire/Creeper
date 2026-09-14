@@ -7,6 +7,7 @@ is projected only from validation-closed production exposures.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from dataclasses import dataclass
@@ -844,14 +845,87 @@ class ResearchIntegrationBridge:
         pivot_id: str = "",
         decision_id: str = "",
     ) -> RootPageResult:
+        row = self.research.get_query_row(query.query_id)
+        if str(row["program_id"]) != program_id:
+            raise ValueError("query/program identity mismatch")
         checkpoint = self.research.query_checkpoint(query.query_id)
+        pages_completed = int(row["pages_completed"])
+        wall_seconds_used = float(row["wall_seconds_used"])
+
+        # Query bounds are authoritative at the bridge, not adapter hints.
+        # This covers adapters with multi-stage/token protocols (OAI,
+        # Archive-It) as well as ordinary page-number APIs.
+        if pages_completed >= query.max_pages:
+            self.research.update_query_checkpoint(
+                query.query_id,
+                checkpoint=checkpoint,
+                state=QueryState.EXHAUSTED,
+                last_error="query page budget exhausted",
+            )
+            return RootPageResult(
+                query_id=query.query_id,
+                hits=0,
+                artifacts=0,
+                sources_inserted=0,
+                terminal=True,
+                retryable=False,
+            )
+
+        remaining_wall = float(query.max_wall_seconds) - wall_seconds_used
+        if remaining_wall <= 0:
+            self.research.update_query_checkpoint(
+                query.query_id,
+                checkpoint=checkpoint,
+                state=QueryState.EXHAUSTED,
+                last_error="query wall-time budget exhausted",
+            )
+            return RootPageResult(
+                query_id=query.query_id,
+                hits=0,
+                artifacts=0,
+                sources_inserted=0,
+                terminal=True,
+                retryable=False,
+            )
+
+        # Reserve before network I/O. The transaction is the cross-worker
+        # authority for QueryProgram.hard_max_requests.
+        if not self.research.reserve_program_request(program_id):
+            self.research.exhaust_program_budget(program_id)
+            self.research.update_query_checkpoint(
+                query.query_id,
+                checkpoint=checkpoint,
+                state=QueryState.EXHAUSTED,
+                last_error="program hard request budget exhausted",
+            )
+            return RootPageResult(
+                query_id=query.query_id,
+                hits=0,
+                artifacts=0,
+                sources_inserted=0,
+                terminal=True,
+                retryable=False,
+            )
+
         self.research.update_query_checkpoint(
             query.query_id,
             checkpoint=checkpoint,
             state=QueryState.RUNNING,
         )
+        started = time.perf_counter()
         try:
-            page = await adapter.search(query, checkpoint)
+            # Current adapters perform exactly one provider request in search();
+            # resolve() is metadata-only. wait_for therefore makes a stuck
+            # provider unable to exceed the remaining durable query wall budget.
+            page = await asyncio.wait_for(
+                adapter.search(query, checkpoint),
+                timeout=remaining_wall,
+            )
+            if page.requests > 1:
+                raise ValueError(
+                    "structured-root adapter exceeded one-request page contract"
+                )
+
             nodes: dict[str, Any] = {}
             artifacts = 0
             sources_inserted = 0
@@ -974,43 +1048,125 @@ class ResearchIntegrationBridge:
                     seen_lineages.add(key)
                 sources_inserted += int(inserted)
 
-            retryable = page.retry_after is not None
-            if retryable:
-                state = QueryState.RETRYABLE
+            elapsed = max(0.0, time.perf_counter() - started)
+            retryable_page = page.retry_after is not None
+            pages_delta = int(page.requests > 0 and not retryable_page)
+            wall_exhausted = (
+                wall_seconds_used + elapsed >= float(query.max_wall_seconds)
+            )
+            page_exhausted = pages_completed + pages_delta >= query.max_pages
+            requests_started, hard_max_requests = (
+                self.research.program_request_budget(program_id)
+            )
+            program_exhausted = requests_started >= hard_max_requests
+            if program_exhausted:
+                self.research.exhaust_program_budget(program_id)
+
+            if retryable_page:
+                if wall_exhausted or program_exhausted:
+                    state = QueryState.EXHAUSTED
+                    retry_at = None
+                else:
+                    state = QueryState.RETRYABLE
+                    retry_at = (
+                        float(self.clock()) + float(page.retry_after or 0.0)
+                    )
                 next_checkpoint = page.next_checkpoint or checkpoint
-                retry_at = float(self.clock()) + float(page.retry_after or 0.0)
             elif page.terminal:
                 state = QueryState.COMPLETE
+                next_checkpoint = page.next_checkpoint
+                retry_at = None
+            elif wall_exhausted or page_exhausted or program_exhausted:
+                state = QueryState.EXHAUSTED
                 next_checkpoint = page.next_checkpoint
                 retry_at = None
             else:
                 state = QueryState.READY
                 next_checkpoint = page.next_checkpoint
                 retry_at = None
+
+            terminal = bool(page.terminal or state is QueryState.EXHAUSTED)
+            retryable = state is QueryState.RETRYABLE
             self.research.update_query_checkpoint(
                 query.query_id,
                 checkpoint=next_checkpoint,
                 state=state,
-                pages_delta=1,
+                pages_delta=pages_delta,
+                wall_seconds_delta=elapsed,
                 retry_at=retry_at,
+                last_error=(
+                    "program hard request budget exhausted"
+                    if state is QueryState.EXHAUSTED and program_exhausted
+                    else (
+                        "query wall-time budget exhausted"
+                        if state is QueryState.EXHAUSTED and wall_exhausted
+                        else (
+                            "query page budget exhausted"
+                            if state is QueryState.EXHAUSTED and page_exhausted
+                            else ""
+                        )
+                    )
+                ),
             )
             return RootPageResult(
                 query_id=query.query_id,
                 hits=len(page.hits),
                 artifacts=artifacts,
                 sources_inserted=sources_inserted,
-                terminal=bool(page.terminal),
+                terminal=terminal,
                 retryable=retryable,
                 metadata_accepted=metadata_accepted,
                 metadata_held=metadata_held,
                 metadata_rejected=metadata_rejected,
             )
-        except BaseException as exc:
+        except asyncio.TimeoutError:
+            elapsed = max(0.0, time.perf_counter() - started)
+            requests_started, hard_max_requests = (
+                self.research.program_request_budget(program_id)
+            )
+            if requests_started >= hard_max_requests:
+                self.research.exhaust_program_budget(program_id)
             self.research.update_query_checkpoint(
                 query.query_id,
                 checkpoint=checkpoint,
-                state=QueryState.RETRYABLE,
-                retry_at=float(self.clock()) + 30.0,
+                state=QueryState.EXHAUSTED,
+                wall_seconds_delta=elapsed,
+                retry_at=None,
+                last_error="query wall-time budget exhausted",
+            )
+            return RootPageResult(
+                query_id=query.query_id,
+                hits=0,
+                artifacts=0,
+                sources_inserted=0,
+                terminal=True,
+                retryable=False,
+            )
+        except BaseException as exc:
+            elapsed = max(0.0, time.perf_counter() - started)
+            requests_started, hard_max_requests = (
+                self.research.program_request_budget(program_id)
+            )
+            program_exhausted = requests_started >= hard_max_requests
+            wall_exhausted = (
+                wall_seconds_used + elapsed >= float(query.max_wall_seconds)
+            )
+            if program_exhausted:
+                self.research.exhaust_program_budget(program_id)
+            self.research.update_query_checkpoint(
+                query.query_id,
+                checkpoint=checkpoint,
+                state=(
+                    QueryState.EXHAUSTED
+                    if program_exhausted or wall_exhausted
+                    else QueryState.RETRYABLE
+                ),
+                wall_seconds_delta=elapsed,
+                retry_at=(
+                    None
+                    if program_exhausted or wall_exhausted
+                    else float(self.clock()) + 30.0
+                ),
                 last_error=f"{type(exc).__name__}: {exc}"[:1000],
             )
             raise
