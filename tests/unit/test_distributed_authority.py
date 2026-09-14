@@ -250,6 +250,67 @@ class DistributedAuthorityTests(unittest.TestCase):
                 worker_id=lease.worker_id,
             )
 
+    def test_evidence_only_exploration_rejects_raw_candidate_export(self) -> None:
+        worker = WorkerDescriptor(
+            worker_id="crawler-worker",
+            runtime_class="vm",
+            region="test-region",
+            architecture="x86_64",
+            memory_bytes=1024**3,
+            cpu_count=2,
+            network_class="public",
+            capabilities=(
+                Capability.WEB_DISCOVERY.value,
+                Capability.ONLINE_QUERY.value,
+            ),
+            producers=("HistoricalCrawlerProducer",),
+            allowed_providers=("web_discovery", "internet_archive"),
+        )
+        self.store.register_worker(worker)
+        self.store.configure_provider_budget(
+            "web_discovery",
+            requests_per_second=1000.0,
+            max_global_inflight=1,
+            require_qualified_region=False,
+        )
+        self.store.configure_provider_budget(
+            "internet_archive",
+            requests_per_second=1000.0,
+            max_global_inflight=1,
+            require_qualified_region=False,
+        )
+        task_id = self.store.admit_historical_exploration_work(
+            url="https://root.example/",
+            archive_providers=("internet_archive",),
+        )
+        lease = self.store.claim_work(worker.worker_id)
+        assert lease is not None
+        self.assertEqual(lease.task_id, task_id)
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "may not export raw results",
+        ):
+            self.store.commit_result_batch(
+                ResultBatch(
+                    task_id=lease.task_id,
+                    generation=lease.generation,
+                    sequence_no=lease.next_sequence_no,
+                    results=(
+                        {
+                            "kind": "HOST_CANDIDATE",
+                            "hostname": "raw.example",
+                            "source": "crawler",
+                            "locator": "https://raw.example/",
+                        },
+                    ),
+                    cursor_after="EOF",
+                ),
+                worker_id=lease.worker_id,
+            )
+        self.assertEqual(self.store.batch_count(task_id), 0)
+        self.assertEqual(self.store.host_candidate_count(), 0)
+
     def test_new_result_batches_must_follow_authority_sequence(self) -> None:
         self.store.admit_work(self.work("sequence.example"))
         lease = self.store.claim_work(self.worker_a.worker_id, lease_seconds=30)
