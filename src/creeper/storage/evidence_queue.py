@@ -8,6 +8,7 @@ visibility renewal follow the mature persistent-queue pattern.
 from __future__ import annotations
 
 from collections.abc import Iterable
+import math
 
 from creeper.evidence.actions import (
     ACTION_PRIOR_STRENGTH,
@@ -90,8 +91,8 @@ class DurableEvidenceQueue:
             raise ValueError("owner is required")
         if limit < 1:
             return []
-        if lease_seconds <= 0:
-            raise ValueError("lease_seconds must be positive")
+        if not math.isfinite(float(lease_seconds)) or lease_seconds <= 0:
+            raise ValueError("lease_seconds must be finite and positive")
         provider_list = tuple(dict.fromkeys(str(item) for item in providers if str(item)))
         if not provider_list:
             return []
@@ -233,8 +234,8 @@ class DurableEvidenceQueue:
         """Extend visibility for a bounded set of tasks still owned by caller."""
         if not owner:
             raise ValueError("owner is required")
-        if lease_seconds <= 0:
-            raise ValueError("lease_seconds must be positive")
+        if not math.isfinite(float(lease_seconds)) or lease_seconds <= 0:
+            raise ValueError("lease_seconds must be finite and positive")
         key_list = list(dict.fromkeys(keys))
         if not key_list:
             return 0
