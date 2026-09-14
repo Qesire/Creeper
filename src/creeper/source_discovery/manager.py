@@ -348,27 +348,10 @@ class SourceReservoirManager:
         """
         rows = self.registry.connection.execute(
             """
-            SELECT e.episode_id,
-                   (
-                       SELECT COUNT(*)
-                       FROM source_proposals p
-                       WHERE p.episode_id = e.episode_id
-                         AND NOT EXISTS (
-                             SELECT 1
-                             FROM source_proposals prior
-                             WHERE prior.source_key = p.source_key
-                               AND (
-                                   prior.created_at < p.created_at
-                                   OR (
-                                       prior.created_at = p.created_at
-                                       AND prior.proposal_id < p.proposal_id
-                                   )
-                               )
-                         )
-                   ) AS new_sources
-            FROM source_search_episodes e
-            WHERE e.finished_at IS NOT NULL
-            ORDER BY e.finished_at DESC, e.episode_id DESC
+            SELECT episode_id, new_sources
+            FROM source_search_episodes
+            WHERE finished_at IS NOT NULL
+            ORDER BY finished_at DESC, episode_id DESC
             LIMIT ?
             """,
             (self.stagnation_window,),
