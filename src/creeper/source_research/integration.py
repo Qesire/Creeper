@@ -12,6 +12,10 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
+from creeper.source_discovery.artifact_intake import (
+    MetadataArtifactAdmission,
+    assess_artifact_metadata,
+)
 from creeper.source_discovery.models import (
     SourceCandidate,
     SourceLevel,
@@ -67,6 +71,9 @@ class RootPageResult:
     sources_inserted: int
     terminal: bool
     retryable: bool
+    metadata_accepted: int = 0
+    metadata_held: int = 0
+    metadata_rejected: int = 0
 
 
 class ResearchIntegrationBridge:
@@ -115,6 +122,21 @@ class ResearchIntegrationBridge:
                 ) WITHOUT ROWID;
                 CREATE INDEX IF NOT EXISTS idx_research_llm_call_context
                     ON research_llm_call_claims(context_hash, task_type, state);
+
+                CREATE TABLE IF NOT EXISTS research_artifact_prefilter(
+                    artifact_identity TEXT NOT NULL,
+                    query_id TEXT NOT NULL,
+                    node_id TEXT NOT NULL,
+                    locator TEXT NOT NULL,
+                    admission TEXT NOT NULL,
+                    format_kind TEXT NOT NULL,
+                    reason TEXT NOT NULL,
+                    semantic_hits_json TEXT NOT NULL,
+                    evaluated_at REAL NOT NULL,
+                    PRIMARY KEY(artifact_identity,query_id,node_id)
+                ) WITHOUT ROWID;
+                CREATE INDEX IF NOT EXISTS idx_research_artifact_prefilter_admission
+                    ON research_artifact_prefilter(admission, query_id, evaluated_at);
 
                 CREATE TABLE IF NOT EXISTS research_final_projection(
                     source_key TEXT NOT NULL,
