@@ -16,6 +16,7 @@ from uuid import uuid4
 
 from creeper.authority.baseline_index import BaselineIndex, YEAR_BITS
 from creeper.authority.normalizer import normalize_official
+from creeper.distributed.edition import FABRIC_PROTOCOL_VERSION
 from creeper.distributed.identity import evidence_id, host_year_id
 from creeper.evidence.contracts import resolve_source_evidence_contract
 from creeper.distributed.models import (
@@ -50,6 +51,10 @@ class AuthorityNotReadyError(RuntimeError):
 
 class ProviderRegionNotQualifiedError(RuntimeError):
     """A formal provider request was attempted from an unqualified region."""
+
+
+class FabricProtocolMismatchError(RuntimeError):
+    """Worker and Authority speak incompatible derivative protocols."""
 
 
 def _json(value) -> str:
@@ -103,6 +108,8 @@ class DistributedAuthorityStore:
                 network_class TEXT NOT NULL,
                 capabilities_json TEXT NOT NULL,
                 producers_json TEXT NOT NULL DEFAULT '[]',
+                protocol_version TEXT NOT NULL DEFAULT 'creeper-fabric-v1',
+                edition_version TEXT NOT NULL DEFAULT '0.1.0-dev',
                 last_heartbeat REAL NOT NULL,
                 revoked INTEGER NOT NULL DEFAULT 0 CHECK(revoked IN (0, 1))
             ) WITHOUT ROWID;
@@ -284,6 +291,22 @@ class DistributedAuthorityStore:
                 ADD COLUMN producers_json TEXT NOT NULL DEFAULT '[]'
                 """
             )
+        if "protocol_version" not in worker_columns:
+            self.connection.execute(
+                """
+                ALTER TABLE distributed_workers
+                ADD COLUMN protocol_version TEXT NOT NULL
+                    DEFAULT 'creeper-fabric-v1'
+                """
+            )
+        if "edition_version" not in worker_columns:
+            self.connection.execute(
+                """
+                ALTER TABLE distributed_workers
+                ADD COLUMN edition_version TEXT NOT NULL
+                    DEFAULT '0.1.0-dev'
+                """
+            )
         budget_columns = {
             str(row["name"])
             for row in self.connection.execute(
@@ -342,14 +365,19 @@ class DistributedAuthorityStore:
             raise
 
     def register_worker(self, worker: WorkerDescriptor) -> None:
+        if worker.protocol_version != FABRIC_PROTOCOL_VERSION:
+            raise FabricProtocolMismatchError(
+                f"authority={FABRIC_PROTOCOL_VERSION} "
+                f"worker={worker.protocol_version}"
+            )
         now = float(self.clock())
         self.connection.execute(
             """
             INSERT INTO distributed_workers(
                 worker_id, runtime_class, region, architecture, memory_bytes,
                 cpu_count, network_class, capabilities_json, producers_json,
-                last_heartbeat
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                protocol_version, edition_version, last_heartbeat
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(worker_id) DO UPDATE SET
                 runtime_class = excluded.runtime_class,
                 region = excluded.region,
@@ -359,6 +387,8 @@ class DistributedAuthorityStore:
                 network_class = excluded.network_class,
                 capabilities_json = excluded.capabilities_json,
                 producers_json = excluded.producers_json,
+                protocol_version = excluded.protocol_version,
+                edition_version = excluded.edition_version,
                 last_heartbeat = excluded.last_heartbeat
             """,
             (
@@ -371,6 +401,8 @@ class DistributedAuthorityStore:
                 worker.network_class,
                 _json(sorted(worker.capabilities)),
                 _json(sorted(worker.producers)),
+                worker.protocol_version,
+                worker.edition_version,
                 now,
             ),
         )
