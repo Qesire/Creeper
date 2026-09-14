@@ -206,20 +206,30 @@ class CommandAgentSearchExecutor:
                     ".cdx", ".cdx.gz", ".cdxj", ".cdxj.gz"
                 ],
                 "direct_evidence_semantics": (
-                    "capture timestamp + original URL rows for 1996-2001"
+                    "capture timestamp + original URL + auditable locator "
+                    "rows for 1996-2001"
                 ),
                 "prefer_catalogs_that_enumerate_direct_evidence_bulk": True,
+                "source_portfolio": (
+                    "diverse finite source families; do not collapse search "
+                    "into repeated discovery of common bulk CDX datasets"
+                ),
                 "resource_priority": [
+                    "reusable catalog, API, manifest, or repository root exposing finite historical artifacts",
+                    "date-bearing historical dataset with stable record provenance",
                     "official archive directory or manifest enumerating CDX/CDXJ",
                     "exact CDX/CDXJ bulk index with target-period captures",
                     "archive collection manifest enumerating WARC/ARC or indexes",
-                    "large historical URL/domain dump overlapping 1996-2001",
-                    "generic historical source only if no bulk enumerator exists",
+                    "large historical URL/domain dump when it adds a distinct source family",
+                    "generic historical source only when it adds marginal coverage",
                 ],
                 "search_targets": [
                     "national libraries and web archives",
-                    "university or research web-archive datasets",
+                    "university and institutional repositories",
+                    "research data repositories and dataset registries",
                     "public archive data-package manifests",
+                    "code/fossil repositories containing historical datasets or index tooling outputs",
+                    "OAI-PMH, DataCite, Dataverse, Zenodo and comparable structured roots",
                     "directory indexes and machine-readable file manifests",
                 ],
                 "avoid_low_yield": [
