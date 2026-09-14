@@ -12,6 +12,7 @@ from creeper.evidence.contracts import (
 )
 from creeper.sources.ftp_sitelist import (
     AUDITED_FTP_SITELIST_LOCATORS,
+    FtpSitelistRecord,
     is_audited_ftp_sitelist_locator,
     is_ftp_sitelist_locator,
     parse_ftp_sitelist_text,
@@ -31,6 +32,23 @@ def sitelist_zip(*members: tuple[str, str]) -> bytes:
 
 
 class FtpSitelistParserTests(unittest.TestCase):
+    def test_record_and_zip_budget_reject_lossy_values(self) -> None:
+        with self.assertRaisesRegex(ValueError, "record_index"):
+            FtpSitelistRecord(
+                hostname="ftp.example",
+                source_time="1997-01-01",
+                year=1997,
+                member_name="part.txt",
+                record_index=1.5,
+            )
+        payload = sitelist_zip(
+            ("part01.txt", "Site: ftp.alpha.example\nDate: 19-Nov-96\n"),
+        )
+        with self.assertRaisesRegex(ValueError, "positive integer"):
+            parse_ftp_sitelist_zip(payload, max_decompressed_bytes=True)
+        with self.assertRaisesRegex(ValueError, "payload must be bytes"):
+            parse_ftp_sitelist_zip("not-bytes")
+
     def test_text_parser_binds_site_to_record_date(self) -> None:
         rows = parse_ftp_sitelist_text(
             """
