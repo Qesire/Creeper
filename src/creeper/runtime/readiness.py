@@ -676,8 +676,12 @@ class IncrementalReadinessRuntime:
         dispatch_threshold: Decimal | str | int = DEFAULT_DISPATCH_THRESHOLD,
         batch_size: int = 50_000,
     ) -> None:
-        if batch_size < 1:
-            raise ValueError("batch_size must be positive")
+        if (
+            isinstance(batch_size, bool)
+            or not isinstance(batch_size, int)
+            or batch_size < 1
+        ):
+            raise ValueError("batch_size must be a positive integer")
         self.runtime_data_root = Path(runtime_data_root)
         self.baseline_path = Path(baseline_index)
         self.model_path = Path(eed_model)
@@ -700,7 +704,7 @@ class IncrementalReadinessRuntime:
             FORMAL_GROWTH_RATE <= self.dispatch_threshold <= Decimal("1")
         ):
             raise ValueError("dispatch_threshold must be between 0.05 and 1")
-        self.batch_size = int(batch_size)
+        self.batch_size = batch_size
         self.evidence = EvidenceStore(
             self.runtime_data_root / "evidence.sqlite3"
         )
