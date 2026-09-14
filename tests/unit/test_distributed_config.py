@@ -66,6 +66,7 @@ memory_bytes = 12884901888
 cpu_count = 2
 network_class = "public"
 capabilities = ["ONLINE_QUERY"]
+allowed_providers = ["internet_archive"]
 secret_env = "TEST_CREEPER_SECRET"
 poll_seconds = 2
 lease_seconds = 120
@@ -86,6 +87,10 @@ max_keepalive_connections = 4
 
         self.assertEqual(config.descriptor.worker_id, "oci-01")
         self.assertEqual(config.descriptor.producers, ())
+        self.assertEqual(
+            config.descriptor.allowed_providers,
+            ("internet_archive",),
+        )
         self.assertEqual(config.cdx_providers[0].row_limit, 150_000)
         self.assertEqual(config.cdx_providers[0].dialect, "wayback")
         with patch.dict(os.environ, {"TEST_CREEPER_SECRET": "secret"}, clear=False):
