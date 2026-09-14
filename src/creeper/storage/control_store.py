@@ -3928,6 +3928,7 @@ class ControlStore:
         expected_novel_eed: float,
         now: float,
         lease_ttl_seconds: float | None = None,
+        initial_cursor: str | None = None,
     ) -> Any | None:
         """Atomically claim a READY reservoir with a new cursor-backed lease."""
         from creeper.scheduler.leases import LeaseState, WorkLease
@@ -3947,6 +3948,8 @@ class ControlStore:
             or lease_ttl_seconds <= 0
         ):
             raise ValueError("lease_ttl_seconds must be finite and positive")
+        if initial_cursor is not None and not isinstance(initial_cursor, str):
+            raise ValueError("initial_cursor must be a string when provided")
 
         self.connection.execute("BEGIN IMMEDIATE")
         try:
@@ -3958,9 +3961,29 @@ class ControlStore:
                 self.connection.commit()
                 return None
 
+            durable_cursor = reservoir["cursor"]
+            if durable_cursor is None and initial_cursor is not None:
+                changed_cursor = self.connection.execute(
+                    """
+                    UPDATE reservoirs
+                    SET cursor = ?
+                    WHERE reservoir_id = ? AND state = ? AND cursor IS NULL
+                    """,
+                    (
+                        initial_cursor,
+                        reservoir_id,
+                        ReservoirState.READY.value,
+                    ),
+                ).rowcount
+                if changed_cursor != 1:
+                    raise RuntimeError(
+                        "reservoir cursor changed while initializing first lease"
+                    )
+                durable_cursor = initial_cursor
+
             lease = WorkLease.create(
                 reservoir_id=reservoir_id,
-                cursor_start=reservoir["cursor"],
+                cursor_start=durable_cursor,
                 max_records=max_records,
                 max_requests=max_requests,
                 max_bytes=max_bytes,
