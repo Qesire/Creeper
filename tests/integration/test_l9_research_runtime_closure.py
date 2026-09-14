@@ -13,6 +13,7 @@ from creeper.source_discovery.registry import SourceDiscoveryRegistry
 from creeper.source_discovery.research_trigger import (
     ResearchDirective,
     ResearchTriggerReason,
+    ResearchTriggerSnapshot,
 )
 from creeper.source_research.adapters.base import (
     ArtifactLead,
