@@ -23,6 +23,33 @@ class EEDReadinessMetricTests(unittest.TestCase):
         )
         return path
 
+    def test_nonfinite_readiness_inputs_are_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            baseline = root / "baseline"
+            accepted = root / "accepted"
+            baseline.mkdir()
+            accepted.mkdir()
+            model = self._model(root)
+            with self.assertRaisesRegex(ValueError, "elapsed_seconds"):
+                build_readiness_report(
+                    accepted_dir=accepted,
+                    baseline_dir=baseline,
+                    model_path=model,
+                    baseline_eed="100",
+                    elapsed_seconds="NaN",
+                    run_id="bad-elapsed",
+                )
+            with self.assertRaisesRegex(ValueError, "baseline_eed"):
+                build_readiness_report(
+                    accepted_dir=accepted,
+                    baseline_dir=baseline,
+                    model_path=model,
+                    baseline_eed="NaN",
+                    elapsed_seconds="1",
+                    run_id="bad-baseline",
+                )
+
     def test_report_excludes_baseline_per_year_and_sums_annual_eed(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
