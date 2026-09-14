@@ -365,6 +365,7 @@ class CoordinatorClient:
         lease: TaskLease,
         provider: str,
         *,
+        request_id: str,
         ttl_seconds: float = 30.0,
         retry_after_seconds: float | None = None,
     ) -> ProviderPermit | None:
@@ -375,6 +376,7 @@ class CoordinatorClient:
                     "provider": provider,
                     "task_id": lease.task_id,
                     "generation": lease.generation,
+                    "permit_request_id": request_id,
                     "ttl_seconds": float(ttl_seconds),
                 },
             )
@@ -384,6 +386,7 @@ class CoordinatorClient:
                     raise CoordinatorError("invalid provider permit")
                 return ProviderPermit(
                     permit_id=str(raw["permit_id"]),
+                    request_id=str(raw["request_id"]),
                     provider=str(raw["provider"]),
                     worker_id=str(raw["worker_id"]),
                     task_id=str(raw["task_id"]),
