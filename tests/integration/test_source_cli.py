@@ -477,12 +477,21 @@ class SourceProducerCliTests(unittest.TestCase):
             try:
                 reservoir = control.get_reservoir("webbase-static")
                 self.assertIsNotNone(reservoir)
-                self.assertIsNotNone(reservoir.cursor)
+                self.assertIsNone(reservoir.cursor)
+                self.assertEqual(reservoir.state.value, "EXHAUSTED")
                 self.assertEqual(
-                    sum(
-                        control.evidence_task_state_counts().values()
-                    ),
-                    7,
+                    control.connection.execute(
+                        "SELECT COUNT(*) FROM evidence_tasks "
+                        "WHERE provider='wayback'"
+                    ).fetchone()[0],
+                    3,
+                )
+                self.assertEqual(
+                    control.connection.execute(
+                        "SELECT COUNT(*) FROM evidence_tasks "
+                        "WHERE provider='rdap'"
+                    ).fetchone()[0],
+                    4,
                 )
             finally:
                 control.close()
