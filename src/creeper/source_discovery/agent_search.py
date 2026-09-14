@@ -346,6 +346,18 @@ class CommandAgentSearchExecutor:
                 "min_confidence": admission.min_confidence,
                 "require_year_bounds": admission.require_year_bounds,
                 "direct_evidence_year_bounds_optional": True,
+                "volume_semantics": {
+                    "SOURCE": (
+                        "estimate enumerable hostname/URL reservoir; do not use "
+                        "page-graph vertex count as a hostname proxy"
+                    ),
+                    "COLLECTION_OR_METASOURCE": (
+                        "estimate enumerable child roots/catalog entries"
+                    ),
+                    "DIRECT_CDX_CDXJ": (
+                        "estimate timestamp-bearing evidence rows/resources"
+                    ),
+                },
                 "target_year_from": admission.target_year_from,
                 "target_year_to": admission.target_year_to,
             }
