@@ -26,6 +26,11 @@ _SQUID_PATH_MARKERS = (
     "/squid/rawlogs/",
     "/squid/access",
 )
+_IRCACHE_SANITIZED_ACCESS_RE = re.compile(
+    r"^(?:[a-z0-9._-]+\.)?sanitized-access\."
+    r"(199[6-9]|200[01])\d{4}(?:\.gz)?$",
+    re.IGNORECASE,
+)
 _DMOZ_CONTENT_NAMES = frozenset(
     {
         "content.rdf.u8",
@@ -136,6 +141,8 @@ def is_squid_access_locator(locator: str) -> bool:
     name = path.rsplit("/", 1)[-1]
     if any(marker in path for marker in _SQUID_PATH_MARKERS):
         return not path.endswith("/")
+    if _IRCACHE_SANITIZED_ACCESS_RE.fullmatch(name):
+        return True
     return name.endswith(
         (
             ".squid",
