@@ -5,6 +5,7 @@ from unittest.mock import patch
 
 from creeper.authority.baseline_index import YEAR_BITS
 from creeper.evidence.contracts import (
+    MAILBOX_MONTH_DIRECT_CONTRACT,
     SQUID_ACCESS_DIRECT_CONTRACT,
     bind_contract_to_adapter_id,
 )
@@ -53,17 +54,20 @@ class _OpenFile:
 
 
 class StructuredProductionAdapterTests(unittest.TestCase):
-    def test_mailbox_adapter_persists_only_urls_and_year_hints(self):
+    def test_dated_mailbox_adapter_emits_direct_year_evidence(self):
         reservoir = Reservoir(
             reservoir_id="reservoir:mbox",
             domain_id="domain:mbox",
-            adapter_id="structured:mbox",
+            adapter_id=bind_contract_to_adapter_id(
+                "structured:mbox",
+                MAILBOX_MONTH_DIRECT_CONTRACT,
+            ),
             root_locator=(
                 "https://lists.gnu.org/archive/mbox/lynx-dev/1998-03"
             ),
             enumeration_kind="structured_records",
             capacity_lower=0,
-            evidence_mode="discovery_only",
+            evidence_mode="direct_year",
             state=ReservoirState.READY,
         )
         adapter = StructuredProductionAdapter(
@@ -88,8 +92,14 @@ class StructuredProductionAdapterTests(unittest.TestCase):
             record.payload.split("\t"),
             ["http://old.example/a", "https://www.example.org/b"],
         )
-        self.assertEqual(record.direct_year_mask, 0)
-        self.assertEqual(record.year_hint_mask, YEAR_BITS[1998])
+        self.assertEqual(record.source_year, 1998)
+        self.assertEqual(record.source_time, "1998-03")
+        self.assertEqual(record.direct_year_mask, YEAR_BITS[1998])
+        self.assertEqual(record.year_hint_mask, 0)
+        self.assertEqual(
+            record.evidence_contract_id,
+            MAILBOX_MONTH_DIRECT_CONTRACT.contract_id,
+        )
 
         observations = tuple(adapter.extract_hosts(record))
         self.assertEqual(
@@ -97,11 +107,31 @@ class StructuredProductionAdapterTests(unittest.TestCase):
             {"old.example", "www.example.org"},
         )
         self.assertTrue(
-            all(item.direct_year_mask == 0 for item in observations)
+            all(item.direct_year_mask == YEAR_BITS[1998] for item in observations)
         )
-        self.assertTrue(
-            all(item.year_hint_mask == YEAR_BITS[1998] for item in observations)
+        self.assertTrue(all(item.year_hint_mask == 0 for item in observations))
+
+    def test_undated_mailbox_stays_discovery_only(self):
+        reservoir = Reservoir(
+            reservoir_id="reservoir:mbox-undated",
+            domain_id="domain:mbox-undated",
+            adapter_id="structured:mbox-undated",
+            root_locator="https://example.test/archive/archive.mbox",
+            enumeration_kind="structured_records",
+            capacity_lower=0,
+            evidence_mode="discovery_only",
+            state=ReservoirState.READY,
         )
+        adapter = StructuredProductionAdapter(reservoir)
+        record = adapter._generic_record(
+            "See http://undated.example/a",
+            locator="fixture:undated",
+        )
+        self.assertIsNotNone(record)
+        assert record is not None
+        record = adapter._apply_contract_authority(record)
+        self.assertEqual(record.direct_year_mask, 0)
+        self.assertEqual(record.year_hint_mask, 0)
 
     def test_dmoz_adapter_keeps_dump_year_as_hint_not_evidence(self):
         reservoir = Reservoir(
