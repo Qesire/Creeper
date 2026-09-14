@@ -71,8 +71,19 @@ class SyncRuntime:
         submission_context: RuntimeSubmissionContext | None = None,
         snapshot_id: str = "runtime-snapshot",
     ) -> None:
-        if baseline_batch_size < 1:
-            raise ValueError("baseline_batch_size must be positive")
+        if (
+            isinstance(baseline_batch_size, bool)
+            or not isinstance(baseline_batch_size, int)
+            or baseline_batch_size < 1
+        ):
+            raise ValueError("baseline_batch_size must be a positive integer")
+        for name, value in (
+            ("evidence_provider", evidence_provider),
+            ("evidence_policy_version", evidence_policy_version),
+            ("owner", owner),
+        ):
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"{name} must be a non-empty string")
         self.baseline = baseline
         self.control_store = control_store
         self.evidence_store = evidence_store
