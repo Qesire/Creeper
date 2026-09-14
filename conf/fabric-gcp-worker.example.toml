@@ -1,0 +1,28 @@
+[worker]
+coordinator_url = "https://coord.example"
+worker_id = "gcp-free-01"
+runtime_class = "vm"
+region = "gcp-us"
+architecture = "x86_64"
+memory_bytes = 1073741824
+cpu_count = 1
+network_class = "metered-public"
+capabilities = ["ONLINE_QUERY", "THIN_QUERY"]
+allowed_providers = ["arquivo_pt"]
+# Conservative example guard for a metered/free-tier worker.
+daily_egress_budget_bytes = 268435456
+secret_env = "CREEPER_WORKER_SECRET"
+poll_seconds = 2.0
+lease_seconds = 180.0
+
+[[cdx_providers]]
+name = "arquivo_pt"
+endpoint = "https://arquivo.pt/wayback/cdx"
+dialect = "arquivo"
+requests_per_second = 1.0
+max_inflight = 2
+max_connections = 4
+max_keepalive_connections = 2
+keepalive_expiry_seconds = 20
+row_limit = 100000
+weight = 1.0
