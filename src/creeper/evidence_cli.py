@@ -493,7 +493,44 @@ async def run_service(
                     {
                         "rdap_effective_requests_per_second": (
                             rdap_provider.effective_requests_per_second
-                        )
+                        ),
+                        "cdx_active_services": len(provider.active_service_names),
+                        **{
+                            f"cdx_{name}_attempts": int(
+                                provider.service_attempts.get(name, 0)
+                            )
+                            for name in provider.services
+                        },
+                        **{
+                            f"cdx_{name}_passes": int(
+                                provider.service_passes.get(name, 0)
+                            )
+                            for name in provider.services
+                        },
+                        **{
+                            f"cdx_{name}_empty_exhaustive": int(
+                                provider.service_empty_exhaustive.get(name, 0)
+                            )
+                            for name in provider.services
+                        },
+                        **{
+                            f"cdx_{name}_transient_errors": int(
+                                provider.service_transient_errors.get(name, 0)
+                            )
+                            for name in provider.services
+                        },
+                        **{
+                            f"cdx_{name}_http_requests": int(
+                                provider.services[name].http_requests
+                            )
+                            for name in provider.services
+                        },
+                        **{
+                            f"cdx_{name}_throttle_responses": int(
+                                provider.services[name].throttle_responses
+                            )
+                            for name in provider.services
+                        },
                     }
                 )
                 previous_cooldown_wait_ms = provider.cooldown_wait_milliseconds
