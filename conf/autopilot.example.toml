@@ -55,6 +55,29 @@ platform_requests_per_second = 0.1
 platform_max_connections = 2
 platform_poll_seconds = 2.0
 
+# Physical CDX services behind the logical "wayback" queue provider.
+# Each service owns its own RPS, inflight and HTTP connection budget. Stable
+# weighted rendezvous hashing assigns one primary service per task; fallbacks
+# are contacted only after empty/incomplete/transient results, never in parallel
+# for the same host-year.
+[[evidence.cdx_providers]]
+name = "internet_archive"
+endpoint = "https://web.archive.org/cdx/search/cdx"
+requests_per_second = 0.5
+max_inflight = 4
+max_connections = 8
+max_keepalive_connections = 4
+weight = 0.5
+
+[[evidence.cdx_providers]]
+name = "arquivo_pt"
+endpoint = "https://arquivo.pt/wayback/cdx"
+requests_per_second = 1.0
+max_inflight = 4
+max_connections = 8
+max_keepalive_connections = 4
+weight = 1.0
+
 [readiness]
 # Optional fourth autopilot child. It consumes only newly proven unique
 # (hostname, year) evidence pairs and maintains annual Novel EED incrementally.
