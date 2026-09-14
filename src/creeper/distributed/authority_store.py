@@ -97,6 +97,7 @@ class DistributedAuthorityStore:
                 cpu_count INTEGER NOT NULL CHECK(cpu_count >= 1),
                 network_class TEXT NOT NULL,
                 capabilities_json TEXT NOT NULL,
+                producers_json TEXT NOT NULL DEFAULT '[]',
                 last_heartbeat REAL NOT NULL,
                 revoked INTEGER NOT NULL DEFAULT 0 CHECK(revoked IN (0, 1))
             ) WITHOUT ROWID;
@@ -249,6 +250,19 @@ class DistributedAuthorityStore:
                 ON distributed_provider_permits(provider, active, expires_at);
             """
         )
+        worker_columns = {
+            str(row["name"])
+            for row in self.connection.execute(
+                "PRAGMA table_info(distributed_workers)"
+            )
+        }
+        if "producers_json" not in worker_columns:
+            self.connection.execute(
+                """
+                ALTER TABLE distributed_workers
+                ADD COLUMN producers_json TEXT NOT NULL DEFAULT '[]'
+                """
+            )
         budget_columns = {
             str(row["name"])
             for row in self.connection.execute(
@@ -312,8 +326,9 @@ class DistributedAuthorityStore:
             """
             INSERT INTO distributed_workers(
                 worker_id, runtime_class, region, architecture, memory_bytes,
-                cpu_count, network_class, capabilities_json, last_heartbeat
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                cpu_count, network_class, capabilities_json, producers_json,
+                last_heartbeat
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(worker_id) DO UPDATE SET
                 runtime_class = excluded.runtime_class,
                 region = excluded.region,
@@ -322,6 +337,7 @@ class DistributedAuthorityStore:
                 cpu_count = excluded.cpu_count,
                 network_class = excluded.network_class,
                 capabilities_json = excluded.capabilities_json,
+                producers_json = excluded.producers_json,
                 last_heartbeat = excluded.last_heartbeat
             """,
             (
@@ -333,6 +349,7 @@ class DistributedAuthorityStore:
                 int(worker.cpu_count),
                 worker.network_class,
                 _json(sorted(worker.capabilities)),
+                _json(sorted(worker.producers)),
                 now,
             ),
         )
@@ -372,6 +389,19 @@ class DistributedAuthorityStore:
         if row is None or int(row["revoked"]):
             raise WorkerRejectedError(worker_id)
         return set(json.loads(str(row["capabilities_json"])))
+
+    def _worker_producers(self, worker_id: str) -> set[str]:
+        row = self.connection.execute(
+            """
+            SELECT producers_json, revoked
+            FROM distributed_workers
+            WHERE worker_id = ?
+            """,
+            (worker_id,),
+        ).fetchone()
+        if row is None or int(row["revoked"]):
+            raise WorkerRejectedError(worker_id)
+        return set(json.loads(str(row["producers_json"])))
 
     def _worker_region(self, worker_id: str) -> str:
         row = self.connection.execute(
@@ -514,6 +544,7 @@ class DistributedAuthorityStore:
             raise ValueError("lease_seconds must be positive")
         now = float(self.clock())
         capabilities = self._worker_capabilities(worker_id)
+        producers = self._worker_producers(worker_id)
         worker_region = self._worker_region(worker_id)
         self.connection.execute("BEGIN IMMEDIATE")
         try:
@@ -542,6 +573,8 @@ class DistributedAuthorityStore:
                         json.loads(str(row["required_capabilities_json"]))
                     )
                     if not required.issubset(capabilities):
+                        continue
+                    if producers and str(row["producer"]) not in producers:
                         continue
                     if not self._work_region_eligible(
                         row,
