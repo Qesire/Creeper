@@ -47,7 +47,7 @@ class CuratedSourceSeedTests(unittest.TestCase):
     def test_non_snapshot_roots_are_audited_mailbox_catalogs(self):
         roots = curated_non_snapshot_roots()
 
-        self.assertEqual(len(roots), 3)
+        self.assertEqual(len(roots), 4)
         self.assertEqual(
             {item.source_family for item in roots},
             {"HISTORICAL_MAILBOX_CATALOG"},
@@ -55,8 +55,18 @@ class CuratedSourceSeedTests(unittest.TestCase):
         self.assertTrue(
             all(
                 item.canonical_entrypoint.startswith(
-                    "https://lists.gnu.org/archive/mbox/"
+                    (
+                        "https://lists.gnu.org/archive/mbox/",
+                        "https://www.ietf.org/ietf-ftp/ietf-mail-archive/",
+                    )
                 )
+                for item in roots
+            )
+        )
+        self.assertTrue(
+            any(
+                item.canonical_entrypoint
+                == "https://www.ietf.org/ietf-ftp/ietf-mail-archive/ietf/"
                 for item in roots
             )
         )
@@ -75,14 +85,14 @@ class CuratedSourceSeedTests(unittest.TestCase):
 
     def test_all_curated_seeds_are_idempotent(self):
         seeds = curated_source_seeds()
-        self.assertEqual(len(seeds), 8)
+        self.assertEqual(len(seeds), 9)
         with tempfile.TemporaryDirectory() as tmp:
             control = ControlStore(Path(tmp) / "control.sqlite3")
             registry = SourceDiscoveryRegistry(control)
             try:
-                self.assertEqual(ensure_curated_source_seeds(registry), 8)
+                self.assertEqual(ensure_curated_source_seeds(registry), 9)
                 self.assertEqual(ensure_curated_source_seeds(registry), 0)
-                self.assertEqual(len(registry.list_candidates()), 8)
+                self.assertEqual(len(registry.list_candidates()), 9)
             finally:
                 control.close()
 

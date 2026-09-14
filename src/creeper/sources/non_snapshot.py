@@ -20,6 +20,17 @@ _HTTP_URL_RE = re.compile(
     """
 )
 _TRAILING_URL_PUNCTUATION = ".,;:!?)]}>"
+_MAILBOX_SUFFIXES = (
+    ".mbox.gz",
+    ".mbox",
+    ".mail.gz",
+    ".mail",
+)
+_MAILBOX_PATH_MARKERS = (
+    "/archive/mbox/",
+    "/ietf-ftp/ietf-mail-archive/",
+    "/pub/ietf/ietf-mail-archive/",
+)
 _SQUID_PATH_MARKERS = (
     "/cache/squid/rawlogs/",
     "/squid/rawlogs/",
@@ -31,7 +42,7 @@ def mailbox_year_from_locator(locator: str) -> int | None:
     """Return target year for an exact monthly mailbox shard, if encoded."""
     path = urlsplit(locator).path.rstrip("/")
     name = path.rsplit("/", 1)[-1].lower()
-    for suffix in (".mbox.gz", ".mbox"):
+    for suffix in _MAILBOX_SUFFIXES:
         if name.endswith(suffix):
             name = name[: -len(suffix)]
             break
@@ -42,11 +53,11 @@ def mailbox_year_from_locator(locator: str) -> int | None:
 
 
 def is_mailbox_url_locator(locator: str) -> bool:
-    """Recognize mailbox files and GNU-style extensionless monthly shards."""
+    """Recognize explicit mailbox files and audited extensionless archives."""
     path = urlsplit(locator).path.lower().rstrip("/")
-    if path.endswith((".mbox", ".mbox.gz")):
+    if path.endswith(_MAILBOX_SUFFIXES):
         return True
-    if "/archive/mbox/" not in path:
+    if not any(marker in path for marker in _MAILBOX_PATH_MARKERS):
         return False
     return mailbox_year_from_locator(locator) is not None
 
