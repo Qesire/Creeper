@@ -79,6 +79,27 @@ def curated_research_roots() -> tuple[SourceCandidate, ...]:
     return (
         SourceCandidate(
             canonical_entrypoint=(
+                "https://data.law.di.unimi.it/webdata/cnr-2000/"
+                "cnr-2000.urls.gz"
+            ),
+            source_family="EARLY_WEB_URL_CORPUS",
+            level=SourceLevel.SOURCE,
+            discovered_by="curated-research-seed",
+            discovery_strategy="CURATED_YEAR_ARCHETYPE_SEARCH",
+            expected_year_from=2000,
+            expected_year_to=2000,
+            expected_volume=325_557,
+            temporal_semantics_prior=1.0,
+            enumerability_prior=1.0,
+            direct_evidence_prior=0.0,
+            baseline_overlap_prior=0.50,
+            access_cost_prior=0.05,
+            adapter_cost_prior=0.05,
+            confidence=1.0,
+            state=SourceState.DISCOVERED,
+        ),
+        SourceCandidate(
+            canonical_entrypoint=(
                 "https://data.law.di.unimi.it/webdata/webbase-2001/"
                 "webbase-2001.urls.gz"
             ),
