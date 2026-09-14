@@ -282,7 +282,7 @@ class SourceProducerCliTests(unittest.TestCase):
                 self.assertEqual(lease.max_records, 4)
                 self.assertEqual(lease.expected_evidence_tasks, 4)
                 candidate_runtime = runtime.producer.candidates[0]
-                self.assertAlmostEqual(candidate_runtime.expected_novel_eed, 1.0)
+                self.assertAlmostEqual(candidate_runtime.expected_novel_eed, 2.0)
                 self.assertEqual(candidate_runtime.costs.evidence_network, 4.0)
                 self.assertEqual(candidate_runtime.reservation_evidence_tasks, 4)
 
@@ -471,8 +471,8 @@ class SourceProducerCliTests(unittest.TestCase):
             report = run_once(config, owner="static-headroom-test")
 
             self.assertEqual(report["leases_succeeded"], 1)
-            self.assertEqual(report["source_records"], 1)
-            self.assertEqual(report["evidence_tasks_enqueued"], 2)
+            self.assertEqual(report["source_records"], 4)
+            self.assertEqual(report["evidence_tasks_enqueued"], 8)
             control = ControlStore(runtime_root / "control.sqlite3")
             try:
                 reservoir = control.get_reservoir("webbase-static")
@@ -482,7 +482,7 @@ class SourceProducerCliTests(unittest.TestCase):
                     sum(
                         control.evidence_task_state_counts().values()
                     ),
-                    5,
+                    11,
                 )
             finally:
                 control.close()
