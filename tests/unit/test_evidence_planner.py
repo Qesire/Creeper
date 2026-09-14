@@ -44,7 +44,7 @@ class EvidencePlannerTests(unittest.TestCase):
             ).hexdigest(),
         )
 
-    def test_unauthorized_direct_claim_is_demoted_to_external_hint(self):
+    def test_unauthorized_direct_claim_remains_metadata_only(self):
         from creeper.evidence.planner import EvidencePlanner
 
         plan = EvidencePlanner().plan(
@@ -56,10 +56,7 @@ class EvidencePlannerTests(unittest.TestCase):
         )
 
         self.assertEqual(plan.direct_capsules, ())
-        self.assertEqual(
-            [(key.hostname, key.temporal_scope.year_from) for key in plan.external_keys],
-            [("new.example", 1997)],
-        )
+        self.assertEqual(plan.external_keys, ())
 
     def test_isc_reference_can_never_become_direct_evidence(self):
         from creeper.evidence.planner import EvidencePlanner
@@ -78,10 +75,7 @@ class EvidencePlannerTests(unittest.TestCase):
         )
 
         self.assertEqual(plan.direct_capsules, ())
-        self.assertEqual(
-            [(key.temporal_scope.year_from, key.temporal_scope.year_to) for key in plan.external_keys],
-            [(1997, 1997)],
-        )
+        self.assertEqual(plan.external_keys, ())
 
     def test_official_and_local_masks_suppress_direct_and_external_outputs(self):
         from creeper.evidence.planner import EvidencePlanner
@@ -102,7 +96,7 @@ class EvidencePlannerTests(unittest.TestCase):
         self.assertEqual(plan.direct_capsules, ())
         self.assertEqual(plan.external_keys, ())
 
-    def test_hints_and_legacy_source_year_create_external_keys(self):
+    def test_hints_and_legacy_source_year_do_not_spend_external_archive_requests(self):
         from creeper.evidence.planner import EvidencePlanner
 
         plan = EvidencePlanner().plan(
@@ -113,11 +107,7 @@ class EvidencePlannerTests(unittest.TestCase):
             policy_version="v1",
         )
 
-        self.assertEqual(
-            [(key.hostname, key.temporal_scope.year_from) for key in plan.external_keys],
-            [("new.example", 1998)],
-        )
-        self.assertEqual(plan.external_keys[0].temporal_scope.year_to, 1999)
+        self.assertEqual(plan.external_keys, ())
         self.assertEqual(plan.direct_capsules, ())
 
     def test_undated_hostname_plans_full_competition_year_range(self):
@@ -152,7 +142,7 @@ class EvidencePlannerTests(unittest.TestCase):
         )
 
 
-    def test_range_first_full_fraction_expands_hinted_host_to_all_unresolved_years(self):
+    def test_range_first_cannot_expand_dated_host_to_wayback(self):
         from creeper.evidence.planner import EvidencePlanner
 
         plan = EvidencePlanner().plan(
@@ -164,15 +154,9 @@ class EvidencePlannerTests(unittest.TestCase):
             range_first_fraction=1.0,
         )
 
-        self.assertEqual(
-            [
-                (key.temporal_scope.year_from, key.temporal_scope.year_to)
-                for key in plan.external_keys
-            ],
-            [(1996, 1996), (1998, 1998), (2000, 2001)],
-        )
+        self.assertEqual(plan.external_keys, ())
 
-    def test_range_first_zero_fraction_preserves_hint_only_planning(self):
+    def test_range_first_zero_fraction_keeps_dated_host_local_only(self):
         from creeper.evidence.planner import EvidencePlanner
 
         plan = EvidencePlanner().plan(
@@ -184,13 +168,7 @@ class EvidencePlannerTests(unittest.TestCase):
             range_first_fraction=0.0,
         )
 
-        self.assertEqual(
-            [
-                (key.temporal_scope.year_from, key.temporal_scope.year_to)
-                for key in plan.external_keys
-            ],
-            [(2001, 2001)],
-        )
+        self.assertEqual(plan.external_keys, ())
 
     def test_range_first_selection_is_stable(self):
         from creeper.evidence.planner import EvidencePlanner
@@ -202,7 +180,7 @@ class EvidencePlannerTests(unittest.TestCase):
         self.assertFalse(planner._range_first_selected("stable.example", 0.0))
         self.assertTrue(planner._range_first_selected("stable.example", 1.0))
 
-    def test_contiguous_missing_years_are_one_range_and_gaps_are_separate(self):
+    def test_dated_hint_masks_never_create_external_ranges(self):
         from creeper.evidence.planner import EvidencePlanner
 
         plan = EvidencePlanner().plan(
@@ -213,20 +191,14 @@ class EvidencePlannerTests(unittest.TestCase):
             policy_version="v1",
         )
 
-        self.assertEqual(
-            [
-                (key.temporal_scope.year_from, key.temporal_scope.year_to)
-                for key in plan.external_keys
-            ],
-            [(1996, 1997), (2000, 2001)],
-        )
+        self.assertEqual(plan.external_keys, ())
 
     def test_provider_coverage_suppresses_external_query_but_not_direct_evidence(self):
         from creeper.evidence.planner import EvidencePlanner
 
-        covered = YEAR_BITS[1997]
+        covered = ALL_YEAR_MASK
         external = EvidencePlanner().plan(
-            self.observation(year_hint_mask=YEAR_BITS[1997]),
+            self.observation(),
             official_mask=0,
             local_mask=0,
             provider="wayback",
@@ -273,7 +245,7 @@ class EvidencePlannerTests(unittest.TestCase):
         from creeper.evidence.planner import EvidencePlan, EvidencePlanner
 
         plan = EvidencePlanner().plan(
-            self.observation(year_hint_mask=YEAR_BITS[2001]),
+            self.observation(),
             official_mask=0,
             local_mask=0,
             provider="arquivo",
