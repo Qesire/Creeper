@@ -841,11 +841,21 @@ class SourceProducer:
                 and result.next_cursor is not None
             ):
                 raise RuntimeError("lease made no cursor progress")
-            # Revalidate ownership immediately before publishing read
+            # No code below can create another evidence task. Release any
+            # unused worst-case capacity now: an expired, no-longer-needed
+            # reservation must not veto an otherwise valid source commit.
+            # Source ownership remains independently fenced by the WorkLease.
+            self.admission.release(reservation)
+            reservation = None
+
+            # Revalidate source ownership immediately before publishing read
             # completion and advancing the durable reservoir cursor. A long
             # tail in downstream post-processing must not let an expired
             # producer commit success after its visibility deadline.
-            keep_ownership_live(force=True)
+            try:
+                keep_ownership_live(force=True)
+            except RuntimeError as exc:
+                raise RuntimeError("source lease expiry before final commit") from exc
             if (
                 self.source_registry is not None
                 and candidate.source_key is not None
