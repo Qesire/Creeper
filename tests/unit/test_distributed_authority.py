@@ -346,6 +346,48 @@ class DistributedAuthorityTests(unittest.TestCase):
         )
         self.assertIsNotNone(permit_b)
 
+    def test_claim_gate_respects_worker_producer_registry(self) -> None:
+        restricted = WorkerDescriptor(
+            worker_id="worker-restricted",
+            runtime_class="vm",
+            region="test-region",
+            architecture="x86_64",
+            memory_bytes=1024**3,
+            cpu_count=2,
+            network_class="public",
+            capabilities=(Capability.ONLINE_QUERY.value,),
+            producers=("HistoricalQueryProducer",),
+        )
+        self.store.register_worker(restricted)
+        unsupported = WorkDefinition(
+            producer="RDAPProducer",
+            task_class=TaskClass.HOST_BATCH,
+            input_identity="rdap.example",
+            coverage={"year_from": 1996, "year_to": 2001},
+            partition="0",
+            algorithm_version="rdap-v1",
+            required_capabilities=(Capability.ONLINE_QUERY.value,),
+        )
+        supported = WorkDefinition(
+            producer="HistoricalQueryProducer",
+            task_class=TaskClass.HOST_BATCH,
+            input_identity="cdx.example",
+            coverage={"year_from": 1996, "year_to": 2001},
+            partition="0",
+            algorithm_version="cdx-v1",
+            required_capabilities=(Capability.ONLINE_QUERY.value,),
+            priority=-1.0,
+        )
+        self.store.admit_work(unsupported)
+        supported_id = self.store.admit_work(supported)
+
+        claimed = self.store.claim_work(restricted.worker_id)
+
+        self.assertIsNotNone(claimed)
+        assert claimed is not None
+        self.assertEqual(claimed.task_id, supported_id)
+        self.assertEqual(claimed.work.producer, "HistoricalQueryProducer")
+
     def test_claim_gate_requires_provider_region_qualification(self) -> None:
         self.store.configure_provider_budget(
             "internet_archive",
