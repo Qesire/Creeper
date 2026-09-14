@@ -26,7 +26,7 @@ index, then run:
 ```bash
 sudo -E \
   FABRIC_BASELINE_INDEX=/absolute/path/to/baseline.sqlite3 \
-  bash deploy/fabric/local-authority/install.sh
+  deploy/fabric/local-authority/install.sh
 ```
 
 The installer:
@@ -45,7 +45,7 @@ Create a production Tunnel in Cloudflare and configure one public hostname
 
 ```bash
 sudo FABRIC_TUNNEL_TOKEN_FILE=/root/cloudflared-token \
-  bash deploy/fabric/local-authority/install-cloudflared.sh
+  deploy/fabric/local-authority/install-cloudflared.sh
 ```
 
 Optional verification:
@@ -57,17 +57,20 @@ curl -fsS https://fabric.example.com/meta
 
 Do not use a Quick Tunnel for production.
 
-## 2. Provision one worker identity
+## 2. Provision worker identities
 
 On the Local Authority machine:
 
 ```bash
 sudo deploy/fabric/local-authority/provision-worker-secret.sh oci-sg-01 \
   > /root/oci-sg-01.secret
+
+sudo deploy/fabric/local-authority/provision-worker-secret.sh gcp-us-01 \
+  > /root/gcp-us-01.secret
 ```
 
 The script atomically updates the Authority credential file, restarts
-Authority, and prints the newly generated HMAC secret once. Transfer that file
+Authority, and prints the newly generated HMAC secret once. Transfer each file
 over an authenticated admin channel (for example SSH/SCP), not via instance
 metadata or the repository.
 
@@ -83,7 +86,7 @@ sudo -E \
   FABRIC_WORKER_ID=oci-sg-01 \
   FABRIC_REGION=oci-singapore \
   FABRIC_WORKER_SECRET_FILE=/root/fabric-worker.secret \
-  bash deploy/fabric/oci/install.sh
+  deploy/fabric/oci/install.sh
 ```
 
 Default OCI profile:
@@ -101,15 +104,15 @@ The worker runs as `creeper-fabric-worker.service`.
 On the GCP VM:
 
 ```bash
-sudo install -m 0600 /path/from/scp/gcp-01.secret /root/fabric-worker.secret
+sudo install -m 0600 /path/from/scp/gcp-us-01.secret /root/fabric-worker.secret
 
 sudo -E \
   FABRIC_COORDINATOR_URL=https://fabric.example.com \
-  FABRIC_WORKER_ID=gcp-01 \
+  FABRIC_WORKER_ID=gcp-us-01 \
   FABRIC_REGION=gcp-us-central1 \
   FABRIC_WORKER_SECRET_FILE=/root/fabric-worker.secret \
   FABRIC_DAILY_EGRESS_BUDGET_BYTES=268435456 \
-  bash deploy/fabric/gcp/install.sh
+  deploy/fabric/gcp/install.sh
 ```
 
 The default GCP profile is deliberately conservative: it uses Arquivo as its
@@ -121,7 +124,71 @@ not embed `CREEPER_WORKER_SECRET` directly in startup-script metadata.
 Provision the root-only secret file first or retrieve it from a dedicated
 secret system.
 
-## 5. Cloudflare thin worker
+## 5. Qualify each provider x region
+
+Archive budgets are fail-closed until the specific worker region is qualified.
+Run these commands on the Local Authority host after the worker service is
+online:
+
+```bash
+CONTROL="/opt/creeper-fabric/.venv/bin/creeper-fabric-control"
+CONFIG="/etc/creeper-fabric/authority.toml"
+
+sudo -u creeper-fabric "$CONTROL" --config "$CONFIG" probe \
+  --provider internet_archive \
+  --region oci-singapore \
+  --hostname example.com
+
+sudo -u creeper-fabric "$CONTROL" --config "$CONFIG" probe \
+  --provider arquivo_pt \
+  --region oci-singapore \
+  --hostname example.com
+
+sudo -u creeper-fabric "$CONTROL" --config "$CONFIG" probe \
+  --provider arquivo_pt \
+  --region gcp-us-central1 \
+  --hostname example.com
+```
+
+The probe task itself bypasses qualification but is claimable only by a worker
+whose registered region exactly matches `--region`.
+
+Inspect state:
+
+```bash
+sudo -u creeper-fabric "$CONTROL" --config "$CONFIG" status
+journalctl -u creeper-fabric-worker -f
+```
+
+## 6. Start evidence-only exploration
+
+A known historical root:
+
+```bash
+sudo -u creeper-fabric "$CONTROL" --config "$CONFIG" explore \
+  --url https://example.org/links.html \
+  --archive-providers internet_archive,arquivo_pt \
+  --seed 1001
+```
+
+A centrally calibrated seeded campaign:
+
+```bash
+sudo -u creeper-fabric "$CONTROL" --config "$CONFIG" seeded-explore \
+  --campaign /opt/creeper-fabric/conf/fabric-search-campaign.example.json \
+  --seed 2001 \
+  --slot-start 0 \
+  --slot-count 4 \
+  --search-endpoint https://SEARCH-PROVIDER.example/search \
+  --archive-providers internet_archive,arquivo_pt
+```
+
+Replace `SEARCH-PROVIDER.example` with a search endpoint you are authorized
+to automate. Search URLs/hostnames remain worker-local; workers immediately
+consume discovered hostnames through their configured CDX providers and send
+only HY admission/evidence traffic to Authority.
+
+## 7. Cloudflare thin worker
 
 The Cloudflare runtime is independent JavaScript and only executes the
 positive-only exact-year thin contract.
@@ -131,7 +198,7 @@ cd deploy/fabric/cloudflare-worker
 cp wrangler.jsonc.example wrangler.jsonc
 # Edit COORDINATOR_URL / WORKER_ID / provider list.
 export CREEPER_WORKER_SECRET="$(cat /secure/path/cf-thin.secret)"
-bash deploy.sh
+./deploy.sh
 ```
 
 The deploy script stores the worker HMAC secret using Wrangler secrets and
