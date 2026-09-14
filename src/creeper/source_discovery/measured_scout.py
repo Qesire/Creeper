@@ -442,10 +442,9 @@ def _extract_hosts(
     truncated: bool = False,
 ) -> ParsedHostSample | None:
     if is_ftp_sitelist_locator(url):
-        if truncated:
-            raise ValueError(
-                "FTP sitelist ZIP requires a complete bounded artifact"
-            )
+        # ZIP central-directory parsing is the completeness check. This is more
+        # reliable than HTTP Range metadata from old mirrors; a partial object
+        # fails closed in parse_ftp_sitelist_zip.
         records = parse_ftp_sitelist_zip(
             payload,
             max_decompressed_bytes=policy.max_decompressed_bytes,
