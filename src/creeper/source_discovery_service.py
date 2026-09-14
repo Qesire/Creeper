@@ -73,7 +73,10 @@ from creeper.source_discovery.scrapy_scout import (
 )
 from creeper.source_discovery.scrapy_sidecar import ScrapyScoutLauncher
 from creeper.source_discovery.triage import HttpSourceTriageExecutor, HttpTriagePolicy
-from creeper.source_research.integration import ResearchIntegrationBridge
+from creeper.source_research.integration import (
+    ResearchIntegrationBridge,
+    RootPageResult,
+)
 from creeper.source_research.registry import ResearchRegistry
 from creeper.storage.control_store import ControlStore
 from creeper.storage.telemetry_store import RuntimeTelemetryStore
@@ -656,6 +659,19 @@ def _research_snapshot(
         key=lambda item: (-item.scout_priority, item.source_key)
     )
 
+    if research_bridge is not None:
+        now = time.time()
+        root_query_backlog = research_bridge.research.connection.execute(
+            """
+            SELECT COUNT(*) AS n
+            FROM research_queries
+            WHERE state IN ('READY','RETRYABLE')
+              AND (retry_at IS NULL OR retry_at<=?)
+            """,
+            (now,),
+        ).fetchone()
+        executable_regions += int(root_query_backlog["n"] or 0)
+
     final = production_value.research_signals()
     subject_candidate = (
         contract_blockers[0]
@@ -975,6 +991,185 @@ def _region_runtime_adapters(
     return plan_regions, execute_region
 
 
+def _root_query_runtime_adapters(
+    research: ResearchRegistry,
+    bridge: ResearchIntegrationBridge,
+    client: httpx.AsyncClient,
+    *,
+    parallelism: int,
+):
+    """Bind durable L3 QUERY frontier tasks to deterministic L4/L5 roots.
+
+    No root is contacted merely because the service is running. Only already
+    durable READY/RETRYABLE research queries create claimable frontier work.
+    """
+
+    if parallelism < 1:
+        raise ValueError("root query parallelism must be positive")
+
+    from creeper.source_research.models import FrontierState, QueryState
+    from creeper.source_research.adapters.archiveit import ArchiveItAdapter
+    from creeper.source_research.adapters.datacite import DataCiteAdapter
+    from creeper.source_research.adapters.dataverse import DataverseAdapter
+    from creeper.source_research.adapters.github_code import GitHubCodeAdapter
+    from creeper.source_research.adapters.oai import OAIAdapter
+    from creeper.source_research.adapters.zenodo import ZenodoAdapter
+
+    max_response_bytes = 8 * 1024 * 1024
+    owner = "source-discovery-root-runtime"
+
+    async def transport(
+        url: str,
+        params: Mapping[str, object] | None = None,
+        headers: Mapping[str, str] | None = None,
+    ) -> httpx.Response:
+        body = bytearray()
+        request = client.build_request(
+            "GET",
+            url,
+            params=params,
+            headers=dict(headers or {}),
+        )
+        async with client.stream(
+            "GET",
+            url,
+            params=params,
+            headers=dict(headers or {}),
+        ) as response:
+            async for chunk in response.aiter_bytes():
+                if len(body) + len(chunk) > max_response_bytes:
+                    raise ValueError(
+                        "structured-root response exceeds bounded 8 MiB page limit"
+                    )
+                body.extend(chunk)
+            return httpx.Response(
+                response.status_code,
+                headers=response.headers,
+                content=bytes(body),
+                request=request,
+            )
+
+    def adapter_for(root):
+        root_id = root.root_id
+        locator = root.canonical_locator
+        if root_id == "datacite":
+            return DataCiteAdapter(transport=transport, endpoint=locator)
+        if root_id == "zenodo":
+            return ZenodoAdapter(transport=transport, endpoint=locator)
+        if root_id == "archiveit":
+            return ArchiveItAdapter(transport=transport, api_endpoint=locator)
+        if root_id == "github-code":
+            return GitHubCodeAdapter(
+                transport=transport,
+                token=os.environ.get("GITHUB_TOKEN"),
+                endpoint=locator,
+            )
+        if root_id.startswith("oai:") or root.kind.value == "OAI":
+            return OAIAdapter(locator, transport=transport)
+        if root_id.startswith("dataverse:"):
+            instance = locator
+            if instance.rstrip("/").endswith("/api/search"):
+                instance = instance.rstrip("/")[: -len("/api/search")]
+            return DataverseAdapter(
+                instance,
+                transport=transport,
+                token=os.environ.get("DATAVERSE_TOKEN"),
+            )
+        return None
+
+    def plan_root_queries() -> tuple[object, ...]:
+        now = time.time()
+        research.reclaim_stale_leases(now=now)
+        research.ensure_query_frontier(limit=max(32, parallelism * 8))
+        claimed: list[object] = []
+        for _ in range(parallelism):
+            task = research.claim_frontier(
+                owner=owner,
+                lease_seconds=300.0,
+                now=now,
+                task_kind="QUERY",
+            )
+            if task is None:
+                break
+            claimed.append(task)
+        return tuple(claimed)
+
+    async def execute_root_query(task: object) -> RootPageResult:
+        task_id = str(getattr(task, "task_id"))
+        query_id = str(getattr(task, "entity_id"))
+        checkpoint = dict(getattr(task, "checkpoint", {}) or {})
+        try:
+            query, program_id = research.get_query(query_id)
+            root = research.get_root(query.root_id)
+            adapter = adapter_for(root)
+            if adapter is None:
+                reason = f"unsupported deterministic root adapter: {root.root_id}"
+                research.update_query_checkpoint(
+                    query_id,
+                    checkpoint=research.query_checkpoint(query_id),
+                    state=QueryState.BLOCKED,
+                    last_error=reason,
+                )
+                research.finish_frontier(
+                    task_id,
+                    state=FrontierState.BLOCKED,
+                    checkpoint=checkpoint,
+                    last_error=reason,
+                )
+                return RootPageResult(
+                    query_id=query_id,
+                    hits=0,
+                    artifacts=0,
+                    sources_inserted=0,
+                    terminal=True,
+                    retryable=False,
+                )
+
+            decision_id = str(checkpoint.get("decision_id", "") or "")
+            if not decision_id:
+                decision = research.latest_decision_for_task(task_id)
+                decision_id = "" if decision is None else decision.decision_id
+            pivot_id = str(checkpoint.get("pivot_id", "") or "")
+            result = await bridge.execute_root_query_page(
+                adapter,
+                query,
+                program_id=program_id,
+                pivot_id=pivot_id,
+                decision_id=decision_id,
+            )
+            row = research.get_query_row(query_id)
+            if result.retryable:
+                frontier_state = FrontierState.RETRYABLE
+                retry_at = row["retry_at"]
+            elif result.terminal:
+                frontier_state = FrontierState.DONE
+                retry_at = None
+            else:
+                frontier_state = FrontierState.READY
+                retry_at = None
+            research.finish_frontier(
+                task_id,
+                state=frontier_state,
+                checkpoint=checkpoint,
+                retry_at=retry_at,
+            )
+            return result
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            row = research.get_query_row(query_id)
+            research.finish_frontier(
+                task_id,
+                state=FrontierState.RETRYABLE,
+                checkpoint=checkpoint,
+                retry_at=row["retry_at"],
+                last_error=f"{type(exc).__name__}: {exc}"[:1000],
+            )
+            raise
+
+    return plan_root_queries, execute_root_query
+
+
 @asynccontextmanager
 async def _open_runtime(config: SourceDiscoveryServiceConfig):
     root = config.runtime_data_root
@@ -1134,6 +1329,17 @@ async def _open_runtime(config: SourceDiscoveryServiceConfig):
                     registry,
                     client,
                 )
+                root_query_planner, root_query_executor = (
+                    _root_query_runtime_adapters(
+                        research_registry,
+                        research_bridge,
+                        client,
+                        parallelism=max(
+                            1,
+                            config.coordinator.region_parallelism,
+                        ),
+                    )
+                )
                 coordinator = SourceDiscoveryCoordinator(
                     registry,
                     manager,
@@ -1149,6 +1355,12 @@ async def _open_runtime(config: SourceDiscoveryServiceConfig):
                     region_planner=region_planner,
                     region_executor=region_executor,
                     region_parallelism=config.coordinator.region_parallelism,
+                    root_query_planner=root_query_planner,
+                    root_query_executor=root_query_executor,
+                    root_query_parallelism=max(
+                        1,
+                        config.coordinator.region_parallelism,
+                    ),
                     failure_retry_seconds=config.coordinator.failure_retry_seconds,
                     research_snapshot_provider=(
                         (
@@ -1200,6 +1412,8 @@ def _report_has_progress(report: dict[str, object]) -> bool:
         "search_candidates_registered",
         "regions_completed",
         "region_candidates_registered",
+        "root_queries_completed",
+        "root_query_sources_registered",
         "research_completed",
     )
     return any(int(report.get(name, 0)) > 0 for name in progress_fields)
@@ -1227,6 +1441,11 @@ _DISCOVERY_COUNTER_FIELDS = {
     "regions_completed": "discovery_regions_completed",
     "regions_exhausted": "discovery_regions_exhausted",
     "region_candidates_registered": "discovery_region_candidates_registered",
+    "root_queries_started": "discovery_root_queries_started",
+    "root_queries_completed": "discovery_root_queries_completed",
+    "root_queries_terminal": "discovery_root_queries_terminal",
+    "root_query_sources_registered": "discovery_root_query_sources_registered",
+    "root_query_failures": "discovery_root_query_failures",
     "research_started": "discovery_research_started",
     "research_completed": "discovery_research_completed",
     "research_failures": "discovery_research_failures",
