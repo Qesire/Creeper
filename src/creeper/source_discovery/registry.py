@@ -1010,6 +1010,13 @@ class SourceDiscoveryRegistry:
         if any(not isinstance(value, str) or not value.strip() for value in values):
             raise ValueError("source-run identity and authority are required")
         now = float(self.clock())
+        if read_started is not None and (
+            isinstance(read_started, bool)
+            or not isinstance(read_started, (int, float))
+            or not math.isfinite(float(read_started))
+            or read_started < 0
+        ):
+            raise ValueError("read_started must be finite and non-negative")
         started = now if read_started is None else float(read_started)
         exposure = self.control_store.begin_production_exposure(
             source_key=source_key,
@@ -1113,6 +1120,13 @@ class SourceDiscoveryRegistry:
         if not lease_id.strip():
             raise ValueError("source-run lease identity is required")
         now = float(self.clock())
+        if read_started is not None and (
+            isinstance(read_started, bool)
+            or not isinstance(read_started, (int, float))
+            or not math.isfinite(float(read_started))
+            or read_started < 0
+        ):
+            raise ValueError("read_started must be finite and non-negative")
         started = None if read_started is None else float(read_started)
         with self.connection:
             self.connection.execute(
@@ -1243,8 +1257,24 @@ class SourceDiscoveryRegistry:
             candidate_duplicates,
             baseline_duplicates,
         )
-        if any(int(value) < 0 for value in metrics):
-            raise ValueError("source-run read counters must be non-negative")
+        if any(
+            isinstance(value, bool)
+            or not isinstance(value, int)
+            or value < 0
+            for value in metrics
+        ):
+            raise ValueError(
+                "source-run read counters must be non-negative integers"
+            )
+        if not isinstance(read_complete, bool):
+            raise ValueError("read_complete must be a boolean")
+        if read_finished is not None and (
+            isinstance(read_finished, bool)
+            or not isinstance(read_finished, (int, float))
+            or not math.isfinite(float(read_finished))
+            or read_finished < 0
+        ):
+            raise ValueError("read_finished must be finite and non-negative")
         now = float(self.clock())
         finished = (
             None
@@ -1344,12 +1374,25 @@ class SourceDiscoveryRegistry:
             accepted_host_years,
             max_evidence_sequence,
         )
-        if any(int(value) < 0 for value in integer_metrics):
-            raise ValueError("source-run validation counters must be non-negative")
-        if int(evidence_tasks_terminal) > int(evidence_tasks_created):
+        if any(
+            isinstance(value, bool)
+            or not isinstance(value, int)
+            or value < 0
+            for value in integer_metrics
+        ):
+            raise ValueError(
+                "source-run validation counters must be non-negative integers"
+            )
+        if evidence_tasks_terminal > evidence_tasks_created:
             raise ValueError("terminal evidence tasks cannot exceed created tasks")
+        if not isinstance(validation_complete, bool):
+            raise ValueError("validation_complete must be a boolean")
         if (
-            not math.isfinite(float(provider_elapsed_seconds))
+            isinstance(provider_elapsed_seconds, bool)
+            or not isinstance(provider_elapsed_seconds, (int, float))
+            or isinstance(final_accepted_eed, bool)
+            or not isinstance(final_accepted_eed, (int, float))
+            or not math.isfinite(float(provider_elapsed_seconds))
             or not math.isfinite(float(final_accepted_eed))
             or provider_elapsed_seconds < 0
             or final_accepted_eed < 0
