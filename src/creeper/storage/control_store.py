@@ -816,8 +816,16 @@ class ControlStore:
 
     @staticmethod
     def _validate_exposure_counters(values: Iterable[object]) -> None:
-        if any(float(value) < 0 for value in values):
-            raise ValueError("production exposure counters must be non-negative")
+        for value in values:
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(float(value))
+                or value < 0
+            ):
+                raise ValueError(
+                    "production exposure counters must be finite and non-negative"
+                )
 
     def get_production_exposure(self, exposure_id: str) -> ProductionExposure | None:
         row = self.connection.execute(
@@ -939,20 +947,29 @@ class ControlStore:
             ):
                 raise ValueError("elapsed_seconds conflicts with split elapsed counters")
             provider_elapsed_seconds = elapsed_seconds
-        values = [
-            value for value in (
-                source_records,
-                source_requests,
-                source_bytes,
-                provider_requests,
-                provider_bytes,
-                source_elapsed_seconds,
-                provider_elapsed_seconds,
-                evidence_frontier,
-                accepted_host_years,
-            ) if value is not None
-        ]
-        self._validate_exposure_counters(values)
+        integer_counters = (
+            source_records,
+            source_requests,
+            source_bytes,
+            provider_requests,
+            provider_bytes,
+            evidence_frontier,
+            accepted_host_years,
+        )
+        for value in integer_counters:
+            if value is None:
+                continue
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError(
+                    "production exposure count fields must be non-negative integers"
+                )
+        elapsed_counters = (
+            source_elapsed_seconds,
+            provider_elapsed_seconds,
+        )
+        self._validate_exposure_counters(
+            value for value in elapsed_counters if value is not None
+        )
         requested_authority = None
         if authority is not None or baseline_signature is not None or model_signature is not None:
             requested_authority = self._exposure_authority(
@@ -1037,8 +1054,20 @@ class ControlStore:
         evidence_frontier: int,
         authority: tuple[str, str],
     ) -> bool:
-        if final_accepted_eed < 0 or accepted_host_years < 0 or evidence_frontier < 0:
-            raise ValueError("production exposure final counters must be non-negative")
+        if (
+            isinstance(final_accepted_eed, bool)
+            or not isinstance(final_accepted_eed, (int, float))
+            or not math.isfinite(float(final_accepted_eed))
+            or final_accepted_eed < 0
+        ):
+            raise ValueError(
+                "production exposure final EED must be finite and non-negative"
+            )
+        for value in (accepted_host_years, evidence_frontier):
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError(
+                    "production exposure final counts must be non-negative integers"
+                )
         requested_authority = self._exposure_authority(authority=authority)
         now = float(self.clock())
         self.connection.execute("BEGIN IMMEDIATE")
@@ -3386,8 +3415,18 @@ class ControlStore:
     ) -> bool:
         """Persist FINAL reward fields after readiness closes the exposure."""
 
-        if final_eed < 0 or accepted_host_years < 0 or evidence_frontier < 0:
-            raise ValueError("platform final counters must be non-negative")
+        if (
+            isinstance(final_eed, bool)
+            or not isinstance(final_eed, (int, float))
+            or not math.isfinite(float(final_eed))
+            or final_eed < 0
+        ):
+            raise ValueError("platform final EED must be finite and non-negative")
+        for value in (accepted_host_years, evidence_frontier):
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError(
+                    "platform final counts must be non-negative integers"
+                )
         exposure = self.get_production_exposure(exposure_id)
         if exposure is None or exposure.state is not ProductionExposureState.FINAL_CLOSED:
             return False
