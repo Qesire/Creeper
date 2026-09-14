@@ -368,6 +368,19 @@ class SourceProducerCliTests(unittest.TestCase):
                 self.assertEqual(lease_candidate.reservation_evidence_tasks, 64)
                 self.assertEqual(lease_candidate.costs.evidence_network, 64.0)
 
+            limits["evidence_backlog_capacity"] = 63
+            with ActivatedSourceRuntime(
+                root / "activated.toml",
+                config=config,
+                limits=limits,
+                owner="mailbox-fanout-too-small-test",
+            ) as runtime:
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "minimum safe per-record evidence fanout",
+                ):
+                    runtime.refresh_workset()
+
     def test_activated_runtime_delegates_only_optimizer_eligible_direct_indexes(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
