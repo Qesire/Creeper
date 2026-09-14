@@ -81,6 +81,9 @@ def platform_year_harvest_id(
         "exposure_id": exposure_id,
         "authority_digest": authority_digest,
     }
+    for name, value in lineage.items():
+        if not isinstance(value, str):
+            raise ValueError(f"platform task lineage {name} must be a string")
     if any(lineage.values()):
         if not all(value.strip() for value in lineage.values()):
             raise ValueError("platform task lineage must be complete")
