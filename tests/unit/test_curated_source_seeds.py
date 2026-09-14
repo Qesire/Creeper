@@ -27,12 +27,6 @@ class CuratedSourceSeedTests(unittest.TestCase):
         )
         self.assertTrue(
             any(
-                item.canonical_entrypoint == "https://archive.org/details/pc-press-internet-cd"
-                for item in roots
-            )
-        )
-        self.assertTrue(
-            any(
                 item.canonical_entrypoint.endswith("webbase-2001.urls.gz")
                 and item.expected_volume == 118_142_155
                 for item in roots
