@@ -40,6 +40,7 @@ class WorkerDescriptor:
     network_class: str
     capabilities: tuple[str, ...]
     producers: tuple[str, ...] = ()
+    allowed_providers: tuple[str, ...] = ()
     protocol_version: str = FABRIC_PROTOCOL_VERSION
     edition_version: str = FABRIC_EDITION_VERSION
 
@@ -64,6 +65,10 @@ class WorkerDescriptor:
             raise ValueError("worker producers must be unique")
         if any(not producer.strip() for producer in self.producers):
             raise ValueError("worker producer names must be non-empty")
+        if len(set(self.allowed_providers)) != len(self.allowed_providers):
+            raise ValueError("worker allowed providers must be unique")
+        if any(not provider.strip() for provider in self.allowed_providers):
+            raise ValueError("worker allowed provider names must be non-empty")
         if not self.protocol_version.strip() or not self.edition_version.strip():
             raise ValueError("worker fabric version identity is required")
 
