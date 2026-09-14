@@ -47,8 +47,17 @@ class InterpretableSourceValueModel:
         exploration_weight: float = 0.25,
         descendant_discount: float = 0.5,
     ) -> None:
-        if exploration_weight < 0 or not 0 <= descendant_discount <= 1:
-            raise ValueError("invalid source value model weights")
+        if (
+            isinstance(exploration_weight, bool)
+            or not isinstance(exploration_weight, (int, float))
+            or not math.isfinite(float(exploration_weight))
+            or exploration_weight < 0
+            or isinstance(descendant_discount, bool)
+            or not isinstance(descendant_discount, (int, float))
+            or not math.isfinite(float(descendant_discount))
+            or not 0 <= descendant_discount <= 1
+        ):
+            raise ValueError("source value model weights must be finite and valid")
         self.registry = registry
         self.exploration_weight = float(exploration_weight)
         self.descendant_discount = float(descendant_discount)
