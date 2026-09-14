@@ -91,6 +91,7 @@ def _metadata_text(
     for key in (
         "name", "filename", "title", "description", "subject", "subjects",
         "keywords", "tags", "resource_type", "resourceType", "format",
+        "classification", "path", "repo",
     ):
         value = md.get(key)
         if isinstance(value, str):
@@ -161,10 +162,29 @@ def assess_artifact_metadata(
         description=description,
         metadata=metadata,
     )
-    hits = tuple(
+    hits_list = [
         name for name, pattern in _POSITIVE_METADATA_PATTERNS
         if pattern.search(text)
-    )
+    ]
+    md = metadata or {}
+    classification = str(md.get("classification") or "").strip().upper()
+    if classification in {
+        "DOWNLOAD_FOSSIL",
+        "MANIFEST",
+        "DATASET_README",
+        "DATA_ARTIFACT",
+    }:
+        hits_list.append("github_" + classification.casefold())
+    scheduling_prior = md.get("scheduling_prior")
+    if (
+        md.get("family_prior") is True
+        or (
+            isinstance(scheduling_prior, Mapping)
+            and scheduling_prior.get("archives_unleashed") is True
+        )
+    ):
+        hits_list.append("archives_unleashed")
+    hits = tuple(dict.fromkeys(hits_list))
 
     if format_kind in _SEMANTIC_ARTIFACT_FORMATS:
         if hits or expected == format_kind:
