@@ -10,6 +10,9 @@ network_class = "public"
 capabilities = ["ONLINE_QUERY", "STREAMING_BULK", "WEB_DISCOVERY", "RDAP"]
 # Fail-closed egress/provider policy enforced by Local Authority.
 allowed_providers = ["internet_archive", "arquivo_pt", "web_discovery"]
+# 0 = unlimited. Constrained workers (for example GCP free-tier nodes) should
+# set a finite daily raw response-byte budget.
+daily_egress_budget_bytes = 0
 secret_env = "CREEPER_WORKER_SECRET"
 poll_seconds = 1.0
 lease_seconds = 300.0
