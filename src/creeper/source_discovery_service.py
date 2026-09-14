@@ -1192,7 +1192,18 @@ def _root_query_runtime_adapters(
     if parallelism < 1:
         raise ValueError("root query parallelism must be positive")
 
-    from creeper.source_research.models import FrontierState, QueryState
+    from creeper.source_research.models import (
+        FrontierState,
+        FrontierTask,
+        QueryState,
+        stable_hash,
+    )
+    from creeper.source_research.policy import (
+        ActionCandidate,
+        HierarchicalAdaptivePolicy,
+        PolicyLevel,
+    )
+    from creeper.source_research.scheduler import AdaptiveResearchScheduler
     from creeper.source_research.adapters.archiveit import ArchiveItAdapter
     from creeper.source_research.adapters.datacite import DataCiteAdapter
     from creeper.source_research.adapters.dataverse import DataverseAdapter
@@ -1266,17 +1277,168 @@ def _root_query_runtime_adapters(
         now = time.time()
         research.reclaim_stale_leases(now=now)
         research.ensure_query_frontier(limit=max(32, parallelism * 8))
+        active_snapshot = research.active_policy_snapshot()
+
+        # No explicitly active L7 policy: preserve deterministic FIFO exactly.
+        if active_snapshot is None:
+            claimed: list[object] = []
+            for _ in range(parallelism):
+                task = research.claim_frontier(
+                    owner=owner,
+                    lease_seconds=300.0,
+                    now=now,
+                    task_kind="QUERY",
+                )
+                if task is None:
+                    break
+                claimed.append(task)
+            return tuple(claimed)
+
+        policy = HierarchicalAdaptivePolicy.from_snapshot(
+            snapshot_id=active_snapshot.snapshot_id,
+            parameters=active_snapshot.parameters,
+        )
+        scheduler = AdaptiveResearchScheduler(
+            policy=policy,
+            registry=research,
+        )
+        stats = scheduler.current_stats()
         claimed: list[object] = []
-        for _ in range(parallelism):
-            task = research.claim_frontier(
+
+        for slot in range(parallelism):
+            eligible = tuple(
+                task
+                for task in research.ready_frontier(now=now)
+                if task.task_kind == "QUERY"
+            )
+            if not eligible:
+                break
+
+            query_rows: dict[str, object] = {}
+            tasks_by_query: dict[str, object] = {}
+            roots: dict[str, list[str]] = {}
+            for task in eligible:
+                row = research.get_query_row(task.entity_id)
+                state = str(row["state"])
+                if state not in {"READY", "RETRYABLE"}:
+                    continue
+                query_id = str(row["query_id"])
+                root_id = str(row["root_id"])
+                query_rows[query_id] = row
+                tasks_by_query[query_id] = task
+                roots.setdefault(root_id, []).append(query_id)
+            if not roots:
+                break
+
+            # One immutable scheduling observation. Replaying the same candidate
+            # set after a crash recreates the same task/decisions and therefore
+            # the same selected action.
+            candidate_identity = [
+                {
+                    "task_id": str(task.task_id),
+                    "query_id": str(task.entity_id),
+                    "attempt": int(task.attempt),
+                }
+                for task in sorted(eligible, key=lambda item: item.task_id)
+                if str(task.entity_id) in query_rows
+            ]
+            schedule_entity = stable_hash(
+                "root-query-schedule",
+                active_snapshot.snapshot_id,
+                candidate_identity,
+                slot,
+            )
+            schedule_task_id = stable_hash(
+                "frontier-schedule",
+                schedule_entity,
+            )
+            research.enqueue_frontier(
+                FrontierTask(
+                    task_id=schedule_task_id,
+                    task_kind="SCHEDULE",
+                    entity_id=schedule_entity,
+                    state=FrontierState.DONE,
+                    policy_version=policy.config.version,
+                    schema_version=policy.config.schema_version,
+                )
+            )
+
+            root_candidates = tuple(
+                ActionCandidate(
+                    root_id,
+                    PolicyLevel.ROOT,
+                    novelty=1.0 if not research.arm_stats(
+                        policy_version=policy.config.version
+                    ) else 0.0,
+                )
+                for root_id in sorted(roots)
+            )
+            root_decision = scheduler.choose(
+                task_id=schedule_task_id,
+                level=PolicyLevel.ROOT,
+                candidates=root_candidates,
+                context_features={
+                    "candidate_query_count": len(query_rows),
+                    "candidate_root_count": len(roots),
+                    "scheduler": "root-query-runtime",
+                },
+                timestamp=now,
+                selection_nonce=f"slot:{slot}:root",
+                stats_by_arm=stats,
+            )
+            chosen_root = root_decision.chosen_action_id
+
+            query_candidates = tuple(
+                ActionCandidate(
+                    query_id,
+                    PolicyLevel.QUERY_FAMILY,
+                )
+                for query_id in sorted(roots[chosen_root])
+            )
+            query_decision = scheduler.choose(
+                task_id=schedule_task_id,
+                level=PolicyLevel.QUERY_FAMILY,
+                candidates=query_candidates,
+                context_features={
+                    "candidate_query_count": len(query_candidates),
+                    "chosen_root": chosen_root,
+                    "parent_path": (chosen_root,),
+                    "parent_decision_ids": (root_decision.decision_id,),
+                    "scheduler": "root-query-runtime",
+                },
+                timestamp=now,
+                selection_nonce=f"slot:{slot}:query",
+                stats_by_arm=stats,
+            )
+            selected_query_id = query_decision.chosen_action_id
+            selected_task = tasks_by_query[selected_query_id]
+
+            # Persist the leaf decision onto the durable execution task before
+            # claiming it. A crash between selection and claim replays the same
+            # scheduling decision and does not lose causal lineage.
+            selected_checkpoint = dict(selected_task.checkpoint)
+            selected_checkpoint.update(
+                {
+                    "decision_id": query_decision.decision_id,
+                    "root_decision_id": root_decision.decision_id,
+                    "policy_snapshot_id": active_snapshot.snapshot_id,
+                }
+            )
+            research.finish_frontier(
+                selected_task.task_id,
+                state=FrontierState.READY,
+                checkpoint=selected_checkpoint,
+            )
+            task = research.claim_frontier_task(
+                selected_task.task_id,
                 owner=owner,
                 lease_seconds=300.0,
                 now=now,
-                task_kind="QUERY",
             )
             if task is None:
-                break
+                continue
             claimed.append(task)
+
         return tuple(claimed)
 
     async def execute_root_query(task: object) -> RootPageResult:
