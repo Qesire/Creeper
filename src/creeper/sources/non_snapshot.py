@@ -8,6 +8,7 @@ cross into Creeper SourceRecord payloads.
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from html import unescape
 import re
 from urllib.parse import urlsplit
 
@@ -20,6 +21,13 @@ _HTTP_URL_RE = re.compile(
     """
 )
 _TRAILING_URL_PUNCTUATION = ".,;:!?)]}>"
+_DMOZ_URL_ATTR_RE = re.compile(
+    r"""(?ix)
+    <(?:link\s+r:resource|ExternalPage\s+about)
+    \s*=\s*
+    ["']([^"']+)["']
+    """
+)
 _SQUID_PATH_MARKERS = (
     "/cache/squid/rawlogs/",
     "/squid/rawlogs/",
@@ -84,6 +92,50 @@ def extract_http_urls(
             break
     return tuple(result)
 
+
+def is_dmoz_rdf_locator(locator: str) -> bool:
+    """Recognize DMOZ/ODP content dumps without matching arbitrary RDF/XML."""
+    path = urlsplit(locator).path.lower().rstrip("/")
+    return path.endswith(
+        (
+            "/content.rdf",
+            "/content.rdf.gz",
+            "/content.rdf.u8",
+            "/content.rdf.u8.gz",
+        )
+    )
+
+
+def extract_dmoz_urls(
+    text: str,
+    *,
+    max_urls: int = 64,
+) -> tuple[str, ...]:
+    """Extract bounded external HTTP(S) URLs from one DMOZ RDF text chunk.
+
+    DMOZ content dumps historically used both link resource and ExternalPage
+    about attributes. XML entities are decoded before URL validation; category
+    identifiers and descriptions are intentionally ignored.
+    """
+    if max_urls < 1:
+        raise ValueError("max_urls must be positive")
+    result: list[str] = []
+    seen: set[str] = set()
+    for match in _DMOZ_URL_ATTR_RE.finditer(text):
+        value = unescape(match.group(1).strip())
+        try:
+            parsed = urlsplit(value)
+        except ValueError:
+            continue
+        if parsed.scheme.lower() not in {"http", "https"} or parsed.hostname is None:
+            continue
+        if value in seen:
+            continue
+        seen.add(value)
+        result.append(value)
+        if len(result) >= max_urls:
+            break
+    return tuple(result)
 
 def is_squid_access_locator(locator: str) -> bool:
     """Recognize explicit Squid access-log resources without matching generic logs."""
