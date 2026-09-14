@@ -41,8 +41,10 @@ A Clockwork Online clockwork.com
 Construction OnLine 199.166.4.9 3004
 Insight Media insight-media.co.uk 1961
 Myndz Eye Dreams BBS http://aol.com/csrv/downloa
+A Truncated Host cal022011.student.utwente.n
+A Marker-Prefixed Host @excal.infoconex.com 1961
 A Duplicate clockwork.com
-TOTAL SYSTEMS LISTED: 5
+TOTAL SYSTEMS LISTED: 7
 [END OF LIST]
 """
 
@@ -82,6 +84,34 @@ class SbiBbsParserTests(unittest.TestCase):
         self.assertEqual(
             sum(row.hostname == "clockwork.com" for row in rows),
             1,
+        )
+
+    def test_truncated_and_marker_prefixed_hostnames_fail_closed(self) -> None:
+        rows = parse_sbi_quick_list_text(
+            sbi_text(),
+            member_name="SBIQ0197.LST",
+        )
+        hosts = {row.hostname for row in rows}
+        self.assertNotIn("cal022011.student.utwente.n", hosts)
+        self.assertNotIn("@excal.infoconex.com", hosts)
+        self.assertNotIn("excal.infoconex.com", hosts)
+
+    def test_quick_list_requires_complete_footer(self) -> None:
+        truncated = sbi_text().replace("[END OF LIST]", "")
+        self.assertEqual(
+            parse_sbi_quick_list_text(
+                truncated,
+                member_name="SBIQ0197.LST",
+            ),
+            (),
+        )
+        missing_total = sbi_text().replace("TOTAL SYSTEMS LISTED: 7", "")
+        self.assertEqual(
+            parse_sbi_quick_list_text(
+                missing_total,
+                member_name="SBIQ0197.LST",
+            ),
+            (),
         )
 
     def test_internal_revision_date_must_match_member_edition(self) -> None:

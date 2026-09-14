@@ -48,6 +48,7 @@ _LIST_HEADER_RE = re.compile(
 )
 _LIST_END_RE = re.compile(r"^\s*TOTAL\s+SYSTEMS\s+LISTED\s*:", re.IGNORECASE)
 _HTTP_URL_RE = re.compile(r"https?://[^\s<>\[\]{}\"']+", re.IGNORECASE)
+_HOST_LABEL_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -119,6 +120,24 @@ def _edition_date(text: str, *, member_name: str) -> datetime | None:
     return parsed
 
 
+def _strict_hostname(value: str) -> str | None:
+    raw = value.strip().rstrip(".")
+    if not raw or "@" in raw:
+        return None
+    try:
+        ipaddress.ip_address(raw)
+    except ValueError:
+        pass
+    else:
+        return None
+    labels = raw.split(".")
+    if len(labels) < 2 or len(labels[-1]) < 2:
+        return None
+    if any(_HOST_LABEL_RE.fullmatch(label) is None for label in labels):
+        return None
+    return normalize_official(raw)
+
+
 def _hostname_from_address_line(line: str) -> str | None:
     url_match = _HTTP_URL_RE.search(line)
     if url_match is not None:
@@ -151,13 +170,7 @@ def _hostname_from_address_line(line: str) -> str | None:
 
     if not raw:
         return None
-    try:
-        ipaddress.ip_address(raw)
-    except ValueError:
-        pass
-    else:
-        return None
-    return normalize_official(raw)
+    return _strict_hostname(raw)
 
 
 def parse_sbi_quick_list_text(
@@ -172,6 +185,8 @@ def parse_sbi_quick_list_text(
         return ()
 
     in_list = False
+    saw_total = False
+    saw_end = False
     rows: list[SbiBbsRecord] = []
     seen: set[str] = set()
     for raw_line in text.splitlines():
@@ -179,7 +194,11 @@ def parse_sbi_quick_list_text(
             if _LIST_HEADER_RE.match(raw_line):
                 in_list = True
             continue
-        if _LIST_END_RE.match(raw_line) or raw_line.strip() == "[END OF LIST]":
+        if _LIST_END_RE.match(raw_line):
+            saw_total = True
+            continue
+        if raw_line.strip() == "[END OF LIST]":
+            saw_end = True
             break
         stripped = raw_line.strip()
         if not stripped or set(stripped) <= {"-", "="}:
@@ -197,6 +216,8 @@ def parse_sbi_quick_list_text(
                 record_index=len(rows),
             )
         )
+    if not (in_list and saw_total and saw_end):
+        return ()
     return tuple(rows)
 
 
