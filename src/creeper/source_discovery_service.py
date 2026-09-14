@@ -743,6 +743,15 @@ def _publish_discovery_telemetry(
                 int(is_direct_evidence_entrypoint(item.canonical_entrypoint))
                 for item in active
             ),
+            "discovery_search_zero_new_streak": int(
+                report.get("search_zero_new_streak", 0)
+            ),
+            "discovery_search_adaptive_cooldown_seconds": float(
+                report.get("search_adaptive_cooldown_seconds", 0.0)
+            ),
+            "discovery_search_call_budget": int(
+                report.get("search_call_budget", 0)
+            ),
             "discovery_search_episodes_inflight": int(
                 registry.connection.execute(
                     """
