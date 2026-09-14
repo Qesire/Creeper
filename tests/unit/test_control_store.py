@@ -724,6 +724,33 @@ class ControlStoreTests(unittest.TestCase):
             store.close()
 
 
+    def test_first_lease_freezes_initial_cursor_and_abort_restores_it(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ControlStore(Path(tmp) / "control.sqlite3")
+            ready = self._ready_reservoir(cursor=None)
+            store.save_domain(self._domain())
+            store.save_reservoir(ready)
+
+            lease = store.grant_fresh_lease(
+                ready.reservoir_id,
+                owner="worker-a",
+                now=100.0,
+                lease_ttl_seconds=40.0,
+                initial_cursor="0",
+                **self._lease_limits(),
+            )
+            assert lease is not None
+            self.assertEqual(lease.cursor_start, "0")
+            self.assertEqual(store.get_reservoir(ready.reservoir_id).cursor, "0")
+
+            running = lease.start()
+            store.save_lease(running)
+            store.abort_lease(running)
+            restored = store.get_reservoir(ready.reservoir_id)
+            self.assertEqual(restored.state, ReservoirState.READY)
+            self.assertEqual(restored.cursor, "0")
+            store.close()
+
     def test_live_source_lease_renews_visibility_but_expired_one_does_not(self):
         with tempfile.TemporaryDirectory() as tmp:
             now = {"value": 100.0}
