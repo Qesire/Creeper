@@ -92,6 +92,24 @@ class WorkLeaseTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "now must be finite"):
             lease.expire(float("nan"))
 
+    def test_expired_helper_cannot_bypass_lifecycle(self):
+        with self.assertRaises(StateTransitionError):
+            self._lease().expired()
+        succeeded = self._lease().grant(owner="worker").start().complete()
+        with self.assertRaises(StateTransitionError):
+            succeeded.expired()
+
+    def test_cursor_types_are_explicit(self):
+        with self.assertRaisesRegex(ValueError, "cursor_start"):
+            WorkLease.create(
+                reservoir_id="arquivo:demo",
+                max_records=1,
+                max_requests=1,
+                max_bytes=1,
+                max_seconds=1,
+                cursor_start=0,
+            )
+
     def test_state_transitions_are_guarded_and_immutable(self):
         created = self._lease()
         granted = created.grant(owner="worker-1")
