@@ -12,6 +12,7 @@ class DistributedDeployAssetTests(unittest.TestCase):
             root / "deploy/fabric/local-authority/install.sh",
             root / "deploy/fabric/local-authority/install-cloudflared.sh",
             root / "deploy/fabric/local-authority/provision-worker-secret.sh",
+            root / "deploy/fabric/local-authority/bootstrap-workers.sh",
             root / "deploy/fabric/local-authority/smoke.sh",
             root / "deploy/fabric/vm-worker/install.sh",
             root / "deploy/fabric/vm-worker/smoke.sh",
