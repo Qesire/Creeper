@@ -208,6 +208,7 @@ class CommandAgentSearchExecutor:
                 "resource_priority": [
                     "new enumerable root or dataset family overlapping 1996-2001",
                     "early-web link/URL/domain/seed inventories with year provenance",
+                    "historical NIC/registry domain-allocation or connected-domain snapshots",
                     "research-repository datasets derived from 1996-2001 web collections",
                     "national-library or university collection/data manifests",
                     "historical directories or site lists exposing many external hosts",
@@ -219,6 +220,7 @@ class CommandAgentSearchExecutor:
                     "university early-web research datasets",
                     "public archive data-package manifests",
                     "historical link lists, URL lists, domain lists, and seed inventories",
+                    "NIC/registry FTP exports and dated allocation/statistics snapshots",
                 ],
                 "query_construction": {
                     "must_include_target_period": (
@@ -227,8 +229,9 @@ class CommandAgentSearchExecutor:
                     ),
                     "must_include_source_archetype": (
                         "combine the year term with one concrete archetype such "
-                        "as link list, URL list, domain list, seed list, dataset, "
-                        "manifest, directory, crawl index, or collection export"
+                        "as link list, URL list, domain list, seed list, registry "
+                        "snapshot, dataset, manifest, directory, crawl index, or "
+                        "collection export"
                     ),
                     "root_first": (
                         "find a new dataset/root/family before enumerating files; "
