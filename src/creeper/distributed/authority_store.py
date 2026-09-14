@@ -23,6 +23,7 @@ from creeper.distributed.edition import (
 )
 from creeper.distributed.identity import (
     evidence_id,
+    host_id,
     host_year_id,
     source_candidate_id,
 )
@@ -173,6 +174,23 @@ class DistributedAuthorityStore:
                 UNIQUE(task_id, sequence_no),
                 FOREIGN KEY(task_id) REFERENCES distributed_work(task_id)
             ) WITHOUT ROWID;
+
+            CREATE TABLE IF NOT EXISTS distributed_host_candidates (
+                candidate_id TEXT PRIMARY KEY,
+                hostname TEXT NOT NULL UNIQUE,
+                first_task_id TEXT NOT NULL,
+                first_source TEXT NOT NULL,
+                first_locator TEXT NOT NULL,
+                discovery_count INTEGER NOT NULL DEFAULT 1
+                    CHECK(discovery_count >= 1),
+                state TEXT NOT NULL DEFAULT 'DISCOVERED',
+                last_error TEXT,
+                first_seen_at REAL NOT NULL,
+                last_seen_at REAL NOT NULL,
+                FOREIGN KEY(first_task_id) REFERENCES distributed_work(task_id)
+            ) WITHOUT ROWID;
+            CREATE INDEX IF NOT EXISTS idx_distributed_host_candidates_state
+                ON distributed_host_candidates(state, discovery_count DESC);
 
             CREATE TABLE IF NOT EXISTS distributed_source_candidates (
                 candidate_id TEXT PRIMARY KEY,
@@ -905,6 +923,93 @@ class DistributedAuthorityStore:
             )
         return promoted
 
+    def host_candidate_count(self) -> int:
+        return int(
+            self.connection.execute(
+                "SELECT COUNT(*) FROM distributed_host_candidates"
+            ).fetchone()[0]
+        )
+
+    def host_candidate_rows(self) -> list[dict[str, object]]:
+        return [
+            dict(row)
+            for row in self.connection.execute(
+                """
+                SELECT * FROM distributed_host_candidates
+                ORDER BY discovery_count DESC, hostname
+                """
+            ).fetchall()
+        ]
+
+    def promote_host_candidates(
+        self,
+        *,
+        physical_providers: tuple[str, ...],
+        coverage_provider: str,
+        resolver_version: str,
+        limit: int = 256,
+        priority: float = 0.0,
+    ) -> list[dict[str, object]]:
+        if (
+            limit < 1
+            or not physical_providers
+            or not coverage_provider.strip()
+            or not resolver_version.strip()
+        ):
+            raise ValueError("invalid host candidate promotion configuration")
+        rows = self.connection.execute(
+            """
+            SELECT * FROM distributed_host_candidates
+            WHERE state = 'DISCOVERED'
+            ORDER BY discovery_count DESC, first_seen_at, hostname
+            LIMIT ?
+            """,
+            (int(limit),),
+        ).fetchall()
+        promoted: list[dict[str, object]] = []
+        for row in rows:
+            hostname = str(row["hostname"])
+            state = "DISCOVERED"
+            error: str | None = None
+            task_ids: tuple[str, ...] = ()
+            try:
+                task_ids = self.admit_host_resolution_work(
+                    hostname=hostname,
+                    physical_providers=physical_providers,
+                    coverage_provider=coverage_provider,
+                    resolver_version=resolver_version,
+                    year_from=1996,
+                    year_to=2001,
+                    priority=priority,
+                )
+                state = "ADMITTED" if task_ids else "COVERED"
+            except Exception as exc:
+                state = "ERROR"
+                error = f"{type(exc).__name__}: {exc}"
+
+            self.connection.execute(
+                """
+                UPDATE distributed_host_candidates
+                SET state = ?, last_error = ?, last_seen_at = ?
+                WHERE candidate_id = ?
+                """,
+                (
+                    state,
+                    error,
+                    float(self.clock()),
+                    str(row["candidate_id"]),
+                ),
+            )
+            self.connection.commit()
+            promoted.append(
+                {
+                    "hostname": hostname,
+                    "state": state,
+                    "task_ids": list(task_ids),
+                }
+            )
+        return promoted
+
     def source_candidate_count(self) -> int:
         return int(
             self.connection.execute(
@@ -1282,6 +1387,61 @@ class DistributedAuthorityStore:
             raise
 
     @staticmethod
+    def _host_candidate_from_result(
+        item: Mapping[str, object],
+    ) -> tuple[str, str, str, str] | None:
+        if str(item.get("kind", "")) != "HOST_CANDIDATE":
+            return None
+        raw_hostname = item.get("hostname")
+        if not isinstance(raw_hostname, str):
+            raise ValueError("HOST_CANDIDATE hostname must be a string")
+        hostname = normalize_official(raw_hostname)
+        source = str(item.get("source", "")).strip()
+        locator = str(item.get("locator", "")).strip()
+        if hostname is None or not source or not locator:
+            raise ValueError("invalid HOST_CANDIDATE")
+        return host_id(hostname), hostname, source, locator
+
+    def _commit_host_candidates(
+        self,
+        task_id: str,
+        results: tuple[Mapping[str, object], ...],
+        *,
+        now: float,
+    ) -> None:
+        unique: dict[str, tuple[str, str, str]] = {}
+        for item in results:
+            parsed = self._host_candidate_from_result(item)
+            if parsed is None:
+                continue
+            candidate_id, hostname, source, locator = parsed
+            unique[candidate_id] = (hostname, source, locator)
+
+        for candidate_id, (hostname, source, locator) in unique.items():
+            self.connection.execute(
+                """
+                INSERT INTO distributed_host_candidates(
+                    candidate_id, hostname, first_task_id, first_source,
+                    first_locator, discovery_count, state,
+                    first_seen_at, last_seen_at
+                ) VALUES (?, ?, ?, ?, ?, 1, 'DISCOVERED', ?, ?)
+                ON CONFLICT(candidate_id) DO UPDATE SET
+                    discovery_count =
+                        distributed_host_candidates.discovery_count + 1,
+                    last_seen_at = excluded.last_seen_at
+                """,
+                (
+                    candidate_id,
+                    hostname,
+                    task_id,
+                    source,
+                    locator,
+                    now,
+                    now,
+                ),
+            )
+
+    @staticmethod
     def _source_candidate_from_result(
         item: Mapping[str, object],
     ) -> tuple[str, str, str, str, str] | None:
@@ -1454,6 +1614,11 @@ class DistributedAuthorityStore:
                 ),
             )
             self._commit_source_candidates(
+                batch.task_id,
+                batch.results,
+                now=now,
+            )
+            self._commit_host_candidates(
                 batch.task_id,
                 batch.results,
                 now=now,
