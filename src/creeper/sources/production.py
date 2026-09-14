@@ -32,7 +32,9 @@ from creeper.sources.archive.cdxj import parse_cdxj_line
 from creeper.sources.archive.cdx import parse_cdx_line
 from creeper.sources.non_snapshot import (
     extract_http_urls,
+    is_ftp_sitelist_zip_locator,
     parse_dmoz_external_page_line,
+    parse_ftp_sitelist_zip,
     parse_squid_access_line,
 )
 from creeper.sources.reservoirs import Reservoir
@@ -831,6 +833,204 @@ class StructuredProductionAdapter:
         return tuple(result)
 
 
+class FtpSitelistZipProductionAdapter:
+    """Bounded package reader for the Perry Rovers Anonymous FTP sitelist."""
+
+    MAX_PACKAGE_BYTES = 8 * 1024 * 1024
+    MAX_UNCOMPRESSED_BYTES = 16 * 1024 * 1024
+
+    def __init__(
+        self,
+        reservoir: Reservoir,
+        *,
+        evidence_contract: SourceEvidenceContract | None = None,
+    ) -> None:
+        self.adapter_id = reservoir.adapter_id
+        self.source_id = reservoir.reservoir_id
+        self.source = reservoir.root_locator
+        if not is_ftp_sitelist_zip_locator(self.source):
+            raise ProductionAdapterError("not an Anonymous FTP sitelist package")
+
+        bound_contract = contract_from_adapter_id(reservoir.adapter_id)
+        if (
+            evidence_contract is not None
+            and bound_contract is not None
+            and evidence_contract != bound_contract
+        ):
+            raise ProductionAdapterError(
+                "explicit evidence contract conflicts with durable adapter binding"
+            )
+        resolved_contract = (
+            evidence_contract
+            or bound_contract
+            or resolve_source_evidence_contract(
+                self.source,
+                parser_kind="ftp_sitelist_zip",
+            )
+        )
+        if (
+            evidence_contract is None
+            and bound_contract is None
+            and reservoir.evidence_mode == "discovery_only"
+            and resolved_contract.evidence_mode == "direct_year"
+        ):
+            resolved_contract = discovery_only_contract("ftp_sitelist_zip")
+        self.evidence_contract = resolved_contract
+        if self.evidence_contract.parser_kind != "ftp_sitelist_zip":
+            raise ProductionAdapterError(
+                "evidence contract parser_kind does not match FTP sitelist source"
+            )
+        if reservoir.evidence_mode != self.evidence_contract.evidence_mode:
+            raise ProductionAdapterError(
+                "reservoir evidence_mode disagrees with frozen evidence contract"
+            )
+        self._records: tuple[tuple[str, int, str, int, str], ...] | None = None
+        self._package_bytes = 0
+
+    @staticmethod
+    def _cursor_value(cursor: str | None) -> int:
+        if cursor in {None, "", "0"}:
+            return 0
+        if not cursor.startswith("record:"):
+            raise ValueError("invalid FTP sitelist cursor; expected record:<index>")
+        raw = cursor.removeprefix("record:")
+        if not raw.isdigit():
+            raise ValueError("invalid FTP sitelist cursor; expected record:<index>")
+        return int(raw)
+
+    def _ensure_records(self, *, byte_budget: int) -> int:
+        if self._records is not None:
+            return 0
+        if byte_budget < 1:
+            raise ProductionAdapterError("FTP sitelist package requires byte budget")
+        cap = min(self.MAX_PACKAGE_BYTES, int(byte_budget))
+        opened = 0
+        with fsspec.open(self.source, "rb", block_size=0).open() as stream:
+            opened = 1
+            payload = stream.read(cap + 1)
+        if len(payload) > cap:
+            raise ProductionAdapterError(
+                "FTP sitelist package exceeds lease/package byte budget"
+            )
+        try:
+            parsed = parse_ftp_sitelist_zip(
+                payload,
+                max_uncompressed_bytes=self.MAX_UNCOMPRESSED_BYTES,
+            )
+        except ValueError as exc:
+            raise ProductionAdapterError(str(exc)) from exc
+        self._package_bytes = len(payload)
+        self._records = tuple(
+            item for item in parsed if item[3] in YEAR_BITS
+        )
+        return opened
+
+    def execute_stream(
+        self,
+        lease: WorkLease,
+        emit_record: Callable[[SourceRecord], None],
+    ) -> LeaseResult:
+        start = self._cursor_value(lease.cursor_start)
+        if lease.max_records <= 0 or lease.max_seconds <= 0 or lease.max_bytes <= 0:
+            return LeaseResult(
+                lease.lease_id,
+                next_cursor=f"record:{start}",
+            )
+        started = time.monotonic()
+        opened = self._ensure_records(byte_budget=lease.max_bytes)
+        bytes_read = self._package_bytes if opened else 0
+        records = self._records or ()
+        if start >= len(records):
+            return LeaseResult(
+                lease_id=lease.lease_id,
+                records=0,
+                requests=opened,
+                bytes_read=bytes_read,
+                elapsed_seconds=max(0.0, time.monotonic() - started),
+                next_cursor=None,
+            )
+
+        emitted = 0
+        index = start
+        while index < len(records) and emitted < lease.max_records:
+            if time.monotonic() - started >= lease.max_seconds:
+                break
+            member, site_line, hostname, year, date_text = records[index]
+            bit = YEAR_BITS[year]
+            direct = self.evidence_contract.grants_direct_web_year
+            locator = f"{self.source}#zip:{member}:line:{site_line}"
+            record = SourceRecord(
+                source_id=self.source_id,
+                locator=locator,
+                payload=f"ftp://{hostname}/",
+                scope=CandidateSourceScope.LOCAL_DISCOVERY,
+                source_year=year,
+                source_time=date_text,
+                record_type="FTP_SITELIST_SITE",
+                artifact_ref=self.source,
+                direct_year_mask=bit if direct else 0,
+                year_hint_mask=0 if direct else bit,
+                evidence_type=(
+                    self.evidence_contract.evidence_type if direct else ""
+                ),
+                temporal_semantics=(
+                    self.evidence_contract.temporal_semantics if direct else ""
+                ),
+                evidence_contract_id=(
+                    self.evidence_contract.contract_id if direct else ""
+                ),
+                evidence_contract_version=(
+                    self.evidence_contract.policy_version if direct else ""
+                ),
+            )
+            emit_record(record)
+            emitted += 1
+            index += 1
+
+        next_cursor = None if index >= len(records) else f"record:{index}"
+        return LeaseResult(
+            lease_id=lease.lease_id,
+            records=emitted,
+            requests=opened,
+            bytes_read=bytes_read,
+            elapsed_seconds=max(0.0, time.monotonic() - started),
+            next_cursor=next_cursor,
+        )
+
+    def execute(self, lease: WorkLease) -> tuple[Iterator[SourceRecord], LeaseResult]:
+        records: list[SourceRecord] = []
+        result = self.execute_stream(lease, records.append)
+        return iter(records), result
+
+    def extract_hosts(self, record: SourceRecord) -> Iterable[HostObservation]:
+        parsed = urlsplit(record.payload)
+        hostname = normalize_official(parsed.hostname or "")
+        if hostname is None:
+            return ()
+        return (
+            HostObservation(
+                hostname=hostname,
+                source_id=record.source_id,
+                locator=record.locator,
+                scope=record.scope,
+                source_year=record.source_year,
+                source_time=record.source_time,
+                record_type=record.record_type,
+                artifact_ref=record.artifact_ref,
+                direct_year_mask=record.direct_year_mask,
+                year_hint_mask=record.year_hint_mask,
+                original_url=record.payload,
+                evidence_type=record.evidence_type,
+                temporal_semantics=record.temporal_semantics,
+                evidence_contract_id=record.evidence_contract_id,
+                evidence_contract_version=record.evidence_contract_version,
+            ),
+        )
+
+    def close(self) -> None:
+        self._records = None
+        self._package_bytes = 0
+
 class ProductionAdapterFactory:
     """Open only adapter families with an explicit production implementation."""
 
@@ -844,6 +1044,11 @@ class ProductionAdapterFactory:
         if reservoir.adapter_id.startswith("warc_arc:"):
             return WarcProductionAdapter(reservoir)
         if reservoir.adapter_id.startswith("structured:"):
+            if is_ftp_sitelist_zip_locator(reservoir.root_locator):
+                return FtpSitelistZipProductionAdapter(
+                    reservoir,
+                    evidence_contract=evidence_contract,
+                )
             return StructuredProductionAdapter(
                 reservoir,
                 temporal_scope=temporal_scope,
