@@ -37,6 +37,12 @@ class ArchiveItRootTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(transport.calls[0][1]["limit"], 100)
         self.assertNotEqual(transport.calls[0][1]["limit"], -1)
 
+    async def test_503_without_retry_after_gets_default_backoff(self):
+        transport = FakeTransport([Response(503)])
+        page = await ArchiveItAdapter(transport=transport).search(self.query(), None)
+        self.assertFalse(page.terminal)
+        self.assertEqual(page.retry_after, 5.0)
+
     async def test_seed_resource_and_native_filters_stay_bounded(self):
         payload = {"seeds": [{"id": "s1", "seed_url": "https://example.org/"}]}
         transport = FakeTransport([Response(200, payload)])
