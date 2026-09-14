@@ -44,6 +44,9 @@ Source : maintainer@example.net
 
 Site   : ftp.missing-date.example
 Source : ignored@example.net
+
+Site   : 192.0.2.15
+Date   : 05-May-97
 """,
             member_name="ftp-list.01",
         )
