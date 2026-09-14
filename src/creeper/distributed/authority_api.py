@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from collections.abc import Mapping
@@ -212,13 +213,29 @@ def create_authority_app(
     async def claim(request: web.Request) -> web.Response:
         data = _body(request)
         worker_id = str(request["worker_id"])
-        lease = store.claim_work(
-            worker_id,
-            lease_seconds=float(data.get("lease_seconds", 300.0)),
-        )
-        return web.json_response(
-            {"task": None if lease is None else _lease_payload(lease)}
-        )
+        lease_seconds = float(data.get("lease_seconds", 300.0))
+        wait_seconds = float(data.get("wait_seconds", 0.0))
+        if not 0.0 <= wait_seconds <= 25.0:
+            raise ValueError("wait_seconds must be within [0, 25]")
+
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + wait_seconds
+        while True:
+            lease = store.claim_work(
+                worker_id,
+                lease_seconds=lease_seconds,
+            )
+            if lease is not None or loop.time() >= deadline:
+                return web.json_response(
+                    {
+                        "task": (
+                            None
+                            if lease is None
+                            else _lease_payload(lease)
+                        )
+                    }
+                )
+            await asyncio.sleep(min(0.25, max(0.0, deadline - loop.time())))
 
     async def renew(request: web.Request) -> web.Response:
         data = _body(request)
