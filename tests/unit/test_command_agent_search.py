@@ -34,7 +34,7 @@ elif args.mode == "fail":
     raise SystemExit(7)
 elif args.mode == "oversize":
     open(args.response, "w", encoding="utf-8").write("x" * 4096)
-elif args.mode == "hypothesis":
+elif args.mode in {"hypothesis", "duplicate-hypothesis"}:
     payload = {
         "query": "expand successful annual source",
         "hypotheses": [{
@@ -65,6 +65,8 @@ elif args.mode == "hypothesis":
             }
         }]
     }
+    if args.mode == "duplicate-hypothesis":
+        payload["hypotheses"].append(dict(payload["hypotheses"][0]))
     open(args.response, "w", encoding="utf-8").write(json.dumps(payload))
 elif args.mode == "success":
     payload = {
@@ -184,6 +186,15 @@ class CommandAgentSearchExecutorTests(unittest.IsolatedAsyncioTestCase):
                 for candidate in batch.candidates
             )
         )
+
+    async def test_duplicate_hypothesis_ids_fail_at_protocol_boundary(self) -> None:
+        executor = self.executor("duplicate-hypothesis")
+
+        with self.assertRaisesRegex(
+            SearchAgentProtocolError,
+            "duplicate hypothesis_id",
+        ):
+            await executor(self.directive())
 
     async def test_oversized_response_fails_closed(self) -> None:
         executor = self.executor("oversize", max_response_bytes=128)
