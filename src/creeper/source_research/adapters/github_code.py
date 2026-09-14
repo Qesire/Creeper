@@ -12,7 +12,7 @@ from enum import StrEnum
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
-from .base import ArtifactLead, RootCapabilityReport, SearchCheckpoint, SearchHit, SearchPage, is_retryable, response_json, retry_after_seconds
+from .base import ArtifactLead, RootCapabilityReport, SearchCheckpoint, SearchHit, SearchPage, is_retryable, response_json, retry_after_seconds, retry_delay_seconds
 
 API = "https://api.github.com/search/code"
 DEFAULT_SEED_QUERIES = (
@@ -92,8 +92,13 @@ class GitHubCodeAdapter:
         }
         response = await self.transport(self.endpoint, params, self._headers())
         status = int(getattr(response, "status_code", 200))
-        if is_retryable(response) or (status == 403 and retry_after_seconds(response) is not None):
-            return SearchPage(next_checkpoint=cp, terminal=False, retry_after=retry_after_seconds(response))
+        explicit_retry = retry_after_seconds(response)
+        if is_retryable(response) or (status == 403 and explicit_retry is not None):
+            return SearchPage(
+                next_checkpoint=cp,
+                terminal=False,
+                retry_after=retry_delay_seconds(response),
+            )
         if status in (401, 403):
             self.state = "DISABLED_AUTH"
             return SearchPage(terminal=True)
