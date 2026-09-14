@@ -137,6 +137,8 @@ class ResearchIntegrationBridge:
                 ) WITHOUT ROWID;
                 CREATE INDEX IF NOT EXISTS idx_research_artifact_prefilter_admission
                     ON research_artifact_prefilter(admission, query_id, evaluated_at);
+                CREATE INDEX IF NOT EXISTS idx_research_artifact_prefilter_locator
+                    ON research_artifact_prefilter(locator, evaluated_at DESC);
 
                 CREATE TABLE IF NOT EXISTS research_final_projection(
                     source_key TEXT NOT NULL,
