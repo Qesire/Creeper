@@ -387,6 +387,57 @@ class MeasuredYieldScoutTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(measurement.novel_pair_eed, 1.0)
         self.assertEqual(measurement.direct_host_years, 0)
 
+    async def test_dmoz_rdf_dump_measures_unique_external_pages(self) -> None:
+        raw = (
+            b'<Topic r:id="Top/Arts">\n'
+            b'<link r:resource="http://known.com/"/>\n'
+            b'</Topic>\n'
+            b'<ExternalPage about="http://known.com/">\n'
+            b'<d:Title>Known</d:Title>\n'
+            b'</ExternalPage>\n'
+            b'<ExternalPage about="https://novel.org/path?a=1&amp;b=2">\n'
+            b'<d:Title>Novel</d:Title>\n'
+            b'</ExternalPage>\n'
+        )
+        body = gzip.compress(raw)
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            return streamed_response(
+                206,
+                body,
+                headers={"content-type": "application/gzip"},
+            )
+
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler)
+        ) as client:
+            scout = MeasuredYieldScoutExecutor(
+                client,
+                self.baseline,
+                {"com": Decimal("1"), "org": Decimal("1")},
+                policy=self.policy(
+                    min_unique_hosts=2,
+                    min_novel_hosts=1,
+                    min_novel_fraction=0.4,
+                    min_novel_eed=0.5,
+                ),
+            )
+            result = await scout(
+                self.candidate(
+                    "https://download.example/content.rdf.u8.gz"
+                )
+            )
+
+        self.assertEqual(result.disposition, ScoutDisposition.WARM)
+        self.assertIsNotNone(result.measurement)
+        measurement = result.measurement
+        assert measurement is not None
+        self.assertEqual(measurement.sampled_records, 2)
+        self.assertEqual(measurement.unique_hosts, 2)
+        self.assertEqual(measurement.novel_hosts, 1)
+        self.assertEqual(measurement.measurement_mode, MeasurementMode.HOST_ONLY)
+        self.assertEqual(len(measurement.minhash_values), 64)
+
     async def test_gzipped_jsonl_uses_bounded_mature_stream_path(self) -> None:
         calls = 0
         raw = b'\n'.join(
