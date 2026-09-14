@@ -437,6 +437,7 @@ class CommandAgentSearchExecutor:
         motif_policy = MotifExpansionPolicy(
             max_expansions=self.policy.max_motif_expansions
         )
+        seen_hypothesis_ids: set[str] = set()
         for raw in hypotheses:
             if not isinstance(raw, dict):
                 raise SearchAgentProtocolError(
@@ -445,6 +446,12 @@ class CommandAgentSearchExecutor:
             raw_id = raw.get("hypothesis_id")
             if not isinstance(raw_id, str) or not raw_id.strip():
                 raise SearchAgentProtocolError("hypothesis_id is required")
+            raw_id = raw_id.strip()
+            if raw_id in seen_hypothesis_ids:
+                raise SearchAgentProtocolError(
+                    f"duplicate hypothesis_id in agent response: {raw_id}"
+                )
+            seen_hypothesis_ids.add(raw_id)
             normalized = dict(raw)
             hypothesis_id = f"{episode_id}:{raw_id}"
             normalized["hypothesis_id"] = hypothesis_id
