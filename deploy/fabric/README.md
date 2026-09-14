@@ -18,6 +18,16 @@ Local Authority
 Provider traffic is direct from each worker to Web/Search/Internet Archive/
 Arquivo. The Local Authority never proxies provider bodies.
 
+On every Linux node, first obtain a small management checkout:
+
+```bash
+git clone --depth 1 --branch feat/distributed-evidence-fabric-vnext \
+  https://github.com/Qesire/Creeper.git
+cd Creeper
+```
+
+The installers maintain their own runtime checkout under `/opt/creeper-fabric`.
+
 ## 1. Local Authority
 
 Clone this derivative branch on the machine that owns the immutable baseline
@@ -197,7 +207,9 @@ positive-only exact-year thin contract.
 cd deploy/fabric/cloudflare-worker
 cp wrangler.jsonc.example wrangler.jsonc
 # Edit COORDINATOR_URL / WORKER_ID / provider list.
-export CREEPER_WORKER_SECRET="$(cat /secure/path/cf-thin.secret)"
+set -a
+. /secure/path/cf-thin.secret
+set +a
 ./deploy.sh
 ```
 
