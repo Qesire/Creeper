@@ -32,6 +32,7 @@ creeper-historical-index = "creeper.historical_index_service:main"
 creeper-validation = "creeper.validation_cli:main"
 creeper-fabric-authority = "creeper.distributed.authority_cli:main"
 creeper-fabric-worker = "creeper.distributed.worker_cli:main"
+creeper-fabric-control = "creeper.distributed.control_cli:main"
 # Compatibility aliases for early distributed-vNext scripts.
 creeper-distributed-authority = "creeper.distributed.authority_cli:main"
 creeper-distributed-worker = "creeper.distributed.worker_cli:main"
