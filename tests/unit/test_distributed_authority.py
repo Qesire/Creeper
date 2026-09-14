@@ -660,6 +660,50 @@ class DistributedAuthorityTests(unittest.TestCase):
         assert recovered is not None
         self.assertEqual(recovered.task_id, second_id)
 
+    def test_provider_permit_request_replay_returns_same_slot(self) -> None:
+        self.store.configure_provider_budget(
+            "internet_archive",
+            requests_per_second=1_000_000.0,
+            max_global_inflight=2,
+            require_qualified_region=False,
+        )
+        self.store.admit_work(self.work("idempotent.example"))
+        lease = self.store.claim_work(self.worker_a.worker_id)
+        assert lease is not None
+
+        first = self.store.issue_provider_permit(
+            "internet_archive",
+            worker_id=lease.worker_id,
+            task_id=lease.task_id,
+            generation=lease.generation,
+            request_id="logical-request-1",
+        )
+        assert first is not None
+        snapshot_after_first = self.store.provider_budget_snapshot(
+            "internet_archive"
+        )
+
+        replay = self.store.issue_provider_permit(
+            "internet_archive",
+            worker_id=lease.worker_id,
+            task_id=lease.task_id,
+            generation=lease.generation,
+            request_id="logical-request-1",
+        )
+        assert replay is not None
+        snapshot_after_replay = self.store.provider_budget_snapshot(
+            "internet_archive"
+        )
+
+        self.assertEqual(replay.permit_id, first.permit_id)
+        self.assertEqual(replay.request_id, first.request_id)
+        self.assertEqual(snapshot_after_first["active_inflight"], 1)
+        self.assertEqual(snapshot_after_replay["active_inflight"], 1)
+        self.assertEqual(
+            snapshot_after_replay["next_request_at"],
+            snapshot_after_first["next_request_at"],
+        )
+
     def test_provider_inflight_budget_is_global_across_regions(self) -> None:
         self.store.configure_provider_budget(
             "internet_archive",
