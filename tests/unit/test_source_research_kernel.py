@@ -108,6 +108,43 @@ class ResearchStateKernelTests(unittest.TestCase):
         self.assertEqual(checkpoint.cursor, "abc")
         self.assertEqual(checkpoint.page, 4)
 
+    def test_program_request_budget_is_durable_and_hard_bounded(self):
+        for _ in range(self.program.hard_max_requests):
+            self.assertTrue(
+                self.reg.reserve_program_request(self.program.program_id)
+            )
+        self.assertFalse(
+            self.reg.reserve_program_request(self.program.program_id)
+        )
+        self.assertEqual(
+            self.reg.program_request_budget(self.program.program_id),
+            (self.program.hard_max_requests, self.program.hard_max_requests),
+        )
+
+        self.store.connection.close()
+        self.store = ControlStore(self.db)
+        reg2 = ResearchRegistry(self.store, clock=lambda: 200.0)
+        self.assertFalse(
+            reg2.reserve_program_request(self.program.program_id)
+        )
+        self.assertEqual(
+            reg2.program_request_budget(self.program.program_id),
+            (self.program.hard_max_requests, self.program.hard_max_requests),
+        )
+
+    def test_query_wall_usage_survives_restart(self):
+        self.reg.update_query_checkpoint(
+            self.query.query_id,
+            checkpoint=None,
+            state="RETRYABLE",
+            wall_seconds_delta=3.25,
+        )
+        self.store.connection.close()
+        self.store = ControlStore(self.db)
+        reg2 = ResearchRegistry(self.store, clock=lambda: 200.0)
+        row = reg2.get_query_row(self.query.query_id)
+        self.assertAlmostEqual(float(row["wall_seconds_used"]), 3.25)
+
     def test_stale_lease_reclaim(self):
         task_id = self.reg.enqueue_frontier(
             FrontierTask("t1", "QUERY", "q1", priority=1.0)
