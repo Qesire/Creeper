@@ -348,6 +348,70 @@ class MeasuredYieldScoutTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(measurement.novel_host_year_pairs, 2)
         self.assertEqual(measurement.novel_hosts, 1)
 
+    async def test_finnish_bbs_scout_measures_internal_edition_host_years(self) -> None:
+        text = """
+                      Elektroniset 24h postilaatikot Suomessa
+                      =======================================
+                               Tilanne  : 25.2.1998
+       nimi/softa            numero       modeemi(t)     net/node / sysop
+    -----------------------------------------------------------------------------
+    KNOWN BBS             09-111 2222 34 42/M         known.com
+    -----------------------------------------------------------------------------
+    NOVEL BBS             09-333 4444 34 42/M         novel.org
+    -----------------------------------------------------------------------------
+      Net-osoitteet:
+      ignored@example.net
+"""
+        raw = io.BytesIO()
+        with zipfile.ZipFile(
+            raw,
+            "w",
+            compression=zipfile.ZIP_DEFLATED,
+        ) as archive:
+            archive.writestr(
+                "fi980225.txt",
+                text.encode("cp437", errors="replace"),
+            )
+        body = raw.getvalue()
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            return streamed_response(
+                200,
+                body,
+                headers={"content-type": "application/zip"},
+            )
+
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler)
+        ) as client:
+            scout = MeasuredYieldScoutExecutor(
+                client,
+                self.baseline,
+                {"com": Decimal("1"), "org": Decimal("0.5")},
+                policy=self.policy(
+                    min_unique_hosts=2,
+                    min_novel_hosts=1,
+                    min_novel_fraction=0.1,
+                    min_novel_eed=0.5,
+                ),
+            )
+            result = await scout(
+                self.candidate(
+                    "https://files.mpoli.fi/software/TEXTS/MISC/FI980225.ZIP"
+                )
+            )
+
+        self.assertEqual(result.disposition, ScoutDisposition.WARM)
+        self.assertIsNotNone(result.measurement)
+        measurement = result.measurement
+        assert measurement is not None
+        self.assertEqual(measurement.sampled_records, 2)
+        self.assertEqual(measurement.unique_hosts, 2)
+        self.assertEqual(measurement.measurement_mode, MeasurementMode.HOST_YEAR)
+        self.assertEqual(measurement.observed_host_year_pairs, 2)
+        self.assertEqual(measurement.novel_host_year_pairs, 2)
+        self.assertEqual(measurement.novel_hosts, 1)
+
     async def test_squid_scout_uses_access_year_and_drops_off_window_rows(self) -> None:
         body = (
             b"915148800.000 1 192.0.2.1 TCP_MISS/200 10 GET "
