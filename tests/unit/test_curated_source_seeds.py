@@ -20,7 +20,7 @@ from creeper.storage.control_store import ControlStore
 class CuratedSourceSeedTests(unittest.TestCase):
     def test_research_roots_are_target_period_discovery_only(self):
         roots = curated_research_roots()
-        self.assertEqual(len(roots), 6)
+        self.assertEqual(len(roots), 8)
         self.assertTrue(
             any(item.canonical_entrypoint == "https://archive95.net/sources" for item in roots)
         )
@@ -104,6 +104,8 @@ class CuratedSourceSeedTests(unittest.TestCase):
                 ),
                 "https://files.mpoli.fi/software/TEXTS/MISC/FI980225.ZIP",
                 "https://files.mpoli.fi/software/TEXTS/MISC/030698.ZIP",
+                "https://files.mpoli.fi/software/TEXTS/COMPUTER/FI980701.ZIP",
+                "https://files.mpoli.fi/software/TEXTS/COMPUTER/FI980916.ZIP",
             },
         )
         self.assertTrue(
@@ -125,14 +127,14 @@ class CuratedSourceSeedTests(unittest.TestCase):
 
     def test_all_curated_seeds_are_idempotent(self):
         seeds = curated_source_seeds()
-        self.assertEqual(len(seeds), 14)
+        self.assertEqual(len(seeds), 16)
         with tempfile.TemporaryDirectory() as tmp:
             control = ControlStore(Path(tmp) / "control.sqlite3")
             registry = SourceDiscoveryRegistry(control)
             try:
-                self.assertEqual(ensure_curated_source_seeds(registry), 14)
+                self.assertEqual(ensure_curated_source_seeds(registry), 16)
                 self.assertEqual(ensure_curated_source_seeds(registry), 0)
-                self.assertEqual(len(registry.list_candidates()), 14)
+                self.assertEqual(len(registry.list_candidates()), 16)
             finally:
                 control.close()
 
