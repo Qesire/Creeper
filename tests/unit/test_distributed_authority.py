@@ -208,6 +208,49 @@ class DistributedAuthorityTests(unittest.TestCase):
                 worker_id=lease.worker_id,
             )
 
+    def test_committed_batch_replay_survives_lease_generation_change(self) -> None:
+        self.store.admit_work(self.work())
+        first = self.store.claim_work(self.worker_a.worker_id, lease_seconds=5)
+        assert first is not None
+        batch = ResultBatch(
+            task_id=first.task_id,
+            generation=first.generation,
+            sequence_no=0,
+            results=({"kind": "HY", "hostname": "example.com", "year": 1999},),
+            cursor_after="page:1",
+        )
+        self.assertTrue(
+            self.store.commit_result_batch(batch, worker_id=first.worker_id)
+        )
+
+        self.clock.advance(6)
+        second = self.store.claim_work(self.worker_b.worker_id, lease_seconds=30)
+        assert second is not None
+        replay = ResultBatch(
+            task_id=second.task_id,
+            generation=second.generation,
+            sequence_no=0,
+            results=({"kind": "HY", "hostname": "example.com", "year": 1999},),
+            cursor_after="page:1",
+        )
+        self.assertFalse(
+            self.store.commit_result_batch(replay, worker_id=second.worker_id)
+        )
+        self.assertEqual(self.store.batch_count(second.task_id), 1)
+
+    def test_revoked_worker_cannot_mutate_current_lease(self) -> None:
+        self.store.admit_work(self.work())
+        lease = self.store.claim_work(self.worker_a.worker_id, lease_seconds=30)
+        assert lease is not None
+        self.store.revoke_worker(lease.worker_id)
+
+        with self.assertRaises(RuntimeError):
+            self.store.renew_task(
+                lease.task_id,
+                worker_id=lease.worker_id,
+                generation=lease.generation,
+            )
+
     def test_exact_replay_remains_acknowledgeable_after_task_finish(self) -> None:
         self.store.admit_work(self.work())
         lease = self.store.claim_work(self.worker_a.worker_id, lease_seconds=30)
