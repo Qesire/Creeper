@@ -12,6 +12,7 @@ from __future__ import annotations
 import csv
 from collections import Counter
 import gzip
+import html
 import io
 import json
 import math
@@ -301,6 +302,25 @@ def _suffix(path: str) -> tuple[str, bool]:
     return PurePosixPath(name).suffix.lower(), compressed
 
 
+def _is_rdf_link_dump(path: str) -> bool:
+    name = PurePosixPath(path).name.lower()
+    return name.endswith((".rdf", ".rdf.gz", ".rdf.u8", ".rdf.u8.gz"))
+
+
+def _rdf_external_page_url(line: str) -> str | None:
+    if "externalpage" not in line.lower():
+        return None
+    match = re.search(
+        r"""\b(?:rdf:)?about\s*=\s*["']([^"']+)["']""",
+        line,
+        flags=re.IGNORECASE,
+    )
+    if match is None:
+        return None
+    value = html.unescape(match.group(1)).strip()
+    return value or None
+
+
 def _inflate_gzip_prefix(payload: bytes, limit: int) -> bytes:
     decoder = zlib.decompressobj(16 + zlib.MAX_WBITS)
     try:
@@ -452,6 +472,26 @@ def _extract_hosts(
     observations: list[str] = []
     saw_undated_host = False
     sampled = 0
+
+    if _is_rdf_link_dump(urlsplit(url).path):
+        for line in lines:
+            if sampled >= policy.max_records:
+                break
+            raw_url = _rdf_external_page_url(line)
+            if raw_url is None:
+                continue
+            sampled += 1
+            hostname = _hostname_from_scalar(raw_url)
+            if hostname is not None:
+                hosts.add(hostname)
+                observations.append(hostname)
+        return ParsedHostSample(
+            sampled_records=sampled,
+            hosts=hosts,
+            host_year_pairs=set(),
+            measurement_mode=MeasurementMode.HOST_ONLY,
+            observation_keys=tuple(observations),
+        )
 
     if suffix in {".cdxj", ".cdx"}:
         for line in lines:
