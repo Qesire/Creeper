@@ -72,6 +72,7 @@ weight = 0.5
 [[evidence.cdx_providers]]
 name = "arquivo_pt"
 endpoint = "https://arquivo.pt/wayback/cdx"
+dialect = "arquivo"
 requests_per_second = 1.0
 max_inflight = 4
 max_connections = 8
