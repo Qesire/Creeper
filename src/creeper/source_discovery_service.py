@@ -60,6 +60,7 @@ from creeper.source_discovery.registry import SourceDiscoveryRegistry
 from creeper.source_discovery.research_trigger import (
     ResearchDirective,
     ResearchTriggerGate,
+    ResearchTriggerReason,
     ResearchTriggerSnapshot,
 )
 from creeper.source_discovery.saturation import (
