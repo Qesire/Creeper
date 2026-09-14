@@ -335,8 +335,14 @@ class CommandAgentSearchExecutor:
             admission = self.admission_policy
             payload["admission"] = {
                 "min_expected_volume": admission.min_expected_volume,
+                "gateway_min_expected_volume": (
+                    admission.gateway_min_expected_volume
+                ),
                 "direct_min_expected_volume": admission.direct_min_expected_volume,
                 "min_enumerability_prior": admission.min_enumerability_prior,
+                "gateway_min_enumerability_prior": (
+                    admission.gateway_min_enumerability_prior
+                ),
                 "min_confidence": admission.min_confidence,
                 "require_year_bounds": admission.require_year_bounds,
                 "direct_evidence_year_bounds_optional": True,
