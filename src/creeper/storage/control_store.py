@@ -3791,6 +3791,21 @@ class ControlStore:
         from creeper.scheduler.leases import LeaseState, WorkLease
         from creeper.sources.reservoirs import ReservoirState
 
+        if (
+            isinstance(now, bool)
+            or not isinstance(now, (int, float))
+            or not math.isfinite(float(now))
+            or now < 0
+        ):
+            raise ValueError("lease grant time must be finite and non-negative")
+        if lease_ttl_seconds is not None and (
+            isinstance(lease_ttl_seconds, bool)
+            or not isinstance(lease_ttl_seconds, (int, float))
+            or not math.isfinite(float(lease_ttl_seconds))
+            or lease_ttl_seconds <= 0
+        ):
+            raise ValueError("lease_ttl_seconds must be finite and positive")
+
         self.connection.execute("BEGIN IMMEDIATE")
         try:
             reservoir = self.connection.execute(
@@ -3885,7 +3900,15 @@ class ControlStore:
         owner = self._field(lease, "owner")
         if not lease_id or not owner:
             raise ValueError("an owned lease is required")
-        current = float(self.clock()) if now is None else float(now)
+        current_raw = self.clock() if now is None else now
+        if (
+            isinstance(current_raw, bool)
+            or not isinstance(current_raw, (int, float))
+            or not math.isfinite(float(current_raw))
+            or current_raw < 0
+        ):
+            raise ValueError("lease renewal time must be finite and non-negative")
+        current = float(current_raw)
         new_expiry = current + float(ttl_seconds)
         self.connection.execute("BEGIN IMMEDIATE")
         try:
@@ -4065,8 +4088,15 @@ class ControlStore:
         from creeper.scheduler.leases import LeaseState
         from creeper.sources.reservoirs import ReservoirState
 
-        if now is None:
-            now = float(self.clock())
+        current_raw = self.clock() if now is None else now
+        if (
+            isinstance(current_raw, bool)
+            or not isinstance(current_raw, (int, float))
+            or not math.isfinite(float(current_raw))
+            or current_raw < 0
+        ):
+            raise ValueError("lease recovery time must be finite and non-negative")
+        now = float(current_raw)
         self.connection.execute("BEGIN IMMEDIATE")
         try:
             rows = self.connection.execute(
