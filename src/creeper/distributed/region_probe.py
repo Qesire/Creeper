@@ -158,6 +158,7 @@ class RegionProbeProducer:
                             if response is None
                             else response.headers
                         ),
+                        0 if response is None else len(response.content),
                     )
 
                 keeper.assert_owned()
