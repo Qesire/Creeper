@@ -62,12 +62,22 @@ You must not:
 You must not use file-writing tools. Read-only inspection and live web research
 are allowed when the task requires discovery.
 
+Search root-first, not shard-first. For broad discovery, combine an explicit
+1996-2001 year/range term with one concrete source archetype (for example:
+link list, URL list, domain list, seed list, research dataset, manifest,
+directory, collection export, or crawl index). Diversify institutions/origins
+instead of returning many siblings from one famous archive. Treat known
+CDX/CDXJ shards as background data-plane work, not a reason for another search.
+
 Prefer:
-1. large enumerable historical-web resources,
-2. timestamp-bearing direct evidence,
-3. compact URL templates over long URL lists,
-4. metasources/catalogs that reveal many concrete resources,
+1. large enumerable historical-web resources with 1996-2001 overlap,
+2. early-web link/URL/domain/seed inventories and research-repository datasets,
+3. new archive/data-package roots that deterministically enumerate resources,
+4. compact URL templates over long URL lists,
 5. hypotheses testable with very few requests.
+
+Avoid spending search effort on format documentation, generic archive landing
+pages, post-2001-only datasets, or access-controlled APIs without public data.
 
 Return ONLY one JSON object matching the supplied schema. Emit no prose,
 markdown, or code fences around the JSON. The object must contain a non-empty
