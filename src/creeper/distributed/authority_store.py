@@ -313,6 +313,7 @@ class DistributedAuthorityStore:
 
             CREATE TABLE IF NOT EXISTS distributed_provider_permits (
                 permit_id TEXT PRIMARY KEY,
+                request_id TEXT,
                 provider TEXT NOT NULL,
                 worker_id TEXT NOT NULL,
                 task_id TEXT NOT NULL,
@@ -332,6 +333,11 @@ class DistributedAuthorityStore:
             ) WITHOUT ROWID;
             CREATE INDEX IF NOT EXISTS idx_distributed_provider_permit_active
                 ON distributed_provider_permits(provider, active, expires_at);
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_distributed_provider_permit_request
+                ON distributed_provider_permits(
+                    provider, worker_id, task_id, generation, request_id
+                )
+                WHERE request_id IS NOT NULL;
             """
         )
         work_columns = {
@@ -411,6 +417,29 @@ class DistributedAuthorityStore:
                 ALTER TABLE distributed_workers
                 ADD COLUMN edition_version TEXT NOT NULL
                     DEFAULT '0.1.0-dev'
+                """
+            )
+        permit_columns = {
+            str(row["name"])
+            for row in self.connection.execute(
+                "PRAGMA table_info(distributed_provider_permits)"
+            )
+        }
+        if "request_id" not in permit_columns:
+            self.connection.execute(
+                """
+                ALTER TABLE distributed_provider_permits
+                ADD COLUMN request_id TEXT
+                """
+            )
+            self.connection.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS
+                    idx_distributed_provider_permit_request
+                ON distributed_provider_permits(
+                    provider, worker_id, task_id, generation, request_id
+                )
+                WHERE request_id IS NOT NULL
                 """
             )
         budget_columns = {
@@ -2522,6 +2551,7 @@ class DistributedAuthorityStore:
         worker_id: str,
         task_id: str,
         generation: int,
+        request_id: str | None = None,
         ttl_seconds: float = 30.0,
     ) -> ProviderPermit | None:
         """Issue one globally paced external-request permit.
@@ -2533,6 +2563,13 @@ class DistributedAuthorityStore:
 
         if ttl_seconds <= 0:
             raise ValueError("ttl_seconds must be positive")
+        request_id = (
+            uuid4().hex
+            if request_id is None
+            else request_id.strip()
+        )
+        if not request_id:
+            raise ValueError("provider permit request_id is required")
         now = float(self.clock())
         self.connection.execute("BEGIN IMMEDIATE")
         try:
@@ -2542,6 +2579,47 @@ class DistributedAuthorityStore:
                 generation,
                 now=now,
             )
+
+            existing = self.connection.execute(
+                """
+                SELECT * FROM distributed_provider_permits
+                WHERE provider = ? AND worker_id = ? AND task_id = ?
+                  AND generation = ? AND request_id = ?
+                """,
+                (
+                    provider,
+                    worker_id,
+                    task_id,
+                    int(generation),
+                    request_id,
+                ),
+            ).fetchone()
+            if existing is not None:
+                if int(existing["active"]) and float(existing["expires_at"]) > now:
+                    self.connection.commit()
+                    return ProviderPermit(
+                        permit_id=str(existing["permit_id"]),
+                        request_id=request_id,
+                        provider=str(existing["provider"]),
+                        worker_id=str(existing["worker_id"]),
+                        task_id=str(existing["task_id"]),
+                        generation=int(existing["generation"]),
+                        allowed_requests=int(existing["allowed_requests"]),
+                        max_inflight=int(existing["max_inflight"]),
+                        expires_at=float(existing["expires_at"]),
+                    )
+                if not int(existing["active"]) and existing["status_code"] is not None:
+                    raise ValueError(
+                        "provider permit request_id has already completed"
+                    )
+                self.connection.execute(
+                    """
+                    DELETE FROM distributed_provider_permits
+                    WHERE permit_id = ?
+                    """,
+                    (str(existing["permit_id"]),),
+                )
+
             allowed_providers = self._worker_allowed_providers(worker_id)
             if provider not in allowed_providers:
                 raise ProviderAccessDeniedError(
@@ -2622,12 +2700,14 @@ class DistributedAuthorityStore:
             self.connection.execute(
                 """
                 INSERT INTO distributed_provider_permits(
-                    permit_id, provider, worker_id, task_id, generation,
-                    allowed_requests, max_inflight, expires_at, active, issued_at
-                ) VALUES (?, ?, ?, ?, ?, 1, ?, ?, 1, ?)
+                    permit_id, request_id, provider, worker_id, task_id,
+                    generation, allowed_requests, max_inflight, expires_at,
+                    active, issued_at
+                ) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, 1, ?)
                 """,
                 (
                     permit_id,
+                    request_id,
                     provider,
                     worker_id,
                     task_id,
@@ -2652,6 +2732,7 @@ class DistributedAuthorityStore:
             self.connection.commit()
             return ProviderPermit(
                 permit_id=permit_id,
+                request_id=request_id,
                 provider=provider,
                 worker_id=worker_id,
                 task_id=task_id,
