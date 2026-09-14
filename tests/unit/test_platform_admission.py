@@ -116,6 +116,21 @@ class PlatformYearAdmissionTests(unittest.TestCase):
             self.assertEqual(task.authority_digest, first.authority_digest)
             control.close()
 
+    def test_fractional_year_and_budget_are_rejected(self):
+        with self.assertRaisesRegex(ValueError, "integer within"):
+            PlatformYearObservation(
+                provider="wayback",
+                subject="example.com",
+                target_year=1997.5,
+                request_template_hash="template",
+                policy_version="platform-v1",
+                source_key="source:example",
+                reservoir_id="reservoir:example",
+                authority_digest="authority-v1",
+            )
+        with self.assertRaisesRegex(ValueError, "positive integer"):
+            PlatformYearAdmissionPolicy(max_tasks=1.5)
+
     def test_missing_scope_or_authority_is_rejected(self):
         cases = (
             {"source_key": "", "reservoir_id": "reservoir", "authority_digest": "a"},
