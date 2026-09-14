@@ -6,6 +6,7 @@ from pathlib import Path
 
 from creeper.evidence.contracts import (
     EvidenceAuthority,
+    MAILBOX_MONTH_DIRECT_CONTRACT,
     SQUID_ACCESS_DIRECT_CONTRACT,
     SourceEvidenceContract,
     bind_contract_to_adapter_id,
@@ -181,6 +182,17 @@ class DirectEvidenceContractTests(unittest.TestCase):
 
         self.assertEqual(observation.direct_year_mask, 0)
         self.assertEqual(observation.year_hint_mask, 1 << (1998 - 1996))
+
+    def test_dated_mailbox_contract_is_direct_but_undated_mbox_is_not(self) -> None:
+        dated = "https://lists.gnu.org/archive/mbox/lynx-dev/1998-03"
+        dated_contract = resolve_source_evidence_contract(dated)
+        self.assertEqual(dated_contract, MAILBOX_MONTH_DIRECT_CONTRACT)
+        self.assertTrue(dated_contract.grants_direct_web_year)
+
+        undated = "https://example.test/archive/archive.mbox"
+        undated_contract = resolve_source_evidence_contract(undated)
+        self.assertFalse(undated_contract.grants_direct_web_year)
+        self.assertEqual(undated_contract.evidence_mode, "discovery_only")
 
     def test_squid_access_contract_is_direct_and_skips_external_provider(self) -> None:
         locator = "https://trace.example/data/old.squid.log"
