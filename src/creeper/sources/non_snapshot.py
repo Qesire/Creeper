@@ -1,0 +1,128 @@
+"""Deterministic parsers for non-snapshot historical URL sources.
+
+These helpers deliberately extract only HTTP(S) URLs/hostnames.  Mailbox
+authors, addresses, message text, client IPs, and other personal fields never
+cross into Creeper SourceRecord payloads.
+"""
+
+from __future__ import annotations
+
+from datetime import datetime, timezone
+import re
+from urllib.parse import urlsplit
+
+
+_TARGET_YEAR_RE = re.compile(r"^(199[6-9]|200[01])-(0[1-9]|1[0-2])$")
+_HTTP_URL_RE = re.compile(
+    r"""(?ix)
+    \bhttps?://
+    [^\s<>\[\]{}"'\\]+
+    """
+)
+_TRAILING_URL_PUNCTUATION = ".,;:!?)]}>"
+_SQUID_PATH_MARKERS = (
+    "/cache/squid/rawlogs/",
+    "/squid/rawlogs/",
+    "/squid/access",
+)
+
+
+def mailbox_year_from_locator(locator: str) -> int | None:
+    """Return target year for an exact monthly mailbox shard, if encoded."""
+    path = urlsplit(locator).path.rstrip("/")
+    name = path.rsplit("/", 1)[-1].lower()
+    for suffix in (".mbox.gz", ".mbox"):
+        if name.endswith(suffix):
+            name = name[: -len(suffix)]
+            break
+    match = _TARGET_YEAR_RE.fullmatch(name)
+    if match is None:
+        return None
+    return int(match.group(1))
+
+
+def is_mailbox_url_locator(locator: str) -> bool:
+    """Recognize mailbox files and GNU-style extensionless monthly shards."""
+    path = urlsplit(locator).path.lower().rstrip("/")
+    if path.endswith((".mbox", ".mbox.gz")):
+        return True
+    if "/archive/mbox/" not in path:
+        return False
+    return mailbox_year_from_locator(locator) is not None
+
+
+def is_target_mailbox_shard(locator: str) -> bool:
+    return mailbox_year_from_locator(locator) is not None
+
+
+def extract_http_urls(text: str) -> tuple[str, ...]:
+    """Extract normalized HTTP(S) URL strings without retaining surrounding text."""
+    result: list[str] = []
+    seen: set[str] = set()
+    for match in _HTTP_URL_RE.finditer(text):
+        value = match.group(0).rstrip(_TRAILING_URL_PUNCTUATION)
+        try:
+            parsed = urlsplit(value)
+        except ValueError:
+            continue
+        if parsed.scheme.lower() not in {"http", "https"} or parsed.hostname is None:
+            continue
+        if value in seen:
+            continue
+        seen.add(value)
+        result.append(value)
+    return tuple(result)
+
+
+def is_squid_access_locator(locator: str) -> bool:
+    """Recognize explicit Squid access-log resources without matching generic logs."""
+    path = urlsplit(locator).path.lower()
+    name = path.rsplit("/", 1)[-1]
+    if any(marker in path for marker in _SQUID_PATH_MARKERS):
+        return not path.endswith("/")
+    return name.endswith(
+        (
+            ".squid",
+            ".squid.gz",
+            ".squid.log",
+            ".squid.log.gz",
+            ".access.log",
+            ".access.log.gz",
+        )
+    )
+
+
+def parse_squid_access_line(line: str) -> tuple[str, int | None] | None:
+    """Return (URL, access-year) from one native Squid access line.
+
+    Standard Squid native logs begin with an epoch timestamp and contain the
+    requested URL later in the row.  We intentionally ignore client identity,
+    usernames, peer fields and all remaining metadata.
+    """
+    fields = line.split()
+    if len(fields) < 2:
+        return None
+
+    year: int | None = None
+    try:
+        stamp = float(fields[0])
+        if stamp >= 0:
+            candidate_year = datetime.fromtimestamp(
+                stamp,
+                tz=timezone.utc,
+            ).year
+            if 1996 <= candidate_year <= 2001:
+                year = candidate_year
+    except (ValueError, OverflowError, OSError):
+        pass
+
+    url: str | None = None
+    for field in fields[1:]:
+        if field.startswith(("http://", "https://")):
+            urls = extract_http_urls(field)
+            if urls:
+                url = urls[0]
+                break
+    if url is None:
+        return None
+    return url, year
