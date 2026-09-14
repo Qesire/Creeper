@@ -779,6 +779,16 @@ class ControlStoreTests(unittest.TestCase):
             now["value"] = 171.0
             with self.assertRaisesRegex(RuntimeError, "expired before renewal"):
                 store.renew_lease(running, ttl_seconds=50.0)
+            with self.assertRaisesRegex(RuntimeError, "expired before renewal"):
+                store.renew_lease(
+                    running,
+                    ttl_seconds=50.0,
+                    now=120.0,
+                )
+            self.assertEqual(
+                store.get_lease(running.lease_id).expires_at,
+                170.0,
+            )
             store.close()
 
     def test_source_lease_rejects_invalid_deadlines_without_mutation(self):
@@ -826,6 +836,13 @@ class ControlStoreTests(unittest.TestCase):
             self.assertEqual(store.get_lease(running.lease_id).expires_at, 140.0)
             with self.assertRaisesRegex(ValueError, "recovery time"):
                 store.recover_expired_leases(now=float("nan"))
+            store.clock = lambda: float("nan")
+            with self.assertRaisesRegex(ValueError, "renewal time"):
+                store.renew_lease(
+                    running,
+                    ttl_seconds=10.0,
+                )
+            self.assertEqual(store.get_lease(running.lease_id).expires_at, 140.0)
             self.assertEqual(store.get_lease(running.lease_id).state, LeaseState.RUNNING)
             store.close()
 
