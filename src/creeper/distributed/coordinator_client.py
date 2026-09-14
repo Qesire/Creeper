@@ -189,10 +189,18 @@ class CoordinatorClient:
             next_sequence_no=int(raw.get("next_sequence_no", 0)),
         )
 
-    async def claim(self, *, lease_seconds: float = 300.0) -> TaskLease | None:
+    async def claim(
+        self,
+        *,
+        lease_seconds: float = 300.0,
+        wait_seconds: float = 0.0,
+    ) -> TaskLease | None:
         value = await self._post(
             "/v1/tasks/claim",
-            {"lease_seconds": float(lease_seconds)},
+            {
+                "lease_seconds": float(lease_seconds),
+                "wait_seconds": float(wait_seconds),
+            },
         )
         raw = value.get("task")
         if raw is None:
