@@ -201,7 +201,10 @@ class CommandAgentSearchExecutor:
             "target_year_to": 2001,
             "requirements": {
                 "prefer_metasources": True,
-                "prefer_direct_evidence_bulk": True,
+                # Kept for protocol compatibility, but false by design:
+                # direct evidence is one valuable family, not the default
+                # search target for every source-intelligence episode.
+                "prefer_direct_evidence_bulk": False,
                 "direct_evidence_suffixes": [
                     ".cdx", ".cdx.gz", ".cdxj", ".cdxj.gz"
                 ],
