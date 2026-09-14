@@ -37,21 +37,29 @@ class PlatformYearObservation:
         if subject is None:
             raise ValueError("platform observation subject must be a valid hostname")
         object.__setattr__(self, "subject", subject)
-        if not 1996 <= int(self.target_year) <= 2001:
-            raise ValueError("platform observation year must be within 1996-2001")
-        if not self.provider.strip() or not self.request_template_hash.strip():
-            raise ValueError("platform observation provider and template are required")
-        if not self.policy_version.strip():
-            raise ValueError("platform observation policy is required")
-        if not self.source_key.strip():
-            raise ValueError("platform observation source_key is required")
-        if not self.reservoir_id.strip():
-            raise ValueError("platform observation reservoir_id is required")
-        if not self.authority_digest.strip():
-            raise ValueError("platform observation authority is required")
-        if not self.origin_decision.strip():
-            raise ValueError("platform observation origin decision is required")
-        if self.exposure_id is not None and not self.exposure_id.strip():
+        if (
+            isinstance(self.target_year, bool)
+            or not isinstance(self.target_year, int)
+            or not 1996 <= self.target_year <= 2001
+        ):
+            raise ValueError(
+                "platform observation year must be an integer within 1996-2001"
+            )
+        required = (
+            ("provider", self.provider),
+            ("request_template_hash", self.request_template_hash),
+            ("policy_version", self.policy_version),
+            ("source_key", self.source_key),
+            ("reservoir_id", self.reservoir_id),
+            ("authority_digest", self.authority_digest),
+            ("origin_decision", self.origin_decision),
+        )
+        for name, value in required:
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"platform observation {name} is required")
+        if self.exposure_id is not None and (
+            not isinstance(self.exposure_id, str) or not self.exposure_id.strip()
+        ):
             raise ValueError("platform observation exposure_id must be non-empty")
 
     @property
@@ -75,8 +83,14 @@ class PlatformYearAdmissionPolicy:
     max_tasks: int = 1
 
     def __post_init__(self) -> None:
-        if int(self.max_tasks) < 1:
-            raise ValueError("platform admission max_tasks must be positive")
+        if (
+            isinstance(self.max_tasks, bool)
+            or not isinstance(self.max_tasks, int)
+            or self.max_tasks < 1
+        ):
+            raise ValueError(
+                "platform admission max_tasks must be a positive integer"
+            )
 
 
 @dataclass(frozen=True)
@@ -122,7 +136,7 @@ class PlatformYearAdmission:
                 idempotent += 1
                 tasks.append(existing)
                 continue
-            if admitted >= int(self.policy.max_tasks):
+            if admitted >= self.policy.max_tasks:
                 blocked += 1
                 continue
             task = self.control_store.enqueue_platform_year_harvest(
