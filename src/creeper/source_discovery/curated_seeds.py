@@ -21,6 +21,9 @@ from creeper.source_discovery.registry import SourceDiscoveryRegistry
 
 
 def curated_direct_catalogs() -> tuple[SourceCandidate, ...]:
+    # Keep the bootstrap limited to broad catalogs that still have unresolved
+    # residual opportunity. Narrow topical catalogs belong in measured search
+    # history, not in every fresh runtime's unconditional seed set.
     return (
         SourceCandidate(
             canonical_entrypoint="https://arquivo.pt/datasets/cdxj/",
@@ -30,24 +33,6 @@ def curated_direct_catalogs() -> tuple[SourceCandidate, ...]:
             discovery_strategy="CURATED_DIRECT_CATALOG",
             expected_volume=150,
             temporal_semantics_prior=0.95,
-            enumerability_prior=1.0,
-            direct_evidence_prior=0.0,
-            baseline_overlap_prior=0.50,
-            access_cost_prior=0.20,
-            adapter_cost_prior=0.20,
-            confidence=1.0,
-            state=SourceState.DISCOVERED,
-        ),
-        SourceCandidate(
-            canonical_entrypoint="https://data.labs.loc.gov/us-elections/",
-            source_family="PUBLIC_ARCHIVE_INDEX_CATALOG",
-            level=SourceLevel.METASOURCE,
-            discovered_by="curated-official-seed",
-            discovery_strategy="CURATED_DIRECT_CATALOG",
-            expected_year_from=2000,
-            expected_year_to=2001,
-            expected_volume=3_500,
-            temporal_semantics_prior=1.0,
             enumerability_prior=1.0,
             direct_evidence_prior=0.0,
             baseline_overlap_prior=0.50,
