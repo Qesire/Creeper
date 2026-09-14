@@ -15,6 +15,7 @@ from creeper.authority.identity import (
 )
 from creeper.evidence.platform_harvest import (
     PlatformHarvestState,
+    PlatformYearHarvestResult,
     PlatformYearHarvestWorker,
     platform_authority_digest,
 )
@@ -314,6 +315,74 @@ class PlatformYearHarvestIntegrationTests(unittest.IsolatedAsyncioTestCase):
 
             await client.aclose()
             evidence.close()
+            control.close()
+
+    async def test_finalize_platform_task_accepts_real_paired_authority(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            control = ControlStore(root / "control.sqlite3", clock=lambda: 100.0)
+            baseline_signature = "baseline:real"
+            model_signature = "model:real"
+            authority_digest = platform_authority_digest(
+                baseline_signature=baseline_signature,
+                model_signature=model_signature,
+            )
+            observation = PlatformYearObservation(
+                provider="wayback",
+                subject="example.com",
+                target_year=1997,
+                request_template_hash="template",
+                policy_version="platform-v1",
+                source_key="source:platform-real-authority",
+                reservoir_id="reservoir:platform-real-authority",
+                authority_digest=authority_digest,
+            )
+            task = PlatformYearAdmission(control).admit([observation]).tasks[0]
+            exposure = control.ensure_platform_year_exposure(
+                task,
+                authority=(baseline_signature, model_signature),
+            )
+            self.assertIsNotNone(exposure)
+            claimed = control.claim_platform_year_harvests(
+                owner="platform-worker",
+                limit=1,
+                lease_seconds=30.0,
+            )
+            self.assertEqual(len(claimed), 1)
+            result = PlatformYearHarvestResult(
+                harvest_id=task.harvest_id,
+                provider=task.provider,
+                subject=task.subject,
+                target_year=task.target_year,
+                request_template_hash=task.request_template_hash,
+                policy_version=task.policy_version,
+                resume_key_used=task.resume_key,
+                state=PlatformHarvestState.COMPLETE,
+                exhaustive=True,
+                requests=1,
+            )
+            control.finish_platform_year_harvest_page(
+                result,
+                owner="platform-worker",
+            )
+
+            self.assertTrue(
+                control.finalize_platform_year_harvest(
+                    task.harvest_id,
+                    final_eed=0.0,
+                    accepted_host_years=0,
+                    evidence_frontier=0,
+                    authority_digest=authority_digest,
+                )
+            )
+            finalized = control.get_production_exposure(task.exposure_id)
+            self.assertIsNotNone(finalized)
+            assert finalized is not None
+            self.assertEqual(
+                finalized.authority,
+                (baseline_signature, model_signature),
+            )
+            self.assertEqual(finalized.state.value, "FINAL_CLOSED")
             control.close()
 
     async def test_complete_platform_task_closes_final_source_reward(self):
