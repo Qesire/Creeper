@@ -765,13 +765,25 @@ class ResearchIntegrationBridge:
         node: Any,
         query: RootQuery,
     ) -> MetadataArtifactAdmission:
+        node_kind = str(getattr(getattr(node, "kind", ""), "value", getattr(node, "kind", "")))
+        node_metadata = dict(getattr(node, "metadata", {}) or {})
+        metadata_filename = str(
+            node_metadata.get("filename")
+            or node_metadata.get("name")
+            or (
+                getattr(node, "title", "")
+                if node_kind in {"FILE", "ARTIFACT"}
+                else ""
+            )
+            or lead.provider_native_id
+        )
         assessment = assess_artifact_metadata(
             locator=lead.locator,
             content_type=lead.content_type or None,
-            filename=lead.provider_native_id,
+            filename=metadata_filename,
             title=str(getattr(node, "title", "") or ""),
             description=str(getattr(node, "description", "") or ""),
-            metadata=dict(getattr(node, "metadata", {}) or {}),
+            metadata=node_metadata,
             expected_artifact_family=query.expected_artifact_family,
         )
         with self.connection:
@@ -845,8 +857,16 @@ class ResearchIntegrationBridge:
             metadata_held = 0
             metadata_rejected = 0
             seen_lineages: set[tuple[str, str]] = set()
+            seen_lead_lineages: set[tuple[str, str]] = set()
 
             def admit_lead(lead: ArtifactLead, node: Any) -> bool:
+                key = (
+                    lead.artifact_identity,
+                    str(getattr(node, "node_id", "") or ""),
+                )
+                if key in seen_lead_lineages:
+                    return False
+                seen_lead_lineages.add(key)
                 nonlocal metadata_accepted, metadata_held, metadata_rejected
                 admission = self._prefilter_artifact_lead(
                     lead,
