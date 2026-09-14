@@ -71,7 +71,11 @@ list, seed list, dated NIC/registry allocation snapshot, research dataset,
 manifest, directory, collection export, or crawl index). Diversify
 institutions/origins instead of returning many siblings from one famous
 archive. Treat known CDX/CDXJ shards as background data-plane work, not a
-reason for another search.
+reason for another search. Treat measured zero-yield terminal sources in the
+request context as negative search evidence: do not re-propose the same
+origin/family/archetype unless you can state a materially different residual
+mechanism. Never infer hostname opportunity from page/document/graph-node
+counts alone.
 
 Prefer:
 1. large enumerable historical-web resources with 1996-2001 overlap,

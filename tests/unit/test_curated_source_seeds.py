@@ -28,14 +28,14 @@ class CuratedSourceSeedTests(unittest.TestCase):
         self.assertTrue(
             any(
                 item.canonical_entrypoint.endswith("webbase-2001.urls.gz")
-                and item.expected_volume == 118_142_155
+                and item.expected_volume is None
                 for item in roots
             )
         )
         self.assertTrue(
             any(
                 item.canonical_entrypoint.endswith("cnr-2000.urls.gz")
-                and item.expected_volume == 325_557
+                and item.expected_volume is None
                 for item in roots
             )
         )
@@ -45,20 +45,20 @@ class CuratedSourceSeedTests(unittest.TestCase):
 
     def test_all_curated_seeds_are_idempotent(self):
         seeds = curated_source_seeds()
-        self.assertEqual(len(seeds), 6)
+        self.assertEqual(len(seeds), 5)
         with tempfile.TemporaryDirectory() as tmp:
             control = ControlStore(Path(tmp) / "control.sqlite3")
             registry = SourceDiscoveryRegistry(control)
             try:
-                self.assertEqual(ensure_curated_source_seeds(registry), 6)
+                self.assertEqual(ensure_curated_source_seeds(registry), 5)
                 self.assertEqual(ensure_curated_source_seeds(registry), 0)
-                self.assertEqual(len(registry.list_candidates()), 6)
+                self.assertEqual(len(registry.list_candidates()), 5)
             finally:
                 control.close()
 
     def test_official_catalogs_are_idempotent_and_enumerable(self):
         seeds = curated_direct_catalogs()
-        self.assertEqual(len(seeds), 2)
+        self.assertEqual(len(seeds), 1)
         self.assertTrue(
             any(
                 item.canonical_entrypoint
@@ -66,12 +66,8 @@ class CuratedSourceSeedTests(unittest.TestCase):
                 for item in seeds
             )
         )
-        self.assertTrue(
-            any(
-                item.canonical_entrypoint
-                == "https://data.labs.loc.gov/us-elections/"
-                for item in seeds
-            )
+        self.assertFalse(
+            any("us-elections" in item.canonical_entrypoint for item in seeds)
         )
         self.assertTrue(all(item.enumerability_prior == 1.0 for item in seeds))
 
@@ -79,9 +75,9 @@ class CuratedSourceSeedTests(unittest.TestCase):
             control = ControlStore(Path(tmp) / "control.sqlite3")
             registry = SourceDiscoveryRegistry(control)
             try:
-                self.assertEqual(ensure_curated_direct_catalogs(registry), 2)
+                self.assertEqual(ensure_curated_direct_catalogs(registry), 1)
                 self.assertEqual(ensure_curated_direct_catalogs(registry), 0)
-                self.assertEqual(len(registry.list_candidates()), 2)
+                self.assertEqual(len(registry.list_candidates()), 1)
                 self.assertTrue(
                     all(
                         registry.proposal_count(seed.source_key) == 1

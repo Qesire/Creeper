@@ -85,16 +85,20 @@ early_accept_multiplier = 4.0
 early_reject_unseen_fraction = 0.01
 
 [admission]
-# Search-time prior gate. This is intentionally before baseline/CDX verification:
-# the Agent must already bring large, enumerable, 1996-2001-relevant resources.
+# Search-time prior gate. This is intentionally before baseline/CDX verification.
+# SOURCE volume is a hostname-reservoir proxy, not a page-count target.
 target_year_from = 1996
 target_year_to = 2001
 min_expected_volume = 100000
+# COLLECTION/METASOURCE roots are gateways: a smaller but highly enumerable
+# catalog can be worth scouting because it yields many independent child roots.
+gateway_min_expected_volume = 50000
 # CDX/CDXJ rows are already timestamp-bearing annual evidence, so even
 # substantially smaller direct-evidence reservoirs can dominate per-host
 # Wayback verification on accepted Novel EED / wall-clock.
 direct_min_expected_volume = 10000
 min_enumerability_prior = 0.50
+gateway_min_enumerability_prior = 0.80
 min_confidence = 0.35
 require_year_bounds = true
 

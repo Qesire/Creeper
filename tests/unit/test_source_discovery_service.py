@@ -82,8 +82,10 @@ follow_query = {follow_query}
 
 [admission]
 min_expected_volume = 123456
+gateway_min_expected_volume = 54321
 direct_min_expected_volume = 12345
 min_enumerability_prior = 0.6
+gateway_min_enumerability_prior = 0.75
 min_confidence = 0.4
 require_year_bounds = true
 
@@ -124,7 +126,15 @@ max_returned_candidates = 17
         )
         self.assertEqual(config.agent.policy.max_returned_candidates, 17)
         self.assertEqual(config.agent.admission.min_expected_volume, 123456)
+        self.assertEqual(
+            config.agent.admission.gateway_min_expected_volume,
+            54321,
+        )
         self.assertEqual(config.agent.admission.direct_min_expected_volume, 12345)
+        self.assertEqual(
+            config.agent.admission.gateway_min_enumerability_prior,
+            0.75,
+        )
         self.assertEqual(config.agent.admission.min_enumerability_prior, 0.6)
 
     def test_follow_query_rejects_string_truthiness(self) -> None:

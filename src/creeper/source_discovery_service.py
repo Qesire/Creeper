@@ -325,12 +325,20 @@ def load_source_discovery_config(config_path: Path) -> SourceDiscoveryServiceCon
             admission_raw.get("min_expected_volume", 100_000),
             name="admission.min_expected_volume",
         ),
+        gateway_min_expected_volume=_positive_int(
+            admission_raw.get("gateway_min_expected_volume", 50_000),
+            name="admission.gateway_min_expected_volume",
+        ),
         direct_min_expected_volume=_positive_int(
             admission_raw.get("direct_min_expected_volume", 10_000),
             name="admission.direct_min_expected_volume",
         ),
         min_enumerability_prior=_unit_float(
             admission_raw.get("min_enumerability_prior", 0.5), name="admission.min_enumerability_prior"
+        ),
+        gateway_min_enumerability_prior=_unit_float(
+            admission_raw.get("gateway_min_enumerability_prior", 0.8),
+            name="admission.gateway_min_enumerability_prior",
         ),
         min_confidence=_unit_float(admission_raw.get("min_confidence", 0.35), name="admission.min_confidence"),
         require_year_bounds=_strict_bool(admission_raw.get("require_year_bounds", True), name="admission.require_year_bounds"),
