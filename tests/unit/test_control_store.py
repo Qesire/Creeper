@@ -1178,6 +1178,57 @@ class ControlStoreTests(unittest.TestCase):
             )
             store.close()
 
+    def test_platform_claim_and_retry_deadlines_fail_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ControlStore(Path(tmp) / "control.sqlite3")
+            seed = store.enqueue_platform_year_harvest(
+                provider="wayback",
+                subject="example.com",
+                target_year=1997,
+                request_template_hash="template",
+                policy_version="platform-v1",
+            )
+            with self.assertRaisesRegex(ValueError, "claim limit must be an integer"):
+                store.claim_platform_year_harvests(
+                    owner="worker-a",
+                    limit=1.5,
+                    lease_seconds=30.0,
+                )
+            store.clock = lambda: float("nan")
+            with self.assertRaisesRegex(ValueError, "clock must be finite"):
+                store.claim_platform_year_harvests(
+                    owner="worker-a",
+                    limit=1,
+                    lease_seconds=30.0,
+                )
+            store.clock = lambda: 100.0
+            claimed = store.claim_platform_year_harvests(
+                owner="worker-a",
+                limit=1,
+                lease_seconds=30.0,
+            )
+            self.assertEqual(len(claimed), 1)
+            result = PlatformYearHarvestResult(
+                harvest_id=seed.harvest_id,
+                provider=seed.provider,
+                subject=seed.subject,
+                target_year=seed.target_year,
+                request_template_hash=seed.request_template_hash,
+                policy_version=seed.policy_version,
+                resume_key_used=seed.resume_key,
+                state=PlatformHarvestState.RETRYABLE,
+                error="temporary failure",
+            )
+            with self.assertRaisesRegex(ValueError, "requires retry_at"):
+                store.finish_platform_year_harvest_page(
+                    result,
+                    owner="worker-a",
+                )
+            stored = store.get_platform_year_harvest(seed.harvest_id)
+            self.assertEqual(stored.state, PlatformHarvestState.RUNNING)
+            self.assertEqual(stored.claimed_by, "worker-a")
+            store.close()
+
     def test_platform_year_harvest_partial_commit_persists_resume_and_counters(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = ControlStore(Path(tmp) / "control.sqlite3", clock=lambda: 100.0)
