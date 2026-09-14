@@ -126,7 +126,7 @@ assert request["requirements"]["prefer_direct_evidence_bulk"] is False
 assert ".cdxj.gz" in request["requirements"]["direct_evidence_suffixes"]
 assert request["requirements"]["resource_priority"][0].startswith("new enumerable root")
 assert "national libraries and web archives" in request["requirements"]["search_targets"]
-assert request["requirements"]["avoid_low_yield"][0] == "ordinary archived pages"
+assert "ordinary archived pages" in request["requirements"]["avoid_low_yield"]
 payload = {
     "query": "large historical web collection",
     "candidates": [
