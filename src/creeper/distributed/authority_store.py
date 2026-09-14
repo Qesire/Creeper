@@ -178,6 +178,23 @@ class DistributedAuthorityStore:
             CREATE INDEX IF NOT EXISTS idx_distributed_request_nonces_seen
                 ON distributed_request_nonces(seen_at);
 
+            CREATE TABLE IF NOT EXISTS distributed_provider_regions (
+                provider TEXT NOT NULL,
+                region TEXT NOT NULL,
+                state TEXT NOT NULL,
+                samples INTEGER NOT NULL DEFAULT 0 CHECK(samples >= 0),
+                successes INTEGER NOT NULL DEFAULT 0 CHECK(successes >= 0),
+                timeouts INTEGER NOT NULL DEFAULT 0 CHECK(timeouts >= 0),
+                throttles INTEGER NOT NULL DEFAULT 0 CHECK(throttles >= 0),
+                policy_blocks INTEGER NOT NULL DEFAULT 0 CHECK(policy_blocks >= 0),
+                total_latency_ms REAL NOT NULL DEFAULT 0
+                    CHECK(total_latency_ms >= 0),
+                response_bytes INTEGER NOT NULL DEFAULT 0
+                    CHECK(response_bytes >= 0),
+                updated_at REAL NOT NULL,
+                PRIMARY KEY(provider, region)
+            ) WITHOUT ROWID;
+
             CREATE TABLE IF NOT EXISTS distributed_provider_budgets (
                 provider TEXT PRIMARY KEY,
                 requests_per_second REAL NOT NULL
@@ -985,6 +1002,163 @@ class DistributedAuthorityStore:
                 "SELECT COUNT(*) FROM distributed_host_year_ledger"
             ).fetchone()[0]
         )
+
+    def record_provider_region_observation(
+        self,
+        provider: str,
+        *,
+        worker_id: str,
+        task_id: str,
+        generation: int,
+        connect_success: bool,
+        status_code: int | None,
+        latency_ms: float,
+        response_bytes: int,
+        timeout: bool = False,
+        policy_block: bool = False,
+    ) -> str:
+        """Record one low-rate qualification probe and return derived state."""
+
+        if (
+            not provider.strip()
+            or latency_ms < 0
+            or response_bytes < 0
+        ):
+            raise ValueError("invalid provider-region observation")
+        now = float(self.clock())
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            self._assert_active_lease(
+                task_id,
+                worker_id,
+                generation,
+                now=now,
+            )
+            worker = self.connection.execute(
+                """
+                SELECT region FROM distributed_workers
+                WHERE worker_id = ? AND revoked = 0
+                """,
+                (worker_id,),
+            ).fetchone()
+            if worker is None:
+                raise WorkerRejectedError(worker_id)
+            region = str(worker["region"])
+            existing = self.connection.execute(
+                """
+                SELECT * FROM distributed_provider_regions
+                WHERE provider = ? AND region = ?
+                """,
+                (provider, region),
+            ).fetchone()
+            samples = 1 + (0 if existing is None else int(existing["samples"]))
+            success = bool(connect_success) and not bool(timeout)
+            successes = (1 if success else 0) + (
+                0 if existing is None else int(existing["successes"])
+            )
+            timeouts = (1 if timeout else 0) + (
+                0 if existing is None else int(existing["timeouts"])
+            )
+            throttles = (1 if status_code == 429 else 0) + (
+                0 if existing is None else int(existing["throttles"])
+            )
+            policy_blocks = (1 if policy_block or status_code == 403 else 0) + (
+                0 if existing is None else int(existing["policy_blocks"])
+            )
+            total_latency = float(latency_ms) + (
+                0.0 if existing is None else float(existing["total_latency_ms"])
+            )
+            total_bytes = int(response_bytes) + (
+                0 if existing is None else int(existing["response_bytes"])
+            )
+
+            if samples < 3:
+                state = "UNKNOWN"
+            elif policy_blocks / samples >= 0.8:
+                state = "BLOCKED"
+            elif timeouts / samples >= 0.5 or throttles / samples >= 0.5:
+                state = "DEGRADED"
+            elif successes / samples >= 0.8:
+                state = "QUALIFIED"
+            else:
+                state = "DEGRADED"
+
+            self.connection.execute(
+                """
+                INSERT INTO distributed_provider_regions(
+                    provider, region, state, samples, successes, timeouts,
+                    throttles, policy_blocks, total_latency_ms,
+                    response_bytes, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(provider, region) DO UPDATE SET
+                    state = excluded.state,
+                    samples = excluded.samples,
+                    successes = excluded.successes,
+                    timeouts = excluded.timeouts,
+                    throttles = excluded.throttles,
+                    policy_blocks = excluded.policy_blocks,
+                    total_latency_ms = excluded.total_latency_ms,
+                    response_bytes = excluded.response_bytes,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    provider,
+                    region,
+                    state,
+                    samples,
+                    successes,
+                    timeouts,
+                    throttles,
+                    policy_blocks,
+                    total_latency,
+                    total_bytes,
+                    now,
+                ),
+            )
+            self.connection.commit()
+            return state
+        except Exception:
+            self.connection.rollback()
+            raise
+
+    def provider_region_snapshot(
+        self,
+        provider: str,
+        region: str,
+    ) -> dict[str, object] | None:
+        row = self.connection.execute(
+            """
+            SELECT * FROM distributed_provider_regions
+            WHERE provider = ? AND region = ?
+            """,
+            (provider, region),
+        ).fetchone()
+        if row is None:
+            return None
+        samples = int(row["samples"])
+        return {
+            "provider": str(row["provider"]),
+            "region": str(row["region"]),
+            "state": str(row["state"]),
+            "samples": samples,
+            "success_rate": (
+                0.0 if samples == 0 else int(row["successes"]) / samples
+            ),
+            "timeout_rate": (
+                0.0 if samples == 0 else int(row["timeouts"]) / samples
+            ),
+            "throttle_rate": (
+                0.0 if samples == 0 else int(row["throttles"]) / samples
+            ),
+            "policy_block_rate": (
+                0.0 if samples == 0 else int(row["policy_blocks"]) / samples
+            ),
+            "mean_latency_ms": (
+                0.0 if samples == 0 else float(row["total_latency_ms"]) / samples
+            ),
+            "response_bytes": int(row["response_bytes"]),
+            "updated_at": float(row["updated_at"]),
+        }
 
     def configure_provider_budget(
         self,
