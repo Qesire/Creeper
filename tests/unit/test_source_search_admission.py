@@ -124,8 +124,10 @@ assert request["admission"]["direct_min_expected_volume"] == 10000
 assert request["admission"]["direct_evidence_year_bounds_optional"] is True
 assert request["requirements"]["prefer_direct_evidence_bulk"] is True
 assert ".cdxj.gz" in request["requirements"]["direct_evidence_suffixes"]
-assert request["requirements"]["resource_priority"][0].startswith("official archive")
+assert request["requirements"]["resource_priority"][0].startswith("reusable catalog")
 assert "national libraries and web archives" in request["requirements"]["search_targets"]
+assert "research data repositories and dataset registries" in request["requirements"]["search_targets"]
+assert "do not collapse search" in request["requirements"]["source_portfolio"]
 assert request["requirements"]["avoid_low_yield"][0] == "ordinary archived pages"
 payload = {
     "query": "large historical web collection",
