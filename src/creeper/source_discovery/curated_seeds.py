@@ -214,13 +214,42 @@ def curated_non_snapshot_roots() -> tuple[SourceCandidate, ...]:
     )
 
 
+def curated_direct_record_sources() -> tuple[SourceCandidate, ...]:
+    """Audited live artifacts with record-level hostname + timestamp semantics."""
+
+    return (
+        SourceCandidate(
+            canonical_entrypoint=(
+                "https://ftpmirror1.infania.net/pub/simtelnet/msdos/info/"
+                "ftp-list.zip"
+            ),
+            source_family="HISTORICAL_FTP_SITELIST",
+            level=SourceLevel.SOURCE,
+            discovered_by="curated-live-research",
+            discovery_strategy="CURATED_DIRECT_RECORD_SEARCH",
+            expected_year_from=1996,
+            expected_year_to=1997,
+            expected_volume=None,
+            temporal_semantics_prior=1.0,
+            enumerability_prior=1.0,
+            direct_evidence_prior=1.0,
+            baseline_overlap_prior=0.50,
+            access_cost_prior=0.02,
+            adapter_cost_prior=0.05,
+            confidence=1.0,
+            state=SourceState.DISCOVERED,
+        ),
+    )
+
+
 def curated_source_seeds() -> tuple[SourceCandidate, ...]:
-    """Return all audited bootstrap roots without granting evidence authority."""
+    """Return all audited bootstrap roots without granting authority by prior."""
 
     return (
         curated_direct_catalogs()
         + curated_research_roots()
         + curated_non_snapshot_roots()
+        + curated_direct_record_sources()
     )
 
 
