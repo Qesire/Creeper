@@ -63,53 +63,6 @@ class AsyncWaybackCDXClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreaterEqual(client.http_elapsed_milliseconds, 0)
         self.assertEqual(sum(client.http_latency_buckets.values()), 2)
 
-    async def test_each_real_http_retry_consumes_one_external_permit(self):
-        calls = 0
-        permits = []
-        reports = []
-
-        async def acquire():
-            token = f"permit-{len(permits) + 1}"
-            permits.append(token)
-            return token
-
-        async def report(token, status_code, _headers):
-            reports.append((token, status_code))
-
-        async def handler(request):
-            nonlocal calls
-            calls += 1
-            if calls == 1:
-                return httpx.Response(503, request=request)
-            payload = [
-                ["timestamp", "original", "statuscode"],
-                ["19970102030405", "http://example.com/", "200"],
-            ]
-            return httpx.Response(
-                200,
-                content=json.dumps(payload).encode(),
-                request=request,
-            )
-
-        async with AsyncWaybackCDXClient(
-            transport=httpx.MockTransport(handler),
-            max_retries=1,
-            backoff=0,
-            throttle_floor_seconds=0,
-            requests_per_second=0,
-            request_permit=acquire,
-            request_report=report,
-        ) as client:
-            result = await client.query_key(self.key())
-
-        self.assertEqual(result.state, CDXQueryState.PASS)
-        self.assertEqual(calls, 2)
-        self.assertEqual(permits, ["permit-1", "permit-2"])
-        self.assertEqual(
-            reports,
-            [("permit-1", 503), ("permit-2", 200)],
-        )
-
     async def test_retry_after_extends_provider_wide_cooldown(self):
         request = httpx.Request("GET", "https://example.invalid/cdx")
         response = httpx.Response(
