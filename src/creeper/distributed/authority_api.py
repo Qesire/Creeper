@@ -13,6 +13,7 @@ from creeper.distributed.auth import AuthenticationError, HMACRequestAuthenticat
 from creeper.distributed.authority_store import (
     AuthorityNotReadyError,
     BatchConflictError,
+    BatchSequenceError,
     DistributedAuthorityStore,
     ProviderRegionNotQualifiedError,
     StaleLeaseError,
@@ -44,6 +45,7 @@ def _lease_payload(lease: TaskLease) -> dict[str, Any]:
         "lease_deadline": lease.lease_deadline,
         "attempt": lease.attempt,
         "cursor": lease.cursor,
+        "next_sequence_no": lease.next_sequence_no,
         "work": {
             "producer": lease.work.producer,
             "task_class": lease.work.task_class.value,
@@ -89,6 +91,11 @@ async def _error_middleware(request: web.Request, handler):
     except BatchConflictError as exc:
         return web.json_response(
             {"error": "BATCH_CONFLICT", "detail": str(exc)},
+            status=409,
+        )
+    except BatchSequenceError as exc:
+        return web.json_response(
+            {"error": "BATCH_SEQUENCE", "detail": str(exc)},
             status=409,
         )
     except KeyError as exc:
