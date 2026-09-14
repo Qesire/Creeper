@@ -4,7 +4,9 @@ import unittest
 
 from creeper.source_discovery.artifact_intake import (
     ArtifactIntakePolicy,
+    MetadataArtifactAdmission,
     assess_artifact_intake,
+    assess_artifact_metadata,
     classify_artifact,
 )
 from creeper.source_discovery.coordinator import TriageDisposition, TriageResult
@@ -171,6 +173,52 @@ class ArtifactIntakeTests(unittest.TestCase):
                 admission=ArtifactAdmission.WARM,
                 sample_is_formal_evidence=True,
             )
+
+    def test_metadata_prefilter_accepts_sparse_strong_archive_format(self) -> None:
+        result = assess_artifact_metadata(
+            locator="https://objects.example/index.cdxj",
+        )
+        self.assertEqual(result.admission, MetadataArtifactAdmission.ACCEPT)
+        self.assertEqual(result.format_kind, "CDXJ")
+
+    def test_metadata_prefilter_requires_semantics_for_generic_tables(self) -> None:
+        held = assess_artifact_metadata(
+            locator="https://objects.example/data.csv",
+            title="experiment measurements",
+        )
+        self.assertEqual(held.admission, MetadataArtifactAdmission.HOLD)
+
+        accepted = assess_artifact_metadata(
+            locator="https://objects.example/hosts.csv",
+            title="Historical web crawl hostname list",
+        )
+        self.assertEqual(accepted.admission, MetadataArtifactAdmission.ACCEPT)
+        self.assertIn("web_crawl", accepted.semantic_hits)
+        self.assertIn("host_list", accepted.semantic_hits)
+
+    def test_metadata_prefilter_rejects_documents_before_network_triage(self) -> None:
+        result = assess_artifact_metadata(
+            locator="https://repo.example/paper.pdf",
+            content_type="application/pdf",
+            title="A paper about web archives",
+        )
+        self.assertEqual(result.admission, MetadataArtifactAdmission.REJECT)
+
+    def test_metadata_prefilter_holds_relevant_but_unsupported_container(self) -> None:
+        result = assess_artifact_metadata(
+            locator="https://repo.example/web-crawl.parquet",
+            title="Historical web crawl corpus",
+        )
+        self.assertEqual(result.admission, MetadataArtifactAdmission.HOLD)
+        self.assertIn("web_crawl", result.semantic_hits)
+
+    def test_metadata_prefilter_rejects_explicit_expected_family_mismatch(self) -> None:
+        result = assess_artifact_metadata(
+            locator="https://repo.example/hosts.csv",
+            title="historical web host list",
+            expected_artifact_family="CDXJ",
+        )
+        self.assertEqual(result.admission, MetadataArtifactAdmission.REJECT)
 
     def test_classification_distinguishes_warc_and_compressed_warc(self) -> None:
         self.assertEqual(classify_artifact("https://x.example/crawl.warc"), ("WARC", None))
