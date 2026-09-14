@@ -156,6 +156,16 @@ class ResearchRegistry:
             CREATE INDEX IF NOT EXISTS idx_research_artifact_source
                 ON research_artifact_lineage(source_key, source_exposure_id, created_at);
 
+            CREATE TABLE IF NOT EXISTS research_source_decision_lineage (
+                source_key TEXT PRIMARY KEY,
+                decision_id TEXT NOT NULL,
+                scope_kind TEXT NOT NULL,
+                entity_id TEXT NOT NULL,
+                bound_at REAL NOT NULL
+            ) WITHOUT ROWID;
+            CREATE INDEX IF NOT EXISTS idx_research_source_decision
+                ON research_source_decision_lineage(decision_id, bound_at);
+
             CREATE TABLE IF NOT EXISTS research_lineage_exposures (
                 lineage_id TEXT NOT NULL,
                 source_key TEXT NOT NULL,
@@ -683,6 +693,53 @@ class ResearchRegistry:
             params.append(exposure_id)
         sql += " ORDER BY created_at,lineage_id"
         return tuple(self.connection.execute(sql, params).fetchall())
+
+    def bind_source_decision(
+        self,
+        *,
+        source_key: str,
+        decision_id: str,
+        scope_kind: str,
+        entity_id: str,
+    ) -> bool:
+        """Bind the first discovery decision for a source exactly once.
+
+        This is intentionally first-touch attribution. If another region later
+        rediscovers the same canonical source, it cannot steal or duplicate the
+        eventual production FINAL credit.
+        """
+        if not source_key or not decision_id or not scope_kind or not entity_id:
+            raise ValueError(
+                "source_key, decision_id, scope_kind and entity_id are required"
+            )
+        self.get_decision(decision_id)
+        with self.connection:
+            changed = self.connection.execute(
+                """
+                INSERT OR IGNORE INTO research_source_decision_lineage(
+                    source_key,decision_id,scope_kind,entity_id,bound_at
+                ) VALUES(?,?,?,?,?)
+                """,
+                (
+                    source_key,
+                    decision_id,
+                    scope_kind,
+                    entity_id,
+                    self.clock(),
+                ),
+            ).rowcount
+        return changed == 1
+
+    def source_decision_id(self, source_key: str) -> str:
+        row = self.connection.execute(
+            """
+            SELECT decision_id
+            FROM research_source_decision_lineage
+            WHERE source_key=?
+            """,
+            (source_key,),
+        ).fetchone()
+        return "" if row is None else str(row["decision_id"])
 
     def bind_source_exposure_lineage(
         self,
@@ -1220,6 +1277,9 @@ class ResearchRegistry:
             (RewardScope.SOURCE, source_key, "")
         }
         leaf_decision_ids: set[str] = set()
+        direct_source_decision = self.source_decision_id(source_key)
+        if direct_source_decision:
+            leaf_decision_ids.add(direct_source_decision)
         for row in rows:
             leaf_decision_id = str(row["decision_id"] or "")
             if leaf_decision_id:
