@@ -1367,9 +1367,7 @@ def _root_query_runtime_adapters(
                 ActionCandidate(
                     root_id,
                     PolicyLevel.ROOT,
-                    novelty=1.0 if not research.arm_stats(
-                        policy_version=policy.config.version
-                    ) else 0.0,
+                    novelty=1.0 if root_id not in stats else 0.0,
                 )
                 for root_id in sorted(roots)
             )
