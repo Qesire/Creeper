@@ -125,6 +125,7 @@ allowed_providers = ${ALLOWED_PROVIDERS}
 daily_egress_budget_bytes = ${DAILY_EGRESS}
 secret_env = "CREEPER_WORKER_SECRET"
 poll_seconds = 2.0
+claim_wait_seconds = 20.0
 lease_seconds = 300.0
 EOF
 
