@@ -20,8 +20,12 @@ def iter_archive_lines(
     without the carriage return.
     """
 
-    if chunk_size <= 0:
-        raise ValueError("chunk_size must be positive")
+    if (
+        isinstance(chunk_size, bool)
+        or not isinstance(chunk_size, int)
+        or chunk_size < 1
+    ):
+        raise ValueError("chunk_size must be a positive integer")
 
     pending = b""
     with bundle.open(name, "r") as source:
