@@ -9,6 +9,7 @@ from creeper.authority.identity import authority_digest
 from creeper.storage.telemetry_store import RuntimeTelemetryStore
 from scripts.run_v5_full_loop_canary import (
     CanaryCheckpointError,
+    _CANARY_SOURCE_HOSTS,
     run_canary,
     validate_canary_checkpoints,
 )
@@ -25,7 +26,16 @@ class V5FullLoopClosureCanaryTests(unittest.TestCase):
         annual_hashes = {}
         for year in range(1996, 2002):
             path = baseline_dir / f"{year}.txt"
-            path.write_text("", encoding="utf-8")
+            # Leave exactly 1997 unresolved for the synthetic undated hosts.
+            # This keeps the canary on the legitimate Wayback fallback path
+            # while preserving one exact task per host for deterministic
+            # provider-boundary assertions.
+            path.write_text(
+                ""
+                if year == 1997
+                else "\n".join(_CANARY_SOURCE_HOSTS) + "\n",
+                encoding="utf-8",
+            )
             annual_hashes[path.name] = _sha256(path)
         candidate_pool = baseline_dir / "candidate_pool.txt"
         candidate_pool.write_text("", encoding="utf-8")
