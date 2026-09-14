@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import gzip
+import io
 import json
 import tempfile
 import unittest
+import zipfile
 from decimal import Decimal
 from pathlib import Path
 
@@ -16,6 +18,7 @@ from creeper.source_discovery.measured_scout import (
     MeasuredYieldScoutPolicy,
 )
 from creeper.source_discovery.models import MeasurementMode, SourceCandidate, SourceLevel
+from creeper.sources.ftp_sitelist import AUDITED_FTP_SITELIST_LOCATORS
 
 
 def streamed_response(
@@ -230,6 +233,61 @@ class MeasuredYieldScoutTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(measurement.observed_host_year_pairs, 2)
         self.assertEqual(measurement.novel_host_year_pairs, 2)
         self.assertEqual(measurement.direct_host_years, 0)
+
+    async def test_ftp_sitelist_scout_measures_record_level_dates(self) -> None:
+        raw = io.BytesIO()
+        with zipfile.ZipFile(
+            raw,
+            "w",
+            compression=zipfile.ZIP_DEFLATED,
+        ) as archive:
+            archive.writestr(
+                "part01.txt",
+                (
+                    "Site: ignored-old.example\nDate: 10-Nov-95\n"
+                    "Site: known.com\nDate: 19-Nov-97\n"
+                    "Site: novel.org\nDate: 03-Jan-97\n"
+                ),
+            )
+        body = raw.getvalue()
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            return streamed_response(
+                200,
+                body,
+                headers={"content-type": "application/zip"},
+            )
+
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler)
+        ) as client:
+            scout = MeasuredYieldScoutExecutor(
+                client,
+                self.baseline,
+                {"com": Decimal("1"), "org": Decimal("0.5")},
+                policy=self.policy(
+                    min_unique_hosts=2,
+                    min_novel_hosts=1,
+                    min_novel_fraction=0.1,
+                    min_novel_eed=0.5,
+                ),
+            )
+            result = await scout(
+                self.candidate(
+                    next(iter(AUDITED_FTP_SITELIST_LOCATORS))
+                )
+            )
+
+        self.assertEqual(result.disposition, ScoutDisposition.WARM)
+        self.assertIsNotNone(result.measurement)
+        measurement = result.measurement
+        assert measurement is not None
+        self.assertEqual(measurement.sampled_records, 2)
+        self.assertEqual(measurement.unique_hosts, 2)
+        self.assertEqual(measurement.measurement_mode, MeasurementMode.HOST_YEAR)
+        self.assertEqual(measurement.observed_host_year_pairs, 2)
+        self.assertEqual(measurement.novel_host_year_pairs, 2)
+        self.assertEqual(measurement.novel_hosts, 1)
 
     async def test_squid_scout_uses_access_year_and_drops_off_window_rows(self) -> None:
         body = (
