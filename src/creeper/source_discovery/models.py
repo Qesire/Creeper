@@ -248,9 +248,11 @@ def is_background_bulk_candidate(candidate: SourceCandidate) -> bool:
     """
     if is_direct_evidence_entrypoint(candidate.canonical_entrypoint):
         return True
+    parsed = urlsplit(candidate.canonical_entrypoint)
+    path = parsed.path.lower().rstrip("/") + "/"
     return (
-        candidate.source_family == "PUBLIC_ARCHIVE_INDEX_CATALOG"
-        and candidate.discovery_strategy == "CURATED_DIRECT_CATALOG"
+        parsed.hostname == "arquivo.pt"
+        and path.startswith("/datasets/cdxj/")
     )
 
 
