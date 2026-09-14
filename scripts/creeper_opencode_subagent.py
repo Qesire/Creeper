@@ -64,15 +64,16 @@ are allowed when the task requires discovery.
 
 Search root-first, not shard-first. For broad discovery, combine an explicit
 1996-2001 year/range term with one concrete source archetype (for example:
-link list, URL list, domain list, seed list, research dataset, manifest,
-directory, collection export, or crawl index). Diversify institutions/origins
+link list, URL list, domain list, seed list, dated NIC/registry allocation
+snapshot, research dataset, manifest, directory, collection export, or crawl
+index). Diversify institutions/origins
 instead of returning many siblings from one famous archive. Treat known
 CDX/CDXJ shards as background data-plane work, not a reason for another search.
 
 Prefer:
 1. large enumerable historical-web resources with 1996-2001 overlap,
-2. early-web link/URL/domain/seed inventories and research-repository datasets,
-3. new archive/data-package roots that deterministically enumerate resources,
+2. early-web link/URL/domain/seed inventories, including dated NIC/registry exports,
+3. research-repository datasets and new archive/data-package roots,
 4. compact URL templates over long URL lists,
 5. hypotheses testable with very few requests.
 
