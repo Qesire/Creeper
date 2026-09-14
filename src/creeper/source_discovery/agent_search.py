@@ -143,6 +143,58 @@ class CommandAgentSearchExecutor:
         self.context_builder = context_builder
         self.clock = clock
 
+    @staticmethod
+    def _calibrated_search_profile(
+        directive: SearchDirective,
+    ) -> dict[str, object]:
+        """Map one agent slot to a distinct search shape observed to work live."""
+        kind = directive.kind.value
+        if kind == "INTERPRET_STRUCTURE":
+            return {
+                "mode": "subject_structure",
+                "primary_archetype": "machine-readable child inventory",
+                "query_examples": [
+                    "inspect the exact subject for download manifests, file lists, API/catalog endpoints",
+                ],
+            }
+        if kind == "RECOVER_STAGNATION":
+            return {
+                "mode": "recovery",
+                "primary_archetype": "alternate repository or citation-chain source",
+                "query_examples": [
+                    '"1996" OR "1997" OR "1998" historical web dataset filetype',
+                    '"1999" OR "2000" OR "2001" internet directory URL dataset',
+                    "paper dataset repository early web crawl URL list",
+                ],
+            }
+        if kind == "DISCOVER_NEW_FAMILY":
+            return {
+                "mode": "orthogonal_exploration",
+                "primary_archetype": "offline web directory/CD-ROM/site-list collection",
+                "query_examples": [
+                    '"1996" internet CD-ROM archived websites original URLs',
+                    '"1997" web directory URL list dataset',
+                    '"1998" offline web collection site list',
+                ],
+            }
+        if kind == "EXPLOIT_SOURCE_FAMILY":
+            return {
+                "mode": "family_exploitation",
+                "primary_archetype": "sibling dataset/root from measured productive family",
+                "query_examples": [
+                    "search the subject family/origin for adjacent years, manifests, sibling exports",
+                ],
+            }
+        return {
+            "mode": "high_density_refill",
+            "primary_archetype": "research crawl/link-list/URL-corpus dataset",
+            "query_examples": [
+                '"1996-2000" early web link list dataset',
+                '"2001" web crawl URL corpus dataset',
+                '"1999-2001" internet directory URLs dataset',
+            ],
+        }
+
     def _request_payload(
         self,
         directive: SearchDirective,
@@ -193,6 +245,9 @@ class CommandAgentSearchExecutor:
             "target_year_from": 1996,
             "target_year_to": 2001,
             "requirements": {
+                "calibrated_search_profile": self._calibrated_search_profile(
+                    directive
+                ),
                 "prefer_metasources": True,
                 # Deterministic CDX/CDXJ artifacts are background bulk work.
                 # Search capacity should find new roots/families, not spend an
