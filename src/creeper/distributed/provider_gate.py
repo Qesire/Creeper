@@ -110,9 +110,18 @@ class DistributedProviderGate:
                 self.throttle_floor_seconds,
                 0.0 if retry_after is None else retry_after,
             )
-        await self.client.provider_report(
-            token.permit_id,
-            status_code=status_code,
-            cooldown_seconds=cooldown,
-            response_bytes=int(response_bytes),
-        )
+        for attempt in range(5):
+            try:
+                await self.client.provider_report(
+                    token.permit_id,
+                    status_code=status_code,
+                    cooldown_seconds=cooldown,
+                    response_bytes=int(response_bytes),
+                )
+                return
+            except CoordinatorTransportError:
+                if attempt == 4:
+                    raise
+                await asyncio.sleep(
+                    min(1.0, self.budget_poll_seconds * (2**attempt))
+                )
