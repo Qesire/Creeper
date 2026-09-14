@@ -67,6 +67,32 @@ class PlatformHarvestInvariantTests(unittest.TestCase):
                 elapsed_seconds=float("inf"),
             )
 
+    def test_partial_result_requires_cursor_progress(self):
+        with self.assertRaisesRegex(ValueError, "advance the continuation"):
+            PlatformYearHarvestResult(
+                harvest_id="result-id",
+                provider="wayback",
+                subject="example.com",
+                target_year=1997,
+                request_template_hash="template",
+                policy_version="platform-v1",
+                resume_key_used="same",
+                state=PlatformHarvestState.PARTIAL,
+                next_resume_key="same",
+            )
+        with self.assertRaisesRegex(ValueError, "only PARTIAL"):
+            PlatformYearHarvestResult(
+                harvest_id="result-id",
+                provider="wayback",
+                subject="example.com",
+                target_year=1997,
+                request_template_hash="template",
+                policy_version="platform-v1",
+                resume_key_used=None,
+                state=PlatformHarvestState.RETRYABLE,
+                next_resume_key="unexpected",
+            )
+
     def test_retry_backoff_saturates_for_extreme_attempt_count(self):
         worker = PlatformYearHarvestWorker.__new__(PlatformYearHarvestWorker)
         worker.retry_base_seconds = 30.0
