@@ -716,6 +716,10 @@ class DistributedAuthorityStore:
     ) -> bool:
         is_probe = str(row["task_class"]) == TaskClass.PROBE.value
         coverage = json.loads(str(row["coverage_json"]))
+        if is_probe:
+            target_region = str(coverage.get("target_region", "")).strip()
+            if target_region and target_region != worker_region:
+                return False
         raw_providers = coverage.get("providers")
         if raw_providers is None:
             one = coverage.get("provider")
@@ -1246,6 +1250,48 @@ class DistributedAuthorityStore:
             partition=partition,
             algorithm_version=algorithm_version,
             required_capabilities=("STREAMING_BULK",),
+            priority=float(priority),
+        )
+        return self.admit_work(work)
+
+    def admit_region_probe_work(
+        self,
+        *,
+        provider: str,
+        probe_hostname: str,
+        target_region: str,
+        year: int = 2001,
+        samples: int = 3,
+        priority: float = 100.0,
+        algorithm_version: str = "fabric-region-probe-v1",
+    ) -> str:
+        provider = provider.strip()
+        hostname = normalize_official(probe_hostname)
+        target_region = target_region.strip()
+        year = int(year)
+        samples = int(samples)
+        if (
+            not provider
+            or hostname is None
+            or not target_region
+            or year not in YEAR_BITS
+            or not 1 <= samples <= 10
+        ):
+            raise ValueError("invalid provider region probe admission")
+        work = WorkDefinition(
+            producer="RegionProbeProducer",
+            task_class=TaskClass.PROBE,
+            input_identity=provider,
+            coverage={
+                "provider": provider,
+                "probe_hostname": hostname,
+                "target_region": target_region,
+                "year": year,
+                "samples": samples,
+            },
+            partition=f"{provider}:{target_region}:{hostname}:{year}",
+            algorithm_version=algorithm_version,
+            required_capabilities=("ONLINE_QUERY",),
             priority=float(priority),
         )
         return self.admit_work(work)
