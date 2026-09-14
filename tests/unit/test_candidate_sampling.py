@@ -7,6 +7,17 @@ from creeper.sources.sampling import stratified_hostnames
 
 
 class CandidateSamplingTests(unittest.TestCase):
+    def test_rejects_lossy_sampling_bounds(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "candidate_pool.txt"
+            path.write_text("a.com\n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "limit"):
+                stratified_hostnames(path, 1.5)
+            with self.assertRaisesRegex(ValueError, "bucket_cap"):
+                stratified_hostnames(path, 1, bucket_cap=True)
+            with self.assertRaisesRegex(ValueError, "bucket_cap"):
+                stratified_hostnames(path, 1, bucket_cap=0)
+
     def test_sampling_is_deterministic_and_covers_multiple_buckets(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "candidate_pool.txt"
