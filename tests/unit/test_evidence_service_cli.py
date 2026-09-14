@@ -3,6 +3,7 @@ import unittest
 from pathlib import Path
 
 from creeper.evidence_cli import run_service
+from creeper.storage.control_store import ControlStore
 
 
 class EvidenceServiceCliTests(unittest.IsolatedAsyncioTestCase):
@@ -32,6 +33,18 @@ class EvidenceServiceCliTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(report.terminal, 0)
             self.assertTrue((Path(tmp) / "control.sqlite3").exists())
             self.assertTrue((Path(tmp) / "evidence.sqlite3").exists())
+            control = ControlStore(Path(tmp) / "control.sqlite3")
+            try:
+                active = {
+                    str(row["service_name"])
+                    for row in control.list_cdx_services(active_only=True)
+                }
+            finally:
+                control.close()
+            self.assertEqual(
+                active,
+                {"wayback", "arquivo", "stanford", "icelandic", "estonian"},
+            )
 
     async def test_invalid_idle_backoff_is_rejected_before_worker_loop(self):
         with tempfile.TemporaryDirectory() as tmp:
