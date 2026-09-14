@@ -745,12 +745,23 @@ class DistributedAuthorityStore:
                 generation,
                 now=now,
             )
-            accepted = {
-                str(row["hy_id"])
-                for row in self.connection.execute(
-                    "SELECT hy_id FROM distributed_host_year_ledger"
+            accepted: set[str] = set()
+            hyids = [hyid for _hostname, _year, _locator, hyid in normalized]
+            for start in range(0, len(hyids), 900):
+                chunk = hyids[start : start + 900]
+                if not chunk:
+                    continue
+                placeholders = ",".join("?" for _ in chunk)
+                accepted.update(
+                    str(row["hy_id"])
+                    for row in self.connection.execute(
+                        f"""
+                        SELECT hy_id FROM distributed_host_year_ledger
+                        WHERE hy_id IN ({placeholders})
+                        """,
+                        chunk,
+                    )
                 )
-            }
             baseline_masks: dict[str, int] = {}
             if self.baseline_index is not None and normalized:
                 baseline_masks = {
