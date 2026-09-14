@@ -358,7 +358,9 @@ def run_canary(
         adapter = _SyntheticSourceAdapter(
             source_file,
             source_id=spec.reservoir_id,
-            source_year=1997,
+            # Canary production deliberately models an undated candidate-pool
+            # style source so Wayback remains the legitimate fallback lane.
+            source_year=None,
         )
         reservoir = control.get_reservoir(spec.reservoir_id)
         if reservoir is None or reservoir.state is not ReservoirState.READY:
