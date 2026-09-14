@@ -6,6 +6,7 @@ from pathlib import Path
 
 from creeper.distributed.authority_store import (
     BatchConflictError,
+    BatchSequenceError,
     DistributedAuthorityStore,
     ProviderRegionNotQualifiedError,
     StaleLeaseError,
@@ -212,7 +213,7 @@ class DistributedAuthorityTests(unittest.TestCase):
         batch = ResultBatch(
             task_id=lease.task_id,
             generation=lease.generation,
-            sequence_no=7,
+            sequence_no=0,
             results=(
                 {"kind": "HY", "hostname": "example.com", "year": 1996},
                 {"kind": "H", "hostname": "other.example"},
@@ -235,7 +236,7 @@ class DistributedAuthorityTests(unittest.TestCase):
         conflicting = ResultBatch(
             task_id=lease.task_id,
             generation=lease.generation,
-            sequence_no=7,
+            sequence_no=0,
             results=({"kind": "HY", "hostname": "evil.example", "year": 1996},),
             cursor_after="offset:4096",
         )
@@ -244,6 +245,45 @@ class DistributedAuthorityTests(unittest.TestCase):
                 conflicting,
                 worker_id=lease.worker_id,
             )
+
+    def test_new_result_batches_must_follow_authority_sequence(self) -> None:
+        self.store.admit_work(self.work("sequence.example"))
+        lease = self.store.claim_work(self.worker_a.worker_id, lease_seconds=30)
+        assert lease is not None
+        self.assertEqual(lease.next_sequence_no, 0)
+
+        with self.assertRaises(BatchSequenceError):
+            self.store.commit_result_batch(
+                ResultBatch(
+                    task_id=lease.task_id,
+                    generation=lease.generation,
+                    sequence_no=1,
+                    results=({"kind": "H", "hostname": "sequence.example"},),
+                    cursor_after="cursor:bad",
+                ),
+                worker_id=lease.worker_id,
+            )
+        self.assertEqual(self.store.batch_count(lease.task_id), 0)
+        self.assertEqual(
+            self.store.task_row(lease.task_id)["next_sequence_no"],
+            0,
+        )
+
+        self.assertTrue(
+            self.store.commit_result_batch(
+                ResultBatch(
+                    task_id=lease.task_id,
+                    generation=lease.generation,
+                    sequence_no=0,
+                    results=({"kind": "H", "hostname": "sequence.example"},),
+                    cursor_after="cursor:1",
+                ),
+                worker_id=lease.worker_id,
+            )
+        )
+        row = self.store.task_row(lease.task_id)
+        self.assertEqual(row["next_sequence_no"], 1)
+        self.assertEqual(row["cursor"], "cursor:1")
 
     def test_committed_batch_replay_survives_lease_generation_change(self) -> None:
         self.store.admit_work(self.work())
