@@ -14,6 +14,12 @@ from creeper.sources.non_snapshot import (
 
 
 class NonSnapshotParserTests(unittest.TestCase):
+    def test_mailbox_url_extraction_rejects_lossy_bound(self) -> None:
+        with self.assertRaisesRegex(ValueError, "positive integer"):
+            extract_http_urls("http://example.test/", max_urls=1.5)
+        with self.assertRaisesRegex(ValueError, "positive integer"):
+            extract_http_urls("http://example.test/", max_urls=True)
+
     def test_mailbox_url_extraction_keeps_only_http_urls(self) -> None:
         text = (
             "From: Person <person@example.net>\n"
