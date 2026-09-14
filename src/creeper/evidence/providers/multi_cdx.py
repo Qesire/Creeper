@@ -27,6 +27,7 @@ from creeper.evidence.policies import (
     EvidenceQueryKey,
     EvidenceQueryResult,
     RangeEvidenceQueryResult,
+    TemporalScope,
 )
 from creeper.evidence.providers.async_cdx import (
     AsyncWaybackCDXClient,
@@ -691,7 +692,7 @@ class AsyncCDXProviderPool:
             exact_keys = tuple(
                 EvidenceQueryKey(
                     key.hostname,
-                    key.temporal_scope.__class__(year, year),
+                    TemporalScope(year, year),
                     key.provider,
                     key.policy_version,
                 )
