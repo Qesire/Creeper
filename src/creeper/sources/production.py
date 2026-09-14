@@ -32,6 +32,8 @@ from creeper.sources.archive.cdxj import parse_cdxj_line
 from creeper.sources.archive.cdx import parse_cdx_line
 from creeper.sources.non_snapshot import (
     extract_http_urls,
+    mailbox_period_from_locator,
+    mailbox_year_from_locator,
     parse_dmoz_external_page_line,
     parse_squid_access_line,
 )
@@ -456,6 +458,13 @@ class StructuredProductionAdapter:
             # Privacy boundary: the durable pipeline sees only extracted URLs,
             # never mailbox authors, addresses, subjects, or surrounding text.
             payload = "\t".join(urls)
+            mailbox_year = mailbox_year_from_locator(self.source)
+            mailbox_period = mailbox_period_from_locator(self.source)
+            if mailbox_year is not None and mailbox_period is not None:
+                source_year = mailbox_year
+                source_time = mailbox_period
+                if self.evidence_contract.grants_direct_web_year:
+                    contract_direct_year = mailbox_year
             record_type = "MAILBOX_URL_LINE"
 
         elif self.kind == "squid_access":
