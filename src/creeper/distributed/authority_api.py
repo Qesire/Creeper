@@ -16,6 +16,7 @@ from creeper.distributed.authority_store import (
     BatchSequenceError,
     DistributedAuthorityStore,
     FabricProtocolMismatchError,
+    ProviderAccessDeniedError,
     ProviderRegionNotQualifiedError,
     StaleLeaseError,
     WorkerRejectedError,
@@ -89,6 +90,11 @@ async def _error_middleware(request: web.Request, handler):
         return web.json_response(
             {"error": "FABRIC_PROTOCOL_MISMATCH", "detail": str(exc)},
             status=409,
+        )
+    except ProviderAccessDeniedError as exc:
+        return web.json_response(
+            {"error": "PROVIDER_ACCESS_DENIED", "detail": str(exc)},
+            status=403,
         )
     except StaleLeaseError as exc:
         return web.json_response(
@@ -180,6 +186,9 @@ def create_authority_app(
             network_class=str(data.get("network_class", "")),
             capabilities=tuple(str(v) for v in data.get("capabilities", ())),
             producers=tuple(str(v) for v in data.get("producers", ())),
+            allowed_providers=tuple(
+                str(v) for v in data.get("allowed_providers", ())
+            ),
             protocol_version=str(data.get("protocol_version", "")),
             edition_version=str(data.get("edition_version", "")),
         )
