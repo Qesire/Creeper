@@ -135,6 +135,16 @@ class DistributedAuthorityStore:
                 FOREIGN KEY(task_id) REFERENCES distributed_work(task_id)
             ) WITHOUT ROWID;
 
+            CREATE TABLE IF NOT EXISTS distributed_resolution_coverage (
+                hostname TEXT NOT NULL,
+                provider TEXT NOT NULL,
+                scope TEXT NOT NULL,
+                resolver_version TEXT NOT NULL,
+                year_mask INTEGER NOT NULL DEFAULT 0 CHECK(year_mask >= 0),
+                updated_at REAL NOT NULL,
+                PRIMARY KEY(hostname, provider, scope, resolver_version)
+            ) WITHOUT ROWID;
+
             CREATE TABLE IF NOT EXISTS distributed_hy_probe_decisions (
                 task_id TEXT NOT NULL,
                 hy_id TEXT NOT NULL,
@@ -729,6 +739,131 @@ class DistributedAuthorityStore:
         except Exception:
             self.connection.rollback()
             raise
+
+    @staticmethod
+    def _year_interval_mask(year_from: int, year_to: int) -> int:
+        if not 1996 <= int(year_from) <= int(year_to) <= 2001:
+            raise ValueError("coverage years must be within 1996-2001")
+        mask = 0
+        for year in range(int(year_from), int(year_to) + 1):
+            mask |= YEAR_BITS[year]
+        return mask
+
+    def record_complete_resolution_coverage(
+        self,
+        task_id: str,
+        *,
+        worker_id: str,
+        generation: int,
+        hostname: str,
+        provider: str,
+        scope: str,
+        resolver_version: str,
+        year_from: int,
+        year_to: int,
+    ) -> int:
+        """Idempotently mark an interval as completely resolved."""
+
+        normalized = normalize_official(hostname)
+        if (
+            normalized is None
+            or not provider.strip()
+            or not scope.strip()
+            or not resolver_version.strip()
+        ):
+            raise ValueError("invalid resolution coverage identity")
+        interval_mask = self._year_interval_mask(year_from, year_to)
+        now = float(self.clock())
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            self._assert_active_lease(
+                task_id,
+                worker_id,
+                generation,
+                now=now,
+            )
+            row = self.connection.execute(
+                """
+                SELECT year_mask FROM distributed_resolution_coverage
+                WHERE hostname = ? AND provider = ? AND scope = ?
+                  AND resolver_version = ?
+                """,
+                (normalized, provider, scope, resolver_version),
+            ).fetchone()
+            old_mask = 0 if row is None else int(row["year_mask"])
+            new_mask = old_mask | interval_mask
+            self.connection.execute(
+                """
+                INSERT INTO distributed_resolution_coverage(
+                    hostname, provider, scope, resolver_version,
+                    year_mask, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(hostname, provider, scope, resolver_version)
+                DO UPDATE SET
+                    year_mask = excluded.year_mask,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    normalized,
+                    provider,
+                    scope,
+                    resolver_version,
+                    new_mask,
+                    now,
+                ),
+            )
+            self.connection.commit()
+            return new_mask
+        except Exception:
+            self.connection.rollback()
+            raise
+
+    def uncovered_resolution_intervals(
+        self,
+        *,
+        hostname: str,
+        provider: str,
+        scope: str,
+        resolver_version: str,
+        year_from: int,
+        year_to: int,
+    ) -> tuple[tuple[int, int], ...]:
+        """Subtract exact durable coverage and return contiguous missing ranges."""
+
+        normalized = normalize_official(hostname)
+        if (
+            normalized is None
+            or not provider.strip()
+            or not scope.strip()
+            or not resolver_version.strip()
+        ):
+            raise ValueError("invalid resolution coverage identity")
+        target_mask = self._year_interval_mask(year_from, year_to)
+        row = self.connection.execute(
+            """
+            SELECT year_mask FROM distributed_resolution_coverage
+            WHERE hostname = ? AND provider = ? AND scope = ?
+              AND resolver_version = ?
+            """,
+            (normalized, provider, scope, resolver_version),
+        ).fetchone()
+        covered = 0 if row is None else int(row["year_mask"])
+        missing = target_mask & ~covered
+        intervals: list[tuple[int, int]] = []
+        start: int | None = None
+        previous: int | None = None
+        for year in range(int(year_from), int(year_to) + 1):
+            if not (missing & YEAR_BITS[year]):
+                if start is not None and previous is not None:
+                    intervals.append((start, previous))
+                    start = previous = None
+                continue
+            if start is None:
+                start = year
+            previous = year
+        if start is not None and previous is not None:
+            intervals.append((start, previous))
+        return tuple(intervals)
 
     def probe_host_years(
         self,
