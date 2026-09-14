@@ -193,6 +193,36 @@ async def run_service(
                     "gt_16s",
                 )
             }
+            previous_physical_provider_stats: dict[
+                str, dict[str, int | float]
+            ] = {}
+            initial_physical_stats = provider.telemetry_snapshot()
+            telemetry.set_gauges(
+                {
+                    metric: value
+                    for name, stats in initial_physical_stats.items()
+                    for metric, value in (
+                        (
+                            "cdx_"
+                            + "".join(
+                                char if char.isalnum() else "_"
+                                for char in name
+                            )
+                            + "_configured_requests_per_second",
+                            stats["configured_requests_per_second"],
+                        ),
+                        (
+                            "cdx_"
+                            + "".join(
+                                char if char.isalnum() else "_"
+                                for char in name
+                            )
+                            + "_max_inflight",
+                            stats["max_inflight"],
+                        ),
+                    )
+                }
+            )
 
             def record_report(report: EvidenceWorkerReport) -> None:
                 nonlocal total
@@ -224,7 +254,9 @@ async def run_service(
                 nonlocal previous_stream_refill_tasks
                 nonlocal previous_stream_refill_empty_claims
                 nonlocal previous_latency_buckets, previous_gap_buckets
+                nonlocal previous_physical_provider_stats
 
+                current_physical_provider_stats = provider.telemetry_snapshot()
                 current_http_429 = int(provider.http_status_counts.get(429, 0))
                 current_http_503 = int(provider.http_status_counts.get(503, 0))
                 current_http_5xx = sum(
@@ -395,6 +427,35 @@ async def run_service(
                             )
                             for name in current_gap_buckets
                         },
+                        **{
+                            "cdx_"
+                            + "".join(
+                                char if char.isalnum() else "_"
+                                for char in provider_name
+                            )
+                            + "_"
+                            + metric: int(stats[metric])
+                            - int(
+                                previous_physical_provider_stats
+                                .get(provider_name, {})
+                                .get(metric, 0)
+                            )
+                            for provider_name, stats
+                            in current_physical_provider_stats.items()
+                            for metric in (
+                                "http_requests",
+                                "throttle_responses",
+                                "transport_errors",
+                                "http_elapsed_milliseconds",
+                                "rate_limit_wait_milliseconds",
+                                "cooldown_wait_milliseconds",
+                                "primary_assignments",
+                                "attempts",
+                                "passes",
+                                "empty_exhaustive",
+                                "retryable",
+                            )
+                        },
                     }
                 )
                 previous_http_requests = provider.http_requests
@@ -455,6 +516,7 @@ async def run_service(
                 )
                 previous_latency_buckets = current_latency_buckets
                 previous_gap_buckets = current_gap_buckets
+                previous_physical_provider_stats = current_physical_provider_stats
                 total = EvidenceWorkerReport(
                     claimed=total.claimed + report.claimed,
                     terminal=total.terminal + report.terminal,
