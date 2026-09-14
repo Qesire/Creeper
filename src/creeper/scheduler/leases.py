@@ -106,6 +106,10 @@ class WorkLease:
             not isinstance(self.owner, str) or not self.owner.strip()
         ):
             raise ValueError("owner must be non-empty when provided")
+        for name in ("cursor_start", "cursor_end"):
+            value = getattr(self, name)
+            if value is not None and not isinstance(value, str):
+                raise ValueError(f"{name} must be a string when provided")
 
     @classmethod
     def create(cls, *, reservoir_id: str, max_records: int, max_requests: int,
@@ -172,9 +176,18 @@ class WorkLease:
         return LeaseState.EXPIRED
 
     def expired(self) -> "WorkLease":
-        if self.state is not LeaseState.EXPIRED:
-            return replace(self, state=LeaseState.EXPIRED)
-        return self
+        if self.state is LeaseState.EXPIRED:
+            return self
+        if self.state not in {
+            LeaseState.GRANTED,
+            LeaseState.RUNNING,
+            LeaseState.PAUSED,
+            LeaseState.PREEMPTED,
+        }:
+            raise StateTransitionError(
+                f"invalid lease transition: {self.state} -> {LeaseState.EXPIRED}"
+            )
+        return replace(self, state=LeaseState.EXPIRED)
 
     def resume(self) -> "WorkLease":
         if self.state not in {LeaseState.PAUSED, LeaseState.PREEMPTED}:
