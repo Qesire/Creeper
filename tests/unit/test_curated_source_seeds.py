@@ -28,14 +28,14 @@ class CuratedSourceSeedTests(unittest.TestCase):
         self.assertTrue(
             any(
                 item.canonical_entrypoint.endswith("webbase-2001.urls.gz")
-                and item.expected_volume == 118_142_155
+                and item.expected_volume is None
                 for item in roots
             )
         )
         self.assertTrue(
             any(
                 item.canonical_entrypoint.endswith("cnr-2000.urls.gz")
-                and item.expected_volume == 325_557
+                and item.expected_volume is None
                 for item in roots
             )
         )
