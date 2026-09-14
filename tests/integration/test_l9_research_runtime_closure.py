@@ -3,9 +3,11 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 import httpx
 
+from creeper.source_discovery.manager import SourceReservoirManager
 from creeper.source_discovery.models import SourceCandidate, SourceLevel
 from creeper.source_discovery.registry import SourceDiscoveryRegistry
 from creeper.source_discovery.research_trigger import (
@@ -45,7 +47,10 @@ from creeper.source_research.policy import (
     PolicyLifecycle,
 )
 from creeper.source_research.registry import ResearchRegistry
-from creeper.source_discovery_service import _root_query_runtime_adapters
+from creeper.source_discovery_service import (
+    _root_query_runtime_adapters,
+    _unified_research_directive_provider,
+)
 from creeper.storage.control_store import ControlStore
 
 
@@ -505,6 +510,96 @@ class L9ResearchRuntimeClosureTests(unittest.IsolatedAsyncioTestCase):
                     # Terminal durable work is not replayed on the next cycle.
                     self.assertEqual(planner(), ())
                     self.assertEqual(len(calls), 1)
+            finally:
+                control.close()
+
+    def test_root_research_cannot_monopolize_generic_llm_budget(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            now = [1000.0]
+            control = ControlStore(Path(tmp) / "control.sqlite3")
+            try:
+                discovery = SourceDiscoveryRegistry(control)
+                research = ResearchRegistry(control)
+                bridge = ResearchIntegrationBridge(
+                    research,
+                    discovery,
+                    clock=lambda: now[0],
+                )
+                research.upsert_root(
+                    RootSurface(
+                        root_id="datacite",
+                        kind=RootKind.STRUCTURED_REPOSITORY,
+                        canonical_locator="https://api.datacite.org/dois",
+                        capabilities=("search", "cursor"),
+                    )
+                )
+                seed = RootQuery(
+                    root_id="datacite",
+                    query_text="seed",
+                    max_pages=1,
+                    max_wall_seconds=30.0,
+                    page_size=10,
+                )
+                research.register_program(
+                    QueryProgram(
+                        root_id="datacite",
+                        strategy="seed",
+                        queries=(seed,),
+                        hard_max_requests=1,
+                        stop_conditions=("terminal_page",),
+                    )
+                )
+                research.update_query_checkpoint(
+                    seed.query_id,
+                    checkpoint=None,
+                    state=QueryState.COMPLETE,
+                    pages_delta=1,
+                )
+
+                manager = SourceReservoirManager(discovery)
+                config = SimpleNamespace(
+                    agent=SimpleNamespace(
+                        min_seconds_between_starts=0.0,
+                        same_context_failure_cooldown_seconds=0.0,
+                    )
+                )
+                provider = _unified_research_directive_provider(
+                    manager,
+                    research,
+                    bridge,
+                    config,
+                )
+                snapshot = ResearchTriggerSnapshot(
+                    ready_minutes=0.0,
+                    context_hash="generic:empty",
+                    now=now[0],
+                )
+
+                first = provider(snapshot)
+                self.assertIsNotNone(first)
+                self.assertEqual(
+                    first.task_type,
+                    "COMPILE_ROOT_QUERY_PROGRAM",
+                )
+
+                root_context = bridge.build_root_research_context(
+                    "datacite",
+                    cooldown_satisfied=True,
+                )
+                root_request = bridge.build_root_research_request(root_context)
+                self.assertTrue(bridge.try_claim_llm_call(root_request))
+                bridge.finish_llm_call(
+                    root_request.call_identity,
+                    success=True,
+                    cost_seconds=0.1,
+                )
+
+                # One root-compiler call consumes the root-research share. The
+                # next allowed slow call must return to generic source-family
+                # discovery instead of compiling another known-root query.
+                second = provider(snapshot)
+                self.assertIsNotNone(second)
+                self.assertEqual(second.task_type, "DISCOVER_NEW_SOURCE")
             finally:
                 control.close()
 
