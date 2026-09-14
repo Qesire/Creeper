@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import sqlite3
 import time
 import uuid
@@ -709,8 +710,15 @@ class SourceDiscoveryRegistry:
         accepted_proposals: int = 0,
         new_sources: int = 0,
     ) -> SearchEpisode:
-        if search_cost_seconds < 0:
-            raise ValueError("search_cost_seconds must be non-negative")
+        if (
+            isinstance(search_cost_seconds, bool)
+            or not isinstance(search_cost_seconds, (int, float))
+            or not math.isfinite(float(search_cost_seconds))
+            or search_cost_seconds < 0
+        ):
+            raise ValueError(
+                "search_cost_seconds must be finite and non-negative"
+            )
         if (
             isinstance(accepted_proposals, bool)
             or not isinstance(accepted_proposals, int)
@@ -759,8 +767,15 @@ class SourceDiscoveryRegistry:
         return episode
 
     def credit_search_episode(self, episode_id: str, *, accepted_novel_eed: float) -> SearchEpisode:
-        if accepted_novel_eed < 0:
-            raise ValueError("accepted_novel_eed must be non-negative")
+        if (
+            isinstance(accepted_novel_eed, bool)
+            or not isinstance(accepted_novel_eed, (int, float))
+            or not math.isfinite(float(accepted_novel_eed))
+            or accepted_novel_eed < 0
+        ):
+            raise ValueError(
+                "accepted_novel_eed must be finite and non-negative"
+            )
         with self.connection:
             changed = self.connection.execute(
                 """
@@ -846,8 +861,13 @@ class SourceDiscoveryRegistry:
         *,
         cost_seconds: float,
     ) -> None:
-        if cost_seconds < 0:
-            raise ValueError("LLM episode cost must be non-negative")
+        if (
+            isinstance(cost_seconds, bool)
+            or not isinstance(cost_seconds, (int, float))
+            or not math.isfinite(float(cost_seconds))
+            or cost_seconds < 0
+        ):
+            raise ValueError("LLM episode cost must be finite and non-negative")
         with self.connection:
             changed = self.connection.execute(
                 """
