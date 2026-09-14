@@ -158,6 +158,11 @@ class CoordinatorCycleReport:
     regions_completed: int = 0
     regions_exhausted: int = 0
     region_candidates_registered: int = 0
+    root_queries_started: int = 0
+    root_queries_completed: int = 0
+    root_queries_terminal: int = 0
+    root_query_sources_registered: int = 0
+    root_query_failures: int = 0
     research_active: bool = False
     research_started: int = 0
     research_completed: int = 0
@@ -182,6 +187,8 @@ ScoutExecutor = Callable[[SourceCandidate], Awaitable[ScoutResult]]
 SearchExecutor = Callable[[SearchDirective], Awaitable[SearchBatch]]
 RegionPlanner = Callable[[], tuple[object, ...]]
 RegionExecutor = Callable[[object], Awaitable[object]]
+RootQueryPlanner = Callable[[], tuple[object, ...]]
+RootQueryExecutor = Callable[[object], Awaitable[object]]
 ResearchSnapshotProvider = Callable[[], ResearchTriggerSnapshot]
 ResearchExecutor = Callable[[ResearchDirective], Awaitable[object]]
 ResearchResultCommitter = Callable[[ResearchDirective, object, float], None]
@@ -239,13 +246,21 @@ class SourceDiscoveryCoordinator:
         region_planner: RegionPlanner | None = None,
         region_executor: RegionExecutor | None = None,
         region_parallelism: int = 2,
+        root_query_planner: RootQueryPlanner | None = None,
+        root_query_executor: RootQueryExecutor | None = None,
+        root_query_parallelism: int = 1,
         research_snapshot_provider: ResearchSnapshotProvider | None = None,
         research_executor: ResearchExecutor | None = None,
         research_result_committer: ResearchResultCommitter | None = None,
         research_failure_recorder: ResearchFailureRecorder | None = None,
         final_reward_synchronizer: FinalRewardSynchronizer | None = None,
     ) -> None:
-        if triage_parallelism < 1 or search_parallelism < 1 or region_parallelism < 1:
+        if (
+            triage_parallelism < 1
+            or search_parallelism < 1
+            or region_parallelism < 1
+            or root_query_parallelism < 1
+        ):
             raise ValueError("coordinator parallelism must be positive")
         if scout_parallelism is None:
             scout_parallelism = manager.targets.scout_parallelism
@@ -283,11 +298,18 @@ class SourceDiscoveryCoordinator:
         self._search_retry_deadlines: dict[str, float] = {}
         if (region_planner is None) != (region_executor is None):
             raise ValueError("region_planner and region_executor must be configured together")
+        if (root_query_planner is None) != (root_query_executor is None):
+            raise ValueError(
+                "root_query_planner and root_query_executor must be configured together"
+            )
         if research_executor is not None and research_snapshot_provider is None:
             raise ValueError("research_snapshot_provider is required with research_executor")
         self.region_planner = region_planner
         self.region_executor = region_executor
         self.region_parallelism = int(region_parallelism)
+        self.root_query_planner = root_query_planner
+        self.root_query_executor = root_query_executor
+        self.root_query_parallelism = int(root_query_parallelism)
         self.research_snapshot_provider = research_snapshot_provider
         self.research_executor = research_executor
         self.research_result_committer = research_result_committer
@@ -833,6 +855,35 @@ class SourceDiscoveryCoordinator:
             candidates = getattr(value, "candidates", ())
             counts["region_candidates_registered"] += len(candidates)
 
+    async def _run_root_queries(
+        self,
+        counts: dict[str, int | bool | float],
+    ) -> None:
+        if self.root_query_planner is None or self.root_query_executor is None:
+            return
+        tasks = tuple(self.root_query_planner())[: self.root_query_parallelism]
+        if not tasks:
+            return
+        counts["root_queries_started"] += len(tasks)
+        outcomes = await self._bounded_batch(
+            tasks,
+            self.root_query_executor,
+            self.root_query_parallelism,
+        )
+        for outcome in outcomes:
+            if outcome.error is not None:
+                counts["root_query_failures"] += 1
+                continue
+            counts["root_queries_completed"] += 1
+            value = outcome.value
+            if value is None:
+                continue
+            if bool(getattr(value, "terminal", False)):
+                counts["root_queries_terminal"] += 1
+            counts["root_query_sources_registered"] += int(
+                getattr(value, "sources_inserted", 0)
+            )
+
     def _current_research_snapshot(self) -> ResearchTriggerSnapshot | None:
         if self.research_snapshot_provider is None:
             return None
@@ -979,6 +1030,11 @@ class SourceDiscoveryCoordinator:
                 "regions_completed": 0,
                 "regions_exhausted": 0,
                 "region_candidates_registered": 0,
+                "root_queries_started": 0,
+                "root_queries_completed": 0,
+                "root_queries_terminal": 0,
+                "root_query_sources_registered": 0,
+                "root_query_failures": 0,
                 "research_active": False,
                 "research_started": 0,
                 "research_completed": 0,
@@ -1062,6 +1118,7 @@ class SourceDiscoveryCoordinator:
             self._commit_scouts(scout_candidates, scout_outcomes, counts)
             self._commit_searches(search_directives, search_outcomes, counts)
             await self._run_regions(counts)
+            await self._run_root_queries(counts)
             self._launch_background_research(counts)
             counts["research_active"] = bool(
                 self._research_task is not None and not self._research_task.done()
