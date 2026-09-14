@@ -34,7 +34,7 @@ elif args.mode == "fail":
     raise SystemExit(7)
 elif args.mode == "oversize":
     open(args.response, "w", encoding="utf-8").write("x" * 4096)
-elif args.mode in {"hypothesis", "duplicate-hypothesis"}:
+elif args.mode == "hypothesis":
     payload = {
         "query": "expand successful annual source",
         "hypotheses": [{
@@ -65,8 +65,55 @@ elif args.mode in {"hypothesis", "duplicate-hypothesis"}:
             }
         }]
     }
-    if args.mode == "duplicate-hypothesis":
-        payload["hypotheses"].append(dict(payload["hypotheses"][0]))
+    open(args.response, "w", encoding="utf-8").write(json.dumps(payload))
+elif args.mode == "duplicate_hypothesis":
+    payload = {
+        "query": "duplicate hypothesis ids",
+        "hypotheses": [
+            {
+                "hypothesis_id": "dup",
+                "action": "ENUMERATE_TEMPLATE",
+                "template": "https://a.example/{YEAR}.cdxj",
+                "variables": {"YEAR": [1999]},
+                "candidate_defaults": {
+                    "source_family": "BULK_ARTIFACT",
+                    "level": "SOURCE",
+                    "expected_year_from": 1999,
+                    "expected_year_to": 1999,
+                    "expected_volume": 1000,
+                    "temporal_semantics_prior": 1.0,
+                    "enumerability_prior": 1.0,
+                    "direct_evidence_prior": 1.0,
+                    "baseline_overlap_prior": 0.5,
+                    "access_cost_prior": 0.5,
+                    "adapter_cost_prior": 0.5,
+                    "confidence": 0.9,
+                },
+                "confidence": 0.9,
+            },
+            {
+                "hypothesis_id": "dup",
+                "action": "ENUMERATE_TEMPLATE",
+                "template": "https://b.example/{YEAR}.cdxj",
+                "variables": {"YEAR": [2000]},
+                "candidate_defaults": {
+                    "source_family": "BULK_ARTIFACT",
+                    "level": "SOURCE",
+                    "expected_year_from": 2000,
+                    "expected_year_to": 2000,
+                    "expected_volume": 1000,
+                    "temporal_semantics_prior": 1.0,
+                    "enumerability_prior": 1.0,
+                    "direct_evidence_prior": 1.0,
+                    "baseline_overlap_prior": 0.5,
+                    "access_cost_prior": 0.5,
+                    "adapter_cost_prior": 0.5,
+                    "confidence": 0.9,
+                },
+                "confidence": 0.9,
+            },
+        ],
+    }
     open(args.response, "w", encoding="utf-8").write(json.dumps(payload))
 elif args.mode == "success":
     payload = {
@@ -158,8 +205,16 @@ class CommandAgentSearchExecutorTests(unittest.IsolatedAsyncioTestCase):
             "high_density_refill",
         )
         self.assertIn(
-            '"2001" web crawl URL corpus dataset',
+            '"1996-2001" proxy cache access log URL hostname dataset',
             request["requirements"]["calibrated_search_profile"]["query_examples"],
+        )
+        self.assertNotIn(
+            "crawl",
+            " ".join(
+                request["requirements"]["calibrated_search_profile"][
+                    "query_examples"
+                ]
+            ).lower(),
         )
         self.assertTrue(request["requirements"]["prefer_metasources"])
         self.assertFalse(request["requirements"]["prefer_direct_evidence_bulk"])
@@ -188,7 +243,7 @@ class CommandAgentSearchExecutorTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_duplicate_hypothesis_ids_fail_at_protocol_boundary(self) -> None:
-        executor = self.executor("duplicate-hypothesis")
+        executor = self.executor("duplicate_hypothesis")
 
         with self.assertRaisesRegex(
             SearchAgentProtocolError,
