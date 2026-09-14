@@ -84,6 +84,13 @@ class ExplorationExecutorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(result.candidates), 101)
         self.assertEqual(result.checkpoint.new_candidates, 101)
 
+    async def test_cdxj_region_candidate_preserves_direct_scheduling_prior(self) -> None:
+        result = await ExplorationExecutor().execute(plan())
+        self.assertEqual(len(result.candidates), 1)
+        candidate = result.candidates[0]
+        self.assertEqual(candidate.direct_evidence_prior, 1.0)
+        self.assertEqual(candidate.temporal_semantics_prior, 1.0)
+
     async def test_exact_duplicate_does_not_consume_artifact_budget(self) -> None:
         item = plan(
             enumerator=EnumeratorSpec(
