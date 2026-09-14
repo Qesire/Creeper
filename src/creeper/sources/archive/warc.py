@@ -49,6 +49,20 @@ class WarcTargetRecord:
     offset: int
     length: int
 
+    def __post_init__(self) -> None:
+        if not isinstance(self.record_type, str) or not self.record_type.strip():
+            raise ValueError("record_type is required")
+        if self.target_uri is not None and not isinstance(self.target_uri, str):
+            raise ValueError("target_uri must be a string when provided")
+        if self.source_year is not None and (
+            isinstance(self.source_year, bool) or not isinstance(self.source_year, int)
+        ):
+            raise ValueError("source_year must be an integer when provided")
+        for name in ("offset", "length"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError(f"{name} must be a non-negative integer")
+
     @property
     def next_offset(self) -> int:
         return self.offset + self.length
@@ -64,6 +78,29 @@ class WarcMetadataLease:
     end_offset: int
     next_offset: int | None
     exhausted: bool
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "records", tuple(self.records))
+        if any(not isinstance(record, WarcTargetRecord) for record in self.records):
+            raise ValueError("records must contain WarcTargetRecord values")
+        for name in ("scanned_records", "start_offset", "end_offset"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError(f"{name} must be a non-negative integer")
+        if self.end_offset < self.start_offset:
+            raise ValueError("end_offset cannot precede start_offset")
+        if self.next_offset is not None and (
+            isinstance(self.next_offset, bool)
+            or not isinstance(self.next_offset, int)
+            or self.next_offset < self.end_offset
+        ):
+            raise ValueError(
+                "next_offset must be an integer not below end_offset when provided"
+            )
+        if not isinstance(self.exhausted, bool):
+            raise ValueError("exhausted must be a boolean")
+        if self.exhausted and self.next_offset is not None:
+            raise ValueError("exhausted WARC lease cannot retain next_offset")
 
     @property
     def next_cursor(self) -> str | None:
@@ -232,16 +269,19 @@ def read_warc_metadata_lease(
     record simply to predict exhaustion.
     """
 
-    if max_scanned_records < 1:
-        raise ValueError("max_scanned_records must be positive")
-    if max_archive_bytes < 1:
-        raise ValueError("max_archive_bytes must be positive")
-    if (
-        not isinstance(max_record_content_bytes, int)
-        or isinstance(max_record_content_bytes, bool)
-        or max_record_content_bytes < 1
+    for name, value in (
+        ("max_scanned_records", max_scanned_records),
+        ("max_archive_bytes", max_archive_bytes),
+        ("max_record_content_bytes", max_record_content_bytes),
     ):
-        raise ValueError("max_record_content_bytes must be a positive integer")
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            raise ValueError(f"{name} must be a positive integer")
+    for name, value in (
+        ("target_year_from", target_year_from),
+        ("target_year_to", target_year_to),
+    ):
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError(f"{name} must be an integer")
     if target_year_from > target_year_to:
         raise ValueError("target_year_from must not exceed target_year_to")
     try:
