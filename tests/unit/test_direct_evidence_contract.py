@@ -194,6 +194,73 @@ class DirectEvidenceContractTests(unittest.TestCase):
         self.assertFalse(undated_contract.grants_direct_web_year)
         self.assertEqual(undated_contract.evidence_mode, "discovery_only")
 
+    def test_dated_mailbox_url_creates_direct_capsule(self) -> None:
+        locator = "https://lists.gnu.org/archive/mbox/lynx-dev/1998-03"
+        contract = resolve_source_evidence_contract(locator)
+        self.assertEqual(contract, MAILBOX_MONTH_DIRECT_CONTRACT)
+
+        reservoir = Reservoir(
+            reservoir_id="reservoir:mailbox-direct",
+            domain_id="domain:mailbox-direct",
+            adapter_id=bind_contract_to_adapter_id(
+                "structured:mailbox-direct",
+                MAILBOX_MONTH_DIRECT_CONTRACT,
+            ),
+            root_locator=locator,
+            enumeration_kind="structured_records",
+            capacity_lower=1,
+            evidence_mode="direct_year",
+            state=ReservoirState.READY,
+        )
+        adapter = ProductionAdapterFactory.open(
+            reservoir,
+            temporal_scope=(1998, 1998),
+        )
+        record = adapter._generic_record(
+            "See http://mailbox-direct.example/path",
+            locator=f"{locator}:byte:42",
+        )
+        self.assertIsNotNone(record)
+        assert record is not None
+        record = adapter._apply_contract_authority(record)
+        observation = next(iter(adapter.extract_hosts(record)))
+        adapter.close()
+
+        self.assertEqual(observation.hostname, "mailbox-direct.example")
+        self.assertEqual(observation.source_year, 1998)
+        self.assertEqual(observation.source_time, "1998-03")
+        self.assertEqual(observation.direct_year_mask, 1 << (1998 - 1996))
+        self.assertEqual(
+            observation.original_url,
+            "http://mailbox-direct.example/path",
+        )
+
+        plan = EvidencePlanner().plan(
+            observation,
+            official_mask=0,
+            local_mask=0,
+            provider="wayback",
+            policy_version="runtime-policy",
+            allow_direct=True,
+        )
+        self.assertEqual(plan.external_keys, ())
+        self.assertEqual(len(plan.direct_capsules), 1)
+        capsule = plan.direct_capsules[0]
+        self.assertEqual(capsule.year, 1998)
+        self.assertEqual(capsule.evidence_timestamp, "1998-03")
+        self.assertEqual(
+            capsule.original_url,
+            "http://mailbox-direct.example/path",
+        )
+        self.assertEqual(
+            capsule.temporal_semantics,
+            MAILBOX_MONTH_DIRECT_CONTRACT.temporal_semantics,
+        )
+        self.assertEqual(
+            capsule.evidence_type,
+            MAILBOX_MONTH_DIRECT_CONTRACT.evidence_type,
+        )
+
     def test_squid_access_contract_is_direct_and_skips_external_provider(self) -> None:
         locator = "https://trace.example/data/old.squid.log"
         contract = resolve_source_evidence_contract(locator)
