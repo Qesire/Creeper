@@ -463,6 +463,21 @@ class SourceDiscoveryRegistryTests(unittest.TestCase):
         self.assertEqual([item.source_key for item in ranked], [ordinary.source_key])
         self.assertIn("baseline overlap", self.registry.suppression_reason(meta) or "")
 
+    def test_nonfinite_final_reward_and_suppression_ttl_are_rejected(self) -> None:
+        candidate = self.candidate("finite-final/")
+        self.registry.register_proposal(candidate)
+        with self.assertRaisesRegex(ValueError, "finite and non-negative"):
+            self.registry.record_final_reward(
+                candidate.source_key,
+                final_accepted_eed=float("nan"),
+            )
+        with self.assertRaisesRegex(ValueError, "finite and non-negative"):
+            self.registry.suppress_candidate(
+                candidate,
+                reason="invalid ttl",
+                ttl_seconds=float("inf"),
+            )
+
     def test_temporary_negative_knowledge_expires_and_is_pruned(self) -> None:
         candidate = self.candidate("temporary/")
         self._to_scout_ready(candidate)
