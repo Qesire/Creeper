@@ -50,7 +50,22 @@ def main(argv: list[str] | None = None) -> int:
         allow_public_bind=bool(args.allow_public_bind),
     )
     credentials = load_worker_credentials(config.credentials_file)
+    if not config.baseline_index.is_file():
+        raise FileNotFoundError(config.baseline_index)
     baseline = BaselineIndex(config.baseline_index)
+    metadata = baseline.connection.execute(
+        """
+        SELECT value FROM authority_metadata
+        WHERE key = 'authority_digest'
+        """
+    ).fetchone()
+    if metadata is None or not str(metadata[0]).strip():
+        baseline.close()
+        raise RuntimeError(
+            "distributed Authority requires an authority-bound baseline index"
+        )
+    # Force schema validation before opening the network listener.
+    baseline.counts()
     store = DistributedAuthorityStore(
         config.database,
         baseline_index=baseline,
