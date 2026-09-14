@@ -377,7 +377,7 @@ class SourceProducerTests(unittest.TestCase):
         self.assertIsNotNone(task)
         self.assertEqual(task.state, "pending")
         self.assertIsNone(task.lease_owner)
-        self.assertEqual(runtime.admission.reserved("wayback"), 0)
+        self.assertEqual(runtime.admission.reserved("wayback"), 5)
         self.assertEqual(self.evidence.count(), 0)
         origin = self.control.connection.execute(
             """
