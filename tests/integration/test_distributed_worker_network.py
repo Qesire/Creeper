@@ -22,6 +22,7 @@ from creeper.distributed.coordinator_client import CoordinatorClient
 from creeper.distributed.host_query import DistributedHostQueryProducer
 from creeper.distributed.region_probe import RegionProbeProducer
 from creeper.distributed.source_discovery import SourceDiscoveryProducer
+from creeper.distributed.thin_query import ThinHistoricalQueryProducer
 from creeper.distributed.models import (
     Capability,
     TaskClass,
@@ -355,6 +356,94 @@ class DistributedWorkerNetworkTests(unittest.IsolatedAsyncioTestCase):
         assert snapshot is not None
         self.assertEqual(snapshot["state"], "QUALIFIED")
         self.assertEqual(snapshot["samples"], 3)
+
+    async def test_cloudflare_thin_query_uses_one_request_and_only_positive_hy(self) -> None:
+        calls = 0
+
+        async def thin_handler(request: httpx.Request) -> httpx.Response:
+            nonlocal calls
+            calls += 1
+            payload = [
+                ["timestamp", "original", "statuscode"],
+                ["19970102030405", "http://thin.example/", "200"],
+            ]
+            return httpx.Response(
+                200,
+                headers={"Content-Type": "application/json"},
+                content=json.dumps(payload).encode(),
+                request=request,
+            )
+
+        self.store.configure_provider_budget(
+            "internet_archive",
+            requests_per_second=1000.0,
+            max_global_inflight=1,
+            require_qualified_region=False,
+        )
+        task_id = self.store.admit_thin_host_probe(
+            hostname="thin.example",
+            provider="internet_archive",
+            year=1997,
+            estimated_response_bytes=64 * 1024,
+        )
+        config = CDXProviderConfig(
+            name="internet_archive",
+            endpoint="https://ia.test/cdx",
+            requests_per_second=1000.0,
+            max_inflight=1,
+            max_connections=1,
+            max_keepalive_connections=1,
+            max_retries=3,
+            row_limit=100,
+        )
+        producer = ThinHistoricalQueryProducer(
+            (config,),
+            transports={
+                "internet_archive": httpx.MockTransport(thin_handler),
+            },
+        )
+        descriptor = WorkerDescriptor(
+            worker_id="worker-a",
+            runtime_class="cloudflare_worker",
+            region="cf-global",
+            architecture="wasm",
+            memory_bytes=128 * 1024**2,
+            cpu_count=1,
+            network_class="edge",
+            capabilities=(Capability.THIN_QUERY.value,),
+            allowed_providers=("internet_archive",),
+        )
+
+        async with CoordinatorClient(
+            self.base_url,
+            worker_id="worker-a",
+            secret=self.credentials["worker-a"],
+        ) as client:
+            worker = DistributedWorker(
+                client,
+                descriptor,
+                {"ThinHistoricalQueryProducer": producer},
+                lease_seconds=30,
+            )
+            report = await worker.run_once()
+
+        self.assertTrue(report.completed, report.error)
+        self.assertEqual(report.task_id, task_id)
+        self.assertEqual(calls, 1)
+        self.assertEqual(self.store.accepted_host_year_count(), 1)
+        self.assertEqual(self.store.task_row(task_id)["state"], "COMPLETE")
+        # Thin positive probes never claim complete resolution coverage.
+        self.assertEqual(
+            self.store.uncovered_resolution_intervals(
+                hostname="thin.example",
+                provider="cdx-pool:any",
+                scope="HOST",
+                resolver_version="resolver-v1",
+                year_from=1997,
+                year_to=1997,
+            ),
+            ((1997, 1997),),
+        )
 
     async def test_host_query_producer_closes_authority_to_cdx_to_hy_loop(self) -> None:
         calls = []
