@@ -469,23 +469,18 @@ class AsyncWaybackCDXClient:
             "from": f"{year_from}0101000000",
             "to": f"{year_to}1231235959",
             "output": "json",
-            # urlkey is intentionally present: Wayback resume-key pagination
-            # depends on the sort key being part of the selected CDX fields.
-            "fl": "urlkey,timestamp,original,statuscode,digest,length",
-            # Server-side filtering removes captures that can never satisfy
-            # Creeper's acceptance predicate. Local validation remains the
-            # final authority for every returned row.
+            # Keep the sort key for robust resume-key pagination, but otherwise
+            # request only fields needed for local validation and provenance.
+            "fl": "urlkey,timestamp,original,statuscode",
+            # Only reject captures that can never satisfy Creeper's acceptance
+            # predicate. Everything else is returned and reduced locally.
             "filter": "statuscode:[23][0-9][0-9]",
-            "gzip": "false",
+            # Do not set gzip=false: archive.org compresses responses by
+            # default and httpx transparently decodes them. Network, not local
+            # parsing, is the scarce resource here.
             "showResumeKey": "true",
             "limit": str(effective_limit),
         }
-        if year_from != year_to:
-            # A range probe needs only one accepted capture per year. CDX
-            # collapsing preserves the first row of each adjacent year run,
-            # sharply reducing dense same-year capture streams without losing
-            # year-existence evidence.
-            query["collapse"] = "timestamp:4"
         resume_key: str | None = None
         while True:
             params = dict(query)
