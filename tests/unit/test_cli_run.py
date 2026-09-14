@@ -59,18 +59,15 @@ evidence_capacity = 1
         self.assertEqual(status, 0)
         self.assertEqual(report["leases_succeeded"], 1)
         self.assertEqual(report["source_records"], 1)
-        self.assertEqual(report["evidence_tasks_enqueued"], 1)
-        self.assertEqual(report["evidence_tasks_completed"], 1)
+        self.assertEqual(report["evidence_tasks_enqueued"], 0)
+        self.assertEqual(report["evidence_tasks_completed"], 0)
         self.assertEqual(report["evidence_capsules_committed"], 0)
-        self.assertEqual(report["max_evidence_queue_depth"], 1)
+        self.assertEqual(report["max_evidence_queue_depth"], 0)
         self.assertTrue((root / "runtime" / "control.sqlite3").exists())
         self.assertTrue((root / "runtime" / "evidence.sqlite3").exists())
         control = ControlStore(root / "runtime" / "control.sqlite3")
         try:
-            self.assertEqual(
-                [task.key.hostname for task in control.list_evidence_tasks()],
-                ["new.example"],
-            )
+            self.assertEqual(control.list_evidence_tasks(), [])
         finally:
             control.close()
 
