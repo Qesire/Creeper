@@ -406,6 +406,34 @@ class ControlStoreTests(unittest.TestCase):
             "expected_novel_eed": 1.5,
         }
 
+    def test_save_lease_revalidates_duck_typed_input_before_persistence(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ControlStore(Path(tmp) / "control.sqlite3")
+            invalid = type(
+                "DuckLease",
+                (),
+                {
+                    "lease_id": "lease:duck",
+                    "reservoir_id": "reservoir:missing",
+                    "cursor_start": None,
+                    "cursor_end": None,
+                    "max_records": 1,
+                    "max_requests": 1,
+                    "max_bytes": 1,
+                    "max_seconds": float("nan"),
+                    "resource_class": "general",
+                    "expected_evidence_tasks": 0,
+                    "expected_novel_eed": 0.0,
+                    "owner": None,
+                    "expires_at": None,
+                    "state": LeaseState.CREATED,
+                },
+            )()
+            with self.assertRaisesRegex(ValueError, "max_seconds"):
+                store.save_lease(invalid)
+            self.assertIsNone(store.get_lease("lease:duck"))
+            store.close()
+
     def test_domain_reservoir_and_lease_round_trip_requires_domain_first(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = ControlStore(Path(tmp) / "control.sqlite3")
