@@ -726,6 +726,48 @@ class ControlStoreTests(unittest.TestCase):
                 store.renew_lease(running, ttl_seconds=50.0)
             store.close()
 
+    def test_source_lease_rejects_invalid_deadlines_without_mutation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ControlStore(Path(tmp) / "control.sqlite3")
+            ready = self._ready_reservoir(cursor="0")
+            store.save_domain(self._domain())
+            store.save_reservoir(ready)
+
+            with self.assertRaisesRegex(ValueError, "lease_ttl_seconds"):
+                store.grant_fresh_lease(
+                    ready.reservoir_id,
+                    owner="worker-a",
+                    now=100.0,
+                    lease_ttl_seconds=-1.0,
+                    **self._lease_limits(),
+                )
+            self.assertEqual(
+                store.get_reservoir(ready.reservoir_id).state,
+                ReservoirState.READY,
+            )
+
+            lease = store.grant_fresh_lease(
+                ready.reservoir_id,
+                owner="worker-a",
+                now=100.0,
+                lease_ttl_seconds=40.0,
+                **self._lease_limits(),
+            )
+            assert lease is not None
+            running = lease.start()
+            store.save_lease(running)
+            with self.assertRaisesRegex(ValueError, "renewal time"):
+                store.renew_lease(
+                    running,
+                    ttl_seconds=10.0,
+                    now=float("nan"),
+                )
+            self.assertEqual(store.get_lease(running.lease_id).expires_at, 140.0)
+            with self.assertRaisesRegex(ValueError, "recovery time"):
+                store.recover_expired_leases(now=float("nan"))
+            self.assertEqual(store.get_lease(running.lease_id).state, LeaseState.RUNNING)
+            store.close()
+
     def test_fresh_grant_uses_cursor_and_prevents_second_claim(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = ControlStore(Path(tmp) / "control.sqlite3")
