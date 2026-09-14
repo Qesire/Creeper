@@ -12,6 +12,7 @@ from creeper.source_discovery import (
     SourceState,
 )
 from creeper.source_discovery.manager import SourcePoolTargets, SourceReservoirManager
+from creeper.source_discovery.models import SearchEpisode, StrategyReward
 from creeper.storage.control_store import ControlStore
 
 
@@ -69,6 +70,35 @@ class SourceRefillBudgetTests(unittest.TestCase):
             ),
             search_cooldown_seconds=search_cooldown_seconds,
         )
+
+    def test_search_reward_models_reject_nonfinite_values(self) -> None:
+        with self.assertRaisesRegex(ValueError, "search_cost_seconds"):
+            SearchEpisode(
+                episode_id="search:test",
+                strategy="META_SOURCE_SEARCH",
+                backend="test",
+                query="q",
+                actor="test",
+                started_at=1.0,
+                search_cost_seconds=float("nan"),
+            )
+        with self.assertRaisesRegex(ValueError, "finished_at"):
+            SearchEpisode(
+                episode_id="search:test",
+                strategy="META_SOURCE_SEARCH",
+                backend="test",
+                query="q",
+                actor="test",
+                started_at=2.0,
+                finished_at=1.0,
+            )
+        with self.assertRaisesRegex(ValueError, "episodes"):
+            StrategyReward(
+                strategy="META_SOURCE_SEARCH",
+                episodes=True,
+                accepted_novel_eed=0.0,
+                search_cost_seconds=1.0,
+            )
 
     def test_parallel_directives_share_one_cold_deficit(self) -> None:
         self._warm()
