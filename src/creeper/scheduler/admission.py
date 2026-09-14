@@ -167,7 +167,7 @@ class EvidenceBacklogAdmission:
             raise ValueError("provider is required")
         if isinstance(amount, bool) or not isinstance(amount, int) or amount < 0:
             raise ValueError("amount must be a non-negative integer")
-        if not isinstance(capacity, int) or capacity < 0:
+        if isinstance(capacity, bool) or not isinstance(capacity, int) or capacity < 0:
             raise ValueError("capacity must be a non-negative integer")
         if (
             isinstance(ttl_seconds, bool)
