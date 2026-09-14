@@ -17,7 +17,13 @@ class StaticDatasetAdapter:
     def __init__(
         self, path: Path, source_id: str = "local_dataset", source_year: int | None = None
     ):
-        self.path = path
+        if not isinstance(source_id, str) or not source_id.strip():
+            raise ValueError("source_id must be non-empty")
+        if source_year is not None and (
+            isinstance(source_year, bool) or not isinstance(source_year, int)
+        ):
+            raise ValueError("source_year must be an integer when provided")
+        self.path = Path(path)
         self.source_id = source_id
         self.source_year = source_year
         self.adapter_id = source_id
