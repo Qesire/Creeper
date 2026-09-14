@@ -2779,10 +2779,18 @@ class SourceDiscoveryRegistry:
         ttl_seconds: float | None = None,
     ) -> None:
         scope = SuppressionScope(scope)
-        if not scope_key.strip() or not reason.strip():
+        if (
+            not isinstance(scope_key, str)
+            or not scope_key.strip()
+            or not isinstance(reason, str)
+            or not reason.strip()
+        ):
             raise ValueError("suppression key and reason are required")
         if ttl_seconds is not None and (
-            not math.isfinite(float(ttl_seconds)) or ttl_seconds < 0
+            isinstance(ttl_seconds, bool)
+            or not isinstance(ttl_seconds, (int, float))
+            or not math.isfinite(float(ttl_seconds))
+            or ttl_seconds < 0
         ):
             raise ValueError("ttl_seconds must be finite and non-negative")
         now = self._now()
