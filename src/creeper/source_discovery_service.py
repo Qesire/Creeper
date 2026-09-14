@@ -1095,6 +1095,87 @@ def _ensure_structured_root_seed_programs(
     return research.connection.total_changes - before
 
 
+def _unified_research_directive_provider(
+    manager: SourceReservoirManager,
+    research: ResearchRegistry,
+    bridge: ResearchIntegrationBridge,
+    config: SourceDiscoveryServiceConfig,
+):
+    """Prefer one exhausted-root compiler call over generic LLM discovery.
+
+    The generic L8 gate remains authoritative for concurrency, deterministic
+    frontier suppression, ready-inventory pressure, and global cooldown.
+    """
+
+    def choose(snapshot: ResearchTriggerSnapshot) -> ResearchDirective | None:
+        base = manager.plan_research(snapshot)
+        if base is None:
+            return None
+        if base.trigger_reason not in {
+            ResearchTriggerReason.READY_INVENTORY_LOW,
+            ResearchTriggerReason.FRONTIER_EXHAUSTED,
+            ResearchTriggerReason.SUSTAINED_FINAL_YIELD_COLLAPSE,
+        }:
+            return base
+
+        rows = research.connection.execute(
+            """
+            SELECT r.root_id, MAX(q.updated_at) AS last_query_at
+            FROM research_roots AS r
+            JOIN research_queries AS q
+              ON q.root_id=r.root_id
+            WHERE r.active=1
+            GROUP BY r.root_id
+            HAVING SUM(
+                CASE WHEN q.state IN ('READY','RUNNING','RETRYABLE')
+                     THEN 1 ELSE 0 END
+            )=0
+               AND SUM(
+                CASE WHEN q.state IN ('COMPLETE','EXHAUSTED')
+                     THEN 1 ELSE 0 END
+               )>0
+            ORDER BY last_query_at ASC, r.root_id
+            """
+        ).fetchall()
+        now = float(snapshot.now if snapshot.now is not None else time.time())
+        for row in rows:
+            root_id = str(row["root_id"])
+            context = bridge.build_root_research_context(
+                root_id,
+                cooldown_satisfied=True,
+            )
+            active, last_started, failures = bridge.llm_gate_state(
+                context.context_hash
+            )
+            if active is not None:
+                return None
+            interval = (
+                config.agent.same_context_failure_cooldown_seconds
+                if failures > 0
+                else config.agent.min_seconds_between_starts
+            )
+            if (
+                last_started is not None
+                and now - float(last_started) < float(interval)
+            ):
+                continue
+            return ResearchDirective(
+                task_type="COMPILE_ROOT_QUERY_PROGRAM",
+                trigger_reason=ResearchTriggerReason.ROOT_PROGRAM_EXHAUSTED,
+                strategy="STRUCTURED_ROOT_QUERY_COMPILER",
+                subject=root_id,
+                desired_regions=1,
+                reason=(
+                    "deterministic structured-root program is exhausted; "
+                    "compile one bounded orthogonal query program"
+                ),
+                context_key=context.context_hash,
+            )
+        return base
+
+    return choose
+
+
 def _root_query_runtime_adapters(
     research: ResearchRegistry,
     bridge: ResearchIntegrationBridge,
@@ -1421,6 +1502,16 @@ async def _open_runtime(config: SourceDiscoveryServiceConfig):
                 async def execute_background_research(
                     directive: ResearchDirective,
                 ) -> object:
+                    if directive.task_type == "COMPILE_ROOT_QUERY_PROGRAM":
+                        if directive.subject is None:
+                            raise ValueError(
+                                "root research directive requires root_id subject"
+                            )
+                        return await research_bridge.execute_root_research(
+                            directive.subject,
+                            unified_research,
+                            cooldown_satisfied=True,
+                        )
                     return await research_bridge.execute_unified(
                         directive,
                         unified_research,
@@ -1480,9 +1571,33 @@ async def _open_runtime(config: SourceDiscoveryServiceConfig):
                         if background_research is not None
                         else None
                     ),
+                    research_directive_provider=(
+                        _unified_research_directive_provider(
+                            manager,
+                            research_registry,
+                            research_bridge,
+                            config,
+                        )
+                        if background_research is not None
+                        else None
+                    ),
                     research_executor=background_research,
                     research_result_committer=(
-                        research_bridge.commit_execution_result
+                        (
+                            lambda directive, result, elapsed: (
+                                research_bridge.commit_root_research_result(
+                                    result,
+                                    elapsed_seconds=elapsed,
+                                )
+                                if directive.task_type
+                                == "COMPILE_ROOT_QUERY_PROGRAM"
+                                else research_bridge.commit_execution_result(
+                                    directive,
+                                    result,
+                                    elapsed,
+                                )
+                            )
+                        )
                         if background_research is not None
                         else None
                     ),
