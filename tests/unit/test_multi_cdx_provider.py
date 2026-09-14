@@ -15,6 +15,7 @@ from creeper.evidence.policies import (
 from creeper.evidence.providers.multi_cdx import (
     AsyncArquivoCDXClient,
     AsyncCDXProviderPool,
+    CDXProviderConfig,
 )
 
 
@@ -159,6 +160,22 @@ class ArquivoDialectTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(params["matchType"], "host")
         self.assertEqual(params["from"], "1996")
         self.assertEqual(params["to"], "2001")
+
+
+class ProviderConfigTests(unittest.TestCase):
+    def test_row_limit_is_serialized_and_applied_to_client(self) -> None:
+        config = CDXProviderConfig(
+            name="internet_archive",
+            endpoint="https://web.archive.org/cdx/search/cdx",
+            row_limit=150_000,
+        )
+        self.assertEqual(config.as_dict()["row_limit"], 150_000)
+        pool = AsyncCDXProviderPool.from_configs((config,))
+        try:
+            self.assertEqual(pool.clients["internet_archive"].limit, 150_000)
+        finally:
+            import asyncio
+            asyncio.run(pool.aclose())
 
 
 class MultiCDXProviderPoolTests(unittest.IsolatedAsyncioTestCase):
