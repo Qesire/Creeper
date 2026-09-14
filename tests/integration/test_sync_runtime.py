@@ -178,10 +178,24 @@ class SyncRuntimeIntegrationTests(unittest.TestCase):
                 evidence_provider="wayback",
                 evidence_policy_version="cdx-v1",
             )
+            original_renew = control.renew_lease
+            renew_calls = []
+
+            def tracked_renew(lease, *, ttl_seconds, now=None):
+                renew_calls.append((lease.lease_id, ttl_seconds, now))
+                return original_renew(
+                    lease,
+                    ttl_seconds=ttl_seconds,
+                    now=now,
+                )
+
+            control.renew_lease = tracked_renew
 
             report = runtime.run_once()
 
             self.assertEqual(report.leases_succeeded, 1)
+            self.assertEqual(len(renew_calls), 1)
+            self.assertEqual(renew_calls[0][0], adapter.leases[0].lease_id)
             self.assertEqual(report.evidence_tasks_completed, 3)
             self.assertEqual(report.evidence_capsules_committed, 1)
             self.assertLessEqual(report.max_evidence_queue_depth, 2)

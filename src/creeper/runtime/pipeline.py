@@ -122,6 +122,11 @@ class SyncRuntime:
             template = candidate.lease
             if template is None:
                 raise ValueError("runtime lease candidate requires a lease template")
+            postprocess_ttl = max(
+                60.0,
+                min(300.0, float(template.max_seconds)),
+            )
+            ownership_ttl = float(template.max_seconds) + postprocess_ttl
             lease = self.control_store.grant_fresh_lease(
                 candidate.reservoir_id,
                 owner=owner,
@@ -132,7 +137,8 @@ class SyncRuntime:
                 resource_class=template.resource_class,
                 expected_evidence_tasks=candidate.expected_evidence_tasks,
                 expected_novel_eed=candidate.expected_novel_eed,
-                now=time.time(),
+                now=float(self.control_store.clock()),
+                lease_ttl_seconds=ownership_ttl,
             )
             if lease is not None:
                 return candidate, lease
@@ -378,6 +384,27 @@ class SyncRuntime:
             if direct_capsules:
                 capsules += self.evidence_store.put_many(direct_capsules)
             assert result is not None
+            if not running.allows_result(result):
+                raise RuntimeError(
+                    "adapter result does not match lease identity or budget"
+                )
+            if result.records != source_records:
+                raise RuntimeError(
+                    "adapter result record count does not match emitted records"
+                )
+            postprocess_ttl = max(
+                60.0,
+                min(300.0, float(running.max_seconds)),
+            )
+            try:
+                self.control_store.renew_lease(
+                    running,
+                    ttl_seconds=postprocess_ttl,
+                )
+            except RuntimeError as exc:
+                raise RuntimeError(
+                    "source lease expiry before final commit"
+                ) from exc
             self.control_store.finalize_lease(
                 running,
                 next_cursor=result.next_cursor,
