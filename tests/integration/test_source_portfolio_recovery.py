@@ -230,7 +230,7 @@ class SourcePortfolioRecoveryIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(self.registry.suppression_reason(measured[0]))
         self.assertEqual(
             self.registry.inventory()[SourceState.SCOUT_READY],
-            2_353,
+            2_354,
         )
         self.assertEqual(
             self.control.connection.execute(
@@ -244,17 +244,48 @@ class SourcePortfolioRecoveryIntegrationTests(unittest.IsolatedAsyncioTestCase):
             0,
         )
 
-        # Raw same-origin inventory no longer blocks search. The direct refill
-        # arm executes even though 2,353 suppressed SCOUT_READY rows still
-        # exist durably in the registry.
-        self.assertIn("DIRECT_EVIDENCE_BULK", search_strategies)
+        # Raw same-origin inventory no longer blocks foreground search, but
+        # deterministic CDX/CDXJ recovery never consumes that search budget.
+        self.assertNotIn("DIRECT_EVIDENCE_BULK", search_strategies)
+        self.assertNotIn("EXPLOIT_DIRECT_ORIGIN", search_strategies)
         self.assertGreater(report.search_episodes, 0)
         self.assertLess(report.effective_cold_count, 50)
+        self.assertEqual(report.background_bulk_deferred, 1)
+        self.assertEqual(catalog_calls, [])
 
-        # The legacy HOLD Arquivo parent is routed to the exact deterministic
-        # catalog executor, not the generic structural parser.
+        # Once the foreground discovery lane is idle, the audited Arquivo
+        # catalog receives exactly one background scout step.
+        idle_manager = SourceReservoirManager(
+            self.registry,
+            targets=SourcePoolTargets(
+                active_min=0,
+                active_target=0,
+                warm_min=0,
+                warm_target=0,
+                cold_min=0,
+                cold_target=0,
+                triage_batch=16,
+                scout_parallelism=4,
+                max_search_directives=3,
+            ),
+            search_cooldown_seconds=0.0,
+        )
+        idle_coordinator = SourceDiscoveryCoordinator(
+            self.registry,
+            idle_manager,
+            lock_path=self.root / "idle-coordinator.lock",
+            triage_executor=forbidden_triage,
+            scout_executor=scout,
+            search_executor=search,
+            scout_authority=("baseline-v4", "eed-v4"),
+            scout_parallelism=4,
+            search_parallelism=3,
+        )
+        idle_report = await idle_coordinator.run_once()
+
         self.assertEqual(catalog_calls, [AUDITED_ARQUIVO_CATALOG_URL])
-        self.assertEqual(report.scout_children_registered, 3)
+        self.assertEqual(idle_report.background_bulk_steps, 1)
+        self.assertEqual(idle_report.scout_children_registered, 3)
         children = self.registry.children(arquivo_parent.source_key)
         self.assertEqual(len(children), 3)
         for child_key in children:
