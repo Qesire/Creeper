@@ -581,6 +581,23 @@ class SourceReservoirManagerTests(unittest.TestCase):
             search_cost_seconds=1.0,
         )
 
+        # One empty result reduces budget to one, but another orthogonal arm
+        # may run immediately. Only repeated empty supply triggers global
+        # exponential backoff.
+        first_empty_plan = manager.plan()
+        self.assertEqual(len(first_empty_plan.search_directives), 1)
+        second_empty = self.registry.begin_search_episode(
+            strategy=first_empty_plan.search_directives[0].strategy,
+            backend="test",
+            query="1999 historical registry allocation snapshot",
+            actor="test",
+            episode_id="search:empty:2",
+        )
+        self.registry.finish_search_episode(
+            second_empty.episode_id,
+            search_cost_seconds=1.0,
+        )
+
         now[0] += 59.0
         self.assertEqual(manager.plan().search_directives, ())
         now[0] += 2.0
