@@ -373,6 +373,63 @@ class DistributedAuthorityStore:
             raise WorkerRejectedError(worker_id)
         return set(json.loads(str(row["capabilities_json"])))
 
+    def _worker_region(self, worker_id: str) -> str:
+        row = self.connection.execute(
+            """
+            SELECT region, revoked FROM distributed_workers
+            WHERE worker_id = ?
+            """,
+            (worker_id,),
+        ).fetchone()
+        if row is None or int(row["revoked"]):
+            raise WorkerRejectedError(worker_id)
+        return str(row["region"])
+
+    def _work_region_eligible(
+        self,
+        row: sqlite3.Row,
+        *,
+        worker_region: str,
+    ) -> bool:
+        if str(row["task_class"]) == TaskClass.PROBE.value:
+            return True
+        coverage = json.loads(str(row["coverage_json"]))
+        raw_providers = coverage.get("providers")
+        if raw_providers is None:
+            one = coverage.get("provider")
+            providers = [one] if isinstance(one, str) and one.strip() else []
+        elif isinstance(raw_providers, list):
+            providers = [
+                str(value)
+                for value in raw_providers
+                if isinstance(value, str) and value.strip()
+            ]
+        else:
+            raise ValueError("coverage.providers must be a list of provider names")
+        for provider in providers:
+            budget = self.connection.execute(
+                """
+                SELECT require_qualified_region
+                FROM distributed_provider_budgets
+                WHERE provider = ?
+                """,
+                (provider,),
+            ).fetchone()
+            if budget is None:
+                return False
+            if not int(budget["require_qualified_region"]):
+                continue
+            region = self.connection.execute(
+                """
+                SELECT state FROM distributed_provider_regions
+                WHERE provider = ? AND region = ?
+                """,
+                (provider, worker_region),
+            ).fetchone()
+            if region is None or str(region["state"]) != "QUALIFIED":
+                return False
+        return True
+
     @staticmethod
     def _work_from_row(row: sqlite3.Row) -> WorkDefinition:
         return WorkDefinition(
@@ -457,31 +514,43 @@ class DistributedAuthorityStore:
             raise ValueError("lease_seconds must be positive")
         now = float(self.clock())
         capabilities = self._worker_capabilities(worker_id)
+        worker_region = self._worker_region(worker_id)
         self.connection.execute("BEGIN IMMEDIATE")
         try:
-            rows = self.connection.execute(
-                """
-                SELECT *
-                FROM distributed_work
-                WHERE state = 'READY'
-                   OR (
-                        state = 'LEASED'
-                        AND lease_deadline IS NOT NULL
-                        AND lease_deadline <= ?
-                   )
-                ORDER BY priority DESC, created_at, work_key
-                LIMIT 256
-                """,
-                (now,),
-            ).fetchall()
             chosen = None
-            for row in rows:
-                required = set(
-                    json.loads(str(row["required_capabilities_json"]))
-                )
-                if required.issubset(capabilities):
+            offset = 0
+            while chosen is None:
+                rows = self.connection.execute(
+                    """
+                    SELECT *
+                    FROM distributed_work
+                    WHERE state = 'READY'
+                       OR (
+                            state = 'LEASED'
+                            AND lease_deadline IS NOT NULL
+                            AND lease_deadline <= ?
+                       )
+                    ORDER BY priority DESC, created_at, work_key
+                    LIMIT 256 OFFSET ?
+                    """,
+                    (now, offset),
+                ).fetchall()
+                if not rows:
+                    break
+                for row in rows:
+                    required = set(
+                        json.loads(str(row["required_capabilities_json"]))
+                    )
+                    if not required.issubset(capabilities):
+                        continue
+                    if not self._work_region_eligible(
+                        row,
+                        worker_region=worker_region,
+                    ):
+                        continue
                     chosen = row
                     break
+                offset += len(rows)
             if chosen is None:
                 self.connection.commit()
                 return None
