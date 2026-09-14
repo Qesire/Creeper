@@ -235,6 +235,19 @@ class UnifiedCompilerRequest:
                 "submission_authority": False,
                 "scheduler_authority": False,
                 "durable_state_authority": False,
+                # Search is a portfolio problem, not "find another CDX".
+                # Bulk CDX/CDXJ is one high-throughput evidence family, while
+                # root discovery should continue across repositories,
+                # manifests, institutional archives, fossil/code indexes and
+                # other finite historical datasets.
+                "source_portfolio": "diverse_families_not_cdx_monoculture",
+                "bulk_cdx_role": "high_throughput_evidence_not_exclusive_search_target",
+                # Rate-limited archive lookup is reserved for records that do
+                # not already carry temporal information. Dated records must
+                # either pass a parent-side direct-evidence contract or remain
+                # research/discovery hints.
+                "remote_archive_fallback": "undated_records_only",
+                "prefer_reusable_metasources": True,
             },
         }
 
