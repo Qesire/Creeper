@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+import math
 from enum import StrEnum
 from uuid import uuid4
 
@@ -50,12 +51,44 @@ class WorkLease:
     state: LeaseState = LeaseState.CREATED
 
     def __post_init__(self) -> None:
-        if not self.reservoir_id.strip():
+        object.__setattr__(self, "state", LeaseState(self.state))
+        if not isinstance(self.lease_id, str) or not self.lease_id.strip():
+            raise ValueError("lease_id is required")
+        if not isinstance(self.reservoir_id, str) or not self.reservoir_id.strip():
             raise ValueError("reservoir_id is required")
-        if min(self.max_records, self.max_requests, self.max_bytes) < 0 or self.max_seconds < 0:
-            raise ValueError("lease limits must be non-negative")
-        if self.expires_at is not None and self.expires_at < 0:
-            raise ValueError("expires_at must be non-negative")
+        if not isinstance(self.resource_class, str) or not self.resource_class.strip():
+            raise ValueError("resource_class is required")
+        for name in ("max_records", "max_requests", "max_bytes", "expected_evidence_tasks"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError(f"{name} must be a non-negative integer")
+        if (
+            isinstance(self.max_seconds, bool)
+            or not isinstance(self.max_seconds, (int, float))
+            or not math.isfinite(float(self.max_seconds))
+            or self.max_seconds < 0
+        ):
+            raise ValueError("max_seconds must be finite and non-negative")
+        if (
+            isinstance(self.expected_novel_eed, bool)
+            or not isinstance(self.expected_novel_eed, (int, float))
+            or not math.isfinite(float(self.expected_novel_eed))
+            or self.expected_novel_eed < 0
+        ):
+            raise ValueError(
+                "expected_novel_eed must be finite and non-negative"
+            )
+        if self.expires_at is not None and (
+            isinstance(self.expires_at, bool)
+            or not isinstance(self.expires_at, (int, float))
+            or not math.isfinite(float(self.expires_at))
+            or self.expires_at < 0
+        ):
+            raise ValueError("expires_at must be finite and non-negative")
+        if self.owner is not None and (
+            not isinstance(self.owner, str) or not self.owner.strip()
+        ):
+            raise ValueError("owner must be non-empty when provided")
 
     @classmethod
     def create(cls, *, reservoir_id: str, max_records: int, max_requests: int,
@@ -101,6 +134,13 @@ class WorkLease:
         return replace(self, state=LeaseState.ABORTED)
 
     def expire(self, now: float) -> LeaseState:
+        if (
+            isinstance(now, bool)
+            or not isinstance(now, (int, float))
+            or not math.isfinite(float(now))
+            or now < 0
+        ):
+            raise ValueError("now must be finite and non-negative")
         if self.expires_at is None or now < self.expires_at:
             raise StateTransitionError("lease has not expired")
         if self.state not in {LeaseState.GRANTED, LeaseState.RUNNING, LeaseState.PAUSED, LeaseState.PREEMPTED}:
