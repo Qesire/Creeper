@@ -17,6 +17,7 @@ from uuid import uuid4
 from creeper.authority.baseline_index import BaselineIndex, YEAR_BITS
 from creeper.authority.normalizer import normalize_official
 from creeper.distributed.edition import (
+    FABRIC_EVIDENCE_ONLY_PRODUCERS,
     FABRIC_PROTOCOL_VERSION,
     FABRIC_THIN_MAX_ESTIMATED_RESPONSE_BYTES,
     FABRIC_THIN_MAX_PROVIDER_REQUESTS,
@@ -1679,6 +1680,13 @@ class DistributedAuthorityStore:
                 batch.generation,
                 now=now,
             )
+            if (
+                str(task_row["producer"]) in FABRIC_EVIDENCE_ONLY_PRODUCERS
+                and batch.results
+            ):
+                raise ValueError(
+                    "evidence-only exploration tasks may not export raw results"
+                )
             expected_sequence = int(task_row["next_sequence_no"])
             if int(batch.sequence_no) != expected_sequence:
                 raise BatchSequenceError(
