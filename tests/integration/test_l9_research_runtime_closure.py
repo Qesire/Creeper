@@ -26,6 +26,7 @@ from creeper.source_research.models import (
     DecisionRecord,
     FrontierState,
     FrontierTask,
+    PolicySnapshot,
     QueryProgram,
     QueryState,
     RootKind,
@@ -37,6 +38,11 @@ from creeper.source_research.agent.protocol import (
     QueryProgramProposal,
     RootQuery as ProposalRootQuery,
     UnifiedLLMTask,
+)
+from creeper.source_research.policy import (
+    HierarchicalAdaptivePolicy,
+    PolicyConfig,
+    PolicyLifecycle,
 )
 from creeper.source_research.registry import ResearchRegistry
 from creeper.source_discovery_service import _root_query_runtime_adapters
@@ -421,6 +427,204 @@ class L9ResearchRuntimeClosureTests(unittest.IsolatedAsyncioTestCase):
                     # Terminal durable work is not replayed on the next cycle.
                     self.assertEqual(planner(), ())
                     self.assertEqual(len(calls), 1)
+            finally:
+                control.close()
+
+    async def test_active_l7_policy_closes_root_query_final_reward(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            control = ControlStore(Path(tmp) / "control.sqlite3")
+            calls: list[str] = []
+            try:
+                discovery = SourceDiscoveryRegistry(control)
+                research = ResearchRegistry(control)
+                bridge = ResearchIntegrationBridge(research, discovery)
+
+                policy = HierarchicalAdaptivePolicy(
+                    PolicyConfig(
+                        policy_id="root-query-runtime",
+                        version="policy:l7:test",
+                        snapshot_id="snapshot:l7:test",
+                        schema_version=2,
+                        lifecycle=PolicyLifecycle.ACTIVE,
+                        exploration_fraction=0.1,
+                    )
+                )
+                research.upsert_policy_snapshot(
+                    PolicySnapshot(
+                        snapshot_id=policy.config.snapshot_id,
+                        policy_version=policy.config.version,
+                        schema_version=policy.config.schema_version,
+                        parameters=policy.snapshot_parameters(),
+                        created_at=1.0,
+                        active=True,
+                    )
+                )
+
+                research.upsert_root(
+                    RootSurface(
+                        root_id="datacite",
+                        kind=RootKind.STRUCTURED_REPOSITORY,
+                        canonical_locator="https://api.datacite.org/dois",
+                        capabilities=("search", "artifacts"),
+                    )
+                )
+                q1 = RootQuery(
+                    root_id="datacite",
+                    query_text="historical web dataset",
+                    max_pages=1,
+                    max_wall_seconds=30.0,
+                    page_size=10,
+                    expected_artifact_family="CDXJ",
+                )
+                q2 = RootQuery(
+                    root_id="datacite",
+                    query_text="early web corpus",
+                    max_pages=1,
+                    max_wall_seconds=30.0,
+                    page_size=10,
+                    expected_artifact_family="CDXJ",
+                )
+                research.register_program(
+                    QueryProgram(
+                        root_id="datacite",
+                        strategy="adaptive-test",
+                        queries=(q1, q2),
+                        hard_max_requests=2,
+                        stop_conditions=("terminal_page",),
+                    )
+                )
+
+                def handler(request: httpx.Request) -> httpx.Response:
+                    calls.append(str(request.url))
+                    return httpx.Response(
+                        200,
+                        json={
+                            "data": [
+                                {
+                                    "id": "10.1234/adaptive-runtime",
+                                    "attributes": {
+                                        "titles": [{"title": "adaptive result"}],
+                                        "contentUrl": [
+                                            "https://objects.example/adaptive.cdxj"
+                                        ],
+                                    },
+                                }
+                            ],
+                            "links": {"next": None},
+                        },
+                    )
+
+                async with httpx.AsyncClient(
+                    transport=httpx.MockTransport(handler),
+                    trust_env=False,
+                ) as client:
+                    planner, executor = _root_query_runtime_adapters(
+                        research,
+                        bridge,
+                        client,
+                        parallelism=1,
+                    )
+                    tasks = planner()
+                    self.assertEqual(len(tasks), 1)
+                    task = tasks[0]
+                    self.assertIn(task.entity_id, {q1.query_id, q2.query_id})
+                    self.assertEqual(task.state, FrontierState.CLAIMED)
+                    leaf_id = str(task.checkpoint["decision_id"])
+                    lineage = research.get_decision_lineage(leaf_id)
+                    self.assertEqual(len(lineage), 2)
+                    root_decision, query_decision = lineage
+                    self.assertEqual(root_decision.arm_id, "datacite")
+                    self.assertEqual(query_decision.arm_id, task.entity_id)
+                    self.assertEqual(
+                        set(
+                            query_decision.metadata["candidate_action_ids"]
+                        ),
+                        {q1.query_id, q2.query_id},
+                    )
+                    self.assertGreater(query_decision.propensity, 0.0)
+                    self.assertLessEqual(query_decision.propensity, 1.0)
+                    self.assertEqual(
+                        query_decision.parent_decision_ids,
+                        (root_decision.decision_id,),
+                    )
+
+                    result = await executor(task)
+                    self.assertTrue(result.terminal)
+                    self.assertEqual(result.sources_inserted, 1)
+                    self.assertEqual(len(calls), 1)
+
+                candidates = discovery.list_candidates()
+                self.assertEqual(len(candidates), 1)
+                candidate = candidates[0]
+                authority = ("baseline:l7", "model:l7")
+                run = discovery.begin_source_run(
+                    candidate.source_key,
+                    reservoir_id="reservoir:l7",
+                    lease_id="lease:l7",
+                    baseline_signature=authority[0],
+                    model_signature=authority[1],
+                )
+                discovery.record_source_run_read(
+                    candidate.source_key,
+                    reservoir_id="reservoir:l7",
+                    lease_id="lease:l7",
+                    baseline_signature=authority[0],
+                    model_signature=authority[1],
+                    source_records=1,
+                    bytes_read=128,
+                    source_requests=1,
+                )
+                discovery.record_source_run_validation(
+                    candidate.source_key,
+                    reservoir_id="reservoir:l7",
+                    lease_id="lease:l7",
+                    baseline_signature=authority[0],
+                    model_signature=authority[1],
+                    evidence_tasks_created=0,
+                    evidence_tasks_terminal=0,
+                    direct_capsules_committed=1,
+                    provider_requests=0,
+                    provider_elapsed_seconds=0.0,
+                    accepted_host_years=1,
+                    final_accepted_eed=4.0,
+                    max_evidence_sequence=1,
+                    validation_complete=True,
+                )
+                self.assertTrue(
+                    discovery.close_source_run(
+                        candidate.source_key,
+                        reservoir_id="reservoir:l7",
+                        lease_id="lease:l7",
+                        baseline_signature=authority[0],
+                        model_signature=authority[1],
+                    )
+                )
+                self.assertEqual(bridge.sync_closed_final_rewards(), 1)
+                stats = {
+                    item.arm_id: item
+                    for item in research.rebuild_arm_stats(
+                        policy_version=policy.config.version,
+                        schema_version=policy.config.schema_version,
+                    )
+                }
+                self.assertIn("datacite", stats)
+                self.assertIn(task.entity_id, stats)
+                self.assertEqual(stats["datacite"].final_observation_count, 1)
+                self.assertEqual(stats["datacite"].final_reward, 4.0)
+                self.assertEqual(
+                    stats[task.entity_id].final_observation_count,
+                    1,
+                )
+                self.assertEqual(stats[task.entity_id].final_reward, 4.0)
+                exposure_lineage = research.artifact_lineage_for_exposure(
+                    source_key=candidate.source_key,
+                    exposure_id=run.exposure_id or "",
+                )
+                self.assertEqual(len(exposure_lineage), 1)
+                self.assertEqual(
+                    exposure_lineage[0]["decision_id"],
+                    query_decision.decision_id,
+                )
             finally:
                 control.close()
 
