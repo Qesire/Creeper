@@ -12,7 +12,7 @@ from creeper.runtime.http import configured_http_proxy
 
 PermitAcquire = Callable[[], Awaitable[object]]
 PermitReport = Callable[
-    [object, int | None, httpx.Headers | None],
+    [object, int | None, httpx.Headers | None, int],
     Awaitable[None],
 ]
 
@@ -23,10 +23,11 @@ class _PermitStream(httpx.AsyncByteStream):
     def __init__(
         self,
         inner: httpx.AsyncByteStream,
-        release: Callable[[], Awaitable[None]],
+        release: Callable[[int], Awaitable[None]],
     ) -> None:
         self.inner = inner
         self.release = release
+        self.response_bytes = 0
         self._released = False
         self._release_lock = asyncio.Lock()
 
@@ -35,11 +36,12 @@ class _PermitStream(httpx.AsyncByteStream):
             if self._released:
                 return
             self._released = True
-            await self.release()
+            await self.release(self.response_bytes)
 
     async def __aiter__(self):
         try:
             async for chunk in self.inner:
+                self.response_bytes += len(chunk)
                 yield chunk
         except BaseException:
             await self._release_once()
@@ -80,17 +82,18 @@ class AuthorityPermitTransport(httpx.AsyncBaseTransport):
         permit = await self.acquire()
         response: httpx.Response | None = None
 
-        async def release() -> None:
+        async def release(response_bytes: int) -> None:
             await self.report(
                 permit,
                 None if response is None else int(response.status_code),
                 None if response is None else response.headers,
+                int(response_bytes),
             )
 
         try:
             response = await self.inner.handle_async_request(request)
         except BaseException:
-            await release()
+            await release(0)
             raise
 
         return httpx.Response(
