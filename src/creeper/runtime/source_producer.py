@@ -396,7 +396,6 @@ class SourceProducer:
             self.control_store.renew_lease(
                 running,
                 ttl_seconds=postprocess_ttl,
-                now=now,
             )
             next_renew_at = now + max(1.0, postprocess_ttl / 3.0)
 
