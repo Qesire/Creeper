@@ -8,6 +8,7 @@ import httpx
 
 from creeper.authority.normalizer import normalize_official
 from creeper.distributed.coordinator_client import CoordinatorClient
+from creeper.distributed.http_transport import build_authority_transport
 from creeper.distributed.identity import stable_identity
 from creeper.distributed.lease_keeper import LeaseKeeper
 from creeper.distributed.models import TaskClass, TaskLease
@@ -58,6 +59,14 @@ def build_distributed_cdx_pool(
             if config.dialect == "arquivo"
             else AsyncWaybackCDXClient
         )
+        transport = build_authority_transport(
+            acquire=gate.acquire,
+            report=gate.report,
+            max_connections=config.max_connections,
+            max_keepalive_connections=config.max_keepalive_connections,
+            keepalive_expiry_seconds=config.keepalive_expiry_seconds,
+            inner=transport_map.get(config.name),
+        )
         clients[config.name] = client_type(
             endpoint=config.endpoint,
             provider=logical_provider,
@@ -72,9 +81,7 @@ def build_distributed_cdx_pool(
             max_keepalive_connections=config.max_keepalive_connections,
             keepalive_expiry_seconds=config.keepalive_expiry_seconds,
             throttle_floor_seconds=config.throttle_floor_seconds,
-            transport=transport_map.get(config.name),
-            request_permit=gate.acquire,
-            request_report=gate.report,
+            transport=transport,
         )
         inflight[config.name] = config.max_inflight
         weights[config.name] = config.weight
