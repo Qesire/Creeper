@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 
 from creeper.evidence.contracts import (
@@ -251,6 +252,66 @@ class DirectEvidenceContractTests(unittest.TestCase):
         self.assertEqual(
             capsule.evidence_type,
             SQUID_ACCESS_DIRECT_CONTRACT.evidence_type,
+        )
+
+    def test_ftp_sitelist_record_creates_direct_capsule(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "ftp-list.zip"
+            with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+                archive.writestr(
+                    "sitelist/part1",
+                    (
+                        "Site   : ftp.direct.example\n"
+                        "Country: USA\n"
+                        "Date   : 05-May-97\n"
+                        "URL    : ftp://ftp.direct.example/\n"
+                    ),
+                )
+            reservoir = Reservoir(
+                reservoir_id="reservoir:ftp-sitelist",
+                domain_id="domain:ftp-sitelist",
+                adapter_id=bind_contract_to_adapter_id(
+                    "structured:ftp-sitelist",
+                    FTP_SITELIST_DIRECT_CONTRACT,
+                ),
+                root_locator=str(path),
+                enumeration_kind="structured_records",
+                capacity_lower=1,
+                evidence_mode="direct_year",
+                state=ReservoirState.READY,
+            )
+            adapter = ProductionAdapterFactory.open(reservoir)
+            records, _result = adapter.execute(_lease(reservoir))
+            observation = next(iter(adapter.extract_hosts(next(records))))
+            adapter.close()
+
+        self.assertEqual(observation.hostname, "ftp.direct.example")
+        self.assertEqual(observation.source_year, 1997)
+        self.assertEqual(observation.source_time, "05-May-97")
+        self.assertEqual(observation.direct_year_mask, 1 << (1997 - 1996))
+        self.assertEqual(observation.year_hint_mask, 0)
+        self.assertEqual(
+            observation.evidence_contract_id,
+            FTP_SITELIST_DIRECT_CONTRACT.contract_id,
+        )
+        self.assertIn("#zip:sitelist/part1:line:1", observation.locator)
+
+        plan = EvidencePlanner().plan(
+            observation,
+            official_mask=0,
+            local_mask=0,
+            provider="wayback",
+            policy_version="runtime-policy",
+            allow_direct=True,
+        )
+        self.assertEqual(plan.external_keys, ())
+        self.assertEqual(len(plan.direct_capsules), 1)
+        capsule = plan.direct_capsules[0]
+        self.assertEqual(capsule.year, 1997)
+        self.assertEqual(capsule.evidence_timestamp, "05-May-97")
+        self.assertEqual(
+            capsule.original_url,
+            "ftp://ftp.direct.example/",
         )
 
     def test_dmoz_content_dump_is_discovery_only_by_default(self) -> None:
