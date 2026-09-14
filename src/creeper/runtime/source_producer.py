@@ -381,10 +381,17 @@ class SourceProducer:
             if not force and now < next_renew_at:
                 return
             if reservation is not None:
-                reservation = self.admission.renew(
-                    reservation,
-                    ttl_seconds=postprocess_ttl,
-                )
+                if self.admission.remaining(reservation) > 0:
+                    reservation = self.admission.renew(
+                        reservation,
+                        ttl_seconds=postprocess_ttl,
+                    )
+                else:
+                    # enqueue_reserved() deletes a fully consumed reservation.
+                    # The in-memory token must stop participating in heartbeats;
+                    # source ownership remains independently protected by the
+                    # WorkLease visibility deadline below.
+                    reservation = None
             self.control_store.renew_lease(
                 running,
                 ttl_seconds=postprocess_ttl,
