@@ -22,6 +22,18 @@ from creeper.storage.control_store import ControlStore
 
 
 class SourceReservoirManagerTests(unittest.TestCase):
+    def test_planning_models_reject_boolean_and_nonfinite_configuration(self) -> None:
+        with self.assertRaisesRegex(ValueError, "non-negative integers"):
+            SourcePoolTargets(active_min=True)
+        with self.assertRaisesRegex(ValueError, "desired_candidates"):
+            SearchDirective(
+                kind=SearchDirectiveKind.REFILL_RESERVOIR,
+                strategy="META_SOURCE_SEARCH",
+                desired_candidates=True,
+                subject=None,
+                reason="test",
+            )
+
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
         self.control = ControlStore(Path(self.tmp.name) / "control.sqlite3")
