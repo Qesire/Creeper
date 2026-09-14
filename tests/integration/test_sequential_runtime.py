@@ -188,15 +188,8 @@ class DurableSequentialRuntimeIntegrationTests(unittest.TestCase):
 
                 self.assertEqual(first.source_records, 2)
                 self.assertEqual(second.source_records, 1)
-                self.assertEqual(
-                    calls,
-                    [
-                        ("one.example", 1997),
-                        ("two.example", 1997),
-                        ("three.example", 1997),
-                    ],
-                )
-                self.assertEqual(evidence.count(), 3)
+                self.assertEqual(calls, [])
+                self.assertEqual(evidence.count(), 0)
                 self.assertEqual(
                     control.get_reservoir("sequential-reservoir").state,
                     ReservoirState.EXHAUSTED,
@@ -275,11 +268,8 @@ class DurableSequentialRuntimeIntegrationTests(unittest.TestCase):
                     reopened_control.get_reservoir("restart-reservoir").cursor,
                     str(len(b"one.example\ntwo.example\n")),
                 )
-                self.assertEqual(
-                    calls,
-                    [("one.example", 1997), ("two.example", 1997)],
-                )
-                self.assertEqual(reopened_evidence.count(), 2)
+                self.assertEqual(calls, [])
+                self.assertEqual(reopened_evidence.count(), 0)
                 self.assertEqual(
                     reopened_control.get_reservoir("restart-reservoir").state,
                     ReservoirState.READY,
@@ -289,7 +279,7 @@ class DurableSequentialRuntimeIntegrationTests(unittest.TestCase):
                 reopened_control.close()
                 reopened_baseline.close()
 
-    def test_capacity_one_evidence_queue_drains_three_hinted_hosts_without_drop(self):
+    def test_dated_hosts_do_not_enter_wayback_evidence_queue(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             dataset = root / "dataset.txt"
@@ -326,34 +316,13 @@ class DurableSequentialRuntimeIntegrationTests(unittest.TestCase):
 
                 self.assertEqual(report.source_records, 3)
                 self.assertEqual(report.observations, 3)
-                self.assertEqual(report.evidence_tasks_enqueued, 3)
-                self.assertEqual(report.evidence_tasks_completed, 3)
-                self.assertEqual(report.evidence_capsules_committed, 3)
-                self.assertEqual(
-                    calls,
-                    [
-                        ("hint-one.example", 1997),
-                        ("hint-two.example", 1997),
-                        ("hint-three.example", 1997),
-                    ],
-                )
-                self.assertLessEqual(report.max_evidence_queue_depth, 1)
-                self.assertEqual(evidence.count(), 3)
-                for hostname in (
-                    "hint-one.example",
-                    "hint-two.example",
-                    "hint-three.example",
-                ):
-                    key = EvidenceQueryKey(
-                        hostname,
-                        TemporalScope(1997, 1997),
-                        "wayback",
-                        "cdx-v1",
-                    )
-                    self.assertEqual(
-                        control.get_evidence_task(key).state,
-                        CDXQueryState.PASS.value,
-                    )
+                self.assertEqual(report.evidence_tasks_enqueued, 0)
+                self.assertEqual(report.evidence_tasks_completed, 0)
+                self.assertEqual(report.evidence_capsules_committed, 0)
+                self.assertEqual(calls, [])
+                self.assertEqual(report.max_evidence_queue_depth, 0)
+                self.assertEqual(evidence.count(), 0)
+                self.assertEqual(control.list_evidence_tasks(), [])
             finally:
                 evidence.close()
                 control.close()
