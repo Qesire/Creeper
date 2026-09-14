@@ -4167,19 +4167,23 @@ class ControlStore:
             raise ValueError("an exhausted lease cannot retain next_cursor")
         if not exhausted and next_cursor is None:
             raise ValueError("a non-exhausted lease must provide next_cursor")
-        now_raw = self.clock()
-        if (
-            isinstance(now_raw, bool)
-            or not isinstance(now_raw, (int, float))
-            or not math.isfinite(float(now_raw))
-            or now_raw < 0
-        ):
-            raise ValueError("lease finalize time must be finite and non-negative")
-        current = float(now_raw)
-
         target = ReservoirState.EXHAUSTED if exhausted else ReservoirState.READY
         self.connection.execute("BEGIN IMMEDIATE")
         try:
+            # Sample the ownership clock only after acquiring the write lock.
+            # Otherwise waiting on SQLite contention can cross the lease
+            # deadline while still committing with a stale pre-lock timestamp.
+            now_raw = self.clock()
+            if (
+                isinstance(now_raw, bool)
+                or not isinstance(now_raw, (int, float))
+                or not math.isfinite(float(now_raw))
+                or now_raw < 0
+            ):
+                raise ValueError(
+                    "lease finalize time must be finite and non-negative"
+                )
+            current = float(now_raw)
             lease_row = self.connection.execute(
                 "SELECT state, owner, reservoir_id, expires_at FROM work_leases WHERE lease_id = ?",
                 (lease_id,),
