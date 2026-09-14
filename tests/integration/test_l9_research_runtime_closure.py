@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import tempfile
 import unittest
 from pathlib import Path
@@ -113,7 +114,186 @@ class _MetadataOnlyRoot:
         return ()
 
 
+class _CountingRoot:
+    def __init__(self, *, terminal: bool = False) -> None:
+        self.calls = 0
+        self.terminal = terminal
+
+    async def search(self, query, checkpoint):
+        self.calls += 1
+        return SearchPage(terminal=self.terminal)
+
+    async def resolve(self, hit):
+        return ()
+
+
+class _SlowRoot:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def search(self, query, checkpoint):
+        self.calls += 1
+        await asyncio.sleep(0.05)
+        return SearchPage(terminal=True)
+
+    async def resolve(self, hit):
+        return ()
+
+
 class L9ResearchRuntimeClosureTests(unittest.IsolatedAsyncioTestCase):
+    async def test_root_query_wall_budget_cancels_stalled_provider(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            control = ControlStore(Path(tmp) / "control.sqlite3")
+            try:
+                discovery = SourceDiscoveryRegistry(control)
+                research = ResearchRegistry(control)
+                bridge = ResearchIntegrationBridge(research, discovery)
+                root = RootSurface(
+                    root_id="root:slow",
+                    kind=RootKind.STRUCTURED_REPOSITORY,
+                    canonical_locator="https://repo.example/api",
+                )
+                research.upsert_root(root)
+                query = AdapterRootQuery(
+                    "query:slow",
+                    root.root_id,
+                    "historical crawl",
+                    3,
+                    0.01,
+                )
+                program = QueryProgram(
+                    root_id=root.root_id,
+                    strategy="wall-bound",
+                    queries=(query,),
+                    hard_max_requests=3,
+                    stop_conditions=("wall_budget",),
+                    program_id="program:slow",
+                )
+                research.register_program(program)
+                adapter = _SlowRoot()
+
+                result = await bridge.execute_root_query_page(
+                    adapter,
+                    query,
+                    program_id=program.program_id,
+                )
+
+                self.assertTrue(result.terminal)
+                self.assertFalse(result.retryable)
+                self.assertEqual(adapter.calls, 1)
+                row = research.get_query_row(query.query_id)
+                self.assertEqual(row["state"], QueryState.EXHAUSTED.value)
+                self.assertGreater(float(row["wall_seconds_used"]), 0.0)
+                self.assertEqual(
+                    research.program_request_budget(program.program_id),
+                    (1, 3),
+                )
+            finally:
+                control.close()
+
+    async def test_program_request_budget_blocks_second_query_before_network(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            control = ControlStore(Path(tmp) / "control.sqlite3")
+            try:
+                discovery = SourceDiscoveryRegistry(control)
+                research = ResearchRegistry(control)
+                bridge = ResearchIntegrationBridge(research, discovery)
+                root = RootSurface(
+                    root_id="root:budget",
+                    kind=RootKind.STRUCTURED_REPOSITORY,
+                    canonical_locator="https://repo.example/api",
+                )
+                research.upsert_root(root)
+                first = AdapterRootQuery(
+                    "query:budget:1", root.root_id, "historical crawl one", 2, 5.0
+                )
+                second = AdapterRootQuery(
+                    "query:budget:2", root.root_id, "historical crawl two", 2, 5.0
+                )
+                program = QueryProgram(
+                    root_id=root.root_id,
+                    strategy="request-bound",
+                    queries=(first, second),
+                    hard_max_requests=1,
+                    stop_conditions=("request_budget",),
+                    program_id="program:budget",
+                )
+                research.register_program(program)
+                adapter = _CountingRoot(terminal=True)
+
+                first_result = await bridge.execute_root_query_page(
+                    adapter,
+                    first,
+                    program_id=program.program_id,
+                )
+                second_result = await bridge.execute_root_query_page(
+                    adapter,
+                    second,
+                    program_id=program.program_id,
+                )
+
+                self.assertTrue(first_result.terminal)
+                self.assertTrue(second_result.terminal)
+                self.assertEqual(adapter.calls, 1)
+                self.assertEqual(
+                    research.program_request_budget(program.program_id),
+                    (1, 1),
+                )
+                self.assertEqual(
+                    research.get_query_row(second.query_id)["state"],
+                    QueryState.EXHAUSTED.value,
+                )
+            finally:
+                control.close()
+
+    async def test_query_page_budget_is_enforced_above_adapter(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            control = ControlStore(Path(tmp) / "control.sqlite3")
+            try:
+                discovery = SourceDiscoveryRegistry(control)
+                research = ResearchRegistry(control)
+                bridge = ResearchIntegrationBridge(research, discovery)
+                root = RootSurface(
+                    root_id="root:pages",
+                    kind=RootKind.STRUCTURED_REPOSITORY,
+                    canonical_locator="https://repo.example/api",
+                )
+                research.upsert_root(root)
+                query = AdapterRootQuery(
+                    "query:pages", root.root_id, "historical crawl", 1, 5.0
+                )
+                program = QueryProgram(
+                    root_id=root.root_id,
+                    strategy="page-bound",
+                    queries=(query,),
+                    hard_max_requests=5,
+                    stop_conditions=("page_budget",),
+                    program_id="program:pages",
+                )
+                research.register_program(program)
+                adapter = _CountingRoot(terminal=False)
+
+                first = await bridge.execute_root_query_page(
+                    adapter,
+                    query,
+                    program_id=program.program_id,
+                )
+                second = await bridge.execute_root_query_page(
+                    adapter,
+                    query,
+                    program_id=program.program_id,
+                )
+
+                self.assertTrue(first.terminal)
+                self.assertTrue(second.terminal)
+                self.assertEqual(adapter.calls, 1)
+                self.assertEqual(
+                    research.get_query_row(query.query_id)["state"],
+                    QueryState.EXHAUSTED.value,
+                )
+            finally:
+                control.close()
+
     async def test_metadata_resolver_promotes_only_concrete_artifact_leads(self):
         with tempfile.TemporaryDirectory() as tmp:
             control = ControlStore(Path(tmp) / "control.sqlite3")
