@@ -65,7 +65,7 @@ curl -fsS https://fabric.example.com/healthz
 curl -fsS https://fabric.example.com/meta
 
 sudo -E FABRIC_PUBLIC_URL=https://fabric.example.com \
-  deploy/fabric/local-authority/smoke.sh
+  bash deploy/fabric/local-authority/smoke.sh
 ```
 
 Do not use a Quick Tunnel for production.
@@ -115,7 +115,7 @@ The worker runs as `creeper-fabric-worker.service`.
 Verify connectivity from the OCI node:
 
 ```bash
-sudo deploy/fabric/vm-worker/smoke.sh
+sudo bash deploy/fabric/vm-worker/smoke.sh
 ```
 
 ## 4. GCP metered explorer
@@ -146,7 +146,7 @@ secret system.
 Verify connectivity from the GCP node:
 
 ```bash
-sudo deploy/fabric/vm-worker/smoke.sh
+sudo bash deploy/fabric/vm-worker/smoke.sh
 ```
 
 ## 5. Qualify each provider x region
