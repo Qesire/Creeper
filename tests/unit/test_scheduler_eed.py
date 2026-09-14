@@ -61,6 +61,25 @@ class SchedulerEEDTests(unittest.TestCase):
 
         self.assertEqual(scheduler.rank([cdx_heavy, direct])[0].reservoir_id, "direct")
 
+    def test_score_rejects_nonfinite_resource_capacity(self):
+        scheduler = GlobalScheduler(
+            CreditLedger({"wayback": 1}),
+            resource_capacities={
+                "general_network": float("nan"),
+                "evidence_network": 1.0,
+                "cpu": 1.0,
+                "ssd": 1.0,
+            },
+        )
+        candidate = LeaseCandidate(
+            reservoir_id="bad-capacity",
+            expected_novel_eed=1.0,
+            costs=ResourceCost(1.0, 1.0, 1.0, 1.0),
+        )
+
+        with self.assertRaisesRegex(ValueError, "finite positive"):
+            scheduler.score(candidate)
+
     def test_direct_score_ignores_fictitious_evidence_network_cost(self):
         scheduler = GlobalScheduler(
             CreditLedger({"wayback": 1}),
