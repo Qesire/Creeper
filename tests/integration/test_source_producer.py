@@ -923,6 +923,48 @@ class SourceProducerTests(unittest.TestCase):
         self.assertIsNotNone(granted)
         self.assertEqual(granted[0].source_key, "new-source")
 
+    def test_background_bulk_never_leapfrogs_foreground_source(self):
+        class Registry:
+            def source_run_count(self, _source_key):
+                return 0
+
+        runtime, _adapter, base = self.build_direct_runtime(
+            backlog_capacities={},
+            owner="background-priority-test",
+        )
+        foreground = replace(
+            base,
+            source_key="foreground-source",
+            expected_novel_eed=1.0,
+            lease=replace(base.lease, resource_class="default"),
+        )
+        background_reservoir = replace(
+            base.reservoir,
+            reservoir_id="background-bulk-reservoir",
+        )
+        self.control.save_reservoir(background_reservoir)
+        background = replace(
+            base,
+            reservoir_id=background_reservoir.reservoir_id,
+            reservoir=background_reservoir,
+            source_key="background-source",
+            expected_novel_eed=1000.0,
+            production_value_score=1000.0,
+            lease=replace(
+                base.lease,
+                reservoir_id=background_reservoir.reservoir_id,
+                resource_class="background-bulk",
+            ),
+        )
+        runtime.candidates = (background, foreground)
+        runtime.source_registry = Registry()
+
+        granted = runtime._grant_fresh_lease()
+
+        self.assertIsNotNone(granted)
+        self.assertEqual(granted[0].source_key, "foreground-source")
+        self.assertEqual(granted[1].resource_class, "default")
+
     def test_full_backlog_blocks_source_before_adapter_execution(self):
         occupied = EvidenceQueryKey(
             "occupied.example", TemporalScope(1997, 1997), "wayback", "cdx-v1"
