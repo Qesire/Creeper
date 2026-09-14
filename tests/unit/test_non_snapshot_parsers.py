@@ -4,6 +4,7 @@ import unittest
 
 from creeper.sources.non_snapshot import (
     extract_http_urls,
+    is_audited_gnu_mailbox_locator,
     is_dmoz_content_locator,
     is_mailbox_url_locator,
     is_squid_access_locator,
@@ -128,6 +129,28 @@ class NonSnapshotParserTests(unittest.TestCase):
         self.assertFalse(
             is_mailbox_url_locator(
                 "https://lists.gnu.org/archive/mbox/lynx-dev/2002-03"
+            )
+        )
+
+    def test_mailbox_authority_is_limited_to_audited_gnu_monthly_shards(self) -> None:
+        self.assertTrue(
+            is_audited_gnu_mailbox_locator(
+                "https://lists.gnu.org/archive/mbox/lynx-dev/1998-03"
+            )
+        )
+        self.assertTrue(
+            is_audited_gnu_mailbox_locator(
+                "https://lists.gnu.org/archive/mbox/lynx-dev/1998-03.mbox.gz"
+            )
+        )
+        self.assertFalse(
+            is_audited_gnu_mailbox_locator(
+                "https://example.test/archive/1998-03.mbox"
+            )
+        )
+        self.assertFalse(
+            is_audited_gnu_mailbox_locator(
+                "https://lists.gnu.org/archive/mbox/lynx-dev/archive.mbox"
             )
         )
 
