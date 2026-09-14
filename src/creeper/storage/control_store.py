@@ -4081,7 +4081,12 @@ class ControlStore:
         """
         from creeper.scheduler.leases import LeaseState
 
-        if not math.isfinite(float(ttl_seconds)) or ttl_seconds <= 0:
+        if (
+            isinstance(ttl_seconds, bool)
+            or not isinstance(ttl_seconds, (int, float))
+            or not math.isfinite(float(ttl_seconds))
+            or ttl_seconds <= 0
+        ):
             raise ValueError("ttl_seconds must be finite and positive")
         lease_id = self._field(lease, "lease_id")
         owner = self._field(lease, "owner")
@@ -4154,14 +4159,29 @@ class ControlStore:
         owner = self._field(lease, "owner")
         if not lease_id or not reservoir_id or not owner:
             raise ValueError("a running lease with an owner is required")
+        if not isinstance(exhausted, bool):
+            raise ValueError("exhausted must be a boolean")
+        if next_cursor is not None and not isinstance(next_cursor, str):
+            raise ValueError("next_cursor must be a string when provided")
+        if exhausted and next_cursor is not None:
+            raise ValueError("an exhausted lease cannot retain next_cursor")
         if not exhausted and next_cursor is None:
             raise ValueError("a non-exhausted lease must provide next_cursor")
+        now_raw = self.clock()
+        if (
+            isinstance(now_raw, bool)
+            or not isinstance(now_raw, (int, float))
+            or not math.isfinite(float(now_raw))
+            or now_raw < 0
+        ):
+            raise ValueError("lease finalize time must be finite and non-negative")
+        current = float(now_raw)
 
         target = ReservoirState.EXHAUSTED if exhausted else ReservoirState.READY
         self.connection.execute("BEGIN IMMEDIATE")
         try:
             lease_row = self.connection.execute(
-                "SELECT state, owner, reservoir_id FROM work_leases WHERE lease_id = ?",
+                "SELECT state, owner, reservoir_id, expires_at FROM work_leases WHERE lease_id = ?",
                 (lease_id,),
             ).fetchone()
             if (
@@ -4171,6 +4191,11 @@ class ControlStore:
                 or lease_row["reservoir_id"] != reservoir_id
             ):
                 raise ValueError("lease is not running or is not owned by caller")
+            if (
+                lease_row["expires_at"] is None
+                or float(lease_row["expires_at"]) <= current
+            ):
+                raise RuntimeError("source lease expired before final commit")
             lease_changed = self.connection.execute(
                 "UPDATE work_leases SET state = ? WHERE lease_id = ? AND state = ? AND owner = ?",
                 (LeaseState.SUCCEEDED.value, lease_id, LeaseState.RUNNING.value, owner),
