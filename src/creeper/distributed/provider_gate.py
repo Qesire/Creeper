@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
+from uuid import uuid4
 
 import httpx
 
@@ -41,13 +42,23 @@ class DistributedProviderGate:
         self.throttle_floor_seconds = float(throttle_floor_seconds)
 
     async def acquire(self) -> object:
+        # One idempotency key per actual external HTTP attempt. If the
+        # Authority accepted the permit but the HTTPS response is lost, retry
+        # the same logical request instead of consuming a second global slot.
+        request_id = uuid4().hex
         while True:
             self.keeper.assert_owned()
-            permit = await self.client.provider_permit(
-                self.keeper.lease,
-                self.provider,
-                ttl_seconds=self.permit_ttl_seconds,
-            )
+            try:
+                permit = await self.client.provider_permit(
+                    self.keeper.lease,
+                    self.provider,
+                    request_id=request_id,
+                    ttl_seconds=self.permit_ttl_seconds,
+                )
+            except Exception:
+                self.keeper.assert_owned()
+                await asyncio.sleep(self.budget_poll_seconds)
+                continue
             if permit is not None:
                 return permit
             await asyncio.sleep(self.budget_poll_seconds)
