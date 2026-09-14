@@ -79,7 +79,12 @@ class SourceIntelligenceContextBuilder:
     def _recent_failures(self) -> list[dict[str, Any]]:
         rows = self.registry.connection.execute(
             """
-            SELECT source_key, canonical_entrypoint, source_family, state
+            SELECT
+                source_key,
+                canonical_entrypoint,
+                source_family,
+                state,
+                state_reason
             FROM source_candidates
             WHERE state IN ('HOLD', 'REJECTED', 'EXHAUSTED')
             ORDER BY updated_at DESC
@@ -87,15 +92,39 @@ class SourceIntelligenceContextBuilder:
             """,
             (self.policy.max_failures,),
         ).fetchall()
-        return [
-            {
-                "source_key": str(row["source_key"]),
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            source_key = str(row["source_key"])
+            candidate = self.registry.get_candidate(source_key)
+            payload: dict[str, Any] = {
+                "source_key": source_key,
                 "entrypoint": str(row["canonical_entrypoint"]),
                 "family": str(row["source_family"]),
                 "state": str(row["state"]),
+                "state_reason": str(row["state_reason"] or ""),
             }
-            for row in rows
-        ]
+            if candidate is not None:
+                payload["origin"] = candidate.origin
+                suppression = self.registry.suppression_reason(candidate)
+                if suppression is not None:
+                    payload["suppression_reason"] = suppression
+            measurement = self.registry.get_scout_measurement(source_key)
+            if measurement is not None:
+                payload["measurement"] = {
+                    "measurement_mode": measurement.measurement_mode.value,
+                    "novel_eed": measurement.novel_eed_for_ranking,
+                    "novel_eed_per_second": measurement.novel_eed_per_second,
+                    "observed": measurement.observed_count_for_threshold,
+                    "novel": measurement.novel_count_for_threshold,
+                    "measured_baseline_overlap": (
+                        measurement.measured_baseline_overlap
+                    ),
+                    "estimated_unseen_fraction": (
+                        measurement.estimated_unseen_fraction
+                    ),
+                }
+            result.append(payload)
+        return result
 
     def _recent_searches(self) -> list[dict[str, Any]]:
         rows = self.registry.connection.execute(
@@ -264,6 +293,8 @@ class SourceIntelligenceContextBuilder:
                 "common_crawl_corpus_excluded": True,
                 "baseline_authority_hidden_from_agent": True,
                 "agent_authority": "proposal_only",
+                "measured_zero_yield_is_negative_search_feedback": True,
+                "do_not_infer_hostname_value_from_page_count_alone": True,
             },
         }
 
