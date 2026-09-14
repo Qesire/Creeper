@@ -318,14 +318,29 @@ class SourceDiscoveryCoordinator:
         failure_retry_seconds: float = 30.0,
         retry_clock=time.monotonic,
     ) -> None:
-        if triage_parallelism < 1 or search_parallelism < 1:
-            raise ValueError("coordinator parallelism must be positive")
+        for name, value in (
+            ("triage_parallelism", triage_parallelism),
+            ("search_parallelism", search_parallelism),
+        ):
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise ValueError(f"{name} must be a positive integer")
         if scout_parallelism is None:
             scout_parallelism = manager.targets.scout_parallelism
-        if scout_parallelism < 1:
-            raise ValueError("scout_parallelism must be positive")
-        if failure_retry_seconds <= 0:
-            raise ValueError("failure_retry_seconds must be positive")
+        if (
+            isinstance(scout_parallelism, bool)
+            or not isinstance(scout_parallelism, int)
+            or scout_parallelism < 1
+        ):
+            raise ValueError("scout_parallelism must be a positive integer")
+        if (
+            isinstance(failure_retry_seconds, bool)
+            or not isinstance(failure_retry_seconds, (int, float))
+            or not math.isfinite(float(failure_retry_seconds))
+            or failure_retry_seconds <= 0
+        ):
+            raise ValueError("failure_retry_seconds must be finite and positive")
+        if not callable(retry_clock):
+            raise ValueError("retry_clock must be callable")
         self.registry = registry
         self.manager = manager
         self.lock_path = Path(lock_path)
@@ -333,9 +348,12 @@ class SourceDiscoveryCoordinator:
         self.scout_executor = scout_executor
         self.search_executor = search_executor
         if scout_authority is not None and (
-            len(scout_authority) != 2
-            or not scout_authority[0]
-            or not scout_authority[1]
+            not isinstance(scout_authority, tuple)
+            or len(scout_authority) != 2
+            or any(
+                not isinstance(value, str) or not value.strip()
+                for value in scout_authority
+            )
         ):
             raise ValueError("scout_authority must contain two non-empty signatures")
         self.scout_authority = scout_authority
@@ -354,6 +372,17 @@ class SourceDiscoveryCoordinator:
         self.retry_clock = retry_clock
         self._startup_recovered = False
         self._search_retry_deadlines: dict[str, float] = {}
+
+    def _retry_now(self) -> float:
+        value = self.retry_clock()
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(float(value))
+            or value < 0
+        ):
+            raise ValueError("coordinator retry clock must be finite and non-negative")
+        return float(value)
 
     @staticmethod
     def _failure_reason(stage: str, error: Exception) -> str:
@@ -391,7 +420,7 @@ class SourceDiscoveryCoordinator:
         self,
         directives: tuple[SearchDirective, ...],
     ) -> tuple[tuple[SearchDirective, ...], int]:
-        now = float(self.retry_clock())
+        now = self._retry_now()
         # Expired entries are deleted so a long-lived process does not accumulate
         # one key for every historical family-specific search.
         self._search_retry_deadlines = {
@@ -597,7 +626,7 @@ class SourceDiscoveryCoordinator:
         outcomes: list[_Outcome[SearchBatch]],
         counts: dict[str, int],
     ) -> None:
-        now = float(self.retry_clock())
+        now = self._retry_now()
         for directive, outcome in zip(directives, outcomes, strict=True):
             if outcome.error is not None:
                 self._search_retry_deadlines[directive.dedup_key] = (
