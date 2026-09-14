@@ -12,6 +12,7 @@ backlog during the interval between SourceLease grant and EvidenceTask enqueue.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from typing import Iterable
 from uuid import uuid4
 
@@ -32,6 +33,23 @@ class CapacityReservation:
     provider: str
     amount: int
     expires_at: float
+
+    def __post_init__(self) -> None:
+        if self.reservation_id is not None and (
+            not isinstance(self.reservation_id, str) or not self.reservation_id.strip()
+        ):
+            raise ValueError("reservation_id must be non-empty when provided")
+        if not isinstance(self.provider, str) or not self.provider.strip():
+            raise ValueError("reservation provider is required")
+        if isinstance(self.amount, bool) or not isinstance(self.amount, int) or self.amount < 0:
+            raise ValueError("reservation amount must be a non-negative integer")
+        if (
+            isinstance(self.expires_at, bool)
+            or not isinstance(self.expires_at, (int, float))
+            or not math.isfinite(float(self.expires_at))
+            or self.expires_at < 0
+        ):
+            raise ValueError("reservation expiry must be finite and non-negative")
 
 
 class EvidenceBacklogAdmission:
@@ -64,7 +82,15 @@ class EvidenceBacklogAdmission:
             )
 
     def _now(self) -> float:
-        return float(self.control_store.clock())
+        value = self.control_store.clock()
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(float(value))
+            or value < 0
+        ):
+            raise ValueError("capacity reservation clock must be finite and non-negative")
+        return float(value)
 
     def _purge_expired_locked(self, now: float) -> None:
         self.connection.execute(
@@ -143,8 +169,13 @@ class EvidenceBacklogAdmission:
             raise ValueError("amount must be a non-negative integer")
         if not isinstance(capacity, int) or capacity < 0:
             raise ValueError("capacity must be a non-negative integer")
-        if ttl_seconds <= 0:
-            raise ValueError("ttl_seconds must be positive")
+        if (
+            isinstance(ttl_seconds, bool)
+            or not isinstance(ttl_seconds, (int, float))
+            or not math.isfinite(float(ttl_seconds))
+            or ttl_seconds <= 0
+        ):
+            raise ValueError("ttl_seconds must be finite and positive")
 
         now = self._now()
         expires_at = now + float(ttl_seconds)
