@@ -464,7 +464,7 @@ class SourceProducerTests(unittest.TestCase):
             "cdx-v1",
         )
         self.assertIsNone(self.control.get_evidence_task(key))
-        self.assertEqual(report.evidence_tasks_enqueued, 1)
+        self.assertEqual(report.evidence_tasks_enqueued, 0)
         self.assertEqual(report.direct_capsules_committed, 0)
         self.assertEqual(self.evidence.count(), 0)
 
@@ -603,9 +603,13 @@ class SourceProducerTests(unittest.TestCase):
             "novel.example", TemporalScope(1997, 1997), "wayback", "cdx-v1"
         )
         self.assertEqual(report.leases_succeeded, 1)
-        self.assertEqual(report.evidence_tasks_enqueued, 0)
+        self.assertEqual(report.evidence_tasks_enqueued, 1)
         self.assertEqual(adapter.executions, 1)
         self.assertIsNone(self.control.get_evidence_task(exact_key))
+        remaining = EvidenceQueryKey(
+            "novel.example", TemporalScope(1999, 2001), "wayback", "cdx-v1"
+        )
+        self.assertIsNotNone(self.control.get_evidence_task(remaining))
 
     def test_duplicate_direct_host_years_commit_one_capsule_per_batch(self):
         records = [
@@ -906,13 +910,7 @@ class SourceProducerTests(unittest.TestCase):
             WHERE parent_hostname = 'example.com'
             """
         ).fetchone()
-        self.assertEqual(state["observed_self"], 0)
-        self.assertEqual(state["child_count"], 4)
-        self.assertEqual(int(state["child_sketch"]).bit_count(), 4)
-        self.assertEqual(state["query_enqueued"], 0)
-        # RDAP now relies on EvidenceTask identity instead of a second per-host
-        # enqueue flag.
-        self.assertEqual(state["rdap_enqueued"], 0)
+        self.assertIsNone(state)
         self.assertEqual(
             self.control.connection.execute(
                 "SELECT COUNT(*) FROM domain_fanout_members"
