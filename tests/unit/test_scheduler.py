@@ -17,6 +17,18 @@ class SchedulerTests(unittest.TestCase):
         self.assertEqual([x.source_id for x in decisions], ["fast", "slow", "saturated"])
         self.assertTrue(all(x.reason == "engineering_only_baseline_external" for x in decisions))
 
+    def test_budget_rejects_nonfinite_or_fractional_limits(self):
+        with self.assertRaisesRegex(ValueError, "max_seconds"):
+            SourceBudget(max_records=1, max_seconds=float("nan"))
+        with self.assertRaisesRegex(ValueError, "max_records"):
+            SourceBudget(max_records=1.5, max_seconds=1.0)
+        with self.assertRaisesRegex(ValueError, "max_requests"):
+            SourceBudget(
+                max_records=1,
+                max_seconds=1.0,
+                max_requests=1.5,
+            )
+
     def test_budget_is_finite(self):
         budget = SourceBudget(max_records=2, max_seconds=10)
         self.assertTrue(budget.allows())
