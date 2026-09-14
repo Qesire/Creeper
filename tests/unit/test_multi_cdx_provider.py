@@ -12,6 +12,7 @@ from creeper.evidence.policies import (
     RangeEvidenceQueryResult,
     TemporalScope,
 )
+from creeper.evidence.providers.async_cdx import AsyncWaybackCDXClient
 from creeper.evidence.providers.multi_cdx import (
     AsyncArquivoCDXClient,
     AsyncCDXProviderPool,
@@ -58,6 +59,35 @@ class FakeClient:
             )
         )
         return self.ranges[key]
+
+
+class AsyncWaybackConfigTests(unittest.TestCase):
+    def test_transport_limits_reject_fractional_and_nonfinite_values(self) -> None:
+        with self.assertRaisesRegex(ValueError, "limit must be an integer"):
+            AsyncWaybackCDXClient(limit=1.5)
+        with self.assertRaisesRegex(ValueError, "max_retries must be an integer"):
+            AsyncWaybackCDXClient(max_retries=1.5)
+        with self.assertRaisesRegex(ValueError, "timeout must be finite"):
+            AsyncWaybackCDXClient(timeout=float("nan"))
+        with self.assertRaisesRegex(ValueError, "backoff must be finite"):
+            AsyncWaybackCDXClient(backoff=float("inf"))
+
+    def test_platform_request_identity_rejects_fractional_year(self) -> None:
+        client = AsyncWaybackCDXClient(
+            transport=httpx.MockTransport(
+                lambda _request: httpx.Response(200, json=[])
+            )
+        )
+        try:
+            with self.assertRaisesRegex(ValueError, "integer within"):
+                client.platform_year_request_template_hash(
+                    "example.com",
+                    1997.5,
+                    policy_version="platform-v1",
+                )
+        finally:
+            import asyncio
+            asyncio.run(client.aclose())
 
 
 class ArquivoDialectTests(unittest.IsolatedAsyncioTestCase):
