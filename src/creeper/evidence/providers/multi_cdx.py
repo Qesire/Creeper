@@ -28,7 +28,10 @@ from creeper.evidence.policies import (
     EvidenceQueryResult,
     RangeEvidenceQueryResult,
 )
-from creeper.evidence.providers.async_cdx import AsyncWaybackCDXClient
+from creeper.evidence.providers.async_cdx import (
+    AsyncWaybackCDXClient,
+    _RequestAccounting,
+)
 
 
 @dataclass(frozen=True)
@@ -46,6 +49,7 @@ class CDXProviderConfig:
     timeout: float = 30.0
     max_retries: int = 3
     weight: float = 1.0
+    dialect: str = "wayback"
 
     def __post_init__(self) -> None:
         if not self.name.strip() or not self.endpoint.strip():
@@ -59,6 +63,8 @@ class CDXProviderConfig:
             or self.max_keepalive_connections > self.max_connections
         ):
             raise ValueError("invalid CDX provider keepalive connection limit")
+        if self.dialect not in {"wayback", "arquivo"}:
+            raise ValueError("unsupported CDX provider dialect")
         if (
             self.keepalive_expiry_seconds <= 0
             or self.throttle_floor_seconds < 0
@@ -109,6 +115,7 @@ class CDXProviderConfig:
             timeout=float(item("timeout", base.timeout)),
             max_retries=int(item("max_retries", base.max_retries)),
             weight=float(item("weight", base.weight)),
+            dialect=str(item("dialect", base.dialect)),
         )
 
     def as_dict(self) -> dict[str, object]:
@@ -124,7 +131,80 @@ class CDXProviderConfig:
             "timeout": self.timeout,
             "max_retries": self.max_retries,
             "weight": self.weight,
+            "dialect": self.dialect,
         }
+
+
+class AsyncArquivoCDXClient(AsyncWaybackCDXClient):
+    """Arquivo.pt CDX dialect with the common Creeper evidence contract.
+
+    Arquivo uses year-valued from/to parameters, the fields selector, and
+    object-shaped JSON rows. It does not expose Wayback resume-key semantics on
+    this endpoint, so a full page is deliberately treated as incomplete.
+    """
+
+    @staticmethod
+    def _parse_arquivo_payload(payload: bytes) -> list[dict[str, object]]:
+        text = payload.decode("utf-8", errors="replace").strip()
+        if not text:
+            return []
+        try:
+            import json
+            value = json.loads(text)
+        except json.JSONDecodeError:
+            rows: list[dict[str, object]] = []
+            for line in text.splitlines():
+                try:
+                    item = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(item, dict):
+                    rows.append(item)
+            return rows
+        if isinstance(value, dict):
+            values = [value]
+        elif isinstance(value, list):
+            values = [item for item in value if isinstance(item, dict)]
+        else:
+            values = []
+        rows = []
+        for item in values:
+            row = dict(item)
+            if "original" not in row and "url" in row:
+                row["original"] = row["url"]
+            if "statuscode" not in row and "status" in row:
+                row["statuscode"] = row["status"]
+            rows.append(row)
+        return rows
+
+    async def iter_range_pages(
+        self,
+        hostname: str,
+        year_from: int,
+        year_to: int,
+        *,
+        page_limit: int | None = None,
+        accounting: _RequestAccounting | None = None,
+    ):
+        if not 1996 <= year_from <= year_to <= 2001:
+            raise ValueError("year range must be within 1996-2001")
+        effective_limit = self.limit if page_limit is None else int(page_limit)
+        if effective_limit < 1:
+            raise ValueError("page_limit must be positive")
+        params = {
+            "url": f"http://{hostname}/",
+            "matchType": "host",
+            "from": str(year_from),
+            "to": str(year_to),
+            "output": "json",
+            "fields": (
+                "url,timestamp,status,mime,digest,length,offset,filename"
+            ),
+            "limit": str(effective_limit),
+        }
+        response = await self._get(params, accounting=accounting)
+        rows = self._parse_arquivo_payload(response.content)
+        yield rows, len(rows) < effective_limit
 
 
 class AsyncCDXProviderPool:
@@ -193,7 +273,12 @@ class AsyncCDXProviderPool:
         for config in configs:
             if config.name in clients:
                 raise ValueError(f"duplicate CDX provider name: {config.name}")
-            clients[config.name] = AsyncWaybackCDXClient(
+            client_type = (
+                AsyncArquivoCDXClient
+                if config.dialect == "arquivo"
+                else AsyncWaybackCDXClient
+            )
+            clients[config.name] = client_type(
                 endpoint=config.endpoint,
                 provider=logical_provider,
                 source_id=config.name,
