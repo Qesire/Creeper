@@ -81,6 +81,7 @@ class AsyncWaybackCDXClient:
         endpoint: str = "https://web.archive.org/cdx/search/cdx",
         *,
         provider: str = "wayback",
+        source_id: str | None = None,
         limit: int = 1_000,
         timeout: float = 30.0,
         max_retries: int = 3,
@@ -119,6 +120,9 @@ class AsyncWaybackCDXClient:
             raise ValueError("pass either client or transport, not both")
         self.endpoint = endpoint
         self.provider = provider
+        self.source_id = provider if source_id is None else source_id
+        if not self.source_id.strip():
+            raise ValueError("source_id must be non-empty")
         self.limit = limit
         self.max_retries = max_retries
         self.backoff = backoff
@@ -495,7 +499,10 @@ class AsyncWaybackCDXClient:
                     raise ConnectionError("CDX returned a repeated resume key")
                 resume_key = next_key
                 continue
-            yield rows, True
+            # Some public CDX deployments support the common query shape but
+            # omit resume keys. A full page without a continuation token is
+            # therefore not proof of exhaustiveness.
+            yield rows, len(rows) < effective_limit
             return
 
     @staticmethod
@@ -519,8 +526,8 @@ class AsyncWaybackCDXClient:
             return int(timestamp[:4])
         return None
 
-    @staticmethod
     def _capsule_from_row(
+        self,
         key: EvidenceQueryKey,
         row: dict[str, object],
         *,
@@ -542,10 +549,10 @@ class AsyncWaybackCDXClient:
             payload_hash=hashlib.sha256(payload).hexdigest(),
             policy_version=key.policy_version,
             evidence_type="exact_host_cdx_capture",
-            source_id=key.provider,
+            source_id=self.source_id,
             original_url=original,
             record_locator=(
-                f"{key.provider}:{key.hostname}:{year}:"
+                f"{self.source_id}:{key.hostname}:{year}:"
                 f"page={page_no}:record={record_no}"
             ),
             extraction_method=extraction_method,
@@ -700,10 +707,10 @@ class AsyncWaybackCDXClient:
                     payload_hash=hashlib.sha256(payload).hexdigest(),
                     policy_version=task.policy_version,
                     evidence_type="platform_scope_cdx_capture",
-                    source_id=task.provider,
+                    source_id=self.source_id,
                     original_url=original,
                     record_locator=(
-                        f"{task.provider}:platform:{task.subject}:"
+                        f"{self.source_id}:platform:{task.subject}:"
                         f"{task.target_year}:page={task.page_number}:"
                         f"record={record_no}"
                     ),
@@ -822,10 +829,10 @@ class AsyncWaybackCDXClient:
                     payload_hash=hashlib.sha256(payload).hexdigest(),
                     policy_version=key.policy_version,
                     evidence_type="domain_scope_cdx_capture",
-                    source_id=key.provider,
+                    source_id=self.source_id,
                     original_url=original,
                     record_locator=(
-                        f"{key.provider}:domain:{key.hostname}:"
+                        f"{self.source_id}:domain:{key.hostname}:"
                         f"{hostname}:{year}:record={records_seen}"
                     ),
                     extraction_method="cdx_query_domain_bounded",

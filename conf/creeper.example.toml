@@ -6,6 +6,8 @@ dataset = "sources/local-hosts.txt"
 source_id = "local_dataset"
 domain_id = "local_static_dataset"
 reservoir_id = "local_dataset"
+# Optional. Omit for a yearless candidate pool; those rows stay
+# discovery-only and are resolved through the CDX provider pool.
 source_year = 1997
 
 [limits]
