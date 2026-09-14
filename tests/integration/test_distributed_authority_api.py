@@ -400,6 +400,63 @@ class DistributedAuthorityAPITests(unittest.IsolatedAsyncioTestCase):
             "KNOWN_ACCEPTED",
         )
 
+    async def test_hy_full_locator_must_match_probe_admission(self) -> None:
+        await self.register("worker-a")
+        task_id = self.store.admit_work(
+            WorkDefinition(
+                producer="HistoricalQueryProducer",
+                task_class=TaskClass.HOST_BATCH,
+                input_identity="locator.example",
+                coverage={"year_from": 1996, "year_to": 2001},
+                partition="0",
+                algorithm_version="resolver-v1",
+                required_capabilities=(Capability.ONLINE_QUERY.value,),
+            )
+        )
+        claim = await self.post(
+            "worker-a",
+            "/v1/tasks/claim",
+            {"lease_seconds": 30},
+        )
+        task = (await claim.json())["task"]
+        probe = await self.post(
+            "worker-a",
+            "/v1/results/hy-probe",
+            {
+                "task_id": task_id,
+                "generation": task["generation"],
+                "probes": [
+                    {
+                        "hostname": "locator.example",
+                        "year": 1999,
+                        "locator": "fixture:probe",
+                    }
+                ],
+            },
+        )
+        self.assertEqual(probe.status, 200, await probe.text())
+
+        full = await self.post(
+            "worker-a",
+            "/v1/results/hy-full",
+            {
+                "task_id": task_id,
+                "generation": task["generation"],
+                "evidence": [
+                    {
+                        "hostname": "locator.example",
+                        "year": 1999,
+                        "evidence_class": "CDX_CAPTURE",
+                        "source": "fixture",
+                        "timestamp": "19990101000000",
+                        "locator": "fixture:different",
+                    }
+                ],
+            },
+        )
+        self.assertEqual(full.status, 400)
+        self.assertEqual(self.store.accepted_host_year_count(), 0)
+
     async def test_hy_full_without_probe_is_rejected(self) -> None:
         await self.register("worker-a")
         task_id = self.store.admit_work(
