@@ -688,7 +688,7 @@ class AsyncEvidenceWorkerTests(unittest.IsolatedAsyncioTestCase):
             1,
         )
 
-    async def test_decomposed_range_commits_positive_and_fans_out_missing_years(self):
+    async def test_decomposed_range_commits_positive_and_retries_same_host_task(self):
         key = EvidenceQueryKey(
             "bounded-range.example",
             TemporalScope(1996, 1998),
@@ -706,7 +706,8 @@ class AsyncEvidenceWorkerTests(unittest.IsolatedAsyncioTestCase):
         report = await worker.run_once()
 
         self.assertEqual(report.claimed, 1)
-        self.assertEqual(report.terminal, 1)
+        self.assertEqual(report.terminal, 0)
+        self.assertEqual(report.retryable, 1)
         self.assertEqual(report.decomposed_count, 1)
         self.assertEqual(report.inserted_capsules, 1)
         self.assertEqual(
@@ -714,21 +715,10 @@ class AsyncEvidenceWorkerTests(unittest.IsolatedAsyncioTestCase):
             (1997,),
         )
         tasks = self.control.list_evidence_tasks()
-        self.assertEqual(
-            [
-                (
-                    item.key.temporal_scope.year_from,
-                    item.key.temporal_scope.year_to,
-                    item.state,
-                )
-                for item in tasks
-            ],
-            [
-                (1996, 1996, CDXQueryState.PENDING.value),
-                (1996, 1998, CDXQueryState.DECOMPOSED.value),
-                (1998, 1998, CDXQueryState.PENDING.value),
-            ],
-        )
+        self.assertEqual(len(tasks), 1)
+        self.assertEqual(tasks[0].key, key)
+        self.assertEqual(tasks[0].state, CDXQueryState.INCOMPLETE.value)
+        self.assertIsNotNone(tasks[0].retry_at)
         metrics = self.control.evidence_attempt_metric_summary()
         self.assertEqual(metrics["range"]["attempts"], 1)
         self.assertEqual(metrics["range"]["provider_requests"], 1)
@@ -783,7 +773,7 @@ class AsyncEvidenceWorkerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(task.retry_at, self.now + 10.0)
         self.assertEqual(tuple(c.year for c in self.evidence.for_hostname(key.hostname)), (1997, 1999))
 
-    async def test_range_task_fans_out_exact_year_tasks_without_writing_capsules(self):
+    async def test_range_task_never_creates_durable_exact_year_children(self):
         key = EvidenceQueryKey(
             "range.example", TemporalScope(1996, 2000), "wayback", "cdx-v1"
         )
@@ -802,15 +792,10 @@ class AsyncEvidenceWorkerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(report.terminal, 1)
         self.assertEqual(report.inserted_capsules, 0)
         self.assertEqual(provider.range_keys, [key])
-        followups = self.control.list_evidence_tasks()
-        self.assertEqual(
-            [(item.key.temporal_scope.year_from, item.key.temporal_scope.year_to) for item in followups],
-            [(1996, 2000), (1997, 1997), (1999, 1999)],
-        )
-        exact_report = await worker.run_until_idle()
-        self.assertEqual(exact_report.claimed, 2)
-        self.assertEqual(exact_report.inserted_capsules, 2)
-        self.assertEqual(len(self.evidence.all_capsules()), 2)
+        tasks = self.control.list_evidence_tasks()
+        self.assertEqual(len(tasks), 1)
+        self.assertEqual(tasks[0].key, key)
+        self.assertEqual(tasks[0].state, CDXQueryState.PASS.value)
 
 
 if __name__ == "__main__":
