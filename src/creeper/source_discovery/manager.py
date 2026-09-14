@@ -369,9 +369,12 @@ class SourceReservoirManager:
 
     def _adaptive_search_cooldown(self) -> float:
         zero_streak, _new_sources, episodes = self._recent_search_supply()
-        if episodes < 1 or zero_streak < 1:
-            return self.search_cooldown_seconds
-        multiplier = min(8, 2 ** min(zero_streak, 3))
+        if episodes < 2 or zero_streak < 2:
+            # One empty result reduces concurrency but does not freeze every
+            # orthogonal search arm; the existing per-strategy cooldown is
+            # sufficient to stop immediate repetition of that same query shape.
+            return 0.0
+        multiplier = min(8, 2 ** min(zero_streak - 1, 3))
         return self.search_cooldown_seconds * float(multiplier)
 
     def _global_search_available(self) -> bool:
