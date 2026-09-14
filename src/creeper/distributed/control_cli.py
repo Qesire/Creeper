@@ -56,6 +56,20 @@ def build_parser() -> argparse.ArgumentParser:
     probe.add_argument("--samples", type=int, default=3)
     probe.add_argument("--priority", type=float, default=100.0)
 
+    thin = sub.add_parser(
+        "thin",
+        help="Admit one positive-only exact-year thin probe.",
+    )
+    thin.add_argument("--hostname", required=True)
+    thin.add_argument("--provider", required=True)
+    thin.add_argument("--year", type=int, required=True)
+    thin.add_argument(
+        "--estimated-response-bytes",
+        type=int,
+        default=64 * 1024,
+    )
+    thin.add_argument("--priority", type=float, default=0.0)
+
     explore = sub.add_parser(
         "explore",
         help="Admit one evidence-only historical crawler root.",
@@ -159,6 +173,17 @@ def main(argv: list[str] | None = None) -> int:
                 target_region=args.region,
                 year=args.year,
                 samples=args.samples,
+                priority=args.priority,
+            )
+            print(task_id)
+            return 0
+
+        if args.command == "thin":
+            task_id = store.admit_thin_host_probe(
+                hostname=args.hostname,
+                provider=args.provider,
+                year=args.year,
+                estimated_response_bytes=args.estimated_response_bytes,
                 priority=args.priority,
             )
             print(task_id)
