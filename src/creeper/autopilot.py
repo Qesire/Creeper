@@ -457,6 +457,7 @@ def load_autopilot_config(config_path: Path) -> AutopilotConfig:
         timeout=evidence.timeout,
         max_retries=evidence.max_retries,
         weight=max(0.1, evidence.requests_per_second),
+        row_limit=150_000,
     )
     raw_cdx_providers = ev_raw.get("cdx_providers")
     if raw_cdx_providers is None:
@@ -475,6 +476,7 @@ def load_autopilot_config(config_path: Path) -> AutopilotConfig:
                 max_retries=evidence.max_retries,
                 weight=1.0,
                 dialect="arquivo",
+                row_limit=100_000,
             ),
         )
     else:
