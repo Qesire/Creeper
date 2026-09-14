@@ -65,6 +65,16 @@ class WorkLeaseTests(unittest.TestCase):
                 max_seconds=30,
                 expires_at=float("nan"),
             )
+        with self.assertRaisesRegex(ValueError, "not precede now"):
+            WorkLease.create(
+                reservoir_id="arquivo:demo",
+                max_records=10,
+                max_requests=2,
+                max_bytes=4096,
+                max_seconds=30,
+                now=100.0,
+                expires_at=99.0,
+            )
 
     def test_lease_result_rejects_lossy_accounting(self):
         with self.assertRaisesRegex(ValueError, "records"):
@@ -91,6 +101,17 @@ class WorkLeaseTests(unittest.TestCase):
         lease = self._lease().grant(owner="worker-1")
         with self.assertRaisesRegex(ValueError, "now must be finite"):
             lease.expire(float("nan"))
+
+    def test_retry_requires_fresh_valid_deadline(self):
+        expired = self._lease().grant(owner="worker").expired()
+        with self.assertRaises(TypeError):
+            expired.retry()
+        with self.assertRaisesRegex(ValueError, "retry time"):
+            expired.retry(now=float("nan"))
+        with self.assertRaisesRegex(ValueError, "not precede retry time"):
+            expired.retry(now=200.0, expires_at=199.0)
+        retry = expired.retry(now=200.0, expires_at=260.0)
+        self.assertEqual(retry.expires_at, 260.0)
 
     def test_expired_helper_cannot_bypass_lifecycle(self):
         with self.assertRaises(StateTransitionError):
@@ -128,13 +149,13 @@ class WorkLeaseTests(unittest.TestCase):
         with self.assertRaises(StateTransitionError):
             expired.resume()
 
-        retry = expired.retry()
+        retry = expired.retry(now=200.0)
         self.assertNotEqual(retry.lease_id, expired.lease_id)
         self.assertEqual(retry.state, LeaseState.CREATED)
         self.assertIsNone(retry.owner)
-        self.assertIsNone(retry.expires_at)
+        self.assertEqual(retry.expires_at, 230.0)
         granted = retry.grant(owner="worker-2")
-        self.assertIsNone(granted.expires_at)
+        self.assertEqual(granted.expires_at, 230.0)
 
 
 if __name__ == "__main__":
