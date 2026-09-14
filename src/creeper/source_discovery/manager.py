@@ -115,9 +115,8 @@ class SourceReservoirManager:
 
     Search is consumption-driven, but cold inventory receives bounded credit
     per origin so thousands of sibling shards cannot masquerade as independent
-    discovery opportunities. Direct-inventory starvation and structural HOLD
-    metasources may bypass the ordinary cold refill gate while retaining the
-    existing bounded search concurrency and cooldown controls.
+    discovery opportunities. Deterministic CDX/CDXJ work is excluded from this
+    foreground inventory and advances only on the idle background lane.
     """
 
     _COLD_STATES = frozenset(
@@ -196,10 +195,13 @@ class SourceReservoirManager:
                 state=SourceState.HOLD
             )
             if (
-                candidate.source_family
-                in {"RESOURCE_CATALOG", "RESOURCE_DIRECTORY"}
-                or candidate.level
-                in {SourceLevel.COLLECTION, SourceLevel.METASOURCE}
+                (
+                    candidate.source_family
+                    in {"RESOURCE_CATALOG", "RESOURCE_DIRECTORY"}
+                    or candidate.level
+                    in {SourceLevel.COLLECTION, SourceLevel.METASOURCE}
+                )
+                and not is_background_bulk_candidate(candidate)
             )
             and self.registry.suppression_reason(candidate) is None
         ]
