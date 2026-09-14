@@ -16,7 +16,11 @@ from uuid import uuid4
 
 from creeper.authority.baseline_index import BaselineIndex, YEAR_BITS
 from creeper.authority.normalizer import normalize_official
-from creeper.distributed.edition import FABRIC_PROTOCOL_VERSION
+from creeper.distributed.edition import (
+    FABRIC_PROTOCOL_VERSION,
+    FABRIC_THIN_MAX_ESTIMATED_RESPONSE_BYTES,
+    FABRIC_THIN_MAX_PROVIDER_REQUESTS,
+)
 from creeper.distributed.identity import (
     evidence_id,
     host_year_id,
@@ -529,6 +533,49 @@ class DistributedAuthorityStore:
             raise WorkerRejectedError(worker_id)
         return set(json.loads(str(row["allowed_providers_json"])))
 
+    def _worker_runtime_class(self, worker_id: str) -> str:
+        row = self.connection.execute(
+            """
+            SELECT runtime_class, revoked
+            FROM distributed_workers
+            WHERE worker_id = ?
+            """,
+            (worker_id,),
+        ).fetchone()
+        if row is None or int(row["revoked"]):
+            raise WorkerRejectedError(worker_id)
+        return str(row["runtime_class"])
+
+    @staticmethod
+    def _work_runtime_eligible(
+        row: sqlite3.Row,
+        *,
+        runtime_class: str,
+    ) -> bool:
+        if runtime_class != "cloudflare_worker":
+            return True
+        if str(row["producer"]) != "ThinHistoricalQueryProducer":
+            return False
+        if str(row["task_class"]) != TaskClass.HOST_BATCH.value:
+            return False
+        coverage = json.loads(str(row["coverage_json"]))
+        if coverage.get("thin_eligible") is not True:
+            return False
+        try:
+            requests = int(coverage["max_provider_requests"])
+            estimated_bytes = int(coverage["estimated_response_bytes"])
+            year_from = int(coverage["year_from"])
+            year_to = int(coverage["year_to"])
+        except (KeyError, TypeError, ValueError):
+            return False
+        return (
+            requests <= FABRIC_THIN_MAX_PROVIDER_REQUESTS
+            and estimated_bytes <= FABRIC_THIN_MAX_ESTIMATED_RESPONSE_BYTES
+            and requests >= 1
+            and estimated_bytes >= 1
+            and 1996 <= year_from == year_to <= 2001
+        )
+
     def _worker_region(self, worker_id: str) -> str:
         row = self.connection.execute(
             """
@@ -851,6 +898,50 @@ class DistributedAuthorityStore:
         )
         return self.admit_work(work)
 
+    def admit_thin_host_probe(
+        self,
+        *,
+        hostname: str,
+        provider: str,
+        year: int,
+        estimated_response_bytes: int = 64 * 1024,
+        priority: float = 0.0,
+        algorithm_version: str = "fabric-thin-positive-v1",
+    ) -> str:
+        """Admit one single-request positive-only exact-year probe."""
+
+        normalized = normalize_official(hostname)
+        provider = provider.strip()
+        year = int(year)
+        estimated_response_bytes = int(estimated_response_bytes)
+        if (
+            normalized is None
+            or not provider
+            or year not in YEAR_BITS
+            or estimated_response_bytes < 1
+            or estimated_response_bytes > FABRIC_THIN_MAX_ESTIMATED_RESPONSE_BYTES
+        ):
+            raise ValueError("invalid thin host probe")
+        work = WorkDefinition(
+            producer="ThinHistoricalQueryProducer",
+            task_class=TaskClass.HOST_BATCH,
+            input_identity=normalized,
+            coverage={
+                "scope": "THIN_POSITIVE_PROBE",
+                "provider": provider,
+                "year_from": year,
+                "year_to": year,
+                "thin_eligible": True,
+                "max_provider_requests": FABRIC_THIN_MAX_PROVIDER_REQUESTS,
+                "estimated_response_bytes": estimated_response_bytes,
+            },
+            partition=f"{provider}:{year}",
+            algorithm_version=algorithm_version,
+            required_capabilities=("THIN_QUERY",),
+            priority=float(priority),
+        )
+        return self.admit_work(work)
+
     def admit_host_resolution_work(
         self,
         *,
@@ -932,6 +1023,7 @@ class DistributedAuthorityStore:
         producers = self._worker_producers(worker_id)
         allowed_providers = self._worker_allowed_providers(worker_id)
         worker_region = self._worker_region(worker_id)
+        runtime_class = self._worker_runtime_class(worker_id)
         self.connection.execute("BEGIN IMMEDIATE")
         try:
             chosen = None
@@ -961,6 +1053,11 @@ class DistributedAuthorityStore:
                     if not required.issubset(capabilities):
                         continue
                     if producers and str(row["producer"]) not in producers:
+                        continue
+                    if not self._work_runtime_eligible(
+                        row,
+                        runtime_class=runtime_class,
+                    ):
                         continue
                     if not self._work_region_eligible(
                         row,
