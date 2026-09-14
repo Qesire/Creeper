@@ -22,6 +22,7 @@ from typing import Mapping
 from urllib.parse import urlsplit
 
 from creeper.sources.non_snapshot import (
+    is_audited_gnu_mailbox_locator,
     is_dmoz_content_locator,
     is_mailbox_url_locator,
     is_squid_access_locator,
@@ -295,7 +296,10 @@ def resolve_source_evidence_contract(
         return CDXJ_DIRECT_CONTRACT
     if actual_parser == "squid_access":
         return SQUID_ACCESS_DIRECT_CONTRACT
-    if actual_parser == "mbox_urls":
+    if (
+        actual_parser == "mbox_urls"
+        and is_audited_gnu_mailbox_locator(locator)
+    ):
         return MBOX_MESSAGE_DIRECT_CONTRACT
     return discovery_only_contract(actual_parser)
 
