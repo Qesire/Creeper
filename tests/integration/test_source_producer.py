@@ -176,6 +176,62 @@ class SourceProducerTests(unittest.TestCase):
                 producer_kwargs={"reservation_grace_seconds": float("inf")},
             )
 
+    def test_rejects_adapter_result_from_different_lease_before_cursor_commit(self):
+        runtime, adapter = self.build_runtime(backlog_capacity=1)
+        original_execute = adapter.execute
+
+        def wrong_lease_result(lease):
+            records, result = original_execute(lease)
+            return records, LeaseResult(
+                lease_id="other-lease",
+                records=result.records,
+                requests=result.requests,
+                bytes_read=result.bytes_read,
+                elapsed_seconds=result.elapsed_seconds,
+                next_cursor=result.next_cursor,
+            )
+
+        adapter.execute = wrong_lease_result
+        with self.assertRaisesRegex(RuntimeError, "identity or budget"):
+            runtime.run_once()
+
+        reservoir = self.control.get_reservoir("fixture-reservoir")
+        self.assertEqual(reservoir.state, ReservoirState.READY)
+        self.assertEqual(reservoir.cursor, "0")
+        rows = self.control.connection.execute(
+            "SELECT state FROM work_leases"
+        ).fetchall()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["state"], "ABORTED")
+
+    def test_rejects_adapter_record_underreport_before_cursor_commit(self):
+        runtime, adapter = self.build_runtime(backlog_capacity=1)
+        original_execute = adapter.execute
+
+        def underreported_result(lease):
+            records, result = original_execute(lease)
+            return records, LeaseResult(
+                lease_id=lease.lease_id,
+                records=0,
+                requests=result.requests,
+                bytes_read=result.bytes_read,
+                elapsed_seconds=result.elapsed_seconds,
+                next_cursor=result.next_cursor,
+            )
+
+        adapter.execute = underreported_result
+        with self.assertRaisesRegex(RuntimeError, "record count"):
+            runtime.run_once()
+
+        reservoir = self.control.get_reservoir("fixture-reservoir")
+        self.assertEqual(reservoir.state, ReservoirState.READY)
+        self.assertEqual(reservoir.cursor, "0")
+        rows = self.control.connection.execute(
+            "SELECT state FROM work_leases"
+        ).fetchall()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["state"], "ABORTED")
+
     def test_final_source_commit_revalidates_lease_ownership(self):
         runtime, _adapter = self.build_runtime(backlog_capacity=1)
         original_renew = self.control.renew_lease

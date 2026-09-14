@@ -15,20 +15,56 @@ class WorkLeaseTests(unittest.TestCase):
             expires_at=130.0,
         )
 
-    def test_allows_enforces_every_finite_work_limit(self):
+    def test_allows_enforces_every_finite_work_limit_inclusively(self):
         lease = self._lease()
         self.assertTrue(
             lease.allows(
-                records=9,
-                requests=1,
-                bytes_read=4095,
-                elapsed_seconds=29.9,
+                records=10,
+                requests=2,
+                bytes_read=4096,
+                elapsed_seconds=30,
             )
         )
-        self.assertFalse(lease.allows(records=10, requests=1, bytes_read=1, elapsed_seconds=1))
-        self.assertFalse(lease.allows(records=1, requests=2, bytes_read=1, elapsed_seconds=1))
-        self.assertFalse(lease.allows(records=1, requests=1, bytes_read=4096, elapsed_seconds=1))
-        self.assertFalse(lease.allows(records=1, requests=1, bytes_read=1, elapsed_seconds=30))
+        self.assertFalse(lease.allows(records=11, requests=1, bytes_read=1, elapsed_seconds=1))
+        self.assertFalse(lease.allows(records=1, requests=3, bytes_read=1, elapsed_seconds=1))
+        self.assertFalse(lease.allows(records=1, requests=1, bytes_read=4097, elapsed_seconds=1))
+        self.assertFalse(lease.allows(records=1, requests=1, bytes_read=1, elapsed_seconds=30.1))
+
+    def test_allows_result_binds_identity_and_budget(self):
+        lease = self._lease()
+        self.assertTrue(
+            lease.allows_result(
+                LeaseResult(
+                    lease.lease_id,
+                    records=10,
+                    requests=2,
+                    bytes_read=4096,
+                    elapsed_seconds=30,
+                )
+            )
+        )
+        self.assertFalse(
+            lease.allows_result(
+                LeaseResult(
+                    "other-lease",
+                    records=1,
+                    requests=1,
+                    bytes_read=1,
+                    elapsed_seconds=1,
+                )
+            )
+        )
+        self.assertFalse(
+            lease.allows_result(
+                LeaseResult(
+                    lease.lease_id,
+                    records=11,
+                    requests=1,
+                    bytes_read=1,
+                    elapsed_seconds=1,
+                )
+            )
+        )
 
     def test_constructor_rejects_nonfinite_or_fractional_limits(self):
         with self.assertRaisesRegex(ValueError, "max_seconds"):

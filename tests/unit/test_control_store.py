@@ -779,6 +779,16 @@ class ControlStoreTests(unittest.TestCase):
             now["value"] = 171.0
             with self.assertRaisesRegex(RuntimeError, "expired before renewal"):
                 store.renew_lease(running, ttl_seconds=50.0)
+            with self.assertRaisesRegex(RuntimeError, "expired before renewal"):
+                store.renew_lease(
+                    running,
+                    ttl_seconds=50.0,
+                    now=120.0,
+                )
+            self.assertEqual(
+                store.get_lease(running.lease_id).expires_at,
+                170.0,
+            )
             store.close()
 
     def test_source_lease_rejects_invalid_deadlines_without_mutation(self):
@@ -817,9 +827,22 @@ class ControlStoreTests(unittest.TestCase):
                     ttl_seconds=10.0,
                     now=float("nan"),
                 )
+            with self.assertRaisesRegex(ValueError, "ttl_seconds"):
+                store.renew_lease(
+                    running,
+                    ttl_seconds=True,
+                    now=110.0,
+                )
             self.assertEqual(store.get_lease(running.lease_id).expires_at, 140.0)
             with self.assertRaisesRegex(ValueError, "recovery time"):
                 store.recover_expired_leases(now=float("nan"))
+            store.clock = lambda: float("nan")
+            with self.assertRaisesRegex(ValueError, "renewal time"):
+                store.renew_lease(
+                    running,
+                    ttl_seconds=10.0,
+                )
+            self.assertEqual(store.get_lease(running.lease_id).expires_at, 140.0)
             self.assertEqual(store.get_lease(running.lease_id).state, LeaseState.RUNNING)
             store.close()
 
@@ -856,7 +879,10 @@ class ControlStoreTests(unittest.TestCase):
 
     def test_finalize_lease_atomically_advances_reservoir_progress(self):
         with tempfile.TemporaryDirectory() as tmp:
-            store = ControlStore(Path(tmp) / "control.sqlite3")
+            store = ControlStore(
+                Path(tmp) / "control.sqlite3",
+                clock=lambda: 105.0,
+            )
             ready = self._ready_reservoir(cursor="128")
             store.save_domain(self._domain())
             store.save_reservoir(ready)
@@ -879,6 +905,90 @@ class ControlStoreTests(unittest.TestCase):
             self.assertEqual(
                 (advanced.state, advanced.cursor),
                 (ReservoirState.READY, "256"),
+            )
+            store.close()
+
+    def test_finalize_lease_rejects_expired_ownership_without_cursor_mutation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            now = {"value": 100.0}
+            store = ControlStore(
+                Path(tmp) / "control.sqlite3",
+                clock=lambda: now["value"],
+            )
+            ready = self._ready_reservoir(cursor="128")
+            store.save_domain(self._domain())
+            store.save_reservoir(ready)
+            granted = store.grant_fresh_lease(
+                ready.reservoir_id,
+                owner="worker-a",
+                now=100.0,
+                lease_ttl_seconds=10.0,
+                **self._lease_limits(),
+            )
+            assert granted is not None
+            running = granted.start()
+            store.save_lease(running)
+
+            now["value"] = 111.0
+            with self.assertRaisesRegex(RuntimeError, "expired before final commit"):
+                store.finalize_lease(
+                    running,
+                    next_cursor="256",
+                    exhausted=False,
+                )
+
+            self.assertEqual(
+                store.get_lease(running.lease_id).state,
+                LeaseState.RUNNING,
+            )
+            unchanged = store.get_reservoir(ready.reservoir_id)
+            self.assertEqual(
+                (unchanged.state, unchanged.cursor),
+                (ReservoirState.LEASED, "128"),
+            )
+            store.close()
+
+    def test_finalize_lease_rejects_inconsistent_terminal_cursor_protocol(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ControlStore(
+                Path(tmp) / "control.sqlite3",
+                clock=lambda: 105.0,
+            )
+            ready = self._ready_reservoir(cursor="128")
+            store.save_domain(self._domain())
+            store.save_reservoir(ready)
+            granted = store.grant_fresh_lease(
+                ready.reservoir_id,
+                owner="worker-a",
+                now=100.0,
+                **self._lease_limits(),
+            )
+            assert granted is not None
+            running = granted.start()
+            store.save_lease(running)
+
+            with self.assertRaisesRegex(ValueError, "cannot retain next_cursor"):
+                store.finalize_lease(
+                    running,
+                    next_cursor="256",
+                    exhausted=True,
+                )
+            with self.assertRaisesRegex(ValueError, "must provide next_cursor"):
+                store.finalize_lease(
+                    running,
+                    next_cursor=None,
+                    exhausted=False,
+                )
+            with self.assertRaisesRegex(ValueError, "exhausted must be a boolean"):
+                store.finalize_lease(
+                    running,
+                    next_cursor=None,
+                    exhausted=1,
+                )
+
+            self.assertEqual(
+                store.get_lease(running.lease_id).state,
+                LeaseState.RUNNING,
             )
             store.close()
 
