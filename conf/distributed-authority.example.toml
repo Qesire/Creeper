@@ -6,6 +6,11 @@ credentials_file = "/etc/creeper/worker-credentials.json"
 host = "127.0.0.1"
 port = 8088
 max_clock_skew_seconds = 300
+reconcile_interval_seconds = 5
+promotion_batch_size = 64
+# Keep generic page recursion off by default; CDX/CDXJ bulk artifacts can still
+# be promoted automatically by the local deterministic reconciler.
+auto_promote_source_pages = false
 
 [provider_budgets.internet_archive]
 requests_per_second = 0.5
