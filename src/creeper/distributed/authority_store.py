@@ -390,6 +390,16 @@ class DistributedAuthorityStore:
         *,
         now: float,
     ) -> sqlite3.Row:
+        worker = self.connection.execute(
+            """
+            SELECT revoked FROM distributed_workers
+            WHERE worker_id = ?
+            """,
+            (worker_id,),
+        ).fetchone()
+        if worker is None or int(worker["revoked"]):
+            raise WorkerRejectedError(worker_id)
+
         row = self.connection.execute(
             "SELECT * FROM distributed_work WHERE task_id = ?",
             (task_id,),
@@ -455,8 +465,11 @@ class DistributedAuthorityStore:
     def _batch_payload(batch: ResultBatch) -> str:
         return _json(
             {
+                # Generation is a fencing credential, not part of BatchID or
+                # logical batch content. A new lease generation must therefore
+                # receive ALREADY_COMMITTED when it replays an identical
+                # task/sequence batch after an ACK was lost.
                 "task_id": batch.task_id,
-                "generation": int(batch.generation),
                 "sequence_no": int(batch.sequence_no),
                 "results": [dict(item) for item in batch.results],
                 "cursor_after": batch.cursor_after,
