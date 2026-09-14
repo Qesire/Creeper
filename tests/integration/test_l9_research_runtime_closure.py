@@ -14,16 +14,19 @@ from creeper.source_discovery.research_trigger import (
 )
 from creeper.source_research.adapters.base import (
     ArtifactLead,
-    RootQuery,
+    RootQuery as AdapterRootQuery,
     SearchHit,
     SearchPage,
 )
 from creeper.source_research.integration import ResearchIntegrationBridge
 from creeper.source_research.models import (
     DecisionRecord,
+    FrontierState,
     FrontierTask,
     QueryProgram,
+    QueryState,
     RootKind,
+    RootQuery,
     RootSurface,
 )
 from creeper.source_research.registry import ResearchRegistry
