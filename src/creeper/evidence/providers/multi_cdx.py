@@ -54,33 +54,62 @@ class CDXProviderConfig:
     row_limit: int = 150_000
 
     def __post_init__(self) -> None:
-        if not self.name.strip() or not self.endpoint.strip():
-            raise ValueError("CDX provider name and endpoint are required")
-        if self.requests_per_second < 0:
-            raise ValueError("CDX provider requests_per_second must be non-negative")
-        if (
-            not isinstance(self.row_limit, int)
-            or isinstance(self.row_limit, bool)
-            or self.row_limit < 1
-        ):
-            raise ValueError("CDX provider row_limit must be a positive integer")
-        if self.max_inflight < 1 or self.max_connections < 1:
-            raise ValueError("CDX provider inflight/connections must be positive")
-        if (
-            self.max_keepalive_connections < 0
-            or self.max_keepalive_connections > self.max_connections
-        ):
+        for field_name, value in (("name", self.name), ("endpoint", self.endpoint)):
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"CDX provider {field_name} is required")
+        integer_limits = (
+            ("row_limit", self.row_limit, 1),
+            ("max_inflight", self.max_inflight, 1),
+            ("max_connections", self.max_connections, 1),
+            ("max_keepalive_connections", self.max_keepalive_connections, 0),
+            ("max_retries", self.max_retries, 0),
+        )
+        for field_name, value, minimum in integer_limits:
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, int)
+                or value < minimum
+            ):
+                raise ValueError(
+                    f"CDX provider {field_name} must be an integer >= {minimum}"
+                )
+        if self.max_keepalive_connections > self.max_connections:
             raise ValueError("invalid CDX provider keepalive connection limit")
-        if self.dialect not in {"wayback", "arquivo"}:
+
+        nonnegative_floats = (
+            ("requests_per_second", self.requests_per_second),
+            ("throttle_floor_seconds", self.throttle_floor_seconds),
+        )
+        for field_name, value in nonnegative_floats:
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(float(value))
+                or value < 0
+            ):
+                raise ValueError(
+                    f"CDX provider {field_name} must be finite and non-negative"
+                )
+        positive_floats = (
+            ("keepalive_expiry_seconds", self.keepalive_expiry_seconds),
+            ("timeout", self.timeout),
+            ("weight", self.weight),
+        )
+        for field_name, value in positive_floats:
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(float(value))
+                or value <= 0
+            ):
+                raise ValueError(
+                    f"CDX provider {field_name} must be finite and positive"
+                )
+        if not isinstance(self.dialect, str) or self.dialect not in {
+            "wayback",
+            "arquivo",
+        }:
             raise ValueError("unsupported CDX provider dialect")
-        if (
-            self.keepalive_expiry_seconds <= 0
-            or self.throttle_floor_seconds < 0
-            or self.timeout <= 0
-            or self.max_retries < 0
-            or self.weight <= 0
-        ):
-            raise ValueError("invalid CDX provider transport limits")
 
     @classmethod
     def from_mapping(
@@ -101,30 +130,28 @@ class CDXProviderConfig:
 
         provider_name = item("name", item("id", base.name))
         return cls(
-            name=str(provider_name),
-            endpoint=str(item("endpoint", base.endpoint)),
-            requests_per_second=float(
-                item("requests_per_second", base.requests_per_second)
+            name=provider_name,
+            endpoint=item("endpoint", base.endpoint),
+            requests_per_second=item(
+                "requests_per_second", base.requests_per_second
             ),
-            max_inflight=int(item("max_inflight", base.max_inflight)),
-            max_connections=int(item("max_connections", base.max_connections)),
-            max_keepalive_connections=int(
-                item(
-                    "max_keepalive_connections",
-                    base.max_keepalive_connections,
-                )
+            max_inflight=item("max_inflight", base.max_inflight),
+            max_connections=item("max_connections", base.max_connections),
+            max_keepalive_connections=item(
+                "max_keepalive_connections",
+                base.max_keepalive_connections,
             ),
-            keepalive_expiry_seconds=float(
-                item("keepalive_expiry_seconds", base.keepalive_expiry_seconds)
+            keepalive_expiry_seconds=item(
+                "keepalive_expiry_seconds", base.keepalive_expiry_seconds
             ),
-            throttle_floor_seconds=float(
-                item("throttle_floor_seconds", base.throttle_floor_seconds)
+            throttle_floor_seconds=item(
+                "throttle_floor_seconds", base.throttle_floor_seconds
             ),
-            timeout=float(item("timeout", base.timeout)),
-            max_retries=int(item("max_retries", base.max_retries)),
-            weight=float(item("weight", base.weight)),
-            dialect=str(item("dialect", base.dialect)),
-            row_limit=int(item("row_limit", base.row_limit)),
+            timeout=item("timeout", base.timeout),
+            max_retries=item("max_retries", base.max_retries),
+            weight=item("weight", base.weight),
+            dialect=item("dialect", base.dialect),
+            row_limit=item("row_limit", base.row_limit),
         )
 
     def as_dict(self) -> dict[str, object]:
