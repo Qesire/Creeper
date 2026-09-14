@@ -100,6 +100,11 @@ class TaskLease:
     attempt: int
     work: WorkDefinition
     cursor: str | None = None
+    next_sequence_no: int = 0
+
+    def __post_init__(self) -> None:
+        if self.generation < 1 or self.attempt < 1 or self.next_sequence_no < 0:
+            raise ValueError("invalid task lease counters")
 
 
 @dataclass(frozen=True)
