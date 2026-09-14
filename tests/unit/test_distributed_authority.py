@@ -11,6 +11,7 @@ from creeper.distributed.authority_store import (
     ProviderAccessDeniedError,
     ProviderRegionNotQualifiedError,
     StaleLeaseError,
+    WorkerEgressBudgetExceededError,
 )
 from creeper.distributed.identity import (
     batch_id,
@@ -492,6 +493,111 @@ class DistributedAuthorityTests(unittest.TestCase):
                 task_id=lease.task_id,
                 generation=lease.generation,
             )
+
+    def test_daily_worker_egress_budget_is_idempotent_and_resets_next_day(self) -> None:
+        worker = WorkerDescriptor(
+            worker_id="worker-egress-limited",
+            runtime_class="vm",
+            region="gcp-free",
+            architecture="x86_64",
+            memory_bytes=1024**3,
+            cpu_count=1,
+            network_class="public",
+            capabilities=(Capability.ONLINE_QUERY.value,),
+            producers=("HistoricalQueryProducer",),
+            allowed_providers=("internet_archive",),
+            daily_egress_budget_bytes=5,
+        )
+        self.store.register_worker(worker)
+        self.store.configure_provider_budget(
+            "internet_archive",
+            requests_per_second=1_000_000.0,
+            max_global_inflight=1,
+            require_qualified_region=False,
+        )
+        first_id = self.store.admit_work(
+            WorkDefinition(
+                producer="HistoricalQueryProducer",
+                task_class=TaskClass.HOST_BATCH,
+                input_identity="egress-a.example",
+                coverage={
+                    "provider": "internet_archive",
+                    "year_from": 1997,
+                    "year_to": 1997,
+                },
+                partition="0",
+                algorithm_version="resolver-v1",
+                required_capabilities=(Capability.ONLINE_QUERY.value,),
+            )
+        )
+        lease = self.store.claim_work(worker.worker_id)
+        assert lease is not None
+        self.assertEqual(lease.task_id, first_id)
+        permit = self.store.issue_provider_permit(
+            "internet_archive",
+            worker_id=lease.worker_id,
+            task_id=lease.task_id,
+            generation=lease.generation,
+        )
+        assert permit is not None
+        self.store.report_provider_permit(
+            permit.permit_id,
+            worker_id=lease.worker_id,
+            status_code=200,
+            response_bytes=5,
+        )
+        self.assertEqual(
+            self.store.worker_egress_snapshot(worker.worker_id)["used_bytes"],
+            5,
+        )
+
+        # Provider reports are idempotent, including byte accounting.
+        self.store.report_provider_permit(
+            permit.permit_id,
+            worker_id=lease.worker_id,
+            status_code=200,
+            response_bytes=5,
+        )
+        self.assertEqual(
+            self.store.worker_egress_snapshot(worker.worker_id)["used_bytes"],
+            5,
+        )
+        with self.assertRaises(WorkerEgressBudgetExceededError):
+            self.store.issue_provider_permit(
+                "internet_archive",
+                worker_id=lease.worker_id,
+                task_id=lease.task_id,
+                generation=lease.generation,
+            )
+        self.store.finish_task(
+            lease.task_id,
+            worker_id=lease.worker_id,
+            generation=lease.generation,
+        )
+
+        second_id = self.store.admit_work(
+            WorkDefinition(
+                producer="HistoricalQueryProducer",
+                task_class=TaskClass.HOST_BATCH,
+                input_identity="egress-b.example",
+                coverage={
+                    "provider": "internet_archive",
+                    "year_from": 1998,
+                    "year_to": 1998,
+                },
+                partition="0",
+                algorithm_version="resolver-v1",
+                required_capabilities=(Capability.ONLINE_QUERY.value,),
+            )
+        )
+        self.assertIsNone(self.store.claim_work(worker.worker_id))
+
+        self.clock.advance(86_400)
+        snapshot = self.store.worker_egress_snapshot(worker.worker_id)
+        self.assertEqual(snapshot["used_bytes"], 0)
+        recovered = self.store.claim_work(worker.worker_id)
+        assert recovered is not None
+        self.assertEqual(recovered.task_id, second_id)
 
     def test_provider_inflight_budget_is_global_across_regions(self) -> None:
         self.store.configure_provider_budget(
