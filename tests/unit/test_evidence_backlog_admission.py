@@ -120,17 +120,17 @@ class EvidenceBacklogAdmissionTests(unittest.TestCase):
         self.assertEqual(self.admission.reserved("wayback"), 1)
 
 
-    def test_range_parent_retains_capacity_for_exact_fanout(self):
+    def test_range_parent_consumes_one_host_task_slot_without_fanout_reserve(self):
         parent = EvidenceQueryKey(
             "range.example",
-            TemporalScope(1996, 1998),
+            TemporalScope(1996, 2001),
             "wayback",
             "cdx-v1",
         )
         reservation = self.admission.try_reserve(
             provider="wayback",
-            amount=3,
-            capacity=3,
+            amount=1,
+            capacity=1,
             ttl_seconds=30,
         )
         assert reservation is not None
@@ -138,43 +138,27 @@ class EvidenceBacklogAdmissionTests(unittest.TestCase):
         inserted = self.admission.enqueue_reserved(reservation, [parent])
 
         self.assertEqual(inserted, 1)
-        # Parent occupies one nonterminal slot; two additional slots remain
-        # persistently reserved for worst-case exact fanout.
-        self.assertEqual(self.admission.reserved("wayback"), 2)
+        self.assertEqual(self.admission.reserved("wayback"), 0)
         self.assertEqual(
-            self.admission.available_capacity(provider="wayback", capacity=3),
+            self.admission.available_capacity(provider="wayback", capacity=1),
             0,
         )
+        fanout = self.control.connection.execute(
+            "SELECT COUNT(*) FROM evidence_task_fanout_reservations"
+        ).fetchone()[0]
+        self.assertEqual(fanout, 0)
 
         self.control.claim_evidence_tasks(owner="worker", limit=1)
-        children = [
-            EvidenceQueryKey(
-                "range.example",
-                TemporalScope(year, year),
-                "wayback",
-                "cdx-v1",
-            )
-            for year in (1996, 1997, 1998)
-        ]
         self.control.finish_range_task(
             parent,
-            "decomposed",
-            followup_keys=children,
+            "pass",
+            followup_keys=(),
             owner="worker",
         )
 
-        self.assertEqual(self.admission.reserved("wayback"), 0)
         self.assertEqual(
-            self.admission.available_capacity(provider="wayback", capacity=3),
-            0,
-        )
-        self.assertEqual(
-            sum(
-                1
-                for task in self.control.list_evidence_tasks()
-                if task.state == "pending"
-            ),
-            3,
+            self.admission.available_capacity(provider="wayback", capacity=1),
+            1,
         )
 
     def test_live_reservation_can_renew_but_expired_one_cannot(self):
