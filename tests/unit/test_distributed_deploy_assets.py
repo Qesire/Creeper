@@ -18,6 +18,7 @@ class DistributedDeployAssetTests(unittest.TestCase):
             root / "deploy/fabric/oci/install.sh",
             root / "deploy/fabric/gcp/install.sh",
             root / "deploy/fabric/cloudflare-worker/deploy.sh",
+            root / "deploy/fabric/cloudflare-worker/smoke.sh",
         )
         for script in scripts:
             self.assertTrue(script.is_file(), script)
