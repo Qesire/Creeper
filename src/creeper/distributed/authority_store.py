@@ -121,6 +121,15 @@ class DistributedAuthorityStore:
                 FOREIGN KEY(task_id) REFERENCES distributed_work(task_id)
             ) WITHOUT ROWID;
 
+            CREATE TABLE IF NOT EXISTS distributed_request_nonces (
+                worker_id TEXT NOT NULL,
+                nonce TEXT NOT NULL,
+                seen_at REAL NOT NULL,
+                PRIMARY KEY(worker_id, nonce)
+            ) WITHOUT ROWID;
+            CREATE INDEX IF NOT EXISTS idx_distributed_request_nonces_seen
+                ON distributed_request_nonces(seen_at);
+
             CREATE TABLE IF NOT EXISTS distributed_provider_budgets (
                 provider TEXT PRIMARY KEY,
                 requests_per_second REAL NOT NULL
@@ -159,6 +168,43 @@ class DistributedAuthorityStore:
 
     def close(self) -> None:
         self.connection.close()
+
+    def consume_request_nonce(
+        self,
+        worker_id: str,
+        nonce: str,
+        *,
+        retention_seconds: float = 600.0,
+    ) -> bool:
+        """Persistently consume a request nonce.
+
+        Returns False for a replay. Nonces are retained longer than the normal
+        HMAC timestamp-skew window so an Authority restart cannot reopen the
+        replay window.
+        """
+
+        if not worker_id.strip() or not nonce.strip() or retention_seconds <= 0:
+            raise ValueError("invalid nonce")
+        now = float(self.clock())
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            self.connection.execute(
+                "DELETE FROM distributed_request_nonces WHERE seen_at < ?",
+                (now - float(retention_seconds),),
+            )
+            cursor = self.connection.execute(
+                """
+                INSERT OR IGNORE INTO distributed_request_nonces(
+                    worker_id, nonce, seen_at
+                ) VALUES (?, ?, ?)
+                """,
+                (worker_id, nonce, now),
+            )
+            self.connection.commit()
+            return cursor.rowcount == 1
+        except Exception:
+            self.connection.rollback()
+            raise
 
     def register_worker(self, worker: WorkerDescriptor) -> None:
         now = float(self.clock())
