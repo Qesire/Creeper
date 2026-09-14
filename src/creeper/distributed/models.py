@@ -39,6 +39,16 @@ class WorkerDescriptor:
     def __post_init__(self) -> None:
         if not self.worker_id.strip():
             raise ValueError("worker_id is required")
+        if not all(
+            value.strip()
+            for value in (
+                self.runtime_class,
+                self.region,
+                self.architecture,
+                self.network_class,
+            )
+        ):
+            raise ValueError("worker runtime, region, architecture and network class are required")
         if self.memory_bytes < 0 or self.cpu_count < 1:
             raise ValueError("invalid worker capacity")
         if len(set(self.capabilities)) != len(self.capabilities):
