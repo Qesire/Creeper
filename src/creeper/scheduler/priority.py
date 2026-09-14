@@ -45,8 +45,15 @@ class ResourceCost:
         normalized = []
         for name, value in values.items():
             capacity = capacities.get(name, 1.0)
-            if not isinstance(capacity, Real) or isinstance(capacity, bool) or capacity <= 0:
-                raise ValueError("resource capacities must be positive numbers")
+            if (
+                not isinstance(capacity, Real)
+                or isinstance(capacity, bool)
+                or capacity <= 0
+                or not isfinite(capacity)
+            ):
+                raise ValueError(
+                    "resource capacities must be finite positive numbers"
+                )
             normalized.append(value / capacity)
         return max(normalized, default=0.0)
 
