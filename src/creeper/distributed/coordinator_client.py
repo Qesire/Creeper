@@ -251,6 +251,32 @@ class CoordinatorClient:
         )
         return str(value["status"])
 
+    async def coverage_complete(
+        self,
+        lease: TaskLease,
+        *,
+        hostname: str,
+        provider: str,
+        scope: str,
+        resolver_version: str,
+        year_from: int,
+        year_to: int,
+    ) -> int:
+        value = await self._post(
+            "/v1/coverage/complete",
+            {
+                "task_id": lease.task_id,
+                "generation": lease.generation,
+                "hostname": hostname,
+                "provider": provider,
+                "scope": scope,
+                "resolver_version": resolver_version,
+                "year_from": int(year_from),
+                "year_to": int(year_to),
+            },
+        )
+        return int(value["year_mask"])
+
     async def hy_probe(
         self,
         lease: TaskLease,
