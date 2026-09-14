@@ -549,11 +549,11 @@ class SourceProducerTests(unittest.TestCase):
         self.assertGreaterEqual(report.max_observation_queue_depth, 1)
         self.assertLessEqual(report.max_observation_queue_depth, 2)
 
-    def test_range_first_reservation_covers_parent_and_future_fanout(self):
+    def test_range_first_host_task_uses_one_reservation_slot(self):
         runtime, adapter = self.build_runtime(
-            backlog_capacity=6,
+            backlog_capacity=1,
             expected_tasks=1,
-            reservation_tasks=6,
+            reservation_tasks=1,
             range_first_fraction=1.0,
         )
 
@@ -571,9 +571,9 @@ class SourceProducerTests(unittest.TestCase):
             ),
             (1996, 2001),
         )
-        # One parent row is durable; five extra slots remain held for a
-        # worst-case DECOMPOSED exact-year fanout.
-        self.assertEqual(runtime.admission.reserved("wayback"), 5)
+        # The six-year range remains one durable host task; no hypothetical
+        # exact-year fanout capacity remains reserved.
+        self.assertEqual(runtime.admission.reserved("wayback"), 0)
 
     def test_completed_wayback_range_suppresses_redundant_exact_year_work(self):
         range_key = EvidenceQueryKey(
@@ -737,7 +737,7 @@ class SourceProducerTests(unittest.TestCase):
             lease=template,
             evidence_provider="wayback",
             expected_evidence_tasks=5,
-            reservation_evidence_tasks=35,
+            reservation_evidence_tasks=5,
         )
         runtime = SourceProducer(
             baseline=self.baseline,
