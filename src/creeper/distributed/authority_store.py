@@ -57,6 +57,10 @@ class FabricProtocolMismatchError(RuntimeError):
     """Worker and Authority speak incompatible derivative protocols."""
 
 
+class ProviderAccessDeniedError(RuntimeError):
+    """Worker is not permitted to access the requested provider."""
+
+
 def _json(value) -> str:
     return json.dumps(
         value,
@@ -108,6 +112,7 @@ class DistributedAuthorityStore:
                 network_class TEXT NOT NULL,
                 capabilities_json TEXT NOT NULL,
                 producers_json TEXT NOT NULL DEFAULT '[]',
+                allowed_providers_json TEXT NOT NULL DEFAULT '[]',
                 protocol_version TEXT NOT NULL DEFAULT 'creeper-fabric-v1',
                 edition_version TEXT NOT NULL DEFAULT '0.1.0-dev',
                 last_heartbeat REAL NOT NULL,
@@ -291,6 +296,13 @@ class DistributedAuthorityStore:
                 ADD COLUMN producers_json TEXT NOT NULL DEFAULT '[]'
                 """
             )
+        if "allowed_providers_json" not in worker_columns:
+            self.connection.execute(
+                """
+                ALTER TABLE distributed_workers
+                ADD COLUMN allowed_providers_json TEXT NOT NULL DEFAULT '[]'
+                """
+            )
         if "protocol_version" not in worker_columns:
             self.connection.execute(
                 """
@@ -376,8 +388,9 @@ class DistributedAuthorityStore:
             INSERT INTO distributed_workers(
                 worker_id, runtime_class, region, architecture, memory_bytes,
                 cpu_count, network_class, capabilities_json, producers_json,
-                protocol_version, edition_version, last_heartbeat
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                allowed_providers_json, protocol_version, edition_version,
+                last_heartbeat
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(worker_id) DO UPDATE SET
                 runtime_class = excluded.runtime_class,
                 region = excluded.region,
@@ -387,6 +400,7 @@ class DistributedAuthorityStore:
                 network_class = excluded.network_class,
                 capabilities_json = excluded.capabilities_json,
                 producers_json = excluded.producers_json,
+                allowed_providers_json = excluded.allowed_providers_json,
                 protocol_version = excluded.protocol_version,
                 edition_version = excluded.edition_version,
                 last_heartbeat = excluded.last_heartbeat
@@ -401,6 +415,7 @@ class DistributedAuthorityStore:
                 worker.network_class,
                 _json(sorted(worker.capabilities)),
                 _json(sorted(worker.producers)),
+                _json(sorted(worker.allowed_providers)),
                 worker.protocol_version,
                 worker.edition_version,
                 now,
@@ -456,6 +471,19 @@ class DistributedAuthorityStore:
             raise WorkerRejectedError(worker_id)
         return set(json.loads(str(row["producers_json"])))
 
+    def _worker_allowed_providers(self, worker_id: str) -> set[str]:
+        row = self.connection.execute(
+            """
+            SELECT allowed_providers_json, revoked
+            FROM distributed_workers
+            WHERE worker_id = ?
+            """,
+            (worker_id,),
+        ).fetchone()
+        if row is None or int(row["revoked"]):
+            raise WorkerRejectedError(worker_id)
+        return set(json.loads(str(row["allowed_providers_json"])))
+
     def _worker_region(self, worker_id: str) -> str:
         row = self.connection.execute(
             """
@@ -473,6 +501,7 @@ class DistributedAuthorityStore:
         row: sqlite3.Row,
         *,
         worker_region: str,
+        allowed_providers: set[str],
     ) -> bool:
         if str(row["task_class"]) == TaskClass.PROBE.value:
             return True
@@ -490,6 +519,8 @@ class DistributedAuthorityStore:
         else:
             raise ValueError("coverage.providers must be a list of provider names")
         for provider in providers:
+            if provider not in allowed_providers:
+                return False
             budget = self.connection.execute(
                 """
                 SELECT require_qualified_region
@@ -716,6 +747,7 @@ class DistributedAuthorityStore:
         now = float(self.clock())
         capabilities = self._worker_capabilities(worker_id)
         producers = self._worker_producers(worker_id)
+        allowed_providers = self._worker_allowed_providers(worker_id)
         worker_region = self._worker_region(worker_id)
         self.connection.execute("BEGIN IMMEDIATE")
         try:
@@ -750,6 +782,7 @@ class DistributedAuthorityStore:
                     if not self._work_region_eligible(
                         row,
                         worker_region=worker_region,
+                        allowed_providers=allowed_providers,
                     ):
                         continue
                     chosen = row
@@ -1680,6 +1713,11 @@ class DistributedAuthorityStore:
                 generation,
                 now=now,
             )
+            allowed_providers = self._worker_allowed_providers(worker_id)
+            if provider not in allowed_providers:
+                raise ProviderAccessDeniedError(
+                    f"worker={worker_id} provider={provider}"
+                )
             budget = self.connection.execute(
                 """
                 SELECT * FROM distributed_provider_budgets
