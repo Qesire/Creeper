@@ -75,6 +75,11 @@ class OAIRootTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(page.terminal)
         self.assertEqual(page.retry_after, 4.0)
 
+        retry_default = OAIAdapter("https://retry-default.example", transport=FakeTransport([Response(503)]))
+        page = await retry_default.search(self.query(), SearchCheckpoint(query_variant="identify"))
+        self.assertFalse(page.terminal)
+        self.assertEqual(page.retry_after, 5.0)
+
         bad = OAIAdapter("https://bad.example", transport=FakeTransport([Response(200, "<broken")]))
         page = await bad.search(self.query(), None)
         self.assertTrue(page.terminal)
