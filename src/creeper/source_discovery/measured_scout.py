@@ -39,6 +39,7 @@ from creeper.sources.ftp_sitelist import (
     is_ftp_sitelist_locator,
     parse_ftp_sitelist_zip,
 )
+from creeper.sources.mailbox_records import parse_mbox_messages
 from creeper.sources.non_snapshot import (
     extract_http_urls,
     is_dmoz_content_locator,
@@ -530,23 +531,28 @@ def _extract_hosts(
         )
 
     if is_mailbox_url_locator(url):
-        for line in lines:
-            urls = extract_http_urls(line)
-            if not urls:
-                continue
-            sampled += 1
-            if sampled > policy.max_records:
+        records = parse_mbox_messages(
+            payload,
+            locator=url,
+            allow_truncated_tail=truncated,
+            max_urls_per_message=64,
+        )
+        for record in records:
+            if sampled >= policy.max_records:
                 break
-            for observed_url in urls:
+            sampled += 1
+            for observed_url in record.urls:
                 hostname = _hostname_from_scalar(observed_url)
-                if hostname is not None:
-                    hosts.add(hostname)
-                    observations.append(hostname)
+                if hostname is None:
+                    continue
+                hosts.add(hostname)
+                host_year_pairs.add((hostname, record.year))
+                observations.append(f"{hostname}\t{record.year}")
         return ParsedHostSample(
-            sampled_records=min(sampled, policy.max_records),
+            sampled_records=sampled,
             hosts=hosts,
-            host_year_pairs=set(),
-            measurement_mode=MeasurementMode.HOST_ONLY,
+            host_year_pairs=host_year_pairs,
+            measurement_mode=MeasurementMode.HOST_YEAR,
             observation_keys=tuple(observations),
         )
 
@@ -781,11 +787,12 @@ class MeasuredYieldScoutExecutor:
     @staticmethod
     def _windowable_line_resource(url: str) -> bool:
         suffix, compressed = _suffix(urlsplit(url).path)
-        if (
-            is_mailbox_url_locator(url)
-            or is_squid_access_locator(url)
-            or is_dmoz_content_locator(url)
-        ):
+        # mbox sampling must start at a real message envelope and preserve
+        # message Date/body binding. Use one prefix instead of arbitrary
+        # stratified line windows that could splice unrelated message fragments.
+        if is_mailbox_url_locator(url):
+            return False
+        if is_squid_access_locator(url) or is_dmoz_content_locator(url):
             return not compressed
         return (not compressed) and suffix in {
             ".cdx",
