@@ -108,6 +108,34 @@ class SourceDiscoveryCoordinatorTests(unittest.IsolatedAsyncioTestCase):
                 ),
             )
 
+    def test_search_batch_rejects_whitespace_llm_task_before_commit(self) -> None:
+        with self.assertRaisesRegex(ValueError, "llm_task_type"):
+            SearchBatch(
+                backend="test",
+                query="bad task type",
+                actor="agent:test",
+                llm_episode_id="llm:test",
+                llm_task_type="   ",
+            )
+
+    def test_search_batch_rejects_non_json_hypothesis_before_commit(self) -> None:
+        with self.assertRaisesRegex(ValueError, "JSON-serializable"):
+            SearchBatch(
+                backend="test",
+                query="bad json",
+                actor="agent:test",
+                llm_episode_id="llm:test",
+                llm_task_type="DISCOVER_NEW_SOURCE",
+                hypotheses=(
+                    {
+                        "hypothesis_id": "llm:test:h1",
+                        "action": "DISCOVER",
+                        "confidence": 0.5,
+                        "unsupported": {"not-json"},
+                    },
+                ),
+            )
+
     def test_search_batch_rejects_llm_lineage_without_episode(self) -> None:
         with self.assertRaisesRegex(ValueError, "require llm_episode_id"):
             SearchBatch(
