@@ -80,7 +80,7 @@ class L9ResearchRuntimeClosureTests(unittest.IsolatedAsyncioTestCase):
                 )
                 research.upsert_root(root)
 
-                query = RootQuery(
+                query = AdapterRootQuery(
                     "query:repo:1",
                     root.root_id,
                     "historical web index",
