@@ -1302,7 +1302,10 @@ def _root_query_runtime_adapters(
             policy=policy,
             registry=research,
         )
-        stats = scheduler.current_stats()
+        # Arm stats are derived state. Rebuild once at the scheduling boundary
+        # so both newly closed FINAL outcomes and zero-yield pulls affect the
+        # very next allocation decision.
+        stats = scheduler.rebuild_derived_stats()
         claimed: list[object] = []
 
         for slot in range(parallelism):
