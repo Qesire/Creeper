@@ -4,6 +4,7 @@ from pathlib import Path
 
 from creeper.evidence_cli import run_service
 from creeper.storage.control_store import ControlStore
+from creeper.storage.telemetry_store import RuntimeTelemetryStore
 
 
 class EvidenceServiceCliTests(unittest.IsolatedAsyncioTestCase):
@@ -44,6 +45,17 @@ class EvidenceServiceCliTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(
                 active,
                 {"wayback", "arquivo", "stanford", "icelandic", "estonian"},
+            )
+            telemetry = RuntimeTelemetryStore(Path(tmp) / "telemetry.sqlite3")
+            try:
+                snapshot = telemetry.snapshot()
+            finally:
+                telemetry.close()
+            self.assertEqual(snapshot.gauges["cdx_loaded_services"], 5.0)
+            self.assertEqual(snapshot.gauges["cdx_wayback_max_inflight"], 2.0)
+            self.assertGreater(
+                snapshot.gauges["wayback_configured_requests_per_second"],
+                0.0,
             )
 
     async def test_invalid_idle_backoff_is_rejected_before_worker_loop(self):
