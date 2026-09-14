@@ -1281,19 +1281,37 @@ class ControlStore:
         *,
         min_children: int = 4,
         limit: int = 16,
+        parents: Iterable[str] | None = None,
     ) -> list[str]:
         if min_children < 1 or limit < 1:
             raise ValueError("domain fanout thresholds must be positive")
+        values = None
+        if parents is not None:
+            values = list(dict.fromkeys(
+                hostname
+                for raw in parents
+                if (hostname := normalize_official(str(raw))) is not None
+            ))
+            if not values:
+                return []
+        where = ""
+        params: list[object] = [int(min_children)]
+        if values is not None:
+            placeholders = ",".join("?" for _ in values)
+            where = f" AND parent_hostname IN ({placeholders})"
+            params.extend(values)
+        params.append(int(limit))
         rows = self.connection.execute(
-            """
+            f"""
             SELECT parent_hostname
             FROM domain_fanout_state
             WHERE query_enqueued = 0
               AND child_count >= ?
+              {where}
             ORDER BY child_count DESC, parent_hostname
             LIMIT ?
             """,
-            (int(min_children), int(limit)),
+            params,
         ).fetchall()
         return [str(row["parent_hostname"]) for row in rows]
 
