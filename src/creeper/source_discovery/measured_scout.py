@@ -35,6 +35,10 @@ from creeper.source_discovery.models import (
 from creeper.sources.archive.cdxj import parse_cdxj_line
 from creeper.sources.archive.cdx import parse_cdx_line
 from creeper.sources.archive.warc import WarcFormatError, iter_warc_target_records
+from creeper.sources.ftp_sitelist import (
+    is_ftp_sitelist_locator,
+    parse_ftp_sitelist_zip,
+)
 from creeper.sources.non_snapshot import (
     extract_http_urls,
     is_dmoz_content_locator,
@@ -437,6 +441,40 @@ def _extract_hosts(
     policy: MeasuredYieldScoutPolicy,
     truncated: bool = False,
 ) -> ParsedHostSample | None:
+    if is_ftp_sitelist_locator(url):
+        if truncated:
+            raise ValueError(
+                "FTP sitelist ZIP requires a complete bounded artifact"
+            )
+        records = parse_ftp_sitelist_zip(
+            payload,
+            max_decompressed_bytes=policy.max_decompressed_bytes,
+        )
+        hosts: set[str] = set()
+        host_year_pairs: set[tuple[str, int]] = set()
+        observations: list[str] = []
+        sampled = 0
+        for record in records:
+            if sampled >= policy.max_records:
+                break
+            if not (
+                policy.target_year_from
+                <= record.year
+                <= policy.target_year_to
+            ):
+                continue
+            sampled += 1
+            hosts.add(record.hostname)
+            host_year_pairs.add((record.hostname, record.year))
+            observations.append(f"{record.hostname}\t{record.year}")
+        return ParsedHostSample(
+            sampled_records=sampled,
+            hosts=hosts,
+            host_year_pairs=host_year_pairs,
+            measurement_mode=MeasurementMode.HOST_YEAR,
+            observation_keys=tuple(observations),
+        )
+
     suffix, compressed = _suffix(urlsplit(url).path)
     lower_type = content_type.lower()
     if _is_warc_resource(suffix=suffix, content_type=content_type):
