@@ -40,6 +40,7 @@ from creeper.sources.non_snapshot import (
     is_dmoz_content_locator,
     is_mailbox_url_locator,
     is_squid_access_locator,
+    mailbox_year_from_locator,
     parse_dmoz_external_page_line,
     parse_squid_access_line,
 )
@@ -493,6 +494,7 @@ def _extract_hosts(
         )
 
     if is_mailbox_url_locator(url):
+        mailbox_year = mailbox_year_from_locator(url)
         for line in lines:
             urls = extract_http_urls(line)
             if not urls:
@@ -504,12 +506,20 @@ def _extract_hosts(
                 hostname = _hostname_from_scalar(observed_url)
                 if hostname is not None:
                     hosts.add(hostname)
-                    observations.append(hostname)
+                    if mailbox_year is None:
+                        observations.append(hostname)
+                    else:
+                        host_year_pairs.add((hostname, mailbox_year))
+                        observations.append(f"{hostname}\t{mailbox_year}")
         return ParsedHostSample(
             sampled_records=min(sampled, policy.max_records),
             hosts=hosts,
-            host_year_pairs=set(),
-            measurement_mode=MeasurementMode.HOST_ONLY,
+            host_year_pairs=host_year_pairs,
+            measurement_mode=(
+                MeasurementMode.HOST_YEAR
+                if mailbox_year is not None
+                else MeasurementMode.HOST_ONLY
+            ),
             observation_keys=tuple(observations),
         )
 
