@@ -369,7 +369,22 @@ class DistributedAuthorityTests(unittest.TestCase):
             status_code=429,
             cooldown_seconds=60,
         )
+        initial_cooldown = self.store.provider_budget_snapshot(
+            "internet_archive"
+        )["cooldown_until"]
         self.clock.advance(1)
+        self.store.report_provider_permit(
+            first.permit_id,
+            worker_id=lease_a.worker_id,
+            status_code=429,
+            cooldown_seconds=60,
+        )
+        self.assertEqual(
+            self.store.provider_budget_snapshot("internet_archive")[
+                "cooldown_until"
+            ],
+            initial_cooldown,
+        )
         blocked = self.store.issue_provider_permit(
             "internet_archive",
             worker_id=lease_b.worker_id,
