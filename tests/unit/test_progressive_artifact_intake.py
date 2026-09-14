@@ -196,6 +196,14 @@ class ArtifactIntakeTests(unittest.TestCase):
         self.assertIn("web_crawl", accepted.semantic_hits)
         self.assertIn("host_list", accepted.semantic_hits)
 
+    def test_metadata_prefilter_suffix_beats_generic_mime(self) -> None:
+        result = assess_artifact_metadata(
+            locator="https://objects.example/index.cdxj",
+            content_type="text/plain",
+        )
+        self.assertEqual(result.admission, MetadataArtifactAdmission.ACCEPT)
+        self.assertEqual(result.format_kind, "CDXJ")
+
     def test_metadata_prefilter_rejects_documents_before_network_triage(self) -> None:
         result = assess_artifact_metadata(
             locator="https://repo.example/paper.pdf",
