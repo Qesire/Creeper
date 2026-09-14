@@ -848,19 +848,41 @@ class ControlStore:
         task_id: str | None = None,
         exposure_id: str | None = None,
     ) -> ProductionExposure:
-        if not source_key.strip() or not reservoir_id.strip() or not lane.strip():
-            raise ValueError("source_key, reservoir_id, and lane are required")
+        for name, value in (
+            ("source_key", source_key),
+            ("reservoir_id", reservoir_id),
+            ("lane", lane),
+        ):
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"{name} is required")
         baseline_signature, model_signature = self._exposure_authority(
             authority=authority,
             baseline_signature=baseline_signature,
             model_signature=model_signature,
         )
-        lease_value = "" if lease_id is None else str(lease_id)
-        task_value = "" if task_id is None else str(task_id)
+        for name, value in (("lease_id", lease_id), ("task_id", task_id)):
+            if value is not None and (
+                not isinstance(value, str) or not value.strip()
+            ):
+                raise ValueError(f"{name} must be non-empty when provided")
+        if exposure_id is not None and (
+            not isinstance(exposure_id, str) or not exposure_id.strip()
+        ):
+            raise ValueError("exposure_id must be non-empty when provided")
+        lease_value = "" if lease_id is None else lease_id
+        task_value = "" if task_id is None else task_id
         if not lease_value and not task_value:
             raise ValueError("lease_id or task_id is required")
-        now = float(self.clock())
-        exposure_id = str(exposure_id or uuid4())
+        now_raw = self.clock()
+        if (
+            isinstance(now_raw, bool)
+            or not isinstance(now_raw, (int, float))
+            or not math.isfinite(float(now_raw))
+            or now_raw < 0
+        ):
+            raise ValueError("production exposure clock must be finite and non-negative")
+        now = float(now_raw)
+        exposure_id = exposure_id or str(uuid4())
         self.connection.execute("BEGIN IMMEDIATE")
         try:
             self.connection.execute(
