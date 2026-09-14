@@ -257,7 +257,7 @@ class AsyncWaybackCDXClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(tuple(capsule.year for capsule in result.capsules), (1997, 1999))
         self.assertTrue(
             all(
-                capsule.extraction_method == "cdx_query_range_bounded"
+                capsule.extraction_method == "cdx_query_host_range"
                 for capsule in result.capsules
             )
         )
@@ -304,13 +304,13 @@ class AsyncWaybackCDXClientTests(unittest.IsolatedAsyncioTestCase):
             with patch.object(client, "iter_range_pages", dense_pages):
                 result = await client.query_range(range_key)
 
-        self.assertEqual(result.state, CDXQueryState.DECOMPOSED)
-        self.assertEqual(result.candidate_years, (1996, 1997))
-        self.assertEqual(result.followup_years, (1998,))
-        self.assertEqual(result.pages_seen, 1)
+        self.assertEqual(result.state, CDXQueryState.PASS)
+        self.assertEqual(result.candidate_years, (1996, 1997, 1998))
+        self.assertEqual(result.followup_years, ())
+        self.assertEqual(result.pages_seen, 2)
         self.assertEqual(
             tuple(capsule.year for capsule in result.capsules),
-            (1996, 1997),
+            (1996, 1997, 1998),
         )
 
     async def test_incomplete_range_keeps_positive_capsule_without_negative_claim(self):
@@ -343,17 +343,24 @@ class AsyncWaybackCDXClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(tuple(capsule.year for capsule in result.capsules), (1997,))
 
 
-    async def test_bounded_range_uses_exactly_one_provider_request_with_resume_key(self):
-        calls = 0
+    async def test_host_range_follows_resume_key_before_year_fanout(self):
+        calls = []
 
         async def handler(request):
-            nonlocal calls
-            calls += 1
-            payload = [
-                ["timestamp", "original", "statuscode"],
-                ["19970102030405", "http://example.com/", "200"],
-                ["resume-token!"],
-            ]
+            calls.append(str(request.url))
+            query = parse_qs(request.url.query.decode())
+            if "resumeKey" not in query:
+                payload = [
+                    ["timestamp", "original", "statuscode"],
+                    ["19970102030405", "http://example.com/", "200"],
+                    ["resume-token!"],
+                ]
+            else:
+                payload = [
+                    ["timestamp", "original", "statuscode"],
+                    ["19960102030405", "http://example.com/a", "200"],
+                    ["19980102030405", "http://example.com/b", "200"],
+                ]
             return httpx.Response(
                 200,
                 content=json.dumps(payload).encode(),
@@ -369,12 +376,17 @@ class AsyncWaybackCDXClientTests(unittest.IsolatedAsyncioTestCase):
         ) as client:
             result = await client.query_range(key)
 
-        self.assertEqual(calls, 1)
-        self.assertEqual(result.provider_requests, 1)
-        self.assertEqual(result.state, CDXQueryState.DECOMPOSED)
-        self.assertEqual(result.candidate_years, (1997,))
-        self.assertEqual(result.followup_years, (1996, 1998))
-
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(result.provider_requests, 2)
+        self.assertEqual(result.state, CDXQueryState.PASS)
+        self.assertEqual(result.candidate_years, (1996, 1997, 1998))
+        self.assertEqual(result.followup_years, ())
+        first_query = parse_qs(urlsplit(calls[0]).query)
+        second_query = parse_qs(urlsplit(calls[1]).query)
+        self.assertEqual(first_query["matchType"], ["host"])
+        self.assertEqual(first_query["from"], ["19960101000000"])
+        self.assertEqual(first_query["to"], ["19981231235959"])
+        self.assertEqual(second_query["resumeKey"], ["resume-token!"])
 
     async def test_domain_probe_returns_distinct_subhost_year_capsules(self):
         seen_query = {}
