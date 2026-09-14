@@ -652,6 +652,8 @@ def _report_has_progress(report: dict[str, object]) -> bool:
         "scout_edges_added",
         "search_episodes",
         "search_candidates_registered",
+        "background_bulk_steps",
+        "background_activated",
     )
     return any(int(report.get(name, 0)) > 0 for name in progress_fields)
 
@@ -674,6 +676,9 @@ _DISCOVERY_COUNTER_FIELDS = {
     "scout_edges_added": "discovery_scout_edges_added",
     "production_exhausted": "discovery_production_exhausted",
     "activated": "discovery_activations_started",
+    "background_bulk_steps": "discovery_background_bulk_steps",
+    "background_bulk_deferred": "discovery_background_bulk_deferred",
+    "background_activated": "discovery_background_activations_started",
 }
 
 
