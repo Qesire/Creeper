@@ -13,6 +13,10 @@ from creeper.authority.identity import authority_digest
 from creeper.distributed.auth import sign_request
 from creeper.distributed.authority_api import create_authority_app
 from creeper.distributed.authority_store import DistributedAuthorityStore
+from creeper.distributed.edition import (
+    FABRIC_EDITION_VERSION,
+    FABRIC_PROTOCOL_VERSION,
+)
 from creeper.distributed.models import Capability, TaskClass, WorkDefinition
 
 
@@ -158,9 +162,40 @@ class DistributedAuthorityAPITests(unittest.IsolatedAsyncioTestCase):
                 "cpu_count": 2,
                 "network_class": "public",
                 "capabilities": [Capability.ONLINE_QUERY.value],
+                "protocol_version": FABRIC_PROTOCOL_VERSION,
+                "edition_version": FABRIC_EDITION_VERSION,
             },
         )
         self.assertEqual(response.status, 200, await response.text())
+
+    async def test_meta_identifies_independent_fabric_edition(self) -> None:
+        response = await self.client.get("/meta")
+        self.assertEqual(response.status, 200)
+        payload = await response.json()
+        self.assertEqual(payload["edition"], "Creeper Fabric")
+        self.assertEqual(payload["protocol_version"], FABRIC_PROTOCOL_VERSION)
+        self.assertEqual(payload["edition_version"], FABRIC_EDITION_VERSION)
+
+    async def test_registration_rejects_incompatible_fabric_protocol(self) -> None:
+        response = await self.post(
+            "worker-a",
+            "/v1/workers/register",
+            {
+                "worker_id": "worker-a",
+                "runtime_class": "vm",
+                "region": "test-region",
+                "architecture": "x86_64",
+                "memory_bytes": 1024**3,
+                "cpu_count": 2,
+                "network_class": "public",
+                "capabilities": [Capability.ONLINE_QUERY.value],
+                "protocol_version": "creeper-fabric-v999",
+                "edition_version": "999.0",
+            },
+        )
+        self.assertEqual(response.status, 409)
+        payload = await response.json()
+        self.assertEqual(payload["error"], "FABRIC_PROTOCOL_MISMATCH")
 
     async def test_signed_register_claim_commit_and_replay(self) -> None:
         await self.register("worker-a")
