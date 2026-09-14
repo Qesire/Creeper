@@ -284,12 +284,14 @@ class StaticSourceRuntime:
                 raise ValueError(f"{name} must be a non-empty string")
         if self.source_id != self.reservoir_id:
             raise ValueError("local static source_id and reservoir_id must match")
-        if (
+        if self.source_year is not None and (
             isinstance(self.source_year, bool)
             or not isinstance(self.source_year, int)
             or not 1996 <= self.source_year <= 2001
         ):
-            raise ValueError("source_year must be between 1996 and 2001")
+            raise ValueError(
+                "source_year must be omitted or between 1996 and 2001"
+            )
 
         self.baseline = BaselineIndex(baseline_path)
         self.control = ControlStore(runtime_root / "control.sqlite3")
