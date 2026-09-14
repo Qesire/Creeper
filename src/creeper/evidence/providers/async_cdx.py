@@ -876,13 +876,17 @@ class AsyncWaybackCDXClient:
             )
 
     async def query_range(self, key: EvidenceQueryKey) -> RangeEvidenceQueryResult:
-        """Execute one bounded multi-year discovery probe.
+        """Resolve one hostname across a multi-year temporal scope.
 
-        Exactly one CDX page is consumed. Positive rows are authoritative
-        immediately. If that page is not exhaustive, the parent becomes
-        DECOMPOSED and missing years are refined into exact-year children by
-        the worker. Therefore an incomplete range page can never establish
-        negative coverage.
+        This is a single logical host query. The provider request uses
+        matchType=host and the complete year interval in one CDX search.
+        If the CDX server returns a continuation cursor, pages are consumed
+        sequentially until either every target year has at least one accepted
+        capture or the provider proves the host query exhausted.
+
+        Positive rows remain immediately reusable. A transport failure after
+        some pages preserves those positives but never turns missing years into
+        negative evidence.
         """
         if key.policy_version.startswith("cdx-domain-"):
             return await self.query_domain(key)
@@ -896,6 +900,9 @@ class AsyncWaybackCDXClient:
         accounting = _RequestAccounting()
         capsules_by_year: dict[int, EvidenceCapsule] = {}
         pages_seen = records_seen = 0
+        expected_years = tuple(range(scope.year_from, scope.year_to + 1))
+        expected_year_set = set(expected_years)
+        last_complete: bool | None = None
         try:
             async for page, complete in self.iter_range_pages(
                 key.hostname,
@@ -904,6 +911,7 @@ class AsyncWaybackCDXClient:
                 accounting=accounting,
             ):
                 pages_seen += 1
+                last_complete = complete
                 for row in page:
                     records_seen += 1
                     year = self._accepted_year(
@@ -920,60 +928,75 @@ class AsyncWaybackCDXClient:
                         year=year,
                         page_no=pages_seen,
                         record_no=records_seen,
-                        extraction_method="cdx_query_range_bounded",
+                        extraction_method="cdx_query_host_range",
                     )
 
-                positive_years = tuple(sorted(capsules_by_year))
-                expected_years = tuple(range(scope.year_from, scope.year_to + 1))
-                if len(positive_years) == len(expected_years):
-                    state = CDXQueryState.PASS
-                    followup_years: tuple[int, ...] = ()
-                elif complete:
-                    state = (
-                        CDXQueryState.PASS
-                        if positive_years
-                        else CDXQueryState.EMPTY_EXHAUSTIVE
-                    )
-                    followup_years = ()
-                else:
-                    state = CDXQueryState.DECOMPOSED
-                    positive = set(positive_years)
-                    followup_years = tuple(
-                        year for year in expected_years if year not in positive
+                if expected_year_set.issubset(capsules_by_year):
+                    positive_years = tuple(sorted(capsules_by_year))
+                    return RangeEvidenceQueryResult(
+                        hostname=key.hostname,
+                        key=key,
+                        state=CDXQueryState.PASS,
+                        candidate_years=positive_years,
+                        followup_years=(),
+                        capsules=tuple(
+                            capsules_by_year[year] for year in positive_years
+                        ),
+                        pages_seen=pages_seen,
+                        records_seen=records_seen,
+                        provider_requests=accounting.requests,
+                        provider_elapsed_milliseconds=accounting.elapsed_milliseconds,
+                        error=None,
                     )
 
-                return RangeEvidenceQueryResult(
-                    hostname=key.hostname,
-                    key=key,
-                    state=state,
-                    candidate_years=positive_years,
-                    followup_years=followup_years,
-                    capsules=tuple(
-                        capsules_by_year[year] for year in positive_years
-                    ),
-                    pages_seen=pages_seen,
-                    records_seen=records_seen,
-                    provider_requests=accounting.requests,
-                    provider_elapsed_milliseconds=accounting.elapsed_milliseconds,
-                    error=None,
+                if complete:
+                    break
+
+            positive_years = tuple(sorted(capsules_by_year))
+            if last_complete is True:
+                state = (
+                    CDXQueryState.PASS
+                    if positive_years
+                    else CDXQueryState.EMPTY_EXHAUSTIVE
                 )
+                followup_years: tuple[int, ...] = ()
+                error = None
+            elif pages_seen:
+                state = CDXQueryState.DECOMPOSED
+                positive = set(positive_years)
+                followup_years = tuple(
+                    year for year in expected_years if year not in positive
+                )
+                error = (
+                    "host CDX query stopped without provider exhaustion or "
+                    "coverage of every target year"
+                )
+            else:
+                state = CDXQueryState.INCOMPLETE
+                followup_years = ()
+                error = "CDX host-range iterator produced no page"
 
-            # Defensive only: iter_range_pages normally yields at least one page.
             return RangeEvidenceQueryResult(
                 hostname=key.hostname,
                 key=key,
-                state=CDXQueryState.INCOMPLETE,
+                state=state,
+                candidate_years=positive_years,
+                followup_years=followup_years,
+                capsules=tuple(
+                    capsules_by_year[year] for year in positive_years
+                ),
                 pages_seen=pages_seen,
                 records_seen=records_seen,
                 provider_requests=accounting.requests,
                 provider_elapsed_milliseconds=accounting.elapsed_milliseconds,
-                error="CDX range iterator produced no page",
+                error=error,
             )
         except ValueError as exc:
             return RangeEvidenceQueryResult(
                 hostname=key.hostname,
                 key=key,
                 state=CDXQueryState.INVALID,
+                candidate_years=tuple(sorted(capsules_by_year)),
                 capsules=tuple(
                     capsules_by_year[year] for year in sorted(capsules_by_year)
                 ),
@@ -989,12 +1012,26 @@ class AsyncWaybackCDXClient:
             httpx.HTTPStatusError,
             ConnectionError,
         ) as exc:
+            positive_years = tuple(sorted(capsules_by_year))
+            positive = set(positive_years)
             return RangeEvidenceQueryResult(
                 hostname=key.hostname,
                 key=key,
-                state=CDXQueryState.TRANSIENT_ERROR,
+                state=(
+                    CDXQueryState.DECOMPOSED
+                    if positive_years
+                    else CDXQueryState.TRANSIENT_ERROR
+                ),
+                candidate_years=positive_years,
+                followup_years=(
+                    tuple(
+                        year for year in expected_years if year not in positive
+                    )
+                    if positive_years
+                    else ()
+                ),
                 capsules=tuple(
-                    capsules_by_year[year] for year in sorted(capsules_by_year)
+                    capsules_by_year[year] for year in positive_years
                 ),
                 pages_seen=pages_seen,
                 records_seen=records_seen,
