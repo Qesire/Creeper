@@ -256,6 +256,13 @@ set +a
 The deploy script stores the worker HMAC secret using Wrangler secrets and
 then deploys the Worker/Cron.
 
+Verify the deployed edge runtime:
+
+```bash
+FABRIC_CLOUDFLARE_WORKER_URL=https://creeper-fabric-thin.<account>.workers.dev \
+  bash deploy/fabric/cloudflare-worker/smoke.sh
+```
+
 ## 9. End-to-end deployment order
 
 For a fresh deployment, use this exact order:
