@@ -1207,7 +1207,7 @@ class DistributedAuthorityStore:
         ):
             raise ValueError("invalid host resolution admission")
         providers = tuple(dict.fromkeys(physical_providers))
-        missing = self.uncovered_resolution_intervals(
+        uncovered = self.uncovered_resolution_intervals(
             hostname=normalized,
             provider=coverage_provider,
             scope="HOST",
@@ -1215,6 +1215,44 @@ class DistributedAuthorityStore:
             year_from=year_from,
             year_to=year_to,
         )
+        missing_mask = 0
+        for missing_from, missing_to in uncovered:
+            missing_mask |= self._year_interval_mask(
+                missing_from,
+                missing_to,
+            )
+
+        if self.baseline_index is not None:
+            missing_mask &= ~int(self.baseline_index.year_mask(normalized))
+
+        accepted_mask = 0
+        for row in self.connection.execute(
+            """
+            SELECT year FROM distributed_host_year_ledger
+            WHERE hostname = ?
+            """,
+            (normalized,),
+        ).fetchall():
+            year = int(row["year"])
+            if year in YEAR_BITS:
+                accepted_mask |= YEAR_BITS[year]
+        missing_mask &= ~accepted_mask
+
+        missing: list[tuple[int, int]] = []
+        start: int | None = None
+        previous: int | None = None
+        for year in range(int(year_from), int(year_to) + 1):
+            if not (missing_mask & YEAR_BITS[year]):
+                if start is not None and previous is not None:
+                    missing.append((start, previous))
+                    start = previous = None
+                continue
+            if start is None:
+                start = year
+            previous = year
+        if start is not None and previous is not None:
+            missing.append((start, previous))
+
         admitted: list[str] = []
         version = (
             resolver_version
