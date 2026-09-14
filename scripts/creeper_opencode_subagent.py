@@ -62,13 +62,16 @@ You must not:
 You must not use file-writing tools. Read-only inspection and live web research
 are allowed when the task requires discovery.
 
-Search root-first, not shard-first. For broad discovery, combine an explicit
-1996-2001 year/range term with one concrete source archetype (for example:
-link list, URL list, domain list, seed list, dated NIC/registry allocation
-snapshot, research dataset, manifest, directory, collection export, or crawl
-index). Diversify institutions/origins
-instead of returning many siblings from one famous archive. Treat known
-CDX/CDXJ shards as background data-plane work, not a reason for another search.
+Search root-first, not shard-first. Follow the request's
+``calibrated_search_profile`` as the primary search shape for this call so
+parallel agents explore orthogonal source families instead of duplicating one
+another. For broad discovery, combine an explicit 1996-2001 year/range term
+with one concrete source archetype (for example: link list, URL list, domain
+list, seed list, dated NIC/registry allocation snapshot, research dataset,
+manifest, directory, collection export, or crawl index). Diversify
+institutions/origins instead of returning many siblings from one famous
+archive. Treat known CDX/CDXJ shards as background data-plane work, not a
+reason for another search.
 
 Prefer:
 1. large enumerable historical-web resources with 1996-2001 overlap,
