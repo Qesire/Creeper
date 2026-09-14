@@ -10,7 +10,8 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-from dataclasses import asdict
+from contextlib import AsyncExitStack
+from dataclasses import asdict, replace
 import fcntl
 import json
 import os
@@ -18,6 +19,10 @@ from pathlib import Path
 import signal
 
 from creeper.evidence.providers.async_cdx import AsyncWaybackCDXClient
+from creeper.evidence.providers.cdx_pool import (
+    AsyncCDXProviderPool,
+    DEFAULT_CDX_SERVICE_CONFIGS,
+)
 from creeper.evidence.providers.async_rdap import AsyncRDAPClient
 from creeper.evidence.worker import AsyncEvidenceWorker, EvidenceWorkerReport
 from creeper.storage.control_store import ControlStore
@@ -84,24 +89,57 @@ async def run_service(
                 except (NotImplementedError, RuntimeError):
                     pass
 
-        async with (
-            AsyncWaybackCDXClient(
+        service_configs = tuple(
+            replace(
+                item,
                 endpoint=endpoint,
-                provider="wayback",
-                timeout=timeout,
-                max_retries=max_retries,
                 requests_per_second=requests_per_second,
-                max_connections=max_connections,
-                max_keepalive_connections=max_keepalive_connections,
-                keepalive_expiry_seconds=keepalive_expiry_seconds,
-                throttle_floor_seconds=throttle_floor_seconds,
-            ) as provider,
-            AsyncRDAPClient(
-                endpoint=rdap_endpoint,
-                timeout=min(timeout, 20.0),
-                requests_per_second=rdap_requests_per_second,
-            ) as rdap_provider,
-        ):
+                max_inflight=max_inflight,
+                weight=max(float(max_inflight), 1.0),
+            )
+            if item.name == "wayback"
+            else item
+            for item in DEFAULT_CDX_SERVICE_CONFIGS
+        )
+        async with AsyncExitStack() as stack:
+            cdx_clients: dict[str, AsyncWaybackCDXClient] = {}
+            for config in service_configs:
+                service_max_connections = max(
+                    int(config.max_inflight),
+                    max_connections if config.name == "wayback"
+                    else int(config.max_inflight) * 2,
+                )
+                service_keepalive = min(
+                    service_max_connections,
+                    max_keepalive_connections
+                    if config.name == "wayback"
+                    else int(config.max_inflight),
+                )
+                cdx_clients[config.name] = await stack.enter_async_context(
+                    AsyncWaybackCDXClient(
+                        endpoint=config.endpoint,
+                        provider=config.name,
+                        timeout=timeout,
+                        max_retries=max_retries,
+                        requests_per_second=config.requests_per_second,
+                        max_connections=service_max_connections,
+                        max_keepalive_connections=service_keepalive,
+                        keepalive_expiry_seconds=keepalive_expiry_seconds,
+                        throttle_floor_seconds=throttle_floor_seconds,
+                    )
+                )
+            provider = AsyncCDXProviderPool(
+                cdx_clients,
+                configs=service_configs,
+                logical_provider="wayback",
+            )
+            rdap_provider = await stack.enter_async_context(
+                AsyncRDAPClient(
+                    endpoint=rdap_endpoint,
+                    timeout=min(timeout, 20.0),
+                    requests_per_second=rdap_requests_per_second,
+                )
+            )
             worker = AsyncEvidenceWorker(
                 control_store=control,
                 evidence_store=evidence,
@@ -110,7 +148,7 @@ async def run_service(
                 claim_batch_size=claim_batch_size,
                 lease_seconds=lease_seconds,
                 provider_inflight={
-                    "wayback": max_inflight,
+                    "wayback": provider.total_max_inflight,
                     "rdap": rdap_max_inflight,
                 },
                 retry_base_seconds=retry_base_seconds,
@@ -118,11 +156,24 @@ async def run_service(
             )
             telemetry.set_gauges(
                 {
-                    "wayback_configured_requests_per_second": requests_per_second,
-                    "wayback_max_inflight": max_inflight,
+                    "wayback_configured_requests_per_second": (
+                        provider.total_configured_requests_per_second
+                    ),
+                    "wayback_max_inflight": provider.total_max_inflight,
+                    "cdx_loaded_services": len(provider.active_service_names),
                     "rdap_configured_requests_per_second": rdap_requests_per_second,
                     "rdap_effective_requests_per_second": rdap_requests_per_second,
                     "rdap_max_inflight": rdap_max_inflight,
+                    **{
+                        f"cdx_{config.name}_configured_rps": (
+                            config.requests_per_second
+                        )
+                        for config in service_configs
+                    },
+                    **{
+                        f"cdx_{config.name}_max_inflight": config.max_inflight
+                        for config in service_configs
+                    },
                 }
             )
             idle_delay = poll_min_seconds
