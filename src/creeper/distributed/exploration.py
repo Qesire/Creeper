@@ -297,15 +297,21 @@ class HistoricalCrawlerEngine:
                         continue
                     score = self._path_score(child)
                     same_host = child_host == current_host
-                    # Same-host navigation preserves context; external links
-                    # continue only when CDX proves target-era history or the
-                    # URL has a strong historical-topology signature.
-                    if not (same_host or historical or score >= 4):
+                    current_historical = current_host in historical_hosts
+                    # Continue within a site only after the current host is
+                    # proven target-era, unless the URL itself looks like a
+                    # strong historical topology hub. External continuation
+                    # likewise requires target-era evidence or strong topology.
+                    if not (
+                        historical
+                        or (same_host and current_historical)
+                        or score >= 4
+                    ):
                         continue
                     if child in seen_urls:
                         continue
                     priority = score + (4 if historical else 0) + (
-                        2 if same_host else 0
+                        2 if same_host and current_historical else 0
                     )
                     heapq.heappush(
                         frontier,
