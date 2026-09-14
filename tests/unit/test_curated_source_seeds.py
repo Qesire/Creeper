@@ -6,6 +6,7 @@ from pathlib import Path
 
 from creeper.source_discovery.curated_seeds import (
     curated_direct_catalogs,
+    curated_direct_record_sources,
     curated_non_snapshot_roots,
     curated_research_roots,
     curated_source_seeds,
@@ -73,16 +74,33 @@ class CuratedSourceSeedTests(unittest.TestCase):
             any("bug-findutils" in item.canonical_entrypoint for item in roots)
         )
 
+    def test_direct_record_seed_is_live_ftp_sitelist_artifact(self):
+        roots = curated_direct_record_sources()
+
+        self.assertEqual(len(roots), 1)
+        root = roots[0]
+        self.assertEqual(root.source_family, "HISTORICAL_FTP_SITELIST")
+        self.assertEqual(
+            root.canonical_entrypoint,
+            (
+                "https://ftpmirror1.infania.net/pub/simtelnet/msdos/info/"
+                "ftp-list.zip"
+            ),
+        )
+        self.assertEqual((root.expected_year_from, root.expected_year_to), (1996, 1997))
+        self.assertEqual(root.direct_evidence_prior, 1.0)
+        self.assertEqual(root.enumerability_prior, 1.0)
+
     def test_all_curated_seeds_are_idempotent(self):
         seeds = curated_source_seeds()
-        self.assertEqual(len(seeds), 8)
+        self.assertEqual(len(seeds), 9)
         with tempfile.TemporaryDirectory() as tmp:
             control = ControlStore(Path(tmp) / "control.sqlite3")
             registry = SourceDiscoveryRegistry(control)
             try:
-                self.assertEqual(ensure_curated_source_seeds(registry), 8)
+                self.assertEqual(ensure_curated_source_seeds(registry), 9)
                 self.assertEqual(ensure_curated_source_seeds(registry), 0)
-                self.assertEqual(len(registry.list_candidates()), 8)
+                self.assertEqual(len(registry.list_candidates()), 9)
             finally:
                 control.close()
 
