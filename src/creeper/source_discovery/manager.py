@@ -459,22 +459,21 @@ class SourceReservoirManager:
             seen.add(dedup_key)
             specs.append((kind, strategy, subject, reason, task_type))
 
-        # Direct timestamp-bearing bulk indexes bypass the scarce per-host
-        # Wayback evidence lane. Keep this arm for ordinary refill and reserve
-        # it as an emergency when no WARM/ACTIVE direct inventory exists.
-        if ordinary_refill or direct_starved:
-            direct_reason = (
-                "no WARM/ACTIVE direct-evidence source is available; reserve "
-                "one bounded direct-source discovery arm"
-                if direct_starved
-                else "prioritize timestamp-bearing bulk indexes that can "
-                "directly produce host-year evidence"
-            )
+        # Direct timestamp-bearing sources bypass the scarce per-host archive
+        # fallback. Reserve a dedicated discovery arm only when that inventory
+        # is actually starved; otherwise direct sources compete by measured
+        # value like every other family. This prevents ordinary refill from
+        # collapsing into repeated searches for common bulk CDX collections.
+        if direct_starved:
             add_spec(
                 SearchDirectiveKind.DIRECT_EVIDENCE,
                 "DIRECT_EVIDENCE_BULK",
-                "cdx/cdxj archive indexes and manifests",
-                direct_reason,
+                "timestamp-bearing direct-evidence datasets and manifests",
+                (
+                    "no WARM/ACTIVE direct-evidence source is available; "
+                    "reserve one bounded direct-source discovery arm across "
+                    "diverse source families"
+                ),
                 SourceIntelligenceTask.DISCOVER_NEW_SOURCE,
             )
 
@@ -500,8 +499,9 @@ class SourceReservoirManager:
                     "EXPLOIT_DIRECT_ORIGIN",
                     origin,
                     (
-                        "search the same archive origin for sibling CDX/CDXJ "
-                        f"resources; measured direct yield={value:.6g} novel EED/s"
+                        "search the same productive origin for sibling finite "
+                        "direct-evidence artifacts or manifests; "
+                        f"measured direct yield={value:.6g} novel EED/s"
                     ),
                     SourceIntelligenceTask.EXPLOIT_SUCCESS_PATTERN,
                 )
@@ -545,13 +545,20 @@ class SourceReservoirManager:
                     SourceIntelligenceTask.RECOVER_STAGNATION,
                 )
 
-        # Keep the two operationally necessary arms stable:
-        # (1) direct timestamp-bearing evidence, (2) generic reservoir refill.
-        # The remaining opportunity slots are learned from final-EED/cost UCB.
+        # Keep portfolio exploration explicit. Direct discovery receives
+        # a reserved slot only during direct-inventory starvation. During
+        # ordinary refill, one new-family arm is retained whenever there are at
+        # least two search slots; this prevents successful CDX/archive families
+        # from monopolizing future source discovery.
         direct = [
             spec
             for spec in specs
             if spec[1] == "DIRECT_EVIDENCE_BULK"
+        ][:1]
+        explore = [
+            spec
+            for spec in specs
+            if spec[1] == "EXPLORE_NEW_FAMILY"
         ][:1]
         refill = [
             spec
@@ -561,7 +568,7 @@ class SourceReservoirManager:
         optional = [
             spec
             for spec in specs
-            if spec not in direct and spec not in refill
+            if spec not in direct and spec not in explore and spec not in refill
         ]
         stagnating = self._is_stagnating()
         optional.sort(
@@ -593,6 +600,8 @@ class SourceReservoirManager:
         ] = []
         if direct and len(selected) < capacity:
             selected.extend(direct)
+        if explore and capacity >= 2 and len(selected) < capacity:
+            selected.extend(explore)
         optional_slots = max(
             0,
             capacity - len(selected) - (1 if refill else 0),
