@@ -269,6 +269,29 @@ class CommandAgentSearchExecutor:
                     "capture timestamp + original URL rows for 1996-2001"
                 ),
                 "prefer_catalogs_that_enumerate_direct_evidence_bulk": False,
+                "prefer_new_direct_record_sources": True,
+                "direct_record_priority": {
+                    "highest_value_shape": (
+                        "one source record deterministically binds a recoverable "
+                        "hostname or URL to an observation timestamp in 1996-2001"
+                    ),
+                    "examples": [
+                        "HTTP proxy/cache access row with request URL + Unix timestamp",
+                        "dated DNS hostcount/raw survey artifact whose rows are hostnames",
+                        "active web/server measurement row with hostname + observation time",
+                        "registry/NIC observation row with hostname/domain + observation time",
+                    ],
+                    "authority_rule": (
+                        "record-level hostname/URL + trustworthy timestamp is direct "
+                        "annual evidence; prefer sources that can avoid external CDX "
+                        "or Wayback completion"
+                    ),
+                    "do_not_infer_from": [
+                        "file size or request count alone",
+                        "dataset publication year without observation-time semantics",
+                        "source-level year when rows may span multiple years",
+                    ],
+                },
                 "capture_mechanism_policy": {
                     "orthogonality_unit": (
                         "how hostnames were originally observed or curated, not "
@@ -292,9 +315,14 @@ class CommandAgentSearchExecutor:
                     ),
                 },
                 "resource_priority": [
+                    (
+                        "record-level hostname/URL + timestamp sources that can "
+                        "produce direct annual evidence without provider completion"
+                    ),
+                    "passive HTTP proxy/cache/request logs with request timestamps",
+                    "dated DNS hostcount/zone/connected-host raw outputs",
+                    "active web/server measurement rows with observation timestamps",
                     "non-snapshot hostname inventories overlapping 1996-2001",
-                    "passive HTTP proxy/cache/request logs with recoverable destination URLs",
-                    "DNS hostcount/zone/connected-host exports with dated provenance",
                     "historical human-curated directories or site lists exposing external hosts",
                     "historical NIC/registry domain-allocation or connected-domain snapshots",
                     "new enumerable roots from an acquisition mechanism not already saturated",
@@ -309,6 +337,11 @@ class CommandAgentSearchExecutor:
                     "research repositories only when the underlying acquisition mechanism is non-snapshot",
                 ],
                 "query_construction": {
+                    "prefer_direct_record_terms": (
+                        "for broad/recovery searches, include terms such as access log, "
+                        "request timestamp, raw hostcount, survey output, dated zone, "
+                        "observation log, or timestamped URL before generic dataset terms"
+                    ),
                     "must_include_target_period": (
                         "use 1996-2001, an overlapping subrange, or an explicit "
                         "target year in every broad web search"
