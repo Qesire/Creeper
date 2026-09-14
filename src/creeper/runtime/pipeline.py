@@ -400,7 +400,6 @@ class SyncRuntime:
                 self.control_store.renew_lease(
                     running,
                     ttl_seconds=postprocess_ttl,
-                    now=float(self.control_store.clock()),
                 )
             except RuntimeError as exc:
                 raise RuntimeError(
