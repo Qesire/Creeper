@@ -67,12 +67,18 @@ def stratified_hostnames(
     cache_path: Path | None = None,
 ) -> list[SampledHostname]:
     """Scan a candidate file and return a deterministic multi-bucket sample."""
-    if limit < 1:
-        raise ValueError("limit must be positive")
+    if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+        raise ValueError("limit must be a positive integer")
+    if bucket_cap is not None and (
+        isinstance(bucket_cap, bool)
+        or not isinstance(bucket_cap, int)
+        or bucket_cap < 1
+    ):
+        raise ValueError("bucket_cap must be a positive integer when provided")
     # Keep one stable default so 1k and 10k pilots reuse the same cache. A
     # larger explicit bucket_cap can be used for unusually large studies; a
     # small change in limit must never invalidate the default cache.
-    cap = bucket_cap or DEFAULT_BUCKET_CAP
+    cap = DEFAULT_BUCKET_CAP if bucket_cap is None else bucket_cap
     stat = path.stat()
     if cache_path is not None and cache_path.is_file():
         try:
