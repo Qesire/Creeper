@@ -39,6 +39,14 @@ class GitHubCodeRootTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(page.requests, 0)
         self.assertEqual(transport.calls, [])
 
+    async def test_503_without_retry_after_gets_default_backoff(self):
+        page = await GitHubCodeAdapter(
+            transport=FakeTransport([Response(503)]),
+            token="t",
+        ).search(self.query(), None)
+        self.assertFalse(page.terminal)
+        self.assertEqual(page.retry_after, 5.0)
+
     def test_schema_family_classification_does_not_create_artifact_class(self):
         cls = classify_code_hit("docs/schema.md", "crawl_date src dest anchor")
         self.assertEqual(cls, GitHubHitClass.SCHEMA_DOC)
