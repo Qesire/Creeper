@@ -38,8 +38,17 @@ class CandidateRecord:
     source_year: int | None = None
 
     def __post_init__(self) -> None:
-        if not self.source_id.strip():
+        if not isinstance(self.hostname, str):
+            raise ValueError("candidate hostname must be a string")
+        if not isinstance(self.source_id, str) or not self.source_id.strip():
             raise ValueError("candidate provenance requires a non-empty source_id")
+        object.__setattr__(self, "scope", CandidateSourceScope(self.scope))
+        if self.source_locator is not None and not isinstance(self.source_locator, str):
+            raise ValueError("source_locator must be a string when provided")
+        if self.source_year is not None and (
+            isinstance(self.source_year, bool) or not isinstance(self.source_year, int)
+        ):
+            raise ValueError("source_year must be an integer when provided")
 
 
 @dataclass(frozen=True)

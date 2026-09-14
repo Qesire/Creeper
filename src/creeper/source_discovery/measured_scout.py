@@ -844,16 +844,28 @@ class MeasuredYieldScoutExecutor:
             parsed_range = _parse_content_range(
                 response.headers.get("content-range")
             )
-            range_start = start
-            range_end = (
-                start + len(body) - 1
-                if body
-                else None
-            )
             total_size = None
             if parsed_range is not None:
                 range_start, parsed_end, total_size = parsed_range
                 range_end = parsed_end
+            else:
+                # HTTP 200 means the origin ignored our Range request and the
+                # payload starts at byte zero. Never label that prefix with the
+                # requested non-zero offset: doing so makes repeated prefixes
+                # look like independent stratified windows.
+                range_start = 0 if response.status_code == 200 else start
+                range_end = (
+                    range_start + len(body) - 1
+                    if body
+                    else None
+                )
+                raw_length = response.headers.get("content-length")
+                if (
+                    response.status_code == 200
+                    and raw_length is not None
+                    and raw_length.isdigit()
+                ):
+                    total_size = int(raw_length)
             return PrefixDownload(
                 payload=body,
                 content_type=response.headers.get("content-type", ""),
@@ -955,15 +967,19 @@ class MeasuredYieldScoutExecutor:
                 starts.append(offset)
 
         downloads = [first]
+        request_count = 1
+        bytes_read = len(first.payload)
         for offset in starts[1:]:
             probe = await self._download_prefix(
                 url,
                 start=offset,
                 max_bytes=per_window,
             )
+            request_count += 1
+            bytes_read += len(probe.payload)
             # A server that ignores non-zero ranges usually returns byte 0.
-            # Ignore that duplicate rather than biasing the sample toward the
-            # prefix or exceeding the deterministic download budget.
+            # Ignore that duplicate for sampling, but retain its real request
+            # and byte cost so source-yield telemetry cannot undercount I/O.
             if offset > 0 and probe.range_start != offset:
                 continue
             downloads.append(probe)
@@ -977,8 +993,8 @@ class MeasuredYieldScoutExecutor:
             payload=combined,
             content_type=first.content_type,
             truncated=True,
-            requests=len(downloads),
-            bytes_read=sum(len(download.payload) for download in downloads),
+            requests=request_count,
+            bytes_read=bytes_read,
         )
 
 

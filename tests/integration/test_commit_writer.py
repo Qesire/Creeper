@@ -45,6 +45,50 @@ class RecordingControlStore:
 
 
 class CommitWriterTests(unittest.TestCase):
+    def test_rejects_invalid_config_and_clock_without_pending_mutation(self):
+        with self.assertRaisesRegex(ValueError, "flush_count"):
+            CommitWriter(None, None, owner="worker", flush_count=1.5)
+        with self.assertRaisesRegex(ValueError, "flush_interval_seconds"):
+            CommitWriter(
+                None,
+                None,
+                owner="worker",
+                flush_interval_seconds=float("nan"),
+            )
+        with self.assertRaisesRegex(ValueError, "owner"):
+            CommitWriter(None, None, owner="")
+        with self.assertRaisesRegex(ValueError, "clock must be finite"):
+            CommitWriter(
+                None,
+                None,
+                owner="worker",
+                clock=lambda: float("nan"),
+            )
+
+        now = [0.0]
+        writer = CommitWriter(
+            None,
+            None,
+            owner="worker",
+            flush_count=100,
+            clock=lambda: now[0],
+        )
+        result = EvidenceQueryResult(
+            "strict.example.com",
+            1997,
+            CDXQueryState.EMPTY_EXHAUSTIVE,
+            key=EvidenceQueryKey(
+                "strict.example.com",
+                TemporalScope(1997, 1997),
+                "wayback",
+                "v1",
+            ),
+        )
+        now[0] = float("nan")
+        with self.assertRaisesRegex(ValueError, "clock must be finite"):
+            writer.submit(None, result)
+        self.assertEqual(writer.pending_count, 0)
+
     def test_flush_batches_capsules_and_repeated_flush_is_idempotent(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

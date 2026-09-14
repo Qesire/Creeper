@@ -66,6 +66,55 @@ elif args.mode == "hypothesis":
         }]
     }
     open(args.response, "w", encoding="utf-8").write(json.dumps(payload))
+elif args.mode == "duplicate_hypothesis":
+    payload = {
+        "query": "duplicate hypothesis ids",
+        "hypotheses": [
+            {
+                "hypothesis_id": "dup",
+                "action": "ENUMERATE_TEMPLATE",
+                "template": "https://a.example/{YEAR}.cdxj",
+                "variables": {"YEAR": [1999]},
+                "candidate_defaults": {
+                    "source_family": "BULK_ARTIFACT",
+                    "level": "SOURCE",
+                    "expected_year_from": 1999,
+                    "expected_year_to": 1999,
+                    "expected_volume": 1000,
+                    "temporal_semantics_prior": 1.0,
+                    "enumerability_prior": 1.0,
+                    "direct_evidence_prior": 1.0,
+                    "baseline_overlap_prior": 0.5,
+                    "access_cost_prior": 0.5,
+                    "adapter_cost_prior": 0.5,
+                    "confidence": 0.9,
+                },
+                "confidence": 0.9,
+            },
+            {
+                "hypothesis_id": "dup",
+                "action": "ENUMERATE_TEMPLATE",
+                "template": "https://b.example/{YEAR}.cdxj",
+                "variables": {"YEAR": [2000]},
+                "candidate_defaults": {
+                    "source_family": "BULK_ARTIFACT",
+                    "level": "SOURCE",
+                    "expected_year_from": 2000,
+                    "expected_year_to": 2000,
+                    "expected_volume": 1000,
+                    "temporal_semantics_prior": 1.0,
+                    "enumerability_prior": 1.0,
+                    "direct_evidence_prior": 1.0,
+                    "baseline_overlap_prior": 0.5,
+                    "access_cost_prior": 0.5,
+                    "adapter_cost_prior": 0.5,
+                    "confidence": 0.9,
+                },
+                "confidence": 0.9,
+            },
+        ],
+    }
+    open(args.response, "w", encoding="utf-8").write(json.dumps(payload))
 elif args.mode == "success":
     payload = {
         "query": "historical web archive catalog 1996 2001",
@@ -192,6 +241,15 @@ class CommandAgentSearchExecutorTests(unittest.IsolatedAsyncioTestCase):
                 for candidate in batch.candidates
             )
         )
+
+    async def test_duplicate_hypothesis_ids_fail_at_protocol_boundary(self) -> None:
+        executor = self.executor("duplicate_hypothesis")
+
+        with self.assertRaisesRegex(
+            SearchAgentProtocolError,
+            "duplicate hypothesis_id",
+        ):
+            await executor(self.directive())
 
     async def test_oversized_response_fails_closed(self) -> None:
         executor = self.executor("oversize", max_response_bytes=128)

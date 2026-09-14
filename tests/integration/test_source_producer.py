@@ -87,6 +87,7 @@ class SourceProducerTests(unittest.TestCase):
         source_registry=None,
         source_year: int | None = 1997,
         year_hint_mask: int = 0,
+        producer_kwargs: dict | None = None,
     ):
         record = SourceRecord(
             source_id="fixture-source",
@@ -154,8 +155,57 @@ class SourceProducerTests(unittest.TestCase):
                 "commits": 2,
             },
             range_first_fraction=range_first_fraction,
+            **(producer_kwargs or {}),
         )
         return runtime, adapter
+
+    def test_rejects_nonfinite_or_fractional_producer_configuration(self):
+        with self.assertRaisesRegex(ValueError, "range_first_fraction"):
+            self.build_runtime(
+                backlog_capacity=1,
+                range_first_fraction=float("nan"),
+            )
+        with self.assertRaisesRegex(ValueError, "domain_fanout_batch_size"):
+            self.build_runtime(
+                backlog_capacity=1,
+                producer_kwargs={"domain_fanout_batch_size": 1.5},
+            )
+        with self.assertRaisesRegex(ValueError, "reservation_grace_seconds"):
+            self.build_runtime(
+                backlog_capacity=1,
+                producer_kwargs={"reservation_grace_seconds": float("inf")},
+            )
+
+    def test_final_source_commit_revalidates_lease_ownership(self):
+        runtime, _adapter = self.build_runtime(backlog_capacity=1)
+        original_renew = self.control.renew_lease
+        renew_calls = 0
+
+        def renew_with_final_expiry(lease, *, ttl_seconds, now=None):
+            nonlocal renew_calls
+            renew_calls += 1
+            if renew_calls >= 2:
+                raise RuntimeError("synthetic expiry before final commit")
+            return original_renew(
+                lease,
+                ttl_seconds=ttl_seconds,
+                now=now,
+            )
+
+        self.control.renew_lease = renew_with_final_expiry
+
+        with self.assertRaisesRegex(RuntimeError, "expiry before final commit"):
+            runtime.run_once()
+
+        self.assertEqual(renew_calls, 2)
+        reservoir = self.control.get_reservoir("fixture-reservoir")
+        self.assertEqual(reservoir.state, ReservoirState.READY)
+        self.assertEqual(reservoir.cursor, "0")
+        rows = self.control.connection.execute(
+            "SELECT state FROM work_leases"
+        ).fetchall()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["state"], "ABORTED")
 
     def build_direct_runtime(
         self,

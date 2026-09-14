@@ -52,6 +52,22 @@ class FakeLocalReservoir:
 
 
 class SyncRuntimeIntegrationTests(unittest.TestCase):
+    def test_constructor_rejects_lossy_batch_and_blank_identity(self):
+        common = dict(
+            baseline=None,
+            control_store=None,
+            evidence_store=None,
+            scheduler=None,
+            candidates=(),
+            adapters={},
+            evidence_transport=lambda _hostname, _year: (),
+            queue_capacities={},
+        )
+        with self.assertRaisesRegex(ValueError, "baseline_batch_size"):
+            SyncRuntime(**common, baseline_batch_size=1.5)
+        with self.assertRaisesRegex(ValueError, "evidence_provider"):
+            SyncRuntime(**common, evidence_provider="")
+
     def test_run_once_filters_baseline_and_resolves_full_host_range(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

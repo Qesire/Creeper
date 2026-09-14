@@ -21,6 +21,30 @@ class AsyncRDAPClientTests(unittest.IsolatedAsyncioTestCase):
             "rdap-registration-v1",
         )
 
+    def test_rejects_nonfinite_or_lossy_transport_configuration(self):
+        with self.assertRaisesRegex(ValueError, "timeout"):
+            AsyncRDAPClient(timeout=float("nan"))
+        with self.assertRaisesRegex(ValueError, "requests_per_second"):
+            AsyncRDAPClient(requests_per_second=float("inf"))
+        with self.assertRaisesRegex(ValueError, "max_connections"):
+            AsyncRDAPClient(max_connections=1.5)
+        with self.assertRaisesRegex(ValueError, "cannot exceed"):
+            AsyncRDAPClient(
+                max_connections=1,
+                max_keepalive_connections=2,
+            )
+
+    async def test_rejects_client_and_transport_together(self):
+        client = httpx.AsyncClient()
+        try:
+            with self.assertRaisesRegex(ValueError, "either client or transport"):
+                AsyncRDAPClient(
+                    client=client,
+                    transport=httpx.MockTransport(lambda request: httpx.Response(200)),
+                )
+        finally:
+            await client.aclose()
+
     async def test_registration_event_in_target_period_is_positive_evidence(self):
         async def handler(request):
             payload = {

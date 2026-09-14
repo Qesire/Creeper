@@ -12,6 +12,7 @@ from creeper.evidence.policies import (
     RangeEvidenceQueryResult,
     TemporalScope,
 )
+from creeper.evidence.providers.async_cdx import AsyncWaybackCDXClient
 from creeper.evidence.providers.multi_cdx import (
     AsyncArquivoCDXClient,
     AsyncCDXProviderPool,
@@ -58,6 +59,35 @@ class FakeClient:
             )
         )
         return self.ranges[key]
+
+
+class AsyncWaybackConfigTests(unittest.TestCase):
+    def test_transport_limits_reject_fractional_and_nonfinite_values(self) -> None:
+        with self.assertRaisesRegex(ValueError, "limit must be an integer"):
+            AsyncWaybackCDXClient(limit=1.5)
+        with self.assertRaisesRegex(ValueError, "max_retries must be an integer"):
+            AsyncWaybackCDXClient(max_retries=1.5)
+        with self.assertRaisesRegex(ValueError, "timeout must be finite"):
+            AsyncWaybackCDXClient(timeout=float("nan"))
+        with self.assertRaisesRegex(ValueError, "backoff must be finite"):
+            AsyncWaybackCDXClient(backoff=float("inf"))
+
+    def test_platform_request_identity_rejects_fractional_year(self) -> None:
+        client = AsyncWaybackCDXClient(
+            transport=httpx.MockTransport(
+                lambda _request: httpx.Response(200, json=[])
+            )
+        )
+        try:
+            with self.assertRaisesRegex(ValueError, "integer within"):
+                client.platform_year_request_template_hash(
+                    "example.com",
+                    1997.5,
+                    policy_version="platform-v1",
+                )
+        finally:
+            import asyncio
+            asyncio.run(client.aclose())
 
 
 class ArquivoDialectTests(unittest.IsolatedAsyncioTestCase):
@@ -109,9 +139,60 @@ class ArquivoDialectTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(params["from"], "1998")
         self.assertEqual(params["to"], "1998")
         self.assertEqual(params["matchType"], "host")
-        self.assertIn("fields", params)
-        self.assertNotIn("fl", params)
+        self.assertIn("fl", params)
+        self.assertNotIn("fields", params)
+        self.assertEqual(params["filter"], "~status:[23][0-9][0-9]")
         self.assertNotIn("showResumeKey", params)
+
+    async def test_arquivo_accepts_wayback_style_header_rows(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                json=[
+                    [
+                        "urlkey",
+                        "timestamp",
+                        "url",
+                        "mime",
+                        "status",
+                        "digest",
+                        "length",
+                    ],
+                    [
+                        "example,arquivo)/",
+                        "19990102030405",
+                        "http://arquivo.example/path",
+                        "text/html",
+                        "200",
+                        "sha1:test",
+                        "123",
+                    ],
+                ],
+            )
+
+        client = AsyncArquivoCDXClient(
+            endpoint="https://arquivo.example/wayback/cdx",
+            provider="wayback",
+            source_id="arquivo_pt",
+            limit=100,
+            requests_per_second=0.0,
+            transport=httpx.MockTransport(handler),
+        )
+        key = EvidenceQueryKey(
+            "arquivo.example",
+            TemporalScope(1999, 1999),
+            "wayback",
+            "cdx-v1",
+        )
+        try:
+            result = await client.query_key(key)
+        finally:
+            await client.aclose()
+
+        self.assertEqual(result.state, CDXQueryState.PASS)
+        assert result.capsule is not None
+        self.assertEqual(result.capsule.original_url, "http://arquivo.example/path")
+        self.assertEqual(result.capsule.source_id, "arquivo_pt")
 
     async def test_arquivo_host_range_queries_all_target_years_at_once(self) -> None:
         seen: list[httpx.Request] = []
@@ -278,6 +359,87 @@ class MultiCDXProviderPoolTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.state, CDXQueryState.EMPTY_EXHAUSTIVE)
         self.assertEqual(result.provider_requests, 2)
 
+    async def test_mixed_empty_and_invalid_exact_is_terminal_invalid(self) -> None:
+        pool, first, second = self.make_pool()
+        key = EvidenceQueryKey(
+            "invalid-gap.example",
+            TemporalScope(2000, 2000),
+            "wayback",
+            "cdx-v1",
+        )
+        order = pool._provider_order(key)
+        clients = {"first": first, "second": second}
+        clients[order[0]].exact[key] = EvidenceQueryResult(
+            key.hostname,
+            2000,
+            CDXQueryState.EMPTY_EXHAUSTIVE,
+            provider_requests=1,
+            key=key,
+        )
+        clients[order[1]].exact[key] = EvidenceQueryResult(
+            key.hostname,
+            2000,
+            CDXQueryState.INVALID,
+            provider_requests=1,
+            error="provider rejected query permanently",
+            key=key,
+        )
+
+        result = await pool.query_key(key)
+
+        self.assertEqual(result.state, CDXQueryState.INVALID)
+        self.assertEqual(result.provider_requests, 2)
+        self.assertEqual(sum(len(client.calls) for client in clients.values()), 2)
+
+    async def test_range_preserves_positive_year_and_terminates_invalid_gap(self) -> None:
+        pool, first, second = self.make_pool()
+        key = EvidenceQueryKey(
+            "partial-invalid.example",
+            TemporalScope(1998, 1999),
+            "wayback",
+            "cdx-v1",
+        )
+        clients = {"first": first, "second": second}
+        for name, client in clients.items():
+            client.ranges[key] = RangeEvidenceQueryResult(
+                hostname=key.hostname,
+                key=key,
+                state=CDXQueryState.DECOMPOSED,
+                candidate_years=(1998,),
+                followup_years=(1999,),
+                capsules=(capsule(key.hostname, 1998, name),),
+                provider_requests=1,
+            )
+        exact = EvidenceQueryKey(
+            key.hostname,
+            TemporalScope(1999, 1999),
+            key.provider,
+            key.policy_version,
+        )
+        exact_order = pool._provider_order(exact)
+        clients[exact_order[0]].exact[exact] = EvidenceQueryResult(
+            key.hostname,
+            1999,
+            CDXQueryState.EMPTY_EXHAUSTIVE,
+            provider_requests=1,
+            key=exact,
+        )
+        clients[exact_order[1]].exact[exact] = EvidenceQueryResult(
+            key.hostname,
+            1999,
+            CDXQueryState.INVALID,
+            provider_requests=1,
+            error="provider rejected exact query permanently",
+            key=exact,
+        )
+
+        result = await pool.query_range(key)
+
+        self.assertEqual(result.state, CDXQueryState.INVALID)
+        self.assertEqual(result.candidate_years, (1998,))
+        self.assertEqual(tuple(item.year for item in result.capsules), (1998,))
+        self.assertEqual(result.followup_years, ())
+
     async def test_range_combines_disjoint_provider_years(self) -> None:
         pool, first, second = self.make_pool()
         key = EvidenceQueryKey(
@@ -312,6 +474,35 @@ class MultiCDXProviderPoolTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.candidate_years, (1998, 1999))
         self.assertEqual(result.followup_years, ())
         self.assertEqual(result.provider_requests, 2)
+
+    async def test_exhaustive_range_treats_missing_years_as_proven_empty(self) -> None:
+        pool, first, second = self.make_pool()
+        key = EvidenceQueryKey(
+            "sparse-years.example",
+            TemporalScope(1998, 1999),
+            "wayback",
+            "cdx-v1",
+        )
+        clients = {"first": first, "second": second}
+        for name, client in clients.items():
+            client.ranges[key] = RangeEvidenceQueryResult(
+                hostname=key.hostname,
+                key=key,
+                state=CDXQueryState.PASS,
+                candidate_years=(1998,),
+                capsules=(capsule(key.hostname, 1998, name),),
+                provider_requests=1,
+            )
+
+        result = await pool.query_range(key)
+
+        self.assertEqual(result.state, CDXQueryState.PASS)
+        self.assertEqual(result.candidate_years, (1998,))
+        self.assertEqual(result.followup_years, ())
+        self.assertEqual(result.provider_requests, 2)
+        self.assertFalse(
+            any(call[0] == "exact" for client in clients.values() for call in client.calls)
+        )
 
     async def test_partial_range_closes_missing_year_inside_same_host_task(self) -> None:
         pool, first, second = self.make_pool()

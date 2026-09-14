@@ -9,7 +9,110 @@ from creeper.evidence.platform_admission import (
     PlatformYearAdmissionPolicy,
     PlatformYearObservation,
 )
+from creeper.evidence.platform_harvest import (
+    PlatformHarvestState,
+    PlatformYearHarvestResult,
+    PlatformYearHarvestTask,
+    PlatformYearHarvestWorker,
+    platform_year_harvest_id,
+)
 from creeper.storage.control_store import ControlStore
+
+
+class PlatformHarvestInvariantTests(unittest.TestCase):
+    @staticmethod
+    def task(**overrides):
+        values = dict(
+            provider="wayback",
+            subject="example.com",
+            target_year=1997,
+            request_template_hash="template",
+            policy_version="platform-v1",
+        )
+        values.update(overrides)
+        harvest_id = platform_year_harvest_id(
+            provider=values["provider"],
+            subject=values["subject"],
+            target_year=values["target_year"],
+            request_template_hash=values["request_template_hash"],
+            policy_version=values["policy_version"],
+        )
+        return PlatformYearHarvestTask(harvest_id=harvest_id, **values)
+
+    def test_year_and_integer_accounting_are_not_silently_truncated(self):
+        with self.assertRaisesRegex(ValueError, "integer within"):
+            platform_year_harvest_id(
+                provider="wayback",
+                subject="example.com",
+                target_year=1997.5,
+                request_template_hash="template",
+                policy_version="platform-v1",
+            )
+        with self.assertRaisesRegex(ValueError, "non-negative integers"):
+            self.task(rows_seen=1.5)
+
+    def test_nonfinite_platform_accounting_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "finite and non-negative"):
+            self.task(elapsed_seconds=float("nan"))
+        with self.assertRaisesRegex(ValueError, "elapsed_seconds"):
+            PlatformYearHarvestResult(
+                harvest_id="result-id",
+                provider="wayback",
+                subject="example.com",
+                target_year=1997,
+                request_template_hash="template",
+                policy_version="platform-v1",
+                resume_key_used=None,
+                state=PlatformHarvestState.RETRYABLE,
+                elapsed_seconds=float("inf"),
+            )
+
+    def test_partial_result_requires_cursor_progress(self):
+        with self.assertRaisesRegex(ValueError, "advance the continuation"):
+            PlatformYearHarvestResult(
+                harvest_id="result-id",
+                provider="wayback",
+                subject="example.com",
+                target_year=1997,
+                request_template_hash="template",
+                policy_version="platform-v1",
+                resume_key_used="same",
+                state=PlatformHarvestState.PARTIAL,
+                next_resume_key="same",
+            )
+        with self.assertRaisesRegex(ValueError, "only PARTIAL"):
+            PlatformYearHarvestResult(
+                harvest_id="result-id",
+                provider="wayback",
+                subject="example.com",
+                target_year=1997,
+                request_template_hash="template",
+                policy_version="platform-v1",
+                resume_key_used=None,
+                state=PlatformHarvestState.RETRYABLE,
+                next_resume_key="unexpected",
+            )
+
+    def test_worker_rejects_empty_provider_set(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            control = ControlStore(Path(tmp) / "control.sqlite3")
+            try:
+                with self.assertRaisesRegex(ValueError, "at least one platform"):
+                    PlatformYearHarvestWorker(
+                        control_store=control,
+                        evidence_store=object(),
+                        providers={},
+                        owner="platform-worker",
+                    )
+            finally:
+                control.close()
+
+    def test_retry_backoff_saturates_for_extreme_attempt_count(self):
+        worker = PlatformYearHarvestWorker.__new__(PlatformYearHarvestWorker)
+        worker.retry_base_seconds = 30.0
+        worker.retry_max_seconds = 3600.0
+        worker.clock = lambda: 100.0
+        self.assertEqual(worker._retry_at(1_000_000), 3700.0)
 
 
 class PlatformYearAdmissionTests(unittest.TestCase):
@@ -52,6 +155,21 @@ class PlatformYearAdmissionTests(unittest.TestCase):
             self.assertTrue(task.exposure_id)
             self.assertEqual(task.authority_digest, first.authority_digest)
             control.close()
+
+    def test_fractional_year_and_budget_are_rejected(self):
+        with self.assertRaisesRegex(ValueError, "integer within"):
+            PlatformYearObservation(
+                provider="wayback",
+                subject="example.com",
+                target_year=1997.5,
+                request_template_hash="template",
+                policy_version="platform-v1",
+                source_key="source:example",
+                reservoir_id="reservoir:example",
+                authority_digest="authority-v1",
+            )
+        with self.assertRaisesRegex(ValueError, "positive integer"):
+            PlatformYearAdmissionPolicy(max_tasks=1.5)
 
     def test_missing_scope_or_authority_is_rejected(self):
         cases = (

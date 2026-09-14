@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 
 from creeper.evidence.policies import EvidenceQueryKey, TemporalScope
-from creeper.evidence.router import EvidenceRouter
+from creeper.evidence.router import EvidenceNeed, EvidenceRouter
 from creeper.scheduler.admission import EvidenceBacklogAdmission
 from creeper.scheduler.leases import WorkLease
 from creeper.sources.domains import DomainState, SourceDomain
@@ -92,6 +92,31 @@ class EvidenceRouterTests(unittest.TestCase):
             ttl_seconds=60,
             preferred_provider=preferred_provider,
         )
+
+    def test_rejects_invalid_lineage_clock_and_flush_limits(self) -> None:
+        key = self.key("strict.example")
+        with self.assertRaisesRegex(ValueError, "source_key"):
+            EvidenceNeed(
+                key=key,
+                source_key="",
+                reservoir_id="router-reservoir",
+                lease_id=self.lease.lease_id,
+            )
+        router = self.router({"wayback": 1})
+        need = EvidenceNeed(
+            key=key,
+            source_key="source-a",
+            reservoir_id="router-reservoir",
+            lease_id=self.lease.lease_id,
+        )
+        self.control.clock = lambda: float("nan")
+        with self.assertRaisesRegex(ValueError, "clock must be finite"):
+            router.stage([need])
+        self.assertEqual(router.pending_count(), 0)
+        with self.assertRaisesRegex(ValueError, "ttl_seconds"):
+            router.flush_pending(ttl_seconds=float("nan"))
+        with self.assertRaisesRegex(ValueError, "max_needs"):
+            router.flush_pending(ttl_seconds=1.0, max_needs=1.5)
 
     def test_provider_admission_failure_is_durable_and_retryable(self) -> None:
         occupied = self.key("occupied.example")

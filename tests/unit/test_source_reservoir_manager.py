@@ -13,6 +13,7 @@ from creeper.source_discovery import (
     SuppressionScope,
 )
 from creeper.source_discovery.manager import (
+    SearchDirective,
     SearchDirectiveKind,
     SourceIntelligenceTask,
     SourcePoolTargets,
@@ -22,6 +23,18 @@ from creeper.storage.control_store import ControlStore
 
 
 class SourceReservoirManagerTests(unittest.TestCase):
+    def test_planning_models_reject_boolean_and_nonfinite_configuration(self) -> None:
+        with self.assertRaisesRegex(ValueError, "non-negative integers"):
+            SourcePoolTargets(active_min=True)
+        with self.assertRaisesRegex(ValueError, "desired_candidates"):
+            SearchDirective(
+                kind=SearchDirectiveKind.REFILL_RESERVOIR,
+                strategy="META_SOURCE_SEARCH",
+                desired_candidates=True,
+                subject=None,
+                reason="test",
+            )
+
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
         self.control = ControlStore(Path(self.tmp.name) / "control.sqlite3")
@@ -681,6 +694,106 @@ class SourceReservoirManagerTests(unittest.TestCase):
             if item.kind is SearchDirectiveKind.REFILL_RESERVOIR
         )
         self.assertEqual(refill.strategy, "RECOVERY")
+
+    def test_specialized_strategy_reward_cannot_shadow_stagnation_recovery(self) -> None:
+        rewarded = self.registry.begin_search_episode(
+            strategy="RECOVER_STAGNATION",
+            backend="test",
+            query="historical recovery success",
+            actor="test",
+            episode_id="search:rewarded-recovery",
+        )
+        self.registry.finish_search_episode(
+            rewarded.episode_id,
+            search_cost_seconds=1.0,
+        )
+        self.registry.credit_search_episode(
+            rewarded.episode_id,
+            accepted_novel_eed=10.0,
+        )
+        for index in range(6):
+            episode = self.registry.begin_search_episode(
+                strategy=f"ZERO_{index}",
+                backend="test",
+                query=f"zero-{index}",
+                actor="test",
+                episode_id=f"search:shadow-zero:{index}",
+            )
+            self.registry.finish_search_episode(
+                episode.episode_id,
+                search_cost_seconds=1.0,
+            )
+
+        manager = SourceReservoirManager(
+            self.registry,
+            targets=SourcePoolTargets(
+                active_min=0,
+                active_target=0,
+                warm_min=0,
+                warm_target=0,
+                cold_min=3,
+                cold_target=6,
+                max_search_directives=3,
+            ),
+            stagnation_window=6,
+        )
+
+        plan = manager.plan()
+
+        self.assertEqual(len(plan.search_directives), 1)
+        recovery = plan.search_directives[0]
+        self.assertEqual(recovery.kind, SearchDirectiveKind.RECOVER_STAGNATION)
+        self.assertEqual(
+            recovery.task_type,
+            SourceIntelligenceTask.RECOVER_STAGNATION,
+        )
+        self.assertEqual(recovery.strategy, "RECOVER_STAGNATION")
+
+    def test_new_family_reward_cannot_shadow_dedicated_exploration(self) -> None:
+        episode = self.registry.begin_search_episode(
+            strategy="EXPLORE_NEW_FAMILY",
+            backend="test",
+            query="orthogonal source family",
+            actor="test",
+            episode_id="search:rewarded-new-family",
+        )
+        self.registry.finish_search_episode(
+            episode.episode_id,
+            search_cost_seconds=1.0,
+            accepted_proposals=1,
+            new_sources=1,
+        )
+        self.registry.credit_search_episode(
+            episode.episode_id,
+            accepted_novel_eed=10.0,
+        )
+        manager = SourceReservoirManager(
+            self.registry,
+            targets=SourcePoolTargets(
+                active_min=0,
+                active_target=0,
+                warm_min=0,
+                warm_target=0,
+                cold_min=3,
+                cold_target=6,
+                max_search_directives=2,
+            ),
+        )
+
+        plan = manager.plan()
+
+        refill = next(
+            item
+            for item in plan.search_directives
+            if item.kind is SearchDirectiveKind.REFILL_RESERVOIR
+        )
+        explore = next(
+            item
+            for item in plan.search_directives
+            if item.kind is SearchDirectiveKind.DISCOVER_NEW_FAMILY
+        )
+        self.assertEqual(refill.strategy, "META_SOURCE_SEARCH")
+        self.assertEqual(explore.strategy, "EXPLORE_NEW_FAMILY")
 
     def test_hold_metasource_allocates_interpret_structure_opportunity(self) -> None:
         catalog = SourceCandidate(

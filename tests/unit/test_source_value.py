@@ -125,6 +125,111 @@ class FinalProductionValueTests(unittest.TestCase):
             )
         )
 
+    def test_source_run_accounting_rejects_fractional_and_nonfinite_values(self) -> None:
+        candidate = self.candidate("strict-accounting")
+        reservoir_id = f"reservoir:{candidate.source_key[-12:]}"
+        self.registry.begin_source_run(
+            candidate.source_key,
+            reservoir_id=reservoir_id,
+            lease_id="lease-strict",
+            baseline_signature="baseline-v5",
+            model_signature="model-v5",
+            read_started=100.0,
+        )
+
+        with self.assertRaisesRegex(ValueError, "non-negative integers"):
+            self.registry.record_source_run_read(
+                candidate.source_key,
+                reservoir_id=reservoir_id,
+                lease_id="lease-strict",
+                baseline_signature="baseline-v5",
+                model_signature="model-v5",
+                source_records=1.5,
+                bytes_read=0,
+                source_requests=0,
+            )
+        with self.assertRaisesRegex(ValueError, "non-negative integers"):
+            self.registry.record_source_run_validation(
+                candidate.source_key,
+                reservoir_id=reservoir_id,
+                lease_id="lease-strict",
+                baseline_signature="baseline-v5",
+                model_signature="model-v5",
+                evidence_tasks_created=1.5,
+                evidence_tasks_terminal=0,
+                direct_capsules_committed=0,
+                provider_requests=0,
+                provider_elapsed_seconds=0.0,
+                accepted_host_years=0,
+                final_accepted_eed=0.0,
+                max_evidence_sequence=0,
+                validation_complete=False,
+            )
+        with self.assertRaisesRegex(ValueError, "finite and non-negative"):
+            self.registry.record_source_run_validation(
+                candidate.source_key,
+                reservoir_id=reservoir_id,
+                lease_id="lease-strict",
+                baseline_signature="baseline-v5",
+                model_signature="model-v5",
+                evidence_tasks_created=0,
+                evidence_tasks_terminal=0,
+                direct_capsules_committed=0,
+                provider_requests=0,
+                provider_elapsed_seconds=float("nan"),
+                accepted_host_years=0,
+                final_accepted_eed=0.0,
+                max_evidence_sequence=0,
+                validation_complete=False,
+            )
+
+        stored = self.registry.get_source_run_outcome(
+            candidate.source_key,
+            reservoir_id=reservoir_id,
+            lease_id="lease-strict",
+            baseline_signature="baseline-v5",
+            model_signature="model-v5",
+        )
+        self.assertIsNotNone(stored)
+        assert stored is not None
+        self.assertEqual(stored.source_records, 0)
+        self.assertEqual(stored.evidence_tasks_created, 0)
+        self.assertEqual(stored.provider_elapsed_seconds, 0.0)
+
+    def test_source_run_rejects_nonfinite_timestamps_and_boolean_completion(self) -> None:
+        candidate = self.candidate("strict-timestamps")
+        reservoir_id = f"reservoir:{candidate.source_key[-12:]}"
+        with self.assertRaisesRegex(ValueError, "read_started"):
+            self.registry.begin_source_run(
+                candidate.source_key,
+                reservoir_id=reservoir_id,
+                lease_id="lease-bad-start",
+                baseline_signature="baseline-v5",
+                model_signature="model-v5",
+                read_started=float("nan"),
+            )
+
+        self.registry.begin_source_run(
+            candidate.source_key,
+            reservoir_id=reservoir_id,
+            lease_id="lease-strict-bool",
+            baseline_signature="baseline-v5",
+            model_signature="model-v5",
+            read_started=100.0,
+        )
+        with self.assertRaisesRegex(ValueError, "read_complete"):
+            self.registry.record_source_run_read(
+                candidate.source_key,
+                reservoir_id=reservoir_id,
+                lease_id="lease-strict-bool",
+                baseline_signature="baseline-v5",
+                model_signature="model-v5",
+                source_records=0,
+                bytes_read=0,
+                source_requests=0,
+                read_complete=1,
+            )
+
     def test_explicit_zero_is_durable_closed_outcome(self) -> None:
         candidate = self.candidate("zero", scout_eed=20.0)
         self.close_run(

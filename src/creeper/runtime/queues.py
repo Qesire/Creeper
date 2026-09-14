@@ -23,7 +23,10 @@ class BoundedQueues:
             "evidence_tasks": evidence_tasks,
             "commits": commits,
         }
-        if any(not isinstance(value, int) or value < 1 for value in capacities.values()):
+        if any(
+            isinstance(value, bool) or not isinstance(value, int) or value < 1
+            for value in capacities.values()
+        ):
             raise ValueError("queue capacities must be positive integers")
 
         self.source_records: queue.Queue[Any] = queue.Queue(maxsize=source_records)

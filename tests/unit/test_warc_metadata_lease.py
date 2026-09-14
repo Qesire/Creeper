@@ -34,8 +34,15 @@ def _archive_bytes(*, gzip: bool) -> bytes:
             http_headers=http_headers,
             warc_headers_dict={"WARC-Date": date},
         )
-        writer.write_record(record)
-    return output.getvalue()
+        try:
+            writer.write_record(record)
+        finally:
+            raw_stream = getattr(record, "raw_stream", None)
+            if raw_stream is not None:
+                raw_stream.close()
+    payload = output.getvalue()
+    output.close()
+    return payload
 
 
 class WarcMetadataLeaseTests(unittest.TestCase):

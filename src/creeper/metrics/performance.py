@@ -101,10 +101,17 @@ def build_performance_model(
     candidate_eed = _decimal(reference.candidate_eed)
     baseline_eed = None if reference.baseline_eed is None else _decimal(reference.baseline_eed)
     conservative = _decimal(conservative_weight)
-    if any(value <= 0 for value in (days, annual_raw, annual_eed, candidate_raw, candidate_eed)):
-        raise ValueError("reference days, raw counts, and EED values must be positive")
-    if not 0 < conservative <= 1:
-        raise ValueError("conservative weight must be in (0, 1]")
+    required = (days, annual_raw, annual_eed, candidate_raw, candidate_eed)
+    if any(not value.is_finite() or value <= 0 for value in required):
+        raise ValueError(
+            "reference days, raw counts, and EED values must be finite and positive"
+        )
+    if baseline_eed is not None and (
+        not baseline_eed.is_finite() or baseline_eed < 0
+    ):
+        raise ValueError("baseline_eed must be finite and non-negative")
+    if not conservative.is_finite() or not 0 < conservative <= 1:
+        raise ValueError("conservative weight must be finite within (0, 1]")
     annual_weight = annual_eed / annual_raw
     candidate_weight = candidate_eed / candidate_raw
     annual_rate = annual_eed / days
@@ -112,8 +119,8 @@ def build_performance_model(
     projections = []
     for raw_target in targets:
         target = _decimal(raw_target)
-        if target <= 0:
-            raise ValueError("target EED/day must be positive")
+        if not target.is_finite() or target <= 0:
+            raise ValueError("target EED/day must be finite and positive")
         projections.append(
             TargetProjection(
                 target,

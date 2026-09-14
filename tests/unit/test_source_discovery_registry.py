@@ -158,6 +158,84 @@ class SourceDiscoveryRegistryTests(unittest.TestCase):
         self.assertEqual(rewards[0].strategy, "META_SOURCE_SEARCH")
         self.assertEqual(rewards[0].reward_per_cost, 3.0)
 
+    def test_registry_rejects_invalid_clock_before_durable_write(self) -> None:
+        bad = SourceDiscoveryRegistry(
+            self.control,
+            max_graph_hops=2,
+            clock=lambda: float("nan"),
+        )
+        with self.assertRaisesRegex(ValueError, "clock must be finite"):
+            bad.begin_search_episode(
+                strategy="META_SOURCE_SEARCH",
+                backend="test",
+                query="bad clock",
+                actor="agent:test",
+                episode_id="search:bad-clock",
+            )
+        row = self.control.connection.execute(
+            "SELECT COUNT(*) FROM source_search_episodes WHERE episode_id = ?",
+            ("search:bad-clock",),
+        ).fetchone()
+        self.assertEqual(int(row[0]), 0)
+
+    def test_registry_rejects_boolean_graph_hops_and_suppression_ttl(self) -> None:
+        with self.assertRaisesRegex(ValueError, "max_graph_hops"):
+            SourceDiscoveryRegistry(
+                self.control,
+                max_graph_hops=True,
+            )
+        with self.assertRaisesRegex(ValueError, "ttl_seconds"):
+            self.registry.suppress(
+                SuppressionScope.ORIGIN,
+                "https://example.com",
+                reason="test",
+                ttl_seconds=True,
+            )
+        row = self.control.connection.execute(
+            "SELECT COUNT(*) FROM source_suppressions"
+        ).fetchone()
+        self.assertEqual(int(row[0]), 0)
+
+    def test_nonfinite_search_and_llm_rewards_are_rejected(self) -> None:
+        episode = self.registry.begin_search_episode(
+            strategy="META_SOURCE_SEARCH",
+            backend="test",
+            query="finite accounting",
+            actor="agent:test",
+            episode_id="search:finite",
+        )
+        with self.assertRaisesRegex(ValueError, "finite and non-negative"):
+            self.registry.finish_search_episode(
+                episode.episode_id,
+                search_cost_seconds=float("nan"),
+            )
+        self.assertIsNone(
+            self.registry.get_search_episode(episode.episode_id).finished_at
+        )
+        self.registry.finish_search_episode(
+            episode.episode_id,
+            search_cost_seconds=1.0,
+        )
+        with self.assertRaisesRegex(ValueError, "finite and non-negative"):
+            self.registry.credit_search_episode(
+                episode.episode_id,
+                accepted_novel_eed=float("inf"),
+            )
+
+        self.registry.begin_llm_episode(
+            episode_id="llm:finite",
+            task_type="DISCOVER_NEW_SOURCE",
+            backend="test",
+            actor="agent:test",
+            context_hash="",
+            prompt_version="v1",
+        )
+        with self.assertRaisesRegex(ValueError, "finite and non-negative"):
+            self.registry.finish_llm_episode(
+                "llm:finite",
+                cost_seconds=float("nan"),
+            )
+
     def test_scout_measurement_credits_originating_search_once_and_updates_delta(self) -> None:
         episode = self.registry.begin_search_episode(
             strategy="META_SOURCE_SEARCH",
@@ -422,6 +500,21 @@ class SourceDiscoveryRegistryTests(unittest.TestCase):
 
         self.assertEqual([item.source_key for item in ranked], [ordinary.source_key])
         self.assertIn("baseline overlap", self.registry.suppression_reason(meta) or "")
+
+    def test_nonfinite_final_reward_and_suppression_ttl_are_rejected(self) -> None:
+        candidate = self.candidate("finite-final/")
+        self.registry.register_proposal(candidate)
+        with self.assertRaisesRegex(ValueError, "finite and non-negative"):
+            self.registry.record_final_reward(
+                candidate.source_key,
+                final_accepted_eed=float("nan"),
+            )
+        with self.assertRaisesRegex(ValueError, "finite and non-negative"):
+            self.registry.suppress_candidate(
+                candidate,
+                reason="invalid ttl",
+                ttl_seconds=float("inf"),
+            )
 
     def test_temporary_negative_knowledge_expires_and_is_pruned(self) -> None:
         candidate = self.candidate("temporary/")

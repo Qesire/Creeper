@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
+import math
 import shutil
 from typing import Iterable, Mapping
 
@@ -25,6 +26,21 @@ class ResourceSample:
     cpu_percent: float = 0.0
     provider_pressure: float = 0.0
 
+    def __post_init__(self) -> None:
+        for name in ("rss_bytes", "disk_free_bytes"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError(f"{name} must be a non-negative integer")
+        for name in ("cpu_percent", "provider_pressure"):
+            value = getattr(self, name)
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(float(value))
+                or value < 0
+            ):
+                raise ValueError(f"{name} must be finite and non-negative")
+
 
 class ResourceGovernor:
     def __init__(
@@ -37,10 +53,33 @@ class ResourceGovernor:
         provider_drain_pressure: float = 1.0,
         provider_throttle_pressure: float = 0.8,
     ):
-        if not (0 <= disk_stop_bytes <= disk_throttle_bytes):
+        for name, value in (
+            ("rss_throttle_bytes", rss_throttle_bytes),
+            ("rss_stop_bytes", rss_stop_bytes),
+            ("disk_throttle_bytes", disk_throttle_bytes),
+            ("disk_stop_bytes", disk_stop_bytes),
+        ):
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError(f"{name} must be a non-negative integer")
+        for name, value in (
+            ("provider_drain_pressure", provider_drain_pressure),
+            ("provider_throttle_pressure", provider_throttle_pressure),
+        ):
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(float(value))
+                or value < 0
+            ):
+                raise ValueError(f"{name} must be finite and non-negative")
+        if disk_stop_bytes > disk_throttle_bytes:
             raise ValueError("disk thresholds must be stop <= throttle")
-        if not (0 <= rss_throttle_bytes <= rss_stop_bytes):
+        if rss_throttle_bytes > rss_stop_bytes:
             raise ValueError("RSS thresholds must be throttle <= stop")
+        if provider_throttle_pressure > provider_drain_pressure:
+            raise ValueError(
+                "provider pressure thresholds must be throttle <= drain"
+            )
         self.rss_throttle_bytes = rss_throttle_bytes
         self.rss_stop_bytes = rss_stop_bytes
         self.disk_throttle_bytes = disk_throttle_bytes
@@ -79,7 +118,10 @@ class ResourceGovernor:
 
         state = self.evaluate(sample)
         values = dict(capacities)
-        if any(not isinstance(value, int) or value < 0 for value in values.values()):
+        if any(
+            isinstance(value, bool) or not isinstance(value, int) or value < 0
+            for value in values.values()
+        ):
             raise ValueError("resource capacities must be non-negative integers")
 
         resource_names = {"source_fetch", "parse", "commit"}

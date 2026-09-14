@@ -61,7 +61,10 @@ class SourcePoolTargets:
             self.scout_parallelism,
             self.max_search_directives,
         )
-        if any(not isinstance(value, int) or value < 0 for value in values):
+        if any(
+            isinstance(value, bool) or not isinstance(value, int) or value < 0
+            for value in values
+        ):
             raise ValueError("source pool targets must be non-negative integers")
         if self.active_min > self.active_target:
             raise ValueError("active_min cannot exceed active_target")
@@ -85,6 +88,24 @@ class SearchDirective:
     subject: str | None
     reason: str
     task_type: SourceIntelligenceTask = SourceIntelligenceTask.DISCOVER_NEW_SOURCE
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "kind", SearchDirectiveKind(self.kind))
+        object.__setattr__(self, "task_type", SourceIntelligenceTask(self.task_type))
+        if not isinstance(self.strategy, str) or not self.strategy.strip():
+            raise ValueError("search directive strategy is required")
+        if (
+            isinstance(self.desired_candidates, bool)
+            or not isinstance(self.desired_candidates, int)
+            or self.desired_candidates < 1
+        ):
+            raise ValueError("desired_candidates must be a positive integer")
+        if self.subject is not None and (
+            not isinstance(self.subject, str) or not self.subject.strip()
+        ):
+            raise ValueError("search directive subject must be non-empty when provided")
+        if not isinstance(self.reason, str) or not self.reason.strip():
+            raise ValueError("search directive reason is required")
 
     @property
     def dedup_key(self) -> str:
@@ -122,6 +143,20 @@ class SourceReservoirManager:
     foreground inventory and advances only on the idle background lane.
     """
 
+    # These strategies encode a specialized task contract. Recycling one as a
+    # generic REFILL_RESERVOIR arm can collide with the dedicated directive's
+    # strategy/subject dedup key and silently change its task_type.
+    _SPECIALIZED_SEARCH_STRATEGIES = frozenset(
+        {
+            "DIRECT_EVIDENCE_BULK",
+            "EXPLOIT_DIRECT_ORIGIN",
+            "EXPLOIT_SUCCESS",
+            "EXPLORE_NEW_FAMILY",
+            "INTERPRET_STRUCTURE",
+            "RECOVER_STAGNATION",
+        }
+    )
+
     _COLD_STATES = frozenset(
         {
             SourceState.DISCOVERED,
@@ -140,12 +175,23 @@ class SourceReservoirManager:
         search_ucb_exploration: float = 0.35,
         stagnation_window: int = 6,
     ) -> None:
-        if search_cooldown_seconds < 0:
-            raise ValueError("search_cooldown_seconds must be non-negative")
-        if search_ucb_exploration < 0:
-            raise ValueError("search_ucb_exploration must be non-negative")
-        if stagnation_window < 2:
-            raise ValueError("stagnation_window must be at least two")
+        for name, value in (
+            ("search_cooldown_seconds", search_cooldown_seconds),
+            ("search_ucb_exploration", search_ucb_exploration),
+        ):
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(float(value))
+                or value < 0
+            ):
+                raise ValueError(f"{name} must be finite and non-negative")
+        if (
+            isinstance(stagnation_window, bool)
+            or not isinstance(stagnation_window, int)
+            or stagnation_window < 2
+        ):
+            raise ValueError("stagnation_window must be an integer >= 2")
         self.registry = registry
         self.targets = targets or SourcePoolTargets()
         self.search_cooldown_seconds = float(search_cooldown_seconds)
@@ -321,7 +367,11 @@ class SourceReservoirManager:
         rewards = [
             reward
             for reward in self.registry.strategy_rewards()
-            if reward.episodes > 0 and reward.search_cost_seconds > 0
+            if (
+                reward.episodes > 0
+                and reward.search_cost_seconds > 0
+                and reward.strategy not in self._SPECIALIZED_SEARCH_STRATEGIES
+            )
         ]
         if not rewards:
             return "META_SOURCE_SEARCH"

@@ -10,6 +10,7 @@ producer processes cannot outrun the evidence backlog high-water mark.
 
 from __future__ import annotations
 
+import math
 import queue
 import time
 from collections.abc import Iterable, Mapping
@@ -121,24 +122,35 @@ class SourceProducer:
         extract_workers: int = 2,
         reservation_grace_seconds: float = 30.0,
     ) -> None:
-        if baseline_batch_size < 1:
-            raise ValueError("baseline_batch_size must be positive")
-        if pipeline_batch_size < 1:
-            raise ValueError("pipeline_batch_size must be positive")
-        if (
-            not isinstance(extract_workers, int)
-            or isinstance(extract_workers, bool)
-            or extract_workers < 1
+        for name, value in (
+            ("baseline_batch_size", baseline_batch_size),
+            ("pipeline_batch_size", pipeline_batch_size),
+            ("extract_workers", extract_workers),
+            ("domain_fanout_min_children", domain_fanout_min_children),
+            ("domain_fanout_batch_size", domain_fanout_batch_size),
+            ("rdap_fanout_min_children", rdap_fanout_min_children),
+            ("rdap_batch_size", rdap_batch_size),
         ):
-            raise ValueError("extract_workers must be a positive integer")
-        if reservation_grace_seconds < 0:
-            raise ValueError("reservation_grace_seconds must be non-negative")
-        if not 0.0 <= float(range_first_fraction) <= 1.0:
-            raise ValueError("range_first_fraction must be between 0 and 1")
-        if domain_fanout_min_children < 2 or domain_fanout_batch_size < 1:
-            raise ValueError("invalid domain fanout thresholds")
-        if rdap_fanout_min_children < 1 or rdap_batch_size < 1:
-            raise ValueError("invalid RDAP candidate thresholds")
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise ValueError(f"{name} must be a positive integer")
+        if domain_fanout_min_children < 2:
+            raise ValueError("domain_fanout_min_children must be at least two")
+        if (
+            isinstance(reservation_grace_seconds, bool)
+            or not isinstance(reservation_grace_seconds, (int, float))
+            or not math.isfinite(float(reservation_grace_seconds))
+            or reservation_grace_seconds < 0
+        ):
+            raise ValueError(
+                "reservation_grace_seconds must be finite and non-negative"
+            )
+        if (
+            isinstance(range_first_fraction, bool)
+            or not isinstance(range_first_fraction, (int, float))
+            or not math.isfinite(float(range_first_fraction))
+            or not 0.0 <= float(range_first_fraction) <= 1.0
+        ):
+            raise ValueError("range_first_fraction must be finite within [0, 1]")
         capacities = dict(backlog_capacities)
         if any(
             not provider or not isinstance(value, int) or value < 0
@@ -294,6 +306,7 @@ class SourceProducer:
                     expected_novel_eed=candidate.expected_novel_eed,
                     now=float(self.control_store.clock()),
                     lease_ttl_seconds=ownership_ttl,
+                    initial_cursor=template.cursor_start,
                 )
                 if lease is None:
                     self.admission.release(reservation)
@@ -369,10 +382,17 @@ class SourceProducer:
             if not force and now < next_renew_at:
                 return
             if reservation is not None:
-                reservation = self.admission.renew(
-                    reservation,
-                    ttl_seconds=postprocess_ttl,
-                )
+                if self.admission.remaining(reservation) > 0:
+                    reservation = self.admission.renew(
+                        reservation,
+                        ttl_seconds=postprocess_ttl,
+                    )
+                else:
+                    # enqueue_reserved() deletes a fully consumed reservation.
+                    # The in-memory token must stop participating in heartbeats;
+                    # source ownership remains independently protected by the
+                    # WorkLease visibility deadline below.
+                    reservation = None
             self.control_store.renew_lease(
                 running,
                 ttl_seconds=postprocess_ttl,
@@ -822,6 +842,21 @@ class SourceProducer:
                 and result.next_cursor is not None
             ):
                 raise RuntimeError("lease made no cursor progress")
+            # No code below can create another evidence task. Release any
+            # unused worst-case capacity now: an expired, no-longer-needed
+            # reservation must not veto an otherwise valid source commit.
+            # Source ownership remains independently fenced by the WorkLease.
+            self.admission.release(reservation)
+            reservation = None
+
+            # Revalidate source ownership immediately before publishing read
+            # completion and advancing the durable reservoir cursor. A long
+            # tail in downstream post-processing must not let an expired
+            # producer commit success after its visibility deadline.
+            try:
+                keep_ownership_live(force=True)
+            except RuntimeError as exc:
+                raise RuntimeError("source lease expiry before final commit") from exc
             if (
                 self.source_registry is not None
                 and candidate.source_key is not None
@@ -891,11 +926,21 @@ class SourceProducer:
         sleep_fn=time.sleep,
     ) -> SourceProducerReport:
         """Continuously consume durable source leases until a stop is requested."""
-        if idle_backoff_seconds <= 0:
-            raise ValueError("idle_backoff_seconds must be positive")
-        if max_idle_backoff_seconds < idle_backoff_seconds:
+        if (
+            isinstance(idle_backoff_seconds, bool)
+            or not isinstance(idle_backoff_seconds, (int, float))
+            or not math.isfinite(float(idle_backoff_seconds))
+            or idle_backoff_seconds <= 0
+        ):
+            raise ValueError("idle_backoff_seconds must be finite and positive")
+        if (
+            isinstance(max_idle_backoff_seconds, bool)
+            or not isinstance(max_idle_backoff_seconds, (int, float))
+            or not math.isfinite(float(max_idle_backoff_seconds))
+            or max_idle_backoff_seconds < idle_backoff_seconds
+        ):
             raise ValueError(
-                "max_idle_backoff_seconds must not be below idle_backoff_seconds"
+                "max_idle_backoff_seconds must be finite and not below idle_backoff_seconds"
             )
 
         total = SourceProducerReport()

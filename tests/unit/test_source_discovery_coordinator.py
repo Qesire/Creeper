@@ -82,6 +82,131 @@ class SourceDiscoveryCoordinatorTests(unittest.IsolatedAsyncioTestCase):
         values.update(overrides)
         return SourceReservoirManager(self.registry, targets=SourcePoolTargets(**values))
 
+    def test_coordinator_rejects_invalid_parallelism_and_retry_timing(self) -> None:
+        common = dict(
+            registry=self.registry,
+            manager=self.manager(),
+            lock_path=self.lock_path,
+            triage_executor=lambda item: item,
+            scout_executor=lambda item: item,
+            search_executor=lambda item: item,
+        )
+        with self.assertRaisesRegex(ValueError, "triage_parallelism"):
+            SourceDiscoveryCoordinator(
+                **common,
+                triage_parallelism=True,
+            )
+        with self.assertRaisesRegex(ValueError, "failure_retry_seconds"):
+            SourceDiscoveryCoordinator(
+                **common,
+                failure_retry_seconds=float("nan"),
+            )
+
+    def test_coordinator_rejects_nonfinite_retry_clock_before_backoff_state(self) -> None:
+        coordinator = SourceDiscoveryCoordinator(
+            self.registry,
+            self.manager(),
+            lock_path=self.lock_path,
+            triage_executor=lambda item: item,
+            scout_executor=lambda item: item,
+            search_executor=lambda item: item,
+            retry_clock=lambda: float("nan"),
+        )
+        with self.assertRaisesRegex(ValueError, "retry clock must be finite"):
+            coordinator._eligible_search_directives(())
+        self.assertEqual(coordinator._search_retry_deadlines, {})
+
+    def test_search_batch_rejects_nonfinite_cost_before_commit(self) -> None:
+        with self.assertRaisesRegex(ValueError, "finite and non-negative"):
+            SearchBatch(
+                backend="test",
+                query="nan cost",
+                actor="agent:test",
+                search_cost_seconds=float("nan"),
+            )
+
+    def test_search_batch_rejects_invalid_hypothesis_before_commit(self) -> None:
+        with self.assertRaisesRegex(ValueError, "hypothesis action"):
+            SearchBatch(
+                backend="test",
+                query="bad hypothesis",
+                actor="agent:test",
+                llm_episode_id="llm:test",
+                llm_task_type="DISCOVER_NEW_SOURCE",
+                hypotheses=(
+                    {
+                        "hypothesis_id": "llm:test:h1",
+                        "action": "",
+                        "confidence": 0.5,
+                    },
+                ),
+            )
+
+    def test_search_batch_rejects_whitespace_llm_task_before_commit(self) -> None:
+        with self.assertRaisesRegex(ValueError, "llm_task_type"):
+            SearchBatch(
+                backend="test",
+                query="bad task type",
+                actor="agent:test",
+                llm_episode_id="llm:test",
+                llm_task_type="   ",
+            )
+
+    def test_search_batch_rejects_non_json_hypothesis_before_commit(self) -> None:
+        with self.assertRaisesRegex(ValueError, "JSON-serializable"):
+            SearchBatch(
+                backend="test",
+                query="bad json",
+                actor="agent:test",
+                llm_episode_id="llm:test",
+                llm_task_type="DISCOVER_NEW_SOURCE",
+                hypotheses=(
+                    {
+                        "hypothesis_id": "llm:test:h1",
+                        "action": "DISCOVER",
+                        "confidence": 0.5,
+                        "unsupported": {"not-json"},
+                    },
+                ),
+            )
+
+    def test_search_batch_rejects_llm_lineage_without_episode(self) -> None:
+        with self.assertRaisesRegex(ValueError, "require llm_episode_id"):
+            SearchBatch(
+                backend="test",
+                query="bad lineage",
+                actor="agent:test",
+                hypotheses=(
+                    {
+                        "hypothesis_id": "h1",
+                        "action": "DISCOVER",
+                        "confidence": 0.5,
+                    },
+                ),
+            )
+
+    def test_search_batch_rejects_unknown_hypothesis_attribution(self) -> None:
+        candidate = self.candidate("lineage")
+        with self.assertRaisesRegex(ValueError, "unknown hypothesis_id"):
+            SearchBatch(
+                backend="test",
+                query="bad attribution",
+                actor="agent:test",
+                candidates=(candidate,),
+                llm_episode_id="llm:test",
+                llm_task_type="DISCOVER_NEW_SOURCE",
+                hypotheses=(
+                    {
+                        "hypothesis_id": "llm:test:h1",
+                        "action": "DISCOVER",
+                        "confidence": 0.5,
+                    },
+                ),
+                hypothesis_attribution=(
+                    (candidate.source_key, "llm:test:missing"),
+                ),
+            )
+
     async def test_search_triage_and_scout_io_overlap_but_commits_complete_serially(self) -> None:
         discovered = self.candidate("triage")
         self.registry.register_proposal(discovered)

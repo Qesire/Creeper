@@ -11,6 +11,7 @@ import asyncio
 from collections import Counter
 import hashlib
 import json
+import math
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from collections.abc import AsyncIterator
@@ -98,30 +99,66 @@ class AsyncWaybackCDXClient:
         client: httpx.AsyncClient | None = None,
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
-        if (
-            limit < 1
-            or timeout <= 0
-            or max_retries < 0
-            or backoff < 0
-            or max_backoff < 0
-            or requests_per_second < 0
-            or max_connections < 1
-            or max_keepalive_connections < 0
-            or max_keepalive_connections > max_connections
-            or keepalive_expiry_seconds <= 0
-            or throttle_floor_seconds < 0
-            or not isinstance(circuit_failure_threshold, int)
-            or isinstance(circuit_failure_threshold, bool)
-            or circuit_failure_threshold < 1
-            or circuit_cooldown_seconds <= 0
+        integer_limits = (
+            ("limit", limit, 1),
+            ("max_retries", max_retries, 0),
+            ("max_connections", max_connections, 1),
+            ("max_keepalive_connections", max_keepalive_connections, 0),
+            ("circuit_failure_threshold", circuit_failure_threshold, 1),
+        )
+        for name, value, minimum in integer_limits:
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, int)
+                or value < minimum
+            ):
+                raise ValueError(
+                    f"{name} must be an integer >= {minimum}"
+                )
+        if max_keepalive_connections > max_connections:
+            raise ValueError(
+                "max_keepalive_connections cannot exceed max_connections"
+            )
+        positive_floats = (
+            ("timeout", timeout),
+            ("keepalive_expiry_seconds", keepalive_expiry_seconds),
+            ("circuit_cooldown_seconds", circuit_cooldown_seconds),
+        )
+        for name, value in positive_floats:
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(float(value))
+                or value <= 0
+            ):
+                raise ValueError(f"{name} must be finite and positive")
+        nonnegative_floats = (
+            ("backoff", backoff),
+            ("max_backoff", max_backoff),
+            ("requests_per_second", requests_per_second),
+            ("throttle_floor_seconds", throttle_floor_seconds),
+        )
+        for name, value in nonnegative_floats:
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(float(value))
+                or value < 0
+            ):
+                raise ValueError(f"{name} must be finite and non-negative")
+        for name, value in (
+            ("endpoint", endpoint),
+            ("provider", provider),
+            ("user_agent", user_agent),
         ):
-            raise ValueError("invalid async CDX client limits")
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"{name} must be non-empty")
         if client is not None and transport is not None:
             raise ValueError("pass either client or transport, not both")
         self.endpoint = endpoint
         self.provider = provider
         self.source_id = provider if source_id is None else source_id
-        if not self.source_id.strip():
+        if not isinstance(self.source_id, str) or not self.source_id.strip():
             raise ValueError("source_id must be non-empty")
         self.limit = limit
         self.max_retries = max_retries
@@ -565,19 +602,27 @@ class AsyncWaybackCDXClient:
         normalized = normalize_official(subject)
         if normalized is None:
             raise ValueError("platform harvest subject must be a valid hostname")
-        if not 1996 <= int(target_year) <= 2001:
-            raise ValueError("platform harvest year must be within 1996-2001")
+        if (
+            isinstance(target_year, bool)
+            or not isinstance(target_year, int)
+            or not 1996 <= target_year <= 2001
+        ):
+            raise ValueError(
+                "platform harvest year must be an integer within 1996-2001"
+            )
+        if not isinstance(policy_version, str) or not policy_version.strip():
+            raise ValueError("platform harvest policy_version is required")
         payload = json.dumps(
             {
                 "template_version": "wayback-platform-year-v1",
                 "provider": self.provider,
                 "endpoint": self.endpoint,
                 "subject": normalized,
-                "target_year": int(target_year),
+                "target_year": target_year,
                 "policy_version": policy_version,
                 "matchType": "domain",
-                "from": f"{int(target_year)}0101000000",
-                "to": f"{int(target_year)}1231235959",
+                "from": f"{target_year}0101000000",
+                "to": f"{target_year}1231235959",
                 "output": "json",
                 "fl": "urlkey,timestamp,original,statuscode,digest,length",
                 "filter": "statuscode:[23][0-9][0-9]",

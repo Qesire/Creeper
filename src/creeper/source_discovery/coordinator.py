@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import asyncio
 import fcntl
+import json
+import math
 import os
 import time
 from collections.abc import Awaitable, Callable
@@ -110,14 +112,112 @@ class SearchBatch:
     hypothesis_attribution: tuple[tuple[str, str], ...] = ()
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "candidates", tuple(self.candidates))
+        object.__setattr__(self, "hypotheses", tuple(self.hypotheses))
+        object.__setattr__(
+            self,
+            "hypothesis_attribution",
+            tuple(self.hypothesis_attribution),
+        )
         if not self.backend.strip() or not self.query.strip() or not self.actor.strip():
             raise ValueError("search batch attribution fields are required")
-        if self.search_cost_seconds is not None and self.search_cost_seconds < 0:
-            raise ValueError("search_cost_seconds must be non-negative")
-        if self.llm_episode_id is not None and not self.llm_episode_id.strip():
+        if self.search_cost_seconds is not None and (
+            isinstance(self.search_cost_seconds, bool)
+            or not isinstance(self.search_cost_seconds, (int, float))
+            or not math.isfinite(float(self.search_cost_seconds))
+            or self.search_cost_seconds < 0
+        ):
+            raise ValueError(
+                "search_cost_seconds must be finite and non-negative"
+            )
+        if self.llm_episode_id is not None and (
+            not isinstance(self.llm_episode_id, str)
+            or not self.llm_episode_id.strip()
+        ):
             raise ValueError("llm_episode_id must be non-empty when provided")
-        if self.llm_episode_id is not None and not self.llm_task_type:
+        if self.llm_episode_id is not None and (
+            not isinstance(self.llm_task_type, str)
+            or not self.llm_task_type.strip()
+        ):
             raise ValueError("llm_task_type is required for LLM batches")
+        if self.prompt_version is not None and (
+            not isinstance(self.prompt_version, str)
+            or not self.prompt_version.strip()
+        ):
+            raise ValueError("prompt_version must be non-empty when provided")
+        if self.context_hash is not None and not isinstance(self.context_hash, str):
+            raise ValueError("context_hash must be a string when provided")
+        if self.llm_episode_id is None and (
+            self.hypotheses or self.hypothesis_attribution
+        ):
+            raise ValueError(
+                "LLM hypotheses/attribution require llm_episode_id"
+            )
+
+        hypothesis_ids: set[str] = set()
+        for hypothesis in self.hypotheses:
+            if not isinstance(hypothesis, dict):
+                raise ValueError("search batch hypotheses must be objects")
+            hypothesis_id = hypothesis.get("hypothesis_id")
+            if not isinstance(hypothesis_id, str) or not hypothesis_id.strip():
+                raise ValueError("search batch hypothesis_id is required")
+            hypothesis_id = hypothesis_id.strip()
+            if hypothesis_id in hypothesis_ids:
+                raise ValueError(
+                    f"duplicate search batch hypothesis_id: {hypothesis_id}"
+                )
+            action = hypothesis.get("action")
+            if not isinstance(action, str) or not action.strip():
+                raise ValueError("search batch hypothesis action is required")
+            confidence = hypothesis.get("confidence", 0.0)
+            if (
+                isinstance(confidence, bool)
+                or not isinstance(confidence, (int, float))
+                or not math.isfinite(float(confidence))
+                or not 0.0 <= float(confidence) <= 1.0
+            ):
+                raise ValueError(
+                    "search batch hypothesis confidence must be within [0, 1]"
+                )
+            try:
+                json.dumps(
+                    hypothesis,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    allow_nan=False,
+                )
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    "search batch hypothesis must be JSON-serializable"
+                ) from exc
+            hypothesis_ids.add(hypothesis_id)
+
+        candidate_keys = {candidate.source_key for candidate in self.candidates}
+        attributed_sources: set[str] = set()
+        for attribution in self.hypothesis_attribution:
+            if (
+                not isinstance(attribution, (tuple, list))
+                or len(attribution) != 2
+                or not all(isinstance(value, str) and value.strip() for value in attribution)
+            ):
+                raise ValueError(
+                    "hypothesis_attribution entries must be (source_key, hypothesis_id)"
+                )
+            source_key_value, hypothesis_id = attribution
+            if source_key_value not in candidate_keys:
+                raise ValueError(
+                    "hypothesis attribution references a candidate outside the batch"
+                )
+            if hypothesis_id not in hypothesis_ids:
+                raise ValueError(
+                    "hypothesis attribution references an unknown hypothesis_id"
+                )
+            if source_key_value in attributed_sources:
+                raise ValueError(
+                    "one candidate cannot be attributed to multiple hypotheses "
+                    "within one search batch"
+                )
+            attributed_sources.add(source_key_value)
 
 
 @dataclass(frozen=True)
@@ -218,14 +318,29 @@ class SourceDiscoveryCoordinator:
         failure_retry_seconds: float = 30.0,
         retry_clock=time.monotonic,
     ) -> None:
-        if triage_parallelism < 1 or search_parallelism < 1:
-            raise ValueError("coordinator parallelism must be positive")
+        for name, value in (
+            ("triage_parallelism", triage_parallelism),
+            ("search_parallelism", search_parallelism),
+        ):
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise ValueError(f"{name} must be a positive integer")
         if scout_parallelism is None:
             scout_parallelism = manager.targets.scout_parallelism
-        if scout_parallelism < 1:
-            raise ValueError("scout_parallelism must be positive")
-        if failure_retry_seconds <= 0:
-            raise ValueError("failure_retry_seconds must be positive")
+        if (
+            isinstance(scout_parallelism, bool)
+            or not isinstance(scout_parallelism, int)
+            or scout_parallelism < 1
+        ):
+            raise ValueError("scout_parallelism must be a positive integer")
+        if (
+            isinstance(failure_retry_seconds, bool)
+            or not isinstance(failure_retry_seconds, (int, float))
+            or not math.isfinite(float(failure_retry_seconds))
+            or failure_retry_seconds <= 0
+        ):
+            raise ValueError("failure_retry_seconds must be finite and positive")
+        if not callable(retry_clock):
+            raise ValueError("retry_clock must be callable")
         self.registry = registry
         self.manager = manager
         self.lock_path = Path(lock_path)
@@ -233,9 +348,12 @@ class SourceDiscoveryCoordinator:
         self.scout_executor = scout_executor
         self.search_executor = search_executor
         if scout_authority is not None and (
-            len(scout_authority) != 2
-            or not scout_authority[0]
-            or not scout_authority[1]
+            not isinstance(scout_authority, tuple)
+            or len(scout_authority) != 2
+            or any(
+                not isinstance(value, str) or not value.strip()
+                for value in scout_authority
+            )
         ):
             raise ValueError("scout_authority must contain two non-empty signatures")
         self.scout_authority = scout_authority
@@ -254,6 +372,17 @@ class SourceDiscoveryCoordinator:
         self.retry_clock = retry_clock
         self._startup_recovered = False
         self._search_retry_deadlines: dict[str, float] = {}
+
+    def _retry_now(self) -> float:
+        value = self.retry_clock()
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(float(value))
+            or value < 0
+        ):
+            raise ValueError("coordinator retry clock must be finite and non-negative")
+        return float(value)
 
     @staticmethod
     def _failure_reason(stage: str, error: Exception) -> str:
@@ -291,7 +420,7 @@ class SourceDiscoveryCoordinator:
         self,
         directives: tuple[SearchDirective, ...],
     ) -> tuple[tuple[SearchDirective, ...], int]:
-        now = float(self.retry_clock())
+        now = self._retry_now()
         # Expired entries are deleted so a long-lived process does not accumulate
         # one key for every historical family-specific search.
         self._search_retry_deadlines = {
@@ -497,7 +626,7 @@ class SourceDiscoveryCoordinator:
         outcomes: list[_Outcome[SearchBatch]],
         counts: dict[str, int],
     ) -> None:
-        now = float(self.retry_clock())
+        now = self._retry_now()
         for directive, outcome in zip(directives, outcomes, strict=True):
             if outcome.error is not None:
                 self._search_retry_deadlines[directive.dedup_key] = (

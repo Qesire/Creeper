@@ -12,6 +12,43 @@ from creeper.runtime.resource_governor import (
 
 
 class ResourceGovernorTests(unittest.TestCase):
+    def test_rejects_nonfinite_samples_and_invalid_thresholds(self):
+        with self.assertRaisesRegex(ValueError, "provider_pressure"):
+            ResourceSample(
+                rss_bytes=1,
+                disk_free_bytes=1,
+                provider_pressure=float("nan"),
+            )
+        with self.assertRaisesRegex(ValueError, "rss_throttle_bytes"):
+            ResourceGovernor(
+                rss_throttle_bytes=True,
+                rss_stop_bytes=200,
+                disk_throttle_bytes=100,
+                disk_stop_bytes=50,
+            )
+        with self.assertRaisesRegex(ValueError, "throttle <= drain"):
+            ResourceGovernor(
+                rss_throttle_bytes=100,
+                rss_stop_bytes=200,
+                disk_throttle_bytes=100,
+                disk_stop_bytes=50,
+                provider_throttle_pressure=2.0,
+                provider_drain_pressure=1.0,
+            )
+
+    def test_boolean_resource_capacity_is_rejected(self):
+        governor = ResourceGovernor(
+            rss_throttle_bytes=100,
+            rss_stop_bytes=200,
+            disk_throttle_bytes=100,
+            disk_stop_bytes=50,
+        )
+        with self.assertRaisesRegex(ValueError, "non-negative integers"):
+            governor.credits(
+                ResourceSample(rss_bytes=10, disk_free_bytes=500),
+                {"source_fetch": True},
+            )
+
     def test_normal_and_throttled_states(self):
         governor = ResourceGovernor(
             rss_throttle_bytes=100,

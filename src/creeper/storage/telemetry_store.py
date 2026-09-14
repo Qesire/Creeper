@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import math
 import sqlite3
 import time
 from typing import Mapping
@@ -75,12 +76,23 @@ class RuntimeTelemetryStore:
         *,
         updated_at: float,
     ) -> list[tuple[str, float, float]]:
+        if (
+            isinstance(updated_at, bool)
+            or not isinstance(updated_at, (int, float))
+            or not math.isfinite(float(updated_at))
+            or updated_at < 0
+        ):
+            raise ValueError("telemetry timestamp must be finite and non-negative")
         rows: list[tuple[str, float, float]] = []
         for name, raw in values.items():
             if not isinstance(name, str) or not name.strip():
                 raise ValueError("telemetry gauge names must be non-empty strings")
-            if isinstance(raw, bool) or not isinstance(raw, (int, float)):
-                raise ValueError("telemetry gauge values must be numeric")
+            if (
+                isinstance(raw, bool)
+                or not isinstance(raw, (int, float))
+                or not math.isfinite(float(raw))
+            ):
+                raise ValueError("telemetry gauge values must be finite numbers")
             rows.append((name, float(raw), float(updated_at)))
         return rows
 
@@ -180,7 +192,15 @@ class RuntimeTelemetryStore:
             raise ValueError("resource byte samples must be non-negative integers")
         if not isinstance(governor_state, str) or not governor_state.strip():
             raise ValueError("governor_state must be a non-empty string")
-        when = float(self.clock()) if sampled_at is None else float(sampled_at)
+        when_raw = self.clock() if sampled_at is None else sampled_at
+        if (
+            isinstance(when_raw, bool)
+            or not isinstance(when_raw, (int, float))
+            or not math.isfinite(float(when_raw))
+            or when_raw < 0
+        ):
+            raise ValueError("sampled_at must be finite and non-negative")
+        when = float(when_raw)
         with self.connection:
             self.connection.execute(
                 """
@@ -197,6 +217,14 @@ class RuntimeTelemetryStore:
         start_time: float,
         end_time: float,
     ) -> dict[str, object]:
+        for name, value in (("start_time", start_time), ("end_time", end_time)):
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(float(value))
+                or value < 0
+            ):
+                raise ValueError(f"{name} must be finite and non-negative")
         if end_time < start_time:
             raise ValueError("resource summary end_time precedes start_time")
         row = self.connection.execute(

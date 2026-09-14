@@ -13,6 +13,7 @@ from creeper.evidence.classification import (
 )
 from creeper.evidence.policies import EvidenceCapsule
 from creeper.submission.verify import (
+    _archive_entry_digest,
     recompute_submission_archive,
     verify_submission_archive,
 )
@@ -298,6 +299,17 @@ def _write_archive(
 
 
 class SubmissionVerifierTests(unittest.TestCase):
+    def test_streaming_helpers_reject_lossy_chunk_sizes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            archive_path = Path(tmp) / "fixture.zip"
+            with zipfile.ZipFile(archive_path, "w") as out:
+                out.writestr("1997.txt", "example.com\n")
+            with zipfile.ZipFile(archive_path, "r") as bundle:
+                with self.assertRaisesRegex(ValueError, "positive integer"):
+                    list(iter_archive_lines(bundle, "1997.txt", chunk_size=1.5))
+                with self.assertRaisesRegex(ValueError, "positive integer"):
+                    _archive_entry_digest(bundle, "1997.txt", chunk_size=True)
+
     def test_archive_line_reader_decodes_lines_across_small_chunks(self):
         with tempfile.TemporaryDirectory() as tmp:
             archive = Path(tmp) / "lines.zip"

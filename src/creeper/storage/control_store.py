@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import math
 import sqlite3
 import time
 from dataclasses import dataclass, replace
@@ -34,6 +35,7 @@ from creeper.evidence.platform_harvest import (
     PlatformHarvestState,
     PlatformYearHarvestResult,
     PlatformYearHarvestTask,
+    platform_authority_digest,
     platform_year_harvest_id,
 )
 from creeper.runtime.exposure import ProductionExposure, ProductionExposureState
@@ -75,8 +77,13 @@ class ControlStore:
         default_lease_seconds: float = 300.0,
         clock=time.time,
     ):
-        if default_lease_seconds < 0:
-            raise ValueError("default_lease_seconds must be non-negative")
+        if (
+            not math.isfinite(float(default_lease_seconds))
+            or default_lease_seconds < 0
+        ):
+            raise ValueError(
+                "default_lease_seconds must be finite and non-negative"
+            )
         path.parent.mkdir(parents=True, exist_ok=True)
         self.connection = sqlite3.connect(path, timeout=30.0)
         self.connection.row_factory = sqlite3.Row
@@ -810,8 +817,16 @@ class ControlStore:
 
     @staticmethod
     def _validate_exposure_counters(values: Iterable[object]) -> None:
-        if any(float(value) < 0 for value in values):
-            raise ValueError("production exposure counters must be non-negative")
+        for value in values:
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(float(value))
+                or value < 0
+            ):
+                raise ValueError(
+                    "production exposure counters must be finite and non-negative"
+                )
 
     def get_production_exposure(self, exposure_id: str) -> ProductionExposure | None:
         row = self.connection.execute(
@@ -833,19 +848,41 @@ class ControlStore:
         task_id: str | None = None,
         exposure_id: str | None = None,
     ) -> ProductionExposure:
-        if not source_key.strip() or not reservoir_id.strip() or not lane.strip():
-            raise ValueError("source_key, reservoir_id, and lane are required")
+        for name, value in (
+            ("source_key", source_key),
+            ("reservoir_id", reservoir_id),
+            ("lane", lane),
+        ):
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"{name} is required")
         baseline_signature, model_signature = self._exposure_authority(
             authority=authority,
             baseline_signature=baseline_signature,
             model_signature=model_signature,
         )
-        lease_value = "" if lease_id is None else str(lease_id)
-        task_value = "" if task_id is None else str(task_id)
+        for name, value in (("lease_id", lease_id), ("task_id", task_id)):
+            if value is not None and (
+                not isinstance(value, str) or not value.strip()
+            ):
+                raise ValueError(f"{name} must be non-empty when provided")
+        if exposure_id is not None and (
+            not isinstance(exposure_id, str) or not exposure_id.strip()
+        ):
+            raise ValueError("exposure_id must be non-empty when provided")
+        lease_value = "" if lease_id is None else lease_id
+        task_value = "" if task_id is None else task_id
         if not lease_value and not task_value:
             raise ValueError("lease_id or task_id is required")
-        now = float(self.clock())
-        exposure_id = str(exposure_id or uuid4())
+        now_raw = self.clock()
+        if (
+            isinstance(now_raw, bool)
+            or not isinstance(now_raw, (int, float))
+            or not math.isfinite(float(now_raw))
+            or now_raw < 0
+        ):
+            raise ValueError("production exposure clock must be finite and non-negative")
+        now = float(now_raw)
+        exposure_id = exposure_id or str(uuid4())
         self.connection.execute("BEGIN IMMEDIATE")
         try:
             self.connection.execute(
@@ -933,20 +970,29 @@ class ControlStore:
             ):
                 raise ValueError("elapsed_seconds conflicts with split elapsed counters")
             provider_elapsed_seconds = elapsed_seconds
-        values = [
-            value for value in (
-                source_records,
-                source_requests,
-                source_bytes,
-                provider_requests,
-                provider_bytes,
-                source_elapsed_seconds,
-                provider_elapsed_seconds,
-                evidence_frontier,
-                accepted_host_years,
-            ) if value is not None
-        ]
-        self._validate_exposure_counters(values)
+        integer_counters = (
+            source_records,
+            source_requests,
+            source_bytes,
+            provider_requests,
+            provider_bytes,
+            evidence_frontier,
+            accepted_host_years,
+        )
+        for value in integer_counters:
+            if value is None:
+                continue
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError(
+                    "production exposure count fields must be non-negative integers"
+                )
+        elapsed_counters = (
+            source_elapsed_seconds,
+            provider_elapsed_seconds,
+        )
+        self._validate_exposure_counters(
+            value for value in elapsed_counters if value is not None
+        )
         requested_authority = None
         if authority is not None or baseline_signature is not None or model_signature is not None:
             requested_authority = self._exposure_authority(
@@ -1031,8 +1077,20 @@ class ControlStore:
         evidence_frontier: int,
         authority: tuple[str, str],
     ) -> bool:
-        if final_accepted_eed < 0 or accepted_host_years < 0 or evidence_frontier < 0:
-            raise ValueError("production exposure final counters must be non-negative")
+        if (
+            isinstance(final_accepted_eed, bool)
+            or not isinstance(final_accepted_eed, (int, float))
+            or not math.isfinite(float(final_accepted_eed))
+            or final_accepted_eed < 0
+        ):
+            raise ValueError(
+                "production exposure final EED must be finite and non-negative"
+            )
+        for value in (accepted_host_years, evidence_frontier):
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError(
+                    "production exposure final counts must be non-negative integers"
+                )
         requested_authority = self._exposure_authority(authority=authority)
         now = float(self.clock())
         self.connection.execute("BEGIN IMMEDIATE")
@@ -2519,15 +2577,25 @@ class ControlStore:
         lease_seconds: float | None = None,
         keys: Iterable[EvidenceQueryKey] | None = None,
     ) -> list[EvidenceTask]:
-        if not owner:
+        if not isinstance(owner, str) or not owner.strip():
             raise ValueError("owner is required")
+        if isinstance(limit, bool) or not isinstance(limit, int):
+            raise ValueError("evidence claim limit must be an integer")
         if limit < 1:
             return []
         if lease_seconds is None:
             lease_seconds = self.default_lease_seconds
-        if lease_seconds < 0:
-            raise ValueError("lease_seconds must be non-negative")
-        now = float(self.clock())
+        if not math.isfinite(float(lease_seconds)) or lease_seconds < 0:
+            raise ValueError("lease_seconds must be finite and non-negative")
+        now_raw = self.clock()
+        if (
+            isinstance(now_raw, bool)
+            or not isinstance(now_raw, (int, float))
+            or not math.isfinite(float(now_raw))
+            or now_raw < 0
+        ):
+            raise ValueError("evidence claim clock must be finite and non-negative")
+        now = float(now_raw)
         key_values = list(keys) if keys is not None else None
         clauses = [
             "state IN (?, ?, ?)",
@@ -2664,6 +2732,17 @@ class ControlStore:
             ):
                 raise ValueError("range follow-up key does not match parent range")
 
+        if not isinstance(owner, str) or not owner.strip():
+            raise ValueError("owner is required")
+        now_raw = self.clock()
+        if (
+            isinstance(now_raw, bool)
+            or not isinstance(now_raw, (int, float))
+            or not math.isfinite(float(now_raw))
+            or now_raw < 0
+        ):
+            raise ValueError("evidence finish clock must be finite and non-negative")
+        now = float(now_raw)
         self.connection.execute("BEGIN IMMEDIATE")
         try:
             row = self.connection.execute(
@@ -2671,8 +2750,9 @@ class ControlStore:
                 SELECT state FROM evidence_tasks
                 WHERE hostname = ? AND year_from = ? AND year_to = ?
                   AND provider = ? AND policy_version = ? AND lease_owner = ?
+                  AND lease_until IS NOT NULL AND lease_until > ?
                 """,
-                (*self._values(key), owner),
+                (*self._values(key), owner, now),
             ).fetchone()
             if row is None:
                 raise KeyError("range task not found or not owned by caller")
@@ -2682,8 +2762,9 @@ class ControlStore:
                 SET state = ?, retry_at = NULL, lease_owner = NULL, lease_until = NULL
                 WHERE hostname = ? AND year_from = ? AND year_to = ?
                   AND provider = ? AND policy_version = ? AND lease_owner = ?
+                  AND lease_until IS NOT NULL AND lease_until > ?
                 """,
-                (value, *self._values(key), owner),
+                (value, *self._values(key), owner, now),
             )
             cursor = self.connection.executemany(
                 """
@@ -2740,6 +2821,28 @@ class ControlStore:
         keyed_results = [result for result in results if result.key is not None]
         if not keyed_results:
             return 0
+        if retry_at is not None and (
+            isinstance(retry_at, bool)
+            or not isinstance(retry_at, (int, float))
+            or not math.isfinite(float(retry_at))
+            or retry_at < 0
+        ):
+            raise ValueError("evidence retry_at must be finite and non-negative")
+        finish_now: float | None = None
+        if owner is not None:
+            if not isinstance(owner, str) or not owner.strip():
+                raise ValueError("owner must be a non-empty string")
+            now_raw = self.clock()
+            if (
+                isinstance(now_raw, bool)
+                or not isinstance(now_raw, (int, float))
+                or not math.isfinite(float(now_raw))
+                or now_raw < 0
+            ):
+                raise ValueError(
+                    "evidence finish clock must be finite and non-negative"
+                )
+            finish_now = float(now_raw)
         updates: list[tuple[str, None, object, ...]] = []
         seen: set[EvidenceQueryKey] = set()
         for result in keyed_results:
@@ -2758,8 +2861,15 @@ class ControlStore:
             for result in keyed_results:
                 key = result.key
                 assert key is not None
-                ownership = " AND lease_owner = ?" if owner is not None else ""
-                params = (*self._values(key), owner) if owner is not None else self._values(key)
+                ownership = ""
+                params: tuple[object, ...] = self._values(key)
+                if owner is not None:
+                    ownership = (
+                        " AND lease_owner = ? AND lease_until IS NOT NULL "
+                        "AND lease_until > ?"
+                    )
+                    assert finish_now is not None
+                    params = (*self._values(key), owner, finish_now)
                 row = self.connection.execute(
                     """
                     SELECT 1 FROM evidence_tasks
@@ -2770,7 +2880,17 @@ class ControlStore:
                 ).fetchone()
                 if row is None:
                     raise KeyError("evidence task not found or not owned by caller")
-            ownership = " AND lease_owner = ?" if owner is not None else ""
+            ownership = ""
+            update_rows: list[tuple[object, ...]] = list(updates)
+            if owner is not None:
+                ownership = (
+                    " AND lease_owner = ? AND lease_until IS NOT NULL "
+                    "AND lease_until > ?"
+                )
+                assert finish_now is not None
+                update_rows = [
+                    (*update, owner, finish_now) for update in updates
+                ]
             self.connection.executemany(
                 """
                 UPDATE evidence_tasks
@@ -2778,7 +2898,7 @@ class ControlStore:
                 WHERE hostname = ? AND year_from = ? AND year_to = ?
                   AND provider = ? AND policy_version = ?
                 """ + ownership,
-                [(*update, owner) if owner is not None else update for update in updates],
+                update_rows,
             )
             # Legacy runtimes pre-reserved exact-year fanout for range tasks.
             # Host-first execution no longer uses those tokens; clear them on
@@ -2883,7 +3003,15 @@ class ControlStore:
             authority_digest=authority_digest,
             origin_decision=origin_decision,
         )
-        now = float(self.clock())
+        now_raw = self.clock()
+        if (
+            isinstance(now_raw, bool)
+            or not isinstance(now_raw, (int, float))
+            or not math.isfinite(float(now_raw))
+            or now_raw < 0
+        ):
+            raise ValueError("platform harvest clock must be finite and non-negative")
+        now = float(now_raw)
         with self.connection:
             self.connection.execute(
                 """
@@ -2985,16 +3113,33 @@ class ControlStore:
     ) -> list[PlatformYearHarvestTask]:
         """Claim resumable platform work with compare-and-fence ownership."""
 
-        if not owner:
+        if not isinstance(owner, str) or not owner.strip():
             raise ValueError("platform harvest owner is required")
+        if isinstance(limit, bool) or not isinstance(limit, int):
+            raise ValueError("platform harvest claim limit must be an integer")
         if limit < 1:
             return []
         if lease_seconds is None:
             lease_seconds = self.default_lease_seconds
-        if lease_seconds <= 0:
-            raise ValueError("platform harvest lease_seconds must be positive")
+        if not math.isfinite(float(lease_seconds)) or lease_seconds <= 0:
+            raise ValueError(
+                "platform harvest lease_seconds must be finite and positive"
+            )
         provider_values = tuple(dict.fromkeys(providers or ()))
-        now = float(self.clock())
+        if any(
+            not isinstance(provider, str) or not provider.strip()
+            for provider in provider_values
+        ):
+            raise ValueError("platform harvest providers must be non-empty strings")
+        now_raw = self.clock()
+        if (
+            isinstance(now_raw, bool)
+            or not isinstance(now_raw, (int, float))
+            or not math.isfinite(float(now_raw))
+            or now_raw < 0
+        ):
+            raise ValueError("platform harvest clock must be finite and non-negative")
+        now = float(now_raw)
         lease_expires_at = now + float(lease_seconds)
         params: list[object] = [
             PlatformHarvestState.READY.value,
@@ -3069,13 +3214,23 @@ class ControlStore:
         owner: str,
         lease_seconds: float | None = None,
     ) -> float:
-        if not owner:
+        if not isinstance(owner, str) or not owner.strip():
             raise ValueError("platform harvest owner is required")
         if lease_seconds is None:
             lease_seconds = self.default_lease_seconds
-        if lease_seconds <= 0:
-            raise ValueError("platform harvest lease_seconds must be positive")
-        now = float(self.clock())
+        if not math.isfinite(float(lease_seconds)) or lease_seconds <= 0:
+            raise ValueError(
+                "platform harvest lease_seconds must be finite and positive"
+            )
+        now_raw = self.clock()
+        if (
+            isinstance(now_raw, bool)
+            or not isinstance(now_raw, (int, float))
+            or not math.isfinite(float(now_raw))
+            or now_raw < 0
+        ):
+            raise ValueError("platform harvest clock must be finite and non-negative")
+        now = float(now_raw)
         lease_expires_at = now + float(lease_seconds)
         with self.connection:
             cursor = self.connection.execute(
@@ -3110,8 +3265,19 @@ class ControlStore:
     ) -> PlatformYearHarvestTask:
         """Commit one page outcome and continuation under the live owner fence."""
 
-        if not owner:
+        if not isinstance(owner, str) or not owner.strip():
             raise ValueError("platform harvest owner is required")
+        if retry_at is not None and (
+            isinstance(retry_at, bool)
+            or not isinstance(retry_at, (int, float))
+            or not math.isfinite(float(retry_at))
+            or retry_at < 0
+        ):
+            raise ValueError("platform harvest retry_at must be finite and non-negative")
+        if result.state is PlatformHarvestState.RETRYABLE and retry_at is None:
+            raise ValueError("RETRYABLE platform harvest requires retry_at")
+        if result.state is not PlatformHarvestState.RETRYABLE and retry_at is not None:
+            raise ValueError("retry_at is only valid for RETRYABLE platform harvests")
         if result.state not in {
             PlatformHarvestState.PARTIAL,
             PlatformHarvestState.RETRYABLE,
@@ -3119,7 +3285,15 @@ class ControlStore:
             PlatformHarvestState.FAILED_INVALID,
         }:
             raise ValueError("unsupported platform harvest page state")
-        now = float(self.clock())
+        now_raw = self.clock()
+        if (
+            isinstance(now_raw, bool)
+            or not isinstance(now_raw, (int, float))
+            or not math.isfinite(float(now_raw))
+            or now_raw < 0
+        ):
+            raise ValueError("platform harvest clock must be finite and non-negative")
+        now = float(now_raw)
         self.connection.execute("BEGIN IMMEDIATE")
         try:
             row = self.connection.execute(
@@ -3335,6 +3509,13 @@ class ControlStore:
         exposure = self.get_production_exposure(task.exposure_id)
         if exposure is None:
             return False
+        legacy_authority = (authority_digest, authority_digest)
+        if exposure.authority != legacy_authority:
+            if platform_authority_digest(
+                baseline_signature=exposure.baseline_signature,
+                model_signature=exposure.model_signature,
+            ) != authority_digest:
+                return False
         if exposure.state is not ProductionExposureState.FINAL_CLOSED:
             self.record_production_exposure_progress(
                 task.exposure_id,
@@ -3350,7 +3531,7 @@ class ControlStore:
             final_accepted_eed=final_eed,
             accepted_host_years=accepted_host_years,
             evidence_frontier=evidence_frontier,
-            authority=(authority_digest, authority_digest),
+            authority=exposure.authority,
         )
         if not finalized:
             return False
@@ -3376,8 +3557,18 @@ class ControlStore:
     ) -> bool:
         """Persist FINAL reward fields after readiness closes the exposure."""
 
-        if final_eed < 0 or accepted_host_years < 0 or evidence_frontier < 0:
-            raise ValueError("platform final counters must be non-negative")
+        if (
+            isinstance(final_eed, bool)
+            or not isinstance(final_eed, (int, float))
+            or not math.isfinite(float(final_eed))
+            or final_eed < 0
+        ):
+            raise ValueError("platform final EED must be finite and non-negative")
+        for value in (accepted_host_years, evidence_frontier):
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError(
+                    "platform final counts must be non-negative integers"
+                )
         exposure = self.get_production_exposure(exposure_id)
         if exposure is None or exposure.state is not ProductionExposureState.FINAL_CLOSED:
             return False
@@ -3683,13 +3874,35 @@ class ControlStore:
         return changed == 1
 
     def save_lease(self, lease: Any) -> None:
-        from creeper.scheduler.leases import LeaseState
+        from creeper.scheduler.leases import LeaseState, WorkLease
 
-        state = self._value(self._field(lease, "state"), "created")
+        raw_state = self._value(
+            self._field(lease, "state", LeaseState.CREATED),
+            LeaseState.CREATED.value,
+        )
+        validated = WorkLease(
+            lease_id=self._field(lease, "lease_id"),
+            reservoir_id=self._field(lease, "reservoir_id"),
+            cursor_start=self._field(lease, "cursor_start"),
+            cursor_end=self._field(lease, "cursor_end"),
+            max_records=self._field(lease, "max_records"),
+            max_requests=self._field(lease, "max_requests"),
+            max_bytes=self._field(lease, "max_bytes"),
+            max_seconds=self._field(lease, "max_seconds"),
+            resource_class=self._field(lease, "resource_class", "general"),
+            expected_evidence_tasks=self._field(
+                lease, "expected_evidence_tasks", 0
+            ),
+            expected_novel_eed=self._field(lease, "expected_novel_eed", 0.0),
+            owner=self._field(lease, "owner"),
+            expires_at=self._field(lease, "expires_at"),
+            state=LeaseState(raw_state),
+        )
+        state = validated.state.value
         if state == LeaseState.RUNNING.value:
             row = self.connection.execute(
                 "SELECT state FROM work_leases WHERE lease_id = ?",
-                (self._field(lease, "lease_id"),),
+                (validated.lease_id,),
             ).fetchone()
             if row is None or row["state"] != LeaseState.GRANTED.value:
                 raise ValueError("a lease must be persisted as GRANTED before RUNNING")
@@ -3712,14 +3925,14 @@ class ControlStore:
                     expires_at=excluded.expires_at, state=excluded.state
                 """,
                 (
-                    self._field(lease, "lease_id"), self._field(lease, "reservoir_id"),
-                    self._field(lease, "cursor_start"), self._field(lease, "cursor_end"),
-                    self._field(lease, "max_records"), self._field(lease, "max_requests"),
-                    self._field(lease, "max_bytes"), self._field(lease, "max_seconds"),
-                    self._value(self._field(lease, "resource_class"), "general"),
-                    self._field(lease, "expected_evidence_tasks", 0),
-                    self._field(lease, "expected_novel_eed", 0.0),
-                    self._field(lease, "owner"), self._field(lease, "expires_at"), state,
+                    validated.lease_id, validated.reservoir_id,
+                    validated.cursor_start, validated.cursor_end,
+                    validated.max_records, validated.max_requests,
+                    validated.max_bytes, validated.max_seconds,
+                    validated.resource_class,
+                    validated.expected_evidence_tasks,
+                    validated.expected_novel_eed,
+                    validated.owner, validated.expires_at, state,
                 ),
             )
 
@@ -3737,10 +3950,28 @@ class ControlStore:
         expected_novel_eed: float,
         now: float,
         lease_ttl_seconds: float | None = None,
+        initial_cursor: str | None = None,
     ) -> Any | None:
         """Atomically claim a READY reservoir with a new cursor-backed lease."""
         from creeper.scheduler.leases import LeaseState, WorkLease
         from creeper.sources.reservoirs import ReservoirState
+
+        if (
+            isinstance(now, bool)
+            or not isinstance(now, (int, float))
+            or not math.isfinite(float(now))
+            or now < 0
+        ):
+            raise ValueError("lease grant time must be finite and non-negative")
+        if lease_ttl_seconds is not None and (
+            isinstance(lease_ttl_seconds, bool)
+            or not isinstance(lease_ttl_seconds, (int, float))
+            or not math.isfinite(float(lease_ttl_seconds))
+            or lease_ttl_seconds <= 0
+        ):
+            raise ValueError("lease_ttl_seconds must be finite and positive")
+        if initial_cursor is not None and not isinstance(initial_cursor, str):
+            raise ValueError("initial_cursor must be a string when provided")
 
         self.connection.execute("BEGIN IMMEDIATE")
         try:
@@ -3752,9 +3983,29 @@ class ControlStore:
                 self.connection.commit()
                 return None
 
+            durable_cursor = reservoir["cursor"]
+            if durable_cursor is None and initial_cursor is not None:
+                changed_cursor = self.connection.execute(
+                    """
+                    UPDATE reservoirs
+                    SET cursor = ?
+                    WHERE reservoir_id = ? AND state = ? AND cursor IS NULL
+                    """,
+                    (
+                        initial_cursor,
+                        reservoir_id,
+                        ReservoirState.READY.value,
+                    ),
+                ).rowcount
+                if changed_cursor != 1:
+                    raise RuntimeError(
+                        "reservoir cursor changed while initializing first lease"
+                    )
+                durable_cursor = initial_cursor
+
             lease = WorkLease.create(
                 reservoir_id=reservoir_id,
-                cursor_start=reservoir["cursor"],
+                cursor_start=durable_cursor,
                 max_records=max_records,
                 max_requests=max_requests,
                 max_bytes=max_bytes,
@@ -3830,13 +4081,21 @@ class ControlStore:
         """
         from creeper.scheduler.leases import LeaseState
 
-        if ttl_seconds <= 0:
-            raise ValueError("ttl_seconds must be positive")
+        if not math.isfinite(float(ttl_seconds)) or ttl_seconds <= 0:
+            raise ValueError("ttl_seconds must be finite and positive")
         lease_id = self._field(lease, "lease_id")
         owner = self._field(lease, "owner")
         if not lease_id or not owner:
             raise ValueError("an owned lease is required")
-        current = float(self.clock()) if now is None else float(now)
+        current_raw = self.clock() if now is None else now
+        if (
+            isinstance(current_raw, bool)
+            or not isinstance(current_raw, (int, float))
+            or not math.isfinite(float(current_raw))
+            or current_raw < 0
+        ):
+            raise ValueError("lease renewal time must be finite and non-negative")
+        current = float(current_raw)
         new_expiry = current + float(ttl_seconds)
         self.connection.execute("BEGIN IMMEDIATE")
         try:
@@ -4016,8 +4275,15 @@ class ControlStore:
         from creeper.scheduler.leases import LeaseState
         from creeper.sources.reservoirs import ReservoirState
 
-        if now is None:
-            now = float(self.clock())
+        current_raw = self.clock() if now is None else now
+        if (
+            isinstance(current_raw, bool)
+            or not isinstance(current_raw, (int, float))
+            or not math.isfinite(float(current_raw))
+            or current_raw < 0
+        ):
+            raise ValueError("lease recovery time must be finite and non-negative")
+        now = float(current_raw)
         self.connection.execute("BEGIN IMMEDIATE")
         try:
             rows = self.connection.execute(

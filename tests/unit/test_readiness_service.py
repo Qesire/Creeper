@@ -9,6 +9,7 @@ from pathlib import Path
 from creeper.authority.baseline_index import BaselineIndex
 from creeper.evidence.policies import EvidenceCapsule
 from creeper.readiness_cli import run_service
+from creeper.runtime.readiness import IncrementalReadinessRuntime
 from creeper.storage.evidence_store import EvidenceStore
 from creeper.storage.telemetry_store import RuntimeTelemetryStore
 
@@ -62,6 +63,22 @@ class ReadinessServiceTests(unittest.TestCase):
             "a" * 64,
             "evidence-v1",
         )
+
+    def test_runtime_rejects_fractional_or_boolean_batch_size(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            baseline = self._build_baseline(root)
+            model = self._model(root)
+            for value in (1.5, True):
+                with self.subTest(batch_size=value):
+                    with self.assertRaisesRegex(ValueError, "positive integer"):
+                        IncrementalReadinessRuntime(
+                            root / "runtime",
+                            baseline_index=baseline,
+                            eed_model=model,
+                            baseline_eed="20",
+                            batch_size=value,
+                        )
 
     def test_once_publishes_readiness_and_gate_markers(self):
         with tempfile.TemporaryDirectory() as tmp:

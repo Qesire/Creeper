@@ -638,20 +638,41 @@ class ActivatedSourceRuntime:
                 expected_tasks = 0
                 reservation_tasks = 0
             else:
-                # Host-first admission: one source record can claim one
-                # initial hostname/range task. The provider resolves the year
-                # interval inside that logical task; rare extra disjoint work
-                # is staged behind the same bounded router instead of being
-                # pre-reserved at a 7x worst-case multiplier.
-                capacity_per_record = (
-                    EvidencePlanner.MAX_BACKLOG_CAPACITY_PER_OBSERVATION
+                # Host-first admission must reserve for the adapter's maximum
+                # observation fanout, not merely input rows. Most adapters emit
+                # one hostname per SourceRecord; mailbox rows may contain a
+                # bounded set of URLs and therefore need multiple host slots.
+                host_fanout = getattr(
+                    adapter,
+                    "max_host_observations_per_record",
+                    1,
                 )
+                if (
+                    not isinstance(host_fanout, int)
+                    or isinstance(host_fanout, bool)
+                    or host_fanout < 1
+                ):
+                    raise ValueError(
+                        "adapter max_host_observations_per_record must be a "
+                        "positive integer"
+                    )
+                capacity_per_record = (
+                    host_fanout
+                    * EvidencePlanner.MAX_BACKLOG_CAPACITY_PER_OBSERVATION
+                )
+                if capacity_per_record > self.backlog_capacity:
+                    raise ValueError(
+                        "evidence_backlog_capacity is below the adapter's "
+                        "minimum safe per-record evidence fanout: "
+                        f"capacity={self.backlog_capacity} required="
+                        f"{capacity_per_record} adapter={reservoir.adapter_id}"
+                    )
                 lease_records = min(
                     self.max_records,
                     wayback_headroom // capacity_per_record,
                 )
-                expected_tasks = lease_records
-                reservation_tasks = lease_records * capacity_per_record
+                expected_tasks = lease_records * capacity_per_record
+                reservation_tasks = expected_tasks
                 if lease_records < 1:
                     continue
             expected_eed, production_value_score = self._production_lease_value(

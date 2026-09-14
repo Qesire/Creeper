@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from creeper.runtime.exposure import ProductionExposure, ProductionExposureState
 from creeper.storage.control_store import ControlStore
 
 
@@ -23,6 +24,88 @@ class ProductionExposureTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.store.close()
         self.tmp.cleanup()
+
+    def test_model_and_begin_reject_invalid_identity_clock_and_timeline(self) -> None:
+        with self.assertRaisesRegex(ValueError, "source_records"):
+            ProductionExposure(
+                exposure_id="exp",
+                source_key="source:a",
+                reservoir_id="reservoir:a",
+                lease_id="lease:a",
+                task_id=None,
+                lane="sequential",
+                baseline_signature="baseline:v1",
+                model_signature="model:v1",
+                source_records=1.5,
+                source_requests=0,
+                source_bytes=0,
+                provider_requests=0,
+                provider_bytes=0,
+                source_elapsed_seconds=0.0,
+                provider_elapsed_seconds=0.0,
+                evidence_frontier=0,
+                accepted_host_years=0,
+                final_accepted_eed=0.0,
+                state=ProductionExposureState.RUNNING,
+                terminal_reason=None,
+                created_at=2.0,
+                updated_at=2.0,
+                closed_at=None,
+            )
+        with self.assertRaisesRegex(ValueError, "updated_at"):
+            ProductionExposure(
+                exposure_id="exp",
+                source_key="source:a",
+                reservoir_id="reservoir:a",
+                lease_id="lease:a",
+                task_id=None,
+                lane="sequential",
+                baseline_signature="baseline:v1",
+                model_signature="model:v1",
+                source_records=0,
+                source_requests=0,
+                source_bytes=0,
+                provider_requests=0,
+                provider_bytes=0,
+                source_elapsed_seconds=0.0,
+                provider_elapsed_seconds=0.0,
+                evidence_frontier=0,
+                accepted_host_years=0,
+                final_accepted_eed=0.0,
+                state=ProductionExposureState.RUNNING,
+                terminal_reason=None,
+                created_at=2.0,
+                updated_at=1.0,
+                closed_at=None,
+            )
+
+        self.store.clock = lambda: float("nan")
+        with self.assertRaisesRegex(ValueError, "clock must be finite"):
+            self.store.begin_production_exposure(
+                source_key="source:a",
+                reservoir_id="reservoir:a",
+                lease_id="lease:a",
+                lane="sequential",
+                baseline_signature="baseline:v1",
+                model_signature="model:v1",
+            )
+        self.assertEqual(
+            self.store.connection.execute(
+                "SELECT COUNT(*) FROM production_exposures"
+            ).fetchone()[0],
+            0,
+        )
+
+    def test_begin_rejects_non_string_identity_instead_of_coercing(self) -> None:
+        with self.assertRaisesRegex(ValueError, "lease_id"):
+            self.store.begin_production_exposure(
+                source_key="source:a",
+                reservoir_id="reservoir:a",
+                lease_id=123,
+                lane="sequential",
+                baseline_signature="baseline:v1",
+                model_signature="model:v1",
+            )
 
     def test_same_lane_identity_and_authority_reuses_one_exposure(self) -> None:
         first = self.store.begin_production_exposure(
@@ -87,6 +170,65 @@ class ProductionExposureTests(unittest.TestCase):
         assert current is not None
         self.assertEqual(current.state, VALIDATING)
         self.assertEqual(current.final_accepted_eed, 0.0)
+
+    def test_progress_rejects_fractional_counts_and_nonfinite_elapsed(self) -> None:
+        exposure = self.store.begin_production_exposure(
+            source_key="source:finite",
+            reservoir_id="reservoir:finite",
+            lease_id="lease:finite",
+            lane="sequential",
+            baseline_signature="baseline:v1",
+            model_signature="model:v1",
+        )
+        with self.assertRaisesRegex(ValueError, "count fields"):
+            self.store.record_production_exposure_progress(
+                exposure.exposure_id,
+                state=READ_COMPLETE,
+                source_records=1.5,
+            )
+        with self.assertRaisesRegex(ValueError, "finite and non-negative"):
+            self.store.record_production_exposure_progress(
+                exposure.exposure_id,
+                state=VALIDATING,
+                provider_elapsed_seconds=float("nan"),
+            )
+
+        stored = self.store.get_production_exposure(exposure.exposure_id)
+        self.assertIsNotNone(stored)
+        assert stored is not None
+        self.assertEqual(stored.state, RUNNING)
+        self.assertEqual(stored.source_records, 0)
+        self.assertEqual(stored.provider_elapsed_seconds, 0.0)
+
+    def test_final_publication_rejects_nonfinite_or_fractional_counters(self) -> None:
+        exposure = self.store.begin_production_exposure(
+            source_key="source:finite-final",
+            reservoir_id="reservoir:finite-final",
+            lease_id="lease:finite-final",
+            lane="sequential",
+            baseline_signature="baseline:v1",
+            model_signature="model:v1",
+        )
+        self.store.record_production_exposure_progress(
+            exposure.exposure_id,
+            state=VALIDATING,
+        )
+        with self.assertRaisesRegex(ValueError, "final EED"):
+            self.store.finalize_production_exposure(
+                exposure.exposure_id,
+                final_accepted_eed=float("nan"),
+                accepted_host_years=0,
+                evidence_frontier=0,
+                authority=("baseline:v1", "model:v1"),
+            )
+        with self.assertRaisesRegex(ValueError, "final counts"):
+            self.store.finalize_production_exposure(
+                exposure.exposure_id,
+                final_accepted_eed=0.0,
+                accepted_host_years=1.5,
+                evidence_frontier=0,
+                authority=("baseline:v1", "model:v1"),
+            )
 
     def test_final_publication_is_idempotent_and_authority_matched(self) -> None:
         exposure = self.store.begin_production_exposure(

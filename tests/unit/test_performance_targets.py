@@ -23,6 +23,30 @@ class PerformanceTargetTests(unittest.TestCase):
         self.assertEqual(target.eta_to_five_percent_days, Decimal("6.97741914786"))
         self.assertGreater(target.multiple_of_reference_annual_rate, Decimal("4.6"))
 
+    def test_nonfinite_reference_and_target_are_rejected(self):
+        with self.assertRaisesRegex(ValueError, "finite and positive"):
+            build_performance_model(
+                PerformanceReference(
+                    observation_days=Decimal("NaN"),
+                    annual_raw=Decimal("1"),
+                    annual_eed=Decimal("1"),
+                    candidate_raw=Decimal("1"),
+                    candidate_eed=Decimal("1"),
+                )
+            )
+        reference = PerformanceReference(
+            observation_days=Decimal("1"),
+            annual_raw=Decimal("1"),
+            annual_eed=Decimal("1"),
+            candidate_raw=Decimal("1"),
+            candidate_eed=Decimal("1"),
+        )
+        with self.assertRaisesRegex(ValueError, "target EED/day"):
+            build_performance_model(
+                reference,
+                targets=(Decimal("NaN"),),
+            )
+
     def test_invalid_reference_is_rejected(self):
         with self.assertRaises(ValueError):
             build_performance_model(

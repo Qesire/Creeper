@@ -41,12 +41,31 @@ class ProductionValueModel:
         exploration_floor: float = 0.01,
         scout_proxy_weight: float = 0.25,
     ) -> None:
-        if recent_window < 1:
-            raise ValueError("recent_window must be positive")
-        if not 0 < ewma_alpha <= 1:
-            raise ValueError("ewma_alpha must be within (0, 1]")
-        if min(exploration_weight, exploration_floor, scout_proxy_weight) < 0:
-            raise ValueError("production value weights must be non-negative")
+        if (
+            isinstance(recent_window, bool)
+            or not isinstance(recent_window, int)
+            or recent_window < 1
+        ):
+            raise ValueError("recent_window must be a positive integer")
+        if (
+            isinstance(ewma_alpha, bool)
+            or not isinstance(ewma_alpha, (int, float))
+            or not math.isfinite(float(ewma_alpha))
+            or not 0 < ewma_alpha <= 1
+        ):
+            raise ValueError("ewma_alpha must be finite within (0, 1]")
+        for name, value in (
+            ("exploration_weight", exploration_weight),
+            ("exploration_floor", exploration_floor),
+            ("scout_proxy_weight", scout_proxy_weight),
+        ):
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(float(value))
+                or value < 0
+            ):
+                raise ValueError(f"{name} must be finite and non-negative")
         self.registry = registry
         self.recent_window = int(recent_window)
         self.ewma_alpha = float(ewma_alpha)

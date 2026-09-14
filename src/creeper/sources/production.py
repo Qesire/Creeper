@@ -39,6 +39,9 @@ from creeper.sources.non_snapshot import (
 from creeper.sources.reservoirs import Reservoir
 
 
+_MAILBOX_MAX_URLS_PER_RECORD = 64
+
+
 class ProductionAdapterError(ValueError):
     """Raised when a persisted Reservoir has no safe production adapter."""
 
@@ -131,6 +134,11 @@ class StructuredProductionAdapter:
     reopening at a nonzero gzip cursor may replay decompression once; that is a
     recovery cost rather than a per-lease cost.
     """
+
+    @property
+    def max_host_observations_per_record(self) -> int:
+        """Hard upper bound used by producer backlog admission."""
+        return _MAILBOX_MAX_URLS_PER_RECORD if self.kind == "mbox_urls" else 1
 
     def __init__(
         self,
@@ -451,7 +459,10 @@ class StructuredProductionAdapter:
         contract_direct_year: int | None = None
 
         if self.kind == "mbox_urls":
-            urls = extract_http_urls(payload)
+            urls = extract_http_urls(
+                payload,
+                max_urls=_MAILBOX_MAX_URLS_PER_RECORD,
+            )
             if not urls:
                 return None
             # Privacy boundary: the durable pipeline sees only extracted URLs,

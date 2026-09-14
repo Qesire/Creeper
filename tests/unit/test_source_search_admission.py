@@ -73,6 +73,18 @@ class SearchAdmissionPolicyTests(unittest.TestCase):
             policy.rejection_reason(weak_gateway) or "",
         )
 
+    def test_rejects_agent_direct_prior_for_non_direct_entrypoint(self) -> None:
+        policy = SearchAdmissionPolicy(min_expected_volume=100_000)
+        reason = policy.rejection_reason(
+            self.candidate(
+                canonical_entrypoint="https://archive.example/urls.txt.gz",
+                level=SourceLevel.SOURCE,
+                direct_evidence_prior=1.0,
+            )
+        )
+
+        self.assertIn("not authoritative", reason or "")
+
     def test_direct_evidence_bulk_uses_lower_volume_floor(self) -> None:
         policy = SearchAdmissionPolicy(
             min_expected_volume=100_000,

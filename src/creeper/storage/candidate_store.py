@@ -6,6 +6,7 @@ import sqlite3
 import time
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
+import math
 from pathlib import Path
 from typing import Callable
 
@@ -51,6 +52,23 @@ class CandidateStore:
     transition table preserves audit-visible state changes without retaining
     every raw source record.
     """
+
+    @staticmethod
+    def _validated_time(value: object, *, name: str) -> float:
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(float(value))
+            or value < 0
+        ):
+            raise ValueError(f"{name} must be finite and non-negative")
+        return float(value)
+
+    @staticmethod
+    def _positive_batch(value: object, *, name: str) -> int:
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            raise ValueError(f"{name} must be a positive integer")
+        return value
 
     def __init__(self, path: Path, *, clock: Callable[[], float] = time.time):
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -152,7 +170,10 @@ class CandidateStore:
         observed_at: float | None = None,
         invalid_reason: str = "hostname_normalization_failed",
     ) -> int:
-        now = float(self.clock() if observed_at is None else observed_at)
+        if not isinstance(invalid_reason, str) or not invalid_reason.strip():
+            raise ValueError("invalid_reason must be a non-empty string")
+        raw_now = self.clock() if observed_at is None else observed_at
+        now = self._validated_time(raw_now, name="observed_at")
         normalized_rows: list[tuple[object, ...]] = []
         invalid_rows: list[tuple[object, ...]] = []
         history_rows: list[tuple[object, ...]] = []
@@ -251,11 +272,14 @@ class CandidateStore:
         reason: str,
         observed_at: float | None = None,
     ) -> None:
-        if not source_id.strip():
+        if not isinstance(source_id, str) or not source_id.strip():
             raise ValueError("unparsed candidate provenance requires source_id")
-        if not reason.strip():
+        if not isinstance(source_locator, str):
+            raise ValueError("source_locator must be a string")
+        if not isinstance(reason, str) or not reason.strip():
             raise ValueError("unparsed candidate requires a reason")
-        now = float(self.clock() if observed_at is None else observed_at)
+        raw_now = self.clock() if observed_at is None else observed_at
+        now = self._validated_time(raw_now, name="observed_at")
         with self.connection:
             self.connection.execute(
                 """
@@ -290,8 +314,10 @@ class CandidateStore:
         reason: str,
         chunk_size: int = 500,
     ) -> int:
-        if chunk_size < 1:
-            raise ValueError("chunk_size must be positive")
+        chunk_size = self._positive_batch(chunk_size, name="chunk_size")
+        status = CandidateStatus(status)
+        if not isinstance(reason, str) or not reason.strip():
+            raise ValueError("transition reason must be non-empty")
         values = sorted({
             normalized
             for raw in hostnames
@@ -300,8 +326,8 @@ class CandidateStore:
         if not values:
             return 0
         changed = 0
-        now = float(self.clock())
-        limit = min(int(chunk_size), 900)
+        now = self._validated_time(self.clock(), name="candidate store clock")
+        limit = min(chunk_size, 900)
         for start in range(0, len(values), limit):
             chunk = values[start:start + limit]
             placeholders = ",".join("?" for _ in chunk)
@@ -438,8 +464,9 @@ class CandidateStore:
         status: CandidateStatus | None = None,
         batch_size: int = 2_000,
     ) -> Iterator[CandidateLedgerEntry]:
-        if batch_size < 1:
-            raise ValueError("batch_size must be positive")
+        batch_size = self._positive_batch(batch_size, name="batch_size")
+        if status is not None:
+            status = CandidateStatus(status)
         if status is None:
             cursor = self.connection.execute(
                 """
@@ -459,7 +486,7 @@ class CandidateStore:
                 (status.value,),
             )
         while True:
-            rows = cursor.fetchmany(int(batch_size))
+            rows = cursor.fetchmany(batch_size)
             if not rows:
                 break
             for row in rows:
@@ -490,8 +517,7 @@ class CandidateStore:
         *,
         batch_size: int = 2_000,
     ) -> Iterator[UnparsedCandidateEntry]:
-        if batch_size < 1:
-            raise ValueError("batch_size must be positive")
+        batch_size = self._positive_batch(batch_size, name="batch_size")
         cursor = self.connection.execute(
             """
             SELECT *
@@ -500,7 +526,7 @@ class CandidateStore:
             """
         )
         while True:
-            rows = cursor.fetchmany(int(batch_size))
+            rows = cursor.fetchmany(batch_size)
             if not rows:
                 break
             for row in rows:

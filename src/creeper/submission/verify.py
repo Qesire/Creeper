@@ -110,6 +110,12 @@ def _archive_entry_digest(
     *,
     chunk_size: int = 1024 * 1024,
 ) -> tuple[str, int]:
+    if (
+        isinstance(chunk_size, bool)
+        or not isinstance(chunk_size, int)
+        or chunk_size < 1
+    ):
+        raise ValueError("chunk_size must be a positive integer")
     digest = hashlib.sha256()
     size = 0
     with bundle.open(name, "r") as source:

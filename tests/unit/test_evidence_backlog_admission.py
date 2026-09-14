@@ -57,6 +57,23 @@ class EvidenceBacklogAdmissionTests(unittest.TestCase):
             4,
         )
 
+    def test_nonfinite_reservation_timing_is_rejected_before_persistence(self):
+        with self.assertRaisesRegex(ValueError, "finite and positive"):
+            self.admission.try_reserve(
+                provider="wayback",
+                amount=1,
+                capacity=1,
+                ttl_seconds=float("nan"),
+            )
+        self.assertEqual(self.admission.reserved("wayback"), 0)
+
+        self.now = float("nan")
+        with self.assertRaisesRegex(ValueError, "clock must be finite"):
+            self.admission.available_capacity(
+                provider="wayback",
+                capacity=1,
+            )
+
     def test_concurrent_connections_cannot_oversubscribe_capacity(self):
         second_control = ControlStore(self.path, clock=lambda: self.now)
         second = EvidenceBacklogAdmission(second_control)
@@ -191,6 +208,48 @@ class EvidenceBacklogAdmissionTests(unittest.TestCase):
 
         self.assertIsNotNone(replacement)
         self.assertEqual(self.admission.reserved("wayback"), 2)
+
+    def test_boolean_capacity_and_amount_are_rejected(self):
+        with self.assertRaisesRegex(ValueError, "amount must be"):
+            self.admission.try_reserve(
+                provider="wayback",
+                amount=True,
+                capacity=1,
+                ttl_seconds=10,
+            )
+        with self.assertRaisesRegex(ValueError, "capacity must be"):
+            self.admission.available_capacity(
+                provider="wayback",
+                capacity=True,
+            )
+
+    def test_nonfinite_clock_and_ttl_fail_without_reservation(self):
+        with self.assertRaisesRegex(ValueError, "finite and positive"):
+            self.admission.try_reserve(
+                provider="wayback",
+                amount=1,
+                capacity=1,
+                ttl_seconds=float("nan"),
+            )
+        self.assertEqual(self.admission.reserved("wayback"), 0)
+
+        self.now = float("nan")
+        with self.assertRaisesRegex(ValueError, "clock must be finite"):
+            self.admission.available_capacity(
+                provider="wayback",
+                capacity=1,
+            )
+
+    def test_reservation_model_rejects_nonfinite_expiry(self):
+        from creeper.scheduler.admission import CapacityReservation
+
+        with self.assertRaisesRegex(ValueError, "expiry must be finite"):
+            CapacityReservation(
+                "reservation:test",
+                "wayback",
+                1,
+                float("nan"),
+            )
 
     def test_zero_reservation_accepts_direct_only_lease_but_not_external_work(self):
         reservation = self.admission.try_reserve(

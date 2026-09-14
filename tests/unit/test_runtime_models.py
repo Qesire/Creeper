@@ -2,13 +2,29 @@ import unittest
 from dataclasses import FrozenInstanceError
 
 from creeper.records.candidates import CandidateSourceScope
-from creeper.records.models import HostObservation, SourceRecord
+from creeper.records.models import HostObservation, SourceRecord, SourceStats
 from creeper.scheduler.leases import LeaseState, StateTransitionError
 from creeper.sources.domains import DomainState, SourceDomain
 from creeper.sources.reservoirs import Reservoir, ReservoirEstimate, ReservoirState
 
 
 class RuntimeModelTests(unittest.TestCase):
+    def test_source_domain_rejects_lossy_temporal_scope(self):
+        with self.assertRaisesRegex(ValueError, "integer year pair"):
+            SourceDomain(
+                domain_id="archive",
+                family="NATIONAL_WEB_ARCHIVE",
+                discovery_mechanism="catalog",
+                temporal_scope=(1996.5, 2001),
+            )
+        with self.assertRaisesRegex(ValueError, "discovery_mechanism"):
+            SourceDomain(
+                domain_id="archive",
+                family="NATIONAL_WEB_ARCHIVE",
+                discovery_mechanism="",
+                temporal_scope=(1996, 2001),
+            )
+
     def test_source_domain_is_immutable_and_has_guarded_transitions(self):
         domain = SourceDomain(
             domain_id="archive",
@@ -25,6 +41,36 @@ class RuntimeModelTests(unittest.TestCase):
         self.assertEqual(productive.state, DomainState.PRODUCTIVE)
         with self.assertRaises(StateTransitionError):
             domain.transition(DomainState.PRODUCTIVE)
+
+    def test_reservoir_rejects_lossy_capacities_and_bad_identity(self):
+        with self.assertRaisesRegex(ValueError, "capacity_lower"):
+            ReservoirEstimate(capacity_lower=1.5)
+        with self.assertRaisesRegex(ValueError, "capacity_lower"):
+            ReservoirEstimate(capacity_lower=True)
+        with self.assertRaisesRegex(ValueError, "reservoir_id"):
+            Reservoir(
+                reservoir_id=1,
+                domain_id="archive",
+                adapter_id="demo",
+                root_locator="fixture://demo",
+                enumeration_kind="finite_list",
+                capacity_lower=1,
+            )
+
+    def test_source_record_models_reject_lossy_years_masks_and_stats(self):
+        scope = CandidateSourceScope.LOCAL_DISCOVERY
+        with self.assertRaisesRegex(ValueError, "source_year"):
+            SourceRecord("source", "line:1", "payload", scope, 1998.5)
+        with self.assertRaisesRegex(ValueError, "direct_year_mask"):
+            HostObservation(
+                "example.com",
+                "source",
+                "line:1",
+                scope,
+                direct_year_mask=True,
+            )
+        with self.assertRaisesRegex(ValueError, "elapsed_seconds"):
+            SourceStats("source", 1, 1, 1, float("nan"))
 
     def test_reservoir_estimate_and_running_guard(self):
         estimate = ReservoirEstimate(
