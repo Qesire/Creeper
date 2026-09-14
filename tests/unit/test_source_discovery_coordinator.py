@@ -82,6 +82,32 @@ class SourceDiscoveryCoordinatorTests(unittest.IsolatedAsyncioTestCase):
         values.update(overrides)
         return SourceReservoirManager(self.registry, targets=SourcePoolTargets(**values))
 
+    def test_search_batch_rejects_nonfinite_cost_before_commit(self) -> None:
+        with self.assertRaisesRegex(ValueError, "finite and non-negative"):
+            SearchBatch(
+                backend="test",
+                query="nan cost",
+                actor="agent:test",
+                search_cost_seconds=float("nan"),
+            )
+
+    def test_search_batch_rejects_invalid_hypothesis_before_commit(self) -> None:
+        with self.assertRaisesRegex(ValueError, "hypothesis action"):
+            SearchBatch(
+                backend="test",
+                query="bad hypothesis",
+                actor="agent:test",
+                llm_episode_id="llm:test",
+                llm_task_type="DISCOVER_NEW_SOURCE",
+                hypotheses=(
+                    {
+                        "hypothesis_id": "llm:test:h1",
+                        "action": "",
+                        "confidence": 0.5,
+                    },
+                ),
+            )
+
     def test_search_batch_rejects_llm_lineage_without_episode(self) -> None:
         with self.assertRaisesRegex(ValueError, "require llm_episode_id"):
             SearchBatch(
