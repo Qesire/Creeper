@@ -600,6 +600,11 @@ class SourceReservoirManager:
         # Search capacity is reserved for genuinely new source discovery and
         # structural recovery. Deterministic CDX/CDXJ work advances on the
         # background lane and never reserves an agent-search arm.
+        structural = [
+            spec
+            for spec in specs
+            if spec[0] is SearchDirectiveKind.INTERPRET_STRUCTURE
+        ][:1]
         refill = [
             spec
             for spec in specs
@@ -608,20 +613,18 @@ class SourceReservoirManager:
         optional = [
             spec
             for spec in specs
-            if spec not in refill
+            if spec not in structural and spec not in refill
         ]
         stagnating = self._is_stagnating()
         optional.sort(
             key=lambda spec: (
                 0
-                if spec[4] is SourceIntelligenceTask.INTERPRET_STRUCTURE
-                else 1
                 if (
                     stagnating
                     and spec[4]
                     is SourceIntelligenceTask.RECOVER_STAGNATION
                 )
-                else 2,
+                else 1,
                 -self._llm_task_ucb(spec[4]),
             )
         )
@@ -643,10 +646,11 @@ class SourceReservoirManager:
                 SourceIntelligenceTask,
             ]
         ] = []
-        optional_slots = max(
-            0,
-            capacity - len(selected) - (1 if refill else 0),
-        )
+        if structural and len(selected) < capacity:
+            selected.extend(structural)
+        remaining_after_structural = max(0, capacity - len(selected))
+        reserve_refill = int(bool(refill) and remaining_after_structural > 0)
+        optional_slots = max(0, remaining_after_structural - reserve_refill)
         selected.extend(optional[:optional_slots])
         if refill and len(selected) < capacity:
             selected.extend(refill)
