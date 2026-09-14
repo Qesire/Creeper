@@ -151,6 +151,14 @@ class CommandAgentSearchExecutorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(request["desired_candidates"], 5)
         self.assertEqual(request["target_year_from"], 1996)
         self.assertEqual(request["target_year_to"], 2001)
+        self.assertEqual(
+            request["requirements"]["calibrated_search_profile"]["mode"],
+            "high_density_refill",
+        )
+        self.assertIn(
+            '"2001" web crawl URL corpus dataset',
+            request["requirements"]["calibrated_search_profile"]["query_examples"],
+        )
         self.assertTrue(request["requirements"]["prefer_metasources"])
         self.assertFalse(request["requirements"]["prefer_direct_evidence_bulk"])
         self.assertFalse(
