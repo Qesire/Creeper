@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import fcntl
+import json
 import math
 import os
 import time
@@ -121,16 +122,31 @@ class SearchBatch:
         if not self.backend.strip() or not self.query.strip() or not self.actor.strip():
             raise ValueError("search batch attribution fields are required")
         if self.search_cost_seconds is not None and (
-            not math.isfinite(self.search_cost_seconds)
+            isinstance(self.search_cost_seconds, bool)
+            or not isinstance(self.search_cost_seconds, (int, float))
+            or not math.isfinite(float(self.search_cost_seconds))
             or self.search_cost_seconds < 0
         ):
             raise ValueError(
                 "search_cost_seconds must be finite and non-negative"
             )
-        if self.llm_episode_id is not None and not self.llm_episode_id.strip():
+        if self.llm_episode_id is not None and (
+            not isinstance(self.llm_episode_id, str)
+            or not self.llm_episode_id.strip()
+        ):
             raise ValueError("llm_episode_id must be non-empty when provided")
-        if self.llm_episode_id is not None and not self.llm_task_type:
+        if self.llm_episode_id is not None and (
+            not isinstance(self.llm_task_type, str)
+            or not self.llm_task_type.strip()
+        ):
             raise ValueError("llm_task_type is required for LLM batches")
+        if self.prompt_version is not None and (
+            not isinstance(self.prompt_version, str)
+            or not self.prompt_version.strip()
+        ):
+            raise ValueError("prompt_version must be non-empty when provided")
+        if self.context_hash is not None and not isinstance(self.context_hash, str):
+            raise ValueError("context_hash must be a string when provided")
         if self.llm_episode_id is None and (
             self.hypotheses or self.hypothesis_attribution
         ):
@@ -163,6 +179,17 @@ class SearchBatch:
                 raise ValueError(
                     "search batch hypothesis confidence must be within [0, 1]"
                 )
+            try:
+                json.dumps(
+                    hypothesis,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    allow_nan=False,
+                )
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    "search batch hypothesis must be JSON-serializable"
+                ) from exc
             hypothesis_ids.add(hypothesis_id)
 
         candidate_keys = {candidate.source_key for candidate in self.candidates}
