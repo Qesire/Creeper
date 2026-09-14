@@ -77,15 +77,28 @@ class AsyncEvidenceWorker:
         heartbeat_interval: float | None = None,
         clock: Callable[[], float] = time.time,
     ) -> None:
-        if not owner:
+        if not isinstance(owner, str) or not owner.strip():
             raise ValueError("owner is required")
-        if claim_batch_size < 1:
-            raise ValueError("claim_batch_size must be positive")
-        if lease_seconds <= 0:
-            raise ValueError("lease_seconds must be positive")
         if (
-            not math.isfinite(retry_base_seconds)
-            or not math.isfinite(retry_max_seconds)
+            isinstance(claim_batch_size, bool)
+            or not isinstance(claim_batch_size, int)
+            or claim_batch_size < 1
+        ):
+            raise ValueError("claim_batch_size must be a positive integer")
+        if (
+            isinstance(lease_seconds, bool)
+            or not isinstance(lease_seconds, (int, float))
+            or not math.isfinite(float(lease_seconds))
+            or lease_seconds <= 0
+        ):
+            raise ValueError("lease_seconds must be finite and positive")
+        if (
+            isinstance(retry_base_seconds, bool)
+            or not isinstance(retry_base_seconds, (int, float))
+            or isinstance(retry_max_seconds, bool)
+            or not isinstance(retry_max_seconds, (int, float))
+            or not math.isfinite(float(retry_base_seconds))
+            or not math.isfinite(float(retry_max_seconds))
             or retry_base_seconds < 0
             or retry_max_seconds < retry_base_seconds
         ):
@@ -94,8 +107,16 @@ class AsyncEvidenceWorker:
             raise ValueError("at least one evidence provider is required")
         if heartbeat_interval is None:
             heartbeat_interval = max(1.0, min(60.0, lease_seconds / 3.0))
-        if heartbeat_interval <= 0 or heartbeat_interval >= lease_seconds:
-            raise ValueError("heartbeat_interval must be positive and below lease_seconds")
+        if (
+            isinstance(heartbeat_interval, bool)
+            or not isinstance(heartbeat_interval, (int, float))
+            or not math.isfinite(float(heartbeat_interval))
+            or heartbeat_interval <= 0
+            or heartbeat_interval >= lease_seconds
+        ):
+            raise ValueError(
+                "heartbeat_interval must be finite, positive and below lease_seconds"
+            )
 
         self.control_store = control_store
         self.evidence_store = evidence_store
@@ -210,7 +231,9 @@ class AsyncEvidenceWorker:
         return claimed
 
     def _retry_at(self, attempt: int) -> float:
-        exponent = max(0, int(attempt) - 1)
+        if isinstance(attempt, bool) or not isinstance(attempt, int) or attempt < 0:
+            raise ValueError("attempt must be a non-negative integer")
+        exponent = max(0, attempt - 1)
         base = self.retry_base_seconds
         maximum = self.retry_max_seconds
         if base <= 0.0 or maximum <= 0.0:
@@ -226,7 +249,15 @@ class AsyncEvidenceWorker:
                 maximum,
                 base * (2.0 ** min(exponent, cap_exponent)),
             )
-        return float(self.clock()) + delay
+        now = self.clock()
+        if (
+            isinstance(now, bool)
+            or not isinstance(now, (int, float))
+            or not math.isfinite(float(now))
+            or now < 0
+        ):
+            raise ValueError("retry clock must be finite and non-negative")
+        return float(now) + delay
 
     @staticmethod
     def _transient_for(
