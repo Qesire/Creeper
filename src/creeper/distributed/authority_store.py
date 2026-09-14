@@ -534,6 +534,74 @@ class DistributedAuthorityStore:
         self.connection.commit()
         return task_id
 
+    def admit_host_resolution_work(
+        self,
+        *,
+        hostname: str,
+        physical_providers: tuple[str, ...],
+        coverage_provider: str,
+        resolver_version: str,
+        year_from: int = 1996,
+        year_to: int = 2001,
+        producer: str = "HistoricalQueryProducer",
+        algorithm_version: str | None = None,
+        required_capabilities: tuple[str, ...] = ("ONLINE_QUERY",),
+        priority: float = 0.0,
+    ) -> tuple[str, ...]:
+        """Admit only uncovered HOST resolution intervals.
+
+        Coverage is keyed by the logical provider-set identity rather than a
+        single physical archive.  Physical providers remain in the work
+        payload so claim-time region qualification can require every provider
+        that the resolver may contact.
+        """
+
+        normalized = normalize_official(hostname)
+        if (
+            normalized is None
+            or not physical_providers
+            or any(not provider.strip() for provider in physical_providers)
+            or not coverage_provider.strip()
+            or not resolver_version.strip()
+            or not producer.strip()
+        ):
+            raise ValueError("invalid host resolution admission")
+        providers = tuple(dict.fromkeys(physical_providers))
+        missing = self.uncovered_resolution_intervals(
+            hostname=normalized,
+            provider=coverage_provider,
+            scope="HOST",
+            resolver_version=resolver_version,
+            year_from=year_from,
+            year_to=year_to,
+        )
+        admitted: list[str] = []
+        version = (
+            resolver_version
+            if algorithm_version is None
+            else str(algorithm_version)
+        )
+        for missing_from, missing_to in missing:
+            work = WorkDefinition(
+                producer=producer,
+                task_class=TaskClass.HOST_BATCH,
+                input_identity=normalized,
+                coverage={
+                    "scope": "HOST",
+                    "year_from": missing_from,
+                    "year_to": missing_to,
+                    "providers": list(providers),
+                    "coverage_provider": coverage_provider,
+                    "resolver_version": resolver_version,
+                },
+                partition=f"{missing_from}-{missing_to}",
+                algorithm_version=version,
+                required_capabilities=required_capabilities,
+                priority=float(priority),
+            )
+            admitted.append(self.admit_work(work))
+        return tuple(admitted)
+
     def claim_work(
         self,
         worker_id: str,
