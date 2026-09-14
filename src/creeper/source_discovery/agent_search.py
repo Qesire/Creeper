@@ -206,22 +206,46 @@ class CommandAgentSearchExecutor:
                 ),
                 "prefer_catalogs_that_enumerate_direct_evidence_bulk": False,
                 "resource_priority": [
-                    "new official archive or historical-data metasource",
-                    "new archive collection root with machine-readable inventory",
-                    "new public dataset family overlapping 1996-2001",
-                    "large historical URL/domain source not already enumerated",
+                    "new enumerable root or dataset family overlapping 1996-2001",
+                    "early-web link/URL/domain/seed inventories with year provenance",
+                    "research-repository datasets derived from 1996-2001 web collections",
+                    "national-library or university collection/data manifests",
+                    "historical directories or site lists exposing many external hosts",
                     "CDX/CDXJ only when surfaced incidentally by a new root",
                 ],
                 "search_targets": [
+                    "institutional and research data repositories",
                     "national libraries and web archives",
-                    "university or research web-archive datasets",
+                    "university early-web research datasets",
                     "public archive data-package manifests",
-                    "directory indexes and machine-readable file manifests",
+                    "historical link lists, URL lists, domain lists, and seed inventories",
                 ],
+                "query_construction": {
+                    "must_include_target_period": (
+                        "use 1996-2001, an overlapping subrange, or an explicit "
+                        "target year in every broad web search"
+                    ),
+                    "must_include_source_archetype": (
+                        "combine the year term with one concrete archetype such "
+                        "as link list, URL list, domain list, seed list, dataset, "
+                        "manifest, directory, crawl index, or collection export"
+                    ),
+                    "root_first": (
+                        "find a new dataset/root/family before enumerating files; "
+                        "known CDX/CDXJ shards are background work"
+                    ),
+                    "diversify_origins": (
+                        "prefer distinct institutions/origins over many siblings "
+                        "from one already-known archive"
+                    ),
+                },
                 "avoid_low_yield": [
-                    "ordinary archived pages",
-                    "single-site snapshots",
-                    "undated seed lists without bulk provenance",
+                    "format specifications or software documentation without data",
+                    "generic archive landing pages without enumerable resources",
+                    "ordinary archived pages and single-site snapshots",
+                    "partner-auth-only APIs unless public direct files also exist",
+                    "datasets entirely after 2001",
+                    "already-known origins when a new origin can be tested",
                     "search results that do not expose a finite enumerable resource",
                 ],
                 "exploit_subject_origin": (
