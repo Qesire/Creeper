@@ -77,30 +77,50 @@ class CuratedSourceSeedTests(unittest.TestCase):
     def test_direct_record_seed_is_live_ftp_sitelist_artifact(self):
         roots = curated_direct_record_sources()
 
-        self.assertEqual(len(roots), 1)
-        root = roots[0]
-        self.assertEqual(root.source_family, "HISTORICAL_FTP_SITELIST")
+        self.assertEqual(len(roots), 2)
         self.assertEqual(
-            root.canonical_entrypoint,
-            (
-                "https://ftpmirror1.infania.net/pub/simtelnet/msdos/info/"
-                "ftp-list.zip"
-            ),
+            {root.source_family for root in roots},
+            {"HISTORICAL_FTP_SITELIST"},
         )
-        self.assertEqual((root.expected_year_from, root.expected_year_to), (1996, 1997))
-        self.assertEqual(root.direct_evidence_prior, 1.0)
-        self.assertEqual(root.enumerability_prior, 1.0)
+        self.assertEqual(
+            {root.canonical_entrypoint for root in roots},
+            {
+                (
+                    "https://ftpmirror1.infania.net/pub/simtelnet/msdos/info/"
+                    "ftp-list.zip"
+                ),
+                (
+                    "https://ftp.zx.net.nz/pub/archive/simtel.net/pub/simtelnet/"
+                    "msdos/info/ftp-list.zip"
+                ),
+            },
+        )
+        self.assertTrue(
+            all(
+                (root.expected_year_from, root.expected_year_to) == (1996, 1997)
+                for root in roots
+            )
+        )
+        self.assertTrue(all(root.direct_evidence_prior == 1.0 for root in roots))
+        self.assertTrue(all(root.enumerability_prior == 1.0 for root in roots))
+        self.assertTrue(
+            any(
+                root.discovery_strategy == "CURATED_DIRECT_RECORD_MIRROR"
+                and root.baseline_overlap_prior >= 0.95
+                for root in roots
+            )
+        )
 
     def test_all_curated_seeds_are_idempotent(self):
         seeds = curated_source_seeds()
-        self.assertEqual(len(seeds), 9)
+        self.assertEqual(len(seeds), 10)
         with tempfile.TemporaryDirectory() as tmp:
             control = ControlStore(Path(tmp) / "control.sqlite3")
             registry = SourceDiscoveryRegistry(control)
             try:
-                self.assertEqual(ensure_curated_source_seeds(registry), 9)
+                self.assertEqual(ensure_curated_source_seeds(registry), 10)
                 self.assertEqual(ensure_curated_source_seeds(registry), 0)
-                self.assertEqual(len(registry.list_candidates()), 9)
+                self.assertEqual(len(registry.list_candidates()), 10)
             finally:
                 control.close()
 
