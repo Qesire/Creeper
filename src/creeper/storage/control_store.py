@@ -2981,7 +2981,15 @@ class ControlStore:
             authority_digest=authority_digest,
             origin_decision=origin_decision,
         )
-        now = float(self.clock())
+        now_raw = self.clock()
+        if (
+            isinstance(now_raw, bool)
+            or not isinstance(now_raw, (int, float))
+            or not math.isfinite(float(now_raw))
+            or now_raw < 0
+        ):
+            raise ValueError("platform harvest clock must be finite and non-negative")
+        now = float(now_raw)
         with self.connection:
             self.connection.execute(
                 """
@@ -3255,7 +3263,15 @@ class ControlStore:
             PlatformHarvestState.FAILED_INVALID,
         }:
             raise ValueError("unsupported platform harvest page state")
-        now = float(self.clock())
+        now_raw = self.clock()
+        if (
+            isinstance(now_raw, bool)
+            or not isinstance(now_raw, (int, float))
+            or not math.isfinite(float(now_raw))
+            or now_raw < 0
+        ):
+            raise ValueError("platform harvest clock must be finite and non-negative")
+        now = float(now_raw)
         self.connection.execute("BEGIN IMMEDIATE")
         try:
             row = self.connection.execute(
