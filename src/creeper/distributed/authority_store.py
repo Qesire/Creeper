@@ -174,9 +174,12 @@ class DistributedAuthorityStore:
                 discovery_count INTEGER NOT NULL DEFAULT 1
                     CHECK(discovery_count >= 1),
                 state TEXT NOT NULL DEFAULT 'DISCOVERED',
+                admitted_task_id TEXT,
+                last_error TEXT,
                 first_seen_at REAL NOT NULL,
                 last_seen_at REAL NOT NULL,
-                FOREIGN KEY(first_task_id) REFERENCES distributed_work(task_id)
+                FOREIGN KEY(first_task_id) REFERENCES distributed_work(task_id),
+                FOREIGN KEY(admitted_task_id) REFERENCES distributed_work(task_id)
             ) WITHOUT ROWID;
             CREATE INDEX IF NOT EXISTS idx_distributed_source_candidates_state
                 ON distributed_source_candidates(state, candidate_type);
@@ -303,6 +306,26 @@ class DistributedAuthorityStore:
                 ALTER TABLE distributed_work
                 ADD COLUMN next_sequence_no INTEGER NOT NULL DEFAULT 0
                     CHECK(next_sequence_no >= 0)
+                """
+            )
+        source_candidate_columns = {
+            str(row["name"])
+            for row in self.connection.execute(
+                "PRAGMA table_info(distributed_source_candidates)"
+            )
+        }
+        if "admitted_task_id" not in source_candidate_columns:
+            self.connection.execute(
+                """
+                ALTER TABLE distributed_source_candidates
+                ADD COLUMN admitted_task_id TEXT
+                """
+            )
+        if "last_error" not in source_candidate_columns:
+            self.connection.execute(
+                """
+                ALTER TABLE distributed_source_candidates
+                ADD COLUMN last_error TEXT
                 """
             )
         worker_columns = {
@@ -669,6 +692,96 @@ class DistributedAuthorityStore:
             priority=float(priority),
         )
         return self.admit_work(work)
+
+    def promote_source_candidates(
+        self,
+        *,
+        limit: int = 64,
+        include_source_pages: bool = False,
+    ) -> list[dict[str, str]]:
+        """Deterministically promote safe discovery candidates into work.
+
+        Only CDX/CDXJ artifacts are automatically eligible for direct-year
+        SOURCE_SHARD work. Other artifact families are held for a future
+        reviewed adapter. Generic pages remain DISCOVERED unless recursion is
+        explicitly enabled.
+        """
+
+        if limit < 1:
+            raise ValueError("promotion limit must be positive")
+        rows = self.connection.execute(
+            """
+            SELECT * FROM distributed_source_candidates
+            WHERE state = 'DISCOVERED'
+            ORDER BY
+                CASE candidate_type
+                    WHEN 'bulk_artifact' THEN 0
+                    ELSE 1
+                END,
+                discovery_count DESC,
+                canonical_url
+            LIMIT ?
+            """,
+            (int(limit),),
+        ).fetchall()
+        promoted: list[dict[str, str]] = []
+
+        for row in rows:
+            candidate_id = str(row["candidate_id"])
+            candidate_type = str(row["candidate_type"])
+            parser_kind = str(row["parser_kind"])
+            canonical_url = str(row["canonical_url"])
+            task_id: str | None = None
+            state = "DISCOVERED"
+            error: str | None = None
+            try:
+                if candidate_type == "bulk_artifact":
+                    if parser_kind in {"cdx", "cdxj"}:
+                        task_id = self.admit_bulk_source_work(
+                            source_id=candidate_id,
+                            source_locator=canonical_url,
+                            partition="all",
+                        )
+                        state = "ADMITTED"
+                    else:
+                        state = "HELD_UNSUPPORTED"
+                        error = (
+                            "bulk parser family is not yet authorized for "
+                            "distributed direct-year production"
+                        )
+                elif candidate_type == "source_page" and include_source_pages:
+                    task_id = self.admit_source_page_work(url=canonical_url)
+                    state = "ADMITTED"
+                else:
+                    continue
+            except Exception as exc:
+                state = "ERROR"
+                error = f"{type(exc).__name__}: {exc}"
+
+            self.connection.execute(
+                """
+                UPDATE distributed_source_candidates
+                SET state = ?, admitted_task_id = ?, last_error = ?,
+                    last_seen_at = ?
+                WHERE candidate_id = ?
+                """,
+                (
+                    state,
+                    task_id,
+                    error,
+                    float(self.clock()),
+                    candidate_id,
+                ),
+            )
+            self.connection.commit()
+            promoted.append(
+                {
+                    "candidate_id": candidate_id,
+                    "state": state,
+                    "task_id": "" if task_id is None else task_id,
+                }
+            )
+        return promoted
 
     def source_candidate_count(self) -> int:
         return int(
