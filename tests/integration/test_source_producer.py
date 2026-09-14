@@ -85,13 +85,16 @@ class SourceProducerTests(unittest.TestCase):
         range_first_fraction: float = 0.0,
         source_key: str | None = None,
         source_registry=None,
+        source_year: int | None = 1997,
+        year_hint_mask: int = 0,
     ):
         record = SourceRecord(
             source_id="fixture-source",
             locator="fixture://1",
             payload="novel.example",
             scope=CandidateSourceScope.LOCAL_DISCOVERY,
-            source_year=1997,
+            source_year=source_year,
+            year_hint_mask=year_hint_mask,
         )
         adapter = FakeSource([record])
         domain = SourceDomain(
@@ -1000,6 +1003,32 @@ class SourceProducerTests(unittest.TestCase):
         self.assertIsNotNone(granted)
         self.assertEqual(granted[0].source_key, "idle-background-source")
         self.assertEqual(granted[1].resource_class, "background-bulk")
+
+    def test_one_slot_lease_stages_extra_disjoint_host_scopes(self):
+        hint_mask = (1 << (1996 - 1996)) | (1 << (1998 - 1996))
+        runtime, adapter = self.build_runtime(
+            backlog_capacity=1,
+            expected_tasks=1,
+            reservation_tasks=1,
+            source_year=None,
+            year_hint_mask=hint_mask,
+        )
+
+        report = runtime.run_once()
+
+        self.assertEqual(report.leases_succeeded, 1)
+        self.assertEqual(adapter.executions, 1)
+        self.assertEqual(report.evidence_tasks_enqueued, 1)
+        tasks = self.control.list_evidence_tasks()
+        self.assertEqual(len(tasks), 1)
+        self.assertEqual(
+            (
+                tasks[0].key.temporal_scope.year_from,
+                tasks[0].key.temporal_scope.year_to,
+            ),
+            (1996, 1996),
+        )
+        self.assertEqual(runtime.evidence_router.pending_count(provider="wayback"), 1)
 
     def test_full_backlog_blocks_source_before_adapter_execution(self):
         occupied = EvidenceQueryKey(
