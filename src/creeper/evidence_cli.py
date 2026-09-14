@@ -21,6 +21,7 @@ import signal
 from creeper.evidence.providers.async_cdx import AsyncWaybackCDXClient
 from creeper.evidence.providers.cdx_pool import (
     AsyncCDXProviderPool,
+    CDXServiceConfig,
     DEFAULT_CDX_SERVICE_CONFIGS,
 )
 from creeper.evidence.providers.async_rdap import AsyncRDAPClient
@@ -89,6 +90,29 @@ async def run_service(
                 except (NotImplementedError, RuntimeError):
                     pass
 
+        for bootstrap in DEFAULT_CDX_SERVICE_CONFIGS:
+            control.register_cdx_service(
+                service_name=bootstrap.name,
+                endpoint=bootstrap.endpoint,
+                requests_per_second=bootstrap.requests_per_second,
+                max_inflight=bootstrap.max_inflight,
+                weight=bootstrap.weight,
+                provenance="bootstrap-known-cdx-server",
+                active=True,
+                overwrite=False,
+            )
+        service_configs = tuple(
+            CDXServiceConfig(
+                name=str(row["service_name"]),
+                endpoint=str(row["endpoint"]),
+                requests_per_second=float(row["requests_per_second"]),
+                max_inflight=int(row["max_inflight"]),
+                weight=float(row["weight"]),
+            )
+            for row in control.list_cdx_services(active_only=True)
+        )
+        # Preserve the legacy CLI as an explicit runtime override for the
+        # primary Wayback lane without overwriting the durable registry.
         service_configs = tuple(
             replace(
                 item,
@@ -99,7 +123,7 @@ async def run_service(
             )
             if item.name == "wayback"
             else item
-            for item in DEFAULT_CDX_SERVICE_CONFIGS
+            for item in service_configs
         )
         async with AsyncExitStack() as stack:
             cdx_clients: dict[str, AsyncWaybackCDXClient] = {}
