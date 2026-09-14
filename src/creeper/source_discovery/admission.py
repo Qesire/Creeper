@@ -75,12 +75,18 @@ class SearchAdmissionPolicy:
     def rejection_reason(self, candidate: SourceCandidate) -> str | None:
         if _is_common_crawl_corpus(candidate):
             return "Common Crawl corpus is excluded from the active candidate pool"
+        direct_entrypoint = is_direct_evidence_entrypoint(
+            candidate.canonical_entrypoint
+        )
+        if candidate.direct_evidence_prior > 0.0 and not direct_entrypoint:
+            return (
+                "agent direct_evidence_prior is not authoritative for a "
+                "non-CDX/CDXJ entrypoint"
+            )
         volume = candidate.expected_volume
         if volume is None:
             return "missing role-aware expected_volume estimate"
-        direct_evidence = is_direct_evidence_entrypoint(
-            candidate.canonical_entrypoint
-        )
+        direct_evidence = direct_entrypoint
         gateway = candidate.level in {
             SourceLevel.COLLECTION,
             SourceLevel.METASOURCE,
