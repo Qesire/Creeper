@@ -333,6 +333,53 @@ class DirectEvidenceContractTests(unittest.TestCase):
             MBOX_MESSAGE_DIRECT_CONTRACT.evidence_type,
         )
 
+    def test_mailbox_without_message_date_never_becomes_direct(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "1998-10.mbox"
+            path.write_bytes(
+                (
+                    b"From sender@example.test Fri Oct 16 04:31:23 1998\n"
+                    b"Subject: missing Date header\n"
+                    b"Content-Type: text/plain; charset=utf-8\n\n"
+                    b"http://undated.example/\n"
+                )
+            )
+            reservoir = Reservoir(
+                reservoir_id="reservoir:mbox-undated",
+                domain_id="domain:mbox-undated",
+                adapter_id=bind_contract_to_adapter_id(
+                    "structured:mbox-undated",
+                    MBOX_MESSAGE_DIRECT_CONTRACT,
+                ),
+                root_locator=str(path),
+                enumeration_kind="structured_records",
+                capacity_lower=1,
+                evidence_mode="direct_year",
+                state=ReservoirState.READY,
+            )
+            adapter = ProductionAdapterFactory.open(
+                reservoir,
+                temporal_scope=(1998, 1998),
+            )
+            records, _result = adapter.execute(_lease(reservoir))
+            observation = next(iter(adapter.extract_hosts(next(records))))
+            adapter.close()
+
+        self.assertEqual(observation.hostname, "undated.example")
+        self.assertEqual(observation.direct_year_mask, 0)
+        self.assertEqual(observation.year_hint_mask, 1 << (1998 - 1996))
+
+        plan = EvidencePlanner().plan(
+            observation,
+            official_mask=0,
+            local_mask=0,
+            provider="wayback",
+            policy_version="runtime-policy",
+            allow_direct=True,
+        )
+        self.assertEqual(plan.direct_capsules, ())
+        self.assertNotEqual(plan.external_keys, ())
+
     def test_dmoz_content_dump_is_discovery_only_by_default(self) -> None:
         locator = "https://mirror.example/2001/content.rdf.u8.gz"
         self.assertEqual(parser_kind_from_locator(locator), "dmoz_rdf_urls")
