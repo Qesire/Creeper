@@ -370,6 +370,62 @@ class MeasuredYieldScoutTests(unittest.IsolatedAsyncioTestCase):
         self.assertLessEqual(measurement.bytes_read, budget)
         self.assertGreater(measurement.bytes_read, 2 * 1024 * 1024)
 
+    async def test_ignored_nonzero_ranges_do_not_duplicate_prefix_samples(self) -> None:
+        lines = [
+            f"https://prefix-{index}.example/path\n".encode()
+            for index in range(20)
+        ]
+        body = b"".join(lines)
+        requested_starts: list[int] = []
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            span = request.headers["Range"].removeprefix("bytes=")
+            start_text, end_text = span.split("-", 1)
+            start = int(start_text)
+            requested_starts.append(start)
+            if start == 0:
+                end = min(int(end_text), len(body) - 1)
+                chunk = body[: end + 1]
+                return streamed_response(
+                    206,
+                    chunk,
+                    headers={
+                        "content-type": "text/plain",
+                        "content-range": f"bytes 0-{end}/{len(body)}",
+                        "content-length": str(len(chunk)),
+                    },
+                )
+            # Simulate an origin/CDN that ignores later Range requests and
+            # sends the object from byte zero with HTTP 200.
+            return streamed_response(
+                200,
+                body,
+                headers={
+                    "content-type": "text/plain",
+                    "content-length": str(len(body)),
+                },
+            )
+
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler)
+        ) as client:
+            scout = MeasuredYieldScoutExecutor(
+                client,
+                self.baseline,
+                {"example": Decimal("1")},
+                policy=self.policy(max_download_bytes=240, sample_windows=3),
+            )
+            download = await scout._download_sample(
+                "https://data.example/ignored-range.urls",
+                max_download_bytes=240,
+                sample_windows=3,
+            )
+
+        self.assertEqual(len(requested_starts), 3)
+        self.assertEqual(download.requests, 3)
+        self.assertEqual(download.bytes_read, 240)
+        self.assertEqual(download.payload.count(lines[1]), 1)
+
     async def test_large_cdxj_stratifies_fixed_byte_budget_across_file(self) -> None:
         lines = []
         for index in range(24):
