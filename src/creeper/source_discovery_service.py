@@ -68,7 +68,7 @@ from creeper.runtime.http import configured_http_proxy
 class CoordinatorConfig:
     triage_parallelism: int = 4
     scout_parallelism: int = 4
-    search_parallelism: int = 3
+    search_parallelism: int = 2
     failure_retry_seconds: float = 30.0
     search_cooldown_seconds: float = 30.0
     search_ucb_exploration: float = 0.35
