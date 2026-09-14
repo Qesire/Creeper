@@ -295,6 +295,34 @@ class CoordinatorClient:
             raise CoordinatorError("invalid HY full response")
         return [dict(item) for item in raw if isinstance(item, Mapping)]
 
+    async def provider_observation(
+        self,
+        lease: TaskLease,
+        *,
+        provider: str,
+        connect_success: bool,
+        status_code: int | None,
+        latency_ms: float,
+        response_bytes: int,
+        timeout: bool = False,
+        policy_block: bool = False,
+    ) -> str:
+        value = await self._post(
+            "/v1/providers/observation",
+            {
+                "provider": provider,
+                "task_id": lease.task_id,
+                "generation": lease.generation,
+                "connect_success": bool(connect_success),
+                "status_code": status_code,
+                "latency_ms": float(latency_ms),
+                "response_bytes": int(response_bytes),
+                "timeout": bool(timeout),
+                "policy_block": bool(policy_block),
+            },
+        )
+        return str(value["state"])
+
     async def provider_permit(
         self,
         lease: TaskLease,
