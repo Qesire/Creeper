@@ -3,6 +3,7 @@ import unittest
 from pathlib import Path
 
 from creeper.evidence_cli import run_service
+from creeper.evidence.worker import AsyncEvidenceWorker
 
 
 class EvidenceServiceCliTests(unittest.IsolatedAsyncioTestCase):
@@ -32,6 +33,14 @@ class EvidenceServiceCliTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(report.terminal, 0)
             self.assertTrue((Path(tmp) / "control.sqlite3").exists())
             self.assertTrue((Path(tmp) / "evidence.sqlite3").exists())
+
+    async def test_retry_deadline_saturates_for_extreme_attempt_count(self):
+        worker = AsyncEvidenceWorker.__new__(AsyncEvidenceWorker)
+        worker.retry_base_seconds = 30.0
+        worker.retry_max_seconds = 3600.0
+        worker.clock = lambda: 100.0
+
+        self.assertEqual(worker._retry_at(1_000_000), 3700.0)
 
     async def test_invalid_idle_backoff_is_rejected_before_worker_loop(self):
         with tempfile.TemporaryDirectory() as tmp:
