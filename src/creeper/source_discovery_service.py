@@ -38,7 +38,7 @@ from creeper.source_discovery.coordinator import (
     CoordinatorBusyError,
     SourceDiscoveryCoordinator,
 )
-from creeper.source_discovery.curated_seeds import ensure_curated_direct_catalogs
+from creeper.source_discovery.curated_seeds import ensure_curated_source_seeds
 from creeper.source_discovery.intelligence import SourceIntelligenceContextBuilder
 from creeper.source_discovery.manager import SourcePoolTargets, SourceReservoirManager
 from creeper.source_discovery.measured_scout import (
@@ -548,9 +548,11 @@ async def _open_runtime(config: SourceDiscoveryServiceConfig):
                     baseline_signature=scout_authority[0],
                     model_signature=scout_authority[1],
                 )
-                # Curated direct-evidence catalogs are only useful when the
-                # deterministic baseline/EED scout authority is configured.
-                ensure_curated_direct_catalogs(registry)
+                # Audited source roots are only activated after deterministic
+                # baseline/EED scouting; bootstrap them once that authority is
+                # configured so agent search does not waste calls rediscovering
+                # known high-density target-period resources.
+                ensure_curated_source_seeds(registry)
                 _requeue_unexpanded_audited_arquivo_catalog(registry)
             saturation = SourceSaturationController(
                 registry,
