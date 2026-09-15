@@ -121,7 +121,10 @@ def canonicalize_result_url(value: str) -> str:
 
 
 def _normalized_doi(value: str) -> str | None:
-    match = _DOI_RE.match(value.strip().rstrip(".,;"))
+    candidate = value.strip().rstrip(".,;")
+    if candidate.lower().startswith("doi:"):
+        candidate = candidate[4:]
+    match = _DOI_RE.match(candidate)
     return None if match is None else match.group(1).lower()
 
 
