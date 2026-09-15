@@ -386,6 +386,54 @@ class ResidualSearchManagerIntegrationTests(unittest.TestCase):
             residual_search_scheduler=self.scheduler,
         )
 
+    def test_search_episode_final_reward_reconciles_idempotently_to_cell(self) -> None:
+        episode = self.registry.begin_search_episode(
+            strategy="RESIDUAL_CELL:proxy_access",
+            backend="fixture",
+            query="fixture query",
+            actor="deterministic:test",
+        )
+        self.ledger.bind_search_episode(self.cell, episode.episode_id)
+        self.ledger.record_episode(
+            self.cell,
+            result_count=10,
+            duplicate_results=2,
+            unique_roots=8,
+            new_families=8,
+            qualified_roots=4,
+            search_cost_seconds=2.0,
+        )
+
+        self.registry.connection.execute(
+            """
+            UPDATE source_search_episodes
+            SET accepted_novel_eed = 12.5
+            WHERE episode_id = ?
+            """,
+            (episode.episode_id,),
+        )
+        updates, delta = self.ledger.reconcile_search_rewards()
+        self.assertEqual(updates, 1)
+        self.assertAlmostEqual(delta, 12.5)
+        self.assertAlmostEqual(self.ledger.stats(self.cell).accepted_novel_eed, 12.5)
+
+        updates, delta = self.ledger.reconcile_search_rewards()
+        self.assertEqual(updates, 0)
+        self.assertAlmostEqual(delta, 0.0)
+
+        self.registry.connection.execute(
+            """
+            UPDATE source_search_episodes
+            SET accepted_novel_eed = 5.0
+            WHERE episode_id = ?
+            """,
+            (episode.episode_id,),
+        )
+        updates, delta = self.ledger.reconcile_search_rewards()
+        self.assertEqual(updates, 1)
+        self.assertAlmostEqual(delta, -7.5)
+        self.assertAlmostEqual(self.ledger.stats(self.cell).accepted_novel_eed, 5.0)
+
     def test_deterministic_cell_refill_suppresses_broad_llm_search(self) -> None:
         plan = self.manager().plan()
 
