@@ -7,7 +7,6 @@ import math
 import re
 import time
 from dataclasses import dataclass
-from pathlib import PurePosixPath
 from typing import Protocol
 from urllib.parse import urlsplit
 
