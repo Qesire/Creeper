@@ -239,6 +239,8 @@ class CoordinatorCycleReport:
     deterministic_search_plans_planned: int = 0
     deterministic_search_episodes: int = 0
     deterministic_search_failures: int = 0
+    residual_reward_updates: int = 0
+    residual_reward_eed_delta: float = 0.0
     search_zero_new_streak: int = 0
     search_adaptive_cooldown_seconds: float = 0.0
     search_call_budget: int = 0
@@ -820,6 +822,7 @@ class SourceDiscoveryCoordinator:
                 query=batch.query,
                 actor=batch.actor,
             )
+            coverage.bind_search_episode(plan.cell, episode.episode_id)
 
             raw_count = len(batch.results)
             duplicate_results = 0
@@ -920,6 +923,17 @@ class SourceDiscoveryCoordinator:
                     for decision in saturation_decisions
                 )
 
+            residual_reward_updates = 0
+            residual_reward_eed_delta = 0.0
+            if self.manager.residual_search_scheduler is not None:
+                (
+                    residual_reward_updates,
+                    residual_reward_eed_delta,
+                ) = (
+                    self.manager.residual_search_scheduler.ledger
+                    .reconcile_search_rewards()
+                )
+
             plan = self.manager.plan()
             search_directives, search_backoff_skipped = self._eligible_search_directives(
                 plan.search_directives
@@ -947,6 +961,8 @@ class SourceDiscoveryCoordinator:
                 ),
                 "deterministic_search_episodes": 0,
                 "deterministic_search_failures": 0,
+                "residual_reward_updates": residual_reward_updates,
+                "residual_reward_eed_delta": residual_reward_eed_delta,
                 "search_zero_new_streak": plan.search_zero_new_streak,
                 "search_adaptive_cooldown_seconds": (
                     plan.search_adaptive_cooldown_seconds
