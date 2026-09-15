@@ -5,7 +5,8 @@ runtime_data_root = "/path/to/Creeper-data/v4-merged260912-3"
 scrapy_project_dir = "../tools/scrapy_acquisition"
 
 [pool]
-# Reservoir watermarks. Search only runs when usable cold inventory is below cold_min.
+# Reservoir watermarks. Deterministic residual search refills cold inventory.
+# A cold deficit alone never authorizes an LLM source-search call.
 active_min = 2
 active_target = 3
 warm_min = 10
@@ -47,10 +48,9 @@ suppression_ttl_seconds = 21600.0
 triage_parallelism = 8
 scout_parallelism = 4
 search_parallelism = 2
-# Agent cadence is further reduced automatically after zero-new-source episodes.
-# One empty/duplicate episode reduces the next budget to one orthogonal call.
-# Starting with two consecutive empty episodes, global cooldown expands to
-# 2x/4x/8x while per-strategy cooldown still prevents immediate repetition.
+# LLM work is exceptional: unresolved structure or exhausted deterministic
+# residual-search space. Search history still controls cooldown for those rare
+# recovery calls; it is not a generic source-refill policy.
 # Transient executor failures are retried after this process-local backoff.
 failure_retry_seconds = 30.0
 # Completed strategies, including valid empty-result searches, are durably cooled down.
@@ -120,11 +120,11 @@ require_year_bounds = true
 [agent]
 # Parent -> child contract:
 #   <command...> --request REQUEST.json --response RESPONSE.json
-# The Creeper parent process explicitly launches a fresh source-intelligence
-# child agent for DISCOVER_NEW_SOURCE / EXPLOIT_SUCCESS_PATTERN /
-# INTERPRET_STRUCTURE / RECOVER_STAGNATION. The child receives only a bounded
-# state snapshot and has proposal-only authority; SQLite, baseline authority and
-# submission stay hidden.
+# The Creeper parent process launches source-intelligence only for exceptional
+# uncertainty/recovery work, currently INTERPRET_STRUCTURE and
+# RECOVER_STAGNATION. Routine source discovery/refill belongs to deterministic
+# residual providers. The child receives only a bounded state snapshot and has
+# proposal-only authority; SQLite, baseline authority and submission stay hidden.
 #
 # The wrapper supports two interchangeable backends, selected with --backend:
 #   opencode (default): --model ustc-107/deepseek-flash
