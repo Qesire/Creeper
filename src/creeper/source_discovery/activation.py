@@ -40,6 +40,11 @@ from creeper.sources.format_binding import (
     format_from_adapter_id,
 )
 from creeper.sources.locator import format_path_from_locator
+from creeper.sources.schema_binding import (
+    SourceRecordSchema,
+    bind_schema_to_adapter_id,
+    schema_from_adapter_id,
+)
 from creeper.sources.reservoirs import Reservoir, ReservoirState
 from creeper.storage.control_store import ControlStore
 from creeper.source_discovery.registry import SourceDiscoveryRegistry
@@ -166,6 +171,26 @@ class SourceActivationCompiler:
         ):
             trusted_format = format_observation
 
+        schema_observation = self.registry.get_schema_observation(source_key)
+        trusted_schema: SourceRecordSchema | None = None
+        if existing is not None:
+            trusted_schema = schema_from_adapter_id(existing.adapter_id)
+        if (
+            trusted_schema is None
+            and schema_observation is not None
+            and schema_observation.confidence >= 0.90
+        ):
+            trusted_schema = schema_observation
+        if (
+            trusted_schema is not None
+            and trusted_format is not None
+            and trusted_schema.parser_kind != trusted_format.parser_kind
+        ):
+            raise SourceActivationError(
+                "record schema parser_kind disagrees with frozen source format",
+                permanent=True,
+            )
+
         if existing is not None:
             adapter_kind = existing.adapter_id.split(":", 1)[0]
             enumeration_kind = existing.enumeration_kind
@@ -286,35 +311,59 @@ class SourceActivationCompiler:
                             "the frozen source format",
                             permanent=True,
                         )
+                    if (
+                        trusted_schema is not None
+                        and reviewed_binding.contract.hostname_field is not None
+                        and (
+                            reviewed_binding.contract.hostname_field
+                            != trusted_schema.hostname_field
+                            or reviewed_binding.contract.timestamp_field
+                            != trusted_schema.timestamp_field
+                        )
+                    ):
+                        raise SourceActivationError(
+                            "reviewed contract field mapping disagrees with "
+                            "the frozen record schema",
+                            permanent=True,
+                        )
                     contract = reviewed_binding.contract
             else:
                 explicit = self.evidence_contracts.get(
                     stored.canonical_entrypoint
                 )
-                if (
-                    explicit is not None
-                    and explicit.grants_direct_web_year
-                    and actual_parser not in {"cdx", "cdxj"}
-                ):
-                    raise SourceActivationError(
-                        "structured DIRECT_WEB_YEAR authority requires a "
-                        "versioned reviewed contract registry",
-                        permanent=True,
-                    )
                 if explicit is not None:
+                    if (
+                        explicit.grants_direct_web_year
+                        and actual_parser not in {"cdx", "cdxj"}
+                    ):
+                        if trusted_schema is None:
+                            raise SourceActivationError(
+                                "structured DIRECT_WEB_YEAR authority requires "
+                                "a deterministic record schema",
+                                permanent=True,
+                            )
+                        if (
+                            explicit.hostname_field
+                            != trusted_schema.hostname_field
+                            or explicit.timestamp_field
+                            != trusted_schema.timestamp_field
+                        ):
+                            raise SourceActivationError(
+                                "explicit direct contract field mapping "
+                                "disagrees with frozen record schema",
+                                permanent=True,
+                            )
                     contract = resolve_source_evidence_contract(
                         stored.canonical_entrypoint,
                         explicit_contracts=self.evidence_contracts,
                         parser_kind=actual_parser,
                     )
+                elif trusted_schema is not None:
+                    # Stable item-level hostname/timestamp fields are themselves
+                    # sufficient annual evidence semantics. No source-level
+                    # reviewed allowlist is required.
+                    contract = trusted_schema.direct_contract()
                 else:
-                    # Evidence authority follows record semantics, not the URL
-                    # suffix. Strictly recognized CDX/CDXJ records carry an
-                    # exact archived URL plus capture timestamp, so an opaque
-                    # transport endpoint is still direct annual evidence.
-                    # Generic JSONL/tabular/text formats remain discovery-only
-                    # unless their record semantics supply an explicit direct
-                    # contract.
                     contract = resolve_source_evidence_contract(
                         stored.canonical_entrypoint,
                         explicit_contracts=self.evidence_contracts,
@@ -330,6 +379,11 @@ class SourceActivationCompiler:
                 base_adapter_id = bind_format_to_adapter_id(
                     base_adapter_id,
                     trusted_format,
+                )
+            if trusted_schema is not None:
+                base_adapter_id = bind_schema_to_adapter_id(
+                    base_adapter_id,
+                    trusted_schema,
                 )
             adapter_id = bind_contract_to_adapter_id(
                 base_adapter_id,
@@ -424,6 +478,11 @@ class SourceActivationCompiler:
                         ""
                         if trusted_format is None
                         else trusted_format.binding_digest
+                    ),
+                    (
+                        ""
+                        if trusted_schema is None
+                        else trusted_schema.binding_digest
                     ),
                     (
                         ""
