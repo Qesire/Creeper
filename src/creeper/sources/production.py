@@ -229,6 +229,17 @@ class StructuredProductionAdapter:
             if format_binding is None
             else format_binding.compression == "gzip"
         )
+        self.delimiter = (
+            self.schema_binding.delimiter
+            if self.schema_binding is not None
+            and self.schema_binding.delimiter is not None
+            else (
+                format_binding.delimiter
+                if format_binding is not None
+                and format_binding.delimiter is not None
+                else ("\t" if path.endswith((".tsv", ".tsv.gz")) else ",")
+            )
+        )
         self._stream = None
         self._pending_line: tuple[int, bytes] | None = None
         self._streaming_mode = False
@@ -585,15 +596,13 @@ class StructuredProductionAdapter:
                     contract_direct_year = contract_year
 
         elif self.kind == "delimited":
-            path = urlsplit(self.source).path.lower()
-            delimiter = (
-                self.schema_binding.delimiter
-                if self.schema_binding is not None
-                and self.schema_binding.delimiter is not None
-                else ("\t" if path.endswith((".tsv", ".tsv.gz")) else ",")
-            )
             try:
-                row = next(csv.reader(io.StringIO(payload), delimiter=delimiter))
+                row = next(
+                    csv.reader(
+                        io.StringIO(payload),
+                        delimiter=self.delimiter,
+                    )
+                )
             except (StopIteration, csv.Error):
                 return None
             selected: str | None = None
