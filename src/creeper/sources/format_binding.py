@@ -117,7 +117,10 @@ def bind_format_to_adapter_id(
             raise ValueError("adapter_id is already bound to another source format")
         return adapter_id
     head, sep, evidence_tail = adapter_id.partition(_EVIDENCE_MARKER)
-    bound = f"{head}{_FORMAT_MARKER}{observation.binding_token}"
+    before_schema, schema_sep, schema_tail = head.partition(":sch1:")
+    bound = f"{before_schema}{_FORMAT_MARKER}{observation.binding_token}"
+    if schema_sep:
+        bound = f"{bound}:sch1:{schema_tail}"
     return bound if not sep else f"{bound}{_EVIDENCE_MARKER}{evidence_tail}"
 
 
