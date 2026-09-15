@@ -31,6 +31,7 @@ from creeper.source_discovery.models import (
     MeasurementMode,
     ScoutMeasurement,
     SourceCandidate,
+    format_path_from_locator,
 )
 from creeper.sources.archive.cdxj import parse_cdxj_line
 from creeper.sources.archive.cdx import parse_cdx_line
@@ -508,7 +509,7 @@ def _extract_hosts(
             observation_keys=tuple(observations),
         )
 
-    suffix, compressed = _suffix(urlsplit(url).path)
+    suffix, compressed = _suffix(format_path_from_locator(url))
     lower_type = content_type.lower()
     if _is_warc_resource(suffix=suffix, content_type=content_type):
         if compressed or payload.startswith(b"\x1f\x8b"):
@@ -814,7 +815,7 @@ class MeasuredYieldScoutExecutor:
 
     @staticmethod
     def _windowable_line_resource(url: str) -> bool:
-        suffix, compressed = _suffix(urlsplit(url).path)
+        suffix, compressed = _suffix(format_path_from_locator(url))
         if (
             is_mailbox_url_locator(url)
             or is_squid_access_locator(url)
