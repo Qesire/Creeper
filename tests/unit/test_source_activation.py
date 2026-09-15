@@ -33,6 +33,10 @@ from creeper.sources.format_binding import (
     SourceFormatObservation,
     format_from_adapter_id,
 )
+from creeper.sources.schema_binding import (
+    SourceRecordSchema,
+    schema_from_adapter_id,
+)
 from creeper.storage.control_store import ControlStore
 
 
@@ -177,6 +181,70 @@ class SourceActivationCompilerTests(unittest.TestCase):
                 ).fetchone()
                 self.assertIsNotNone(index_row)
                 self.assertEqual(index_row["source_format"], "JSONL")
+            finally:
+                control.close()
+
+    def test_stable_jsonl_record_schema_auto_grants_direct_year(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            control = ControlStore(Path(tmp) / "control.sqlite3")
+            try:
+                candidate = _candidate(
+                    "https://repo.example/api/download?id=dated-jsonl"
+                )
+                registry = self._registry(control, candidate)
+                fmt = SourceFormatObservation(
+                    parser_kind="jsonl",
+                    compression="none",
+                    detection_method="content_signature",
+                    confidence=0.97,
+                    content_type="application/octet-stream",
+                )
+                schema = SourceRecordSchema(
+                    parser_kind="jsonl",
+                    hostname_field="url",
+                    timestamp_field="capture_year",
+                    delimiter=None,
+                    detection_method="stable_json_fields",
+                    confidence=1.0,
+                    sample_records=8,
+                    matched_records=8,
+                )
+                registry.record_format_observation(candidate.source_key, fmt)
+                registry.record_schema_observation(candidate.source_key, schema)
+
+                spec = SourceActivationCompiler(
+                    control,
+                    registry=registry,
+                ).compile(candidate)
+
+                self.assertEqual(spec.adapter_kind, "structured")
+                self.assertEqual(spec.evidence_mode, "direct_year")
+                reservoir = control.get_reservoir(spec.reservoir_id)
+                self.assertIsNotNone(reservoir)
+                assert reservoir is not None
+                self.assertEqual(
+                    format_from_adapter_id(reservoir.adapter_id),
+                    fmt,
+                )
+                self.assertEqual(
+                    schema_from_adapter_id(reservoir.adapter_id),
+                    schema,
+                )
+                contract = contract_from_adapter_id(reservoir.adapter_id)
+                self.assertIsNotNone(contract)
+                assert contract is not None
+                self.assertTrue(contract.grants_direct_web_year)
+                self.assertEqual(contract.hostname_field, "url")
+                self.assertEqual(contract.timestamp_field, "capture_year")
+                row = control.connection.execute(
+                    """
+                    SELECT direct_evidence_authority
+                    FROM source_indexes_v1
+                    WHERE source_key = ?
+                    """,
+                    (candidate.source_key,),
+                ).fetchone()
+                self.assertEqual(row["direct_evidence_authority"], 1)
             finally:
                 control.close()
 
@@ -552,7 +620,7 @@ class SourceActivationCompilerTests(unittest.TestCase):
             finally:
                 control.close()
 
-    def test_raw_direct_contract_cannot_bypass_reviewed_registry(self) -> None:
+    def test_raw_direct_contract_requires_deterministic_record_schema(self) -> None:
         direct = SourceEvidenceContract(
             contract_id="unsafe-jsonl-v1",
             authority=EvidenceAuthority.DIRECT_WEB_YEAR,
@@ -572,7 +640,7 @@ class SourceActivationCompilerTests(unittest.TestCase):
                 registry = self._registry(control, candidate)
                 with self.assertRaisesRegex(
                     SourceActivationError,
-                    "reviewed contract registry",
+                    "deterministic record schema",
                 ):
                     SourceActivationCompiler(
                         control,
