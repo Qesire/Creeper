@@ -1,8 +1,16 @@
 from __future__ import annotations
 
 import sqlite3
+import tempfile
 import unittest
+from pathlib import Path
 
+from creeper.source_discovery.manager import (
+    SearchDirectiveKind,
+    SourcePoolTargets,
+    SourceReservoirManager,
+)
+from creeper.source_discovery.registry import SourceDiscoveryRegistry
 from creeper.source_discovery.residual_search import (
     ResidualSearchLedger,
     ResidualSearchPolicy,
@@ -11,6 +19,7 @@ from creeper.source_discovery.residual_search import (
     SearchCellState,
     default_search_cells,
 )
+from creeper.storage.control_store import ControlStore
 
 
 class ResidualSearchLedgerTests(unittest.TestCase):
@@ -198,6 +207,62 @@ class ResidualSearchLedgerTests(unittest.TestCase):
         self.assertLess(len(cells), 2000)
         self.assertEqual(len({cell.key for cell in cells}), len(cells))
         self.assertTrue(all(cell.period in {"1996", "1997", "1998", "1999", "2000", "2001"} for cell in cells))
+
+
+class ResidualSearchManagerIntegrationTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.control = ControlStore(Path(self.tmp.name) / "control.sqlite3")
+        self.registry = SourceDiscoveryRegistry(self.control)
+        self.ledger = ResidualSearchLedger(self.registry.connection)
+        self.cell = SearchCell(
+            mechanism="proxy_access",
+            institution="university",
+            period="1998",
+            artifact="trace",
+        )
+        self.ledger.ensure_cell(self.cell)
+        self.scheduler = SearchCellScheduler(self.ledger)
+
+    def tearDown(self) -> None:
+        self.control.close()
+        self.tmp.cleanup()
+
+    def manager(self) -> SourceReservoirManager:
+        return SourceReservoirManager(
+            self.registry,
+            targets=SourcePoolTargets(
+                active_min=0,
+                active_target=0,
+                warm_min=0,
+                warm_target=0,
+                cold_min=1,
+                cold_target=1,
+                max_search_directives=1,
+            ),
+            residual_search_scheduler=self.scheduler,
+        )
+
+    def test_deterministic_cell_refill_suppresses_broad_llm_search(self) -> None:
+        plan = self.manager().plan()
+
+        self.assertEqual(len(plan.deterministic_search_plans), 1)
+        self.assertEqual(plan.deterministic_search_plans[0].cell, self.cell)
+        self.assertEqual(plan.search_directives, ())
+        self.assertTrue(plan.needs_search)
+
+    def test_exhausted_cell_requests_mechanism_recovery_not_generic_refill(self) -> None:
+        self.ledger.mark_exhausted(self.cell)
+
+        plan = self.manager().plan()
+
+        self.assertEqual(plan.deterministic_search_plans, ())
+        self.assertEqual(len(plan.search_directives), 1)
+        self.assertEqual(
+            plan.search_directives[0].kind,
+            SearchDirectiveKind.RECOVER_STAGNATION,
+        )
+        self.assertIn("data-generating mechanism", plan.search_directives[0].reason)
 
 
 if __name__ == "__main__":
