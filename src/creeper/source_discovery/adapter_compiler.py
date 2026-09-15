@@ -24,6 +24,9 @@ from typing import Any
 
 from creeper.source_discovery.models import SourceCandidate
 from creeper.sources.format_binding import SourceFormatObservation
+from creeper.sources.locator import format_path_from_locator
+from creeper.sources.schema_binding import SourceRecordSchema
+from creeper.sources.schema_detection import validate_record_schema_proposal
 
 
 class AdapterCompilerProtocolError(RuntimeError):
@@ -192,6 +195,79 @@ def _bounded_sample_text(payload: bytes, *, limit: int) -> tuple[str, bool]:
         except zlib.error:
             raw = b""
     return raw.decode("utf-8", errors="replace"), compressed
+
+
+def validate_adapter_proposal(
+    proposal: AdapterProposal,
+    *,
+    payload: bytes,
+    locator: str,
+    content_type: str,
+    known_format: SourceFormatObservation | None,
+) -> tuple[SourceFormatObservation, SourceRecordSchema | None] | None:
+    """Convert an LLM proposal into locally validated durable facts."""
+
+    if (
+        known_format is not None
+        and known_format.parser_kind != proposal.parser_kind
+    ):
+        return None
+    compression = (
+        known_format.compression
+        if known_format is not None
+        else (
+            "gzip"
+            if payload.startswith(b"\x1f\x8b")
+            or format_path_from_locator(locator).endswith(".gz")
+            else "none"
+        )
+    )
+    if proposal.parser_kind in {"jsonl", "delimited"}:
+        proposed_format = (
+            known_format
+            if known_format is not None
+            else SourceFormatObservation(
+                parser_kind=proposal.parser_kind,
+                compression=compression,
+                detection_method="llm_parser_locally_validated",
+                confidence=0.95,
+                content_type=content_type,
+            )
+        )
+        schema = validate_record_schema_proposal(
+            payload=payload,
+            format_observation=proposed_format,
+            hostname_field=proposal.hostname_field or "",
+            timestamp_field=proposal.timestamp_field or "",
+            delimiter=proposal.delimiter,
+        )
+        if schema is None:
+            return None
+        if known_format is None:
+            proposed_format = SourceFormatObservation(
+                parser_kind=proposal.parser_kind,
+                compression=compression,
+                detection_method="llm_schema_locally_validated",
+                confidence=max(0.95, schema.confidence),
+                content_type=content_type,
+            )
+        return proposed_format, schema
+
+    # Plain line sources never become direct evidence from an LLM proposal.
+    # The caller still has to parse real hostnames from the sample before this
+    # format observation is persisted.
+    return (
+        known_format
+        if known_format is not None
+        else SourceFormatObservation(
+            parser_kind="lines",
+            compression=compression,
+            detection_method="llm_parser_pending_sample_validation",
+            confidence=0.90,
+            content_type=content_type,
+        ),
+        None,
+    )
 
 
 class CommandAdapterCompilerExecutor:
