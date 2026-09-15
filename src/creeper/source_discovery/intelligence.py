@@ -11,6 +11,7 @@ from urllib.parse import urlsplit
 from creeper.source_discovery.manager import SearchDirective
 from creeper.source_discovery.models import SourceState
 from creeper.source_discovery.registry import SourceDiscoveryRegistry
+from creeper.source_discovery.research_memory import source_research_memory
 
 
 @dataclass(frozen=True)
@@ -286,6 +287,7 @@ class SourceIntelligenceContextBuilder:
             "recent_terminal_sources": self._recent_failures(),
             "recent_searches": self._recent_searches(),
             "known_origins": self._known_origins(),
+            "research_memory": list(source_research_memory()),
             "subject_sources": self._subject_sources(directive),
             "constraints": {
                 "target_year_from": 1996,

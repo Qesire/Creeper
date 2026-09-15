@@ -78,10 +78,14 @@ archive. Treat known CDX/CDXJ shards as background data-plane work, not a
 reason for another search. Treat measured zero-yield terminal sources in the
 request context as negative search evidence: do not re-propose the same
 origin/family/archetype unless you can state a materially different residual
-mechanism. Never infer hostname opportunity from page/document/graph-node
-counts alone. Reject anonymized traces whose server names or URLs were
-irreversibly hashed/tokenized: large request counts are worthless when the
-original hostname cannot be recovered.
+mechanism. Treat context.research_memory as durable search evidence:
+REJECT_IDENTITY_LOSS entries are hard negatives for that exact distributed
+dataset; RECOVER_PUBLIC_MIRROR entries are targeted recovery leads, not proof
+that a live source exists; HOLD_PROVENANCE entries require resolving the stated
+uncertainty before proposal. Never infer hostname opportunity from
+page/document/graph-node counts alone. Reject anonymized traces whose server
+names or URLs were irreversibly hashed/tokenized: large request counts are
+worthless when the original hostname cannot be recovered.
 
 Prefer:
 1. non-snapshot contemporaneous URL reservoirs with 1996-2001 overlap

@@ -35,6 +35,22 @@ class SystemPolicyTests(unittest.TestCase):
             "Never infer hostname opportunity from page/document/graph-node",
             subagent._SYSTEM_POLICY,
         )
+        self.assertIn(
+            "context.research_memory",
+            subagent._SYSTEM_POLICY,
+        )
+        self.assertIn(
+            "REJECT_IDENTITY_LOSS",
+            subagent._SYSTEM_POLICY,
+        )
+        self.assertIn(
+            "RECOVER_PUBLIC_MIRROR",
+            subagent._SYSTEM_POLICY,
+        )
+        self.assertIn(
+            "HOLD_PROVENANCE",
+            subagent._SYSTEM_POLICY,
+        )
 
 
 class ExtractFinalTextTests(unittest.TestCase):
