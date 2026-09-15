@@ -10,6 +10,8 @@ from dataclasses import dataclass
 from enum import StrEnum
 from urllib.parse import SplitResult, urlsplit, urlunsplit
 
+from creeper.sources.locator import format_path_from_locator
+
 
 class SourceLevel(StrEnum):
     """Source graph level; larger-scale enumerators are discovered first."""
@@ -101,25 +103,6 @@ def canonicalize_source_entrypoint(value: str) -> str:
 _DIRECT_EVIDENCE_SUFFIXES = (
     ".cdx", ".cdx.gz", ".cdxj", ".cdxj.gz"
 )
-
-
-def format_path_from_locator(value: str) -> str:
-    """Return the path component that carries the remote artifact filename.
-
-    Repository APIs commonly expose binary content through wrapper paths such
-    as .../files/example.csv/content. The transport locator remains unchanged,
-    while parser selection uses example.csv rather than the wrapper segment.
-    This helper is syntax-only and grants no evidence authority.
-    """
-
-    path = urlsplit(value).path.lower()
-    stripped = path.rstrip("/")
-    head, sep, tail = stripped.rpartition("/")
-    if sep and tail in {"content", "download"}:
-        _parent, parent_sep, candidate = head.rpartition("/")
-        if parent_sep and "." in candidate:
-            return head
-    return path
 
 
 def is_direct_evidence_entrypoint(value: str) -> bool:
