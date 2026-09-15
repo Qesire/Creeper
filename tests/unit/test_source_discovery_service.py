@@ -152,7 +152,11 @@ max_returned_candidates = 17
                 """
 [residual_search]
 enabled = true
-providers = ["datacite", "zenodo"]
+providers = ["datacite", "zenodo", "dataverse"]
+dataverse_endpoints = [
+  "https://dataverse.harvard.edu/api/search",
+  "https://borealisdata.ca/api/search",
+]
 results_per_provider = 77
 max_total_results = 155
 min_relevance_score = 0.65
@@ -165,18 +169,43 @@ timeout_seconds = 9.0
         self.assertTrue(config.residual_search.enabled)
         self.assertEqual(
             config.residual_search.providers,
-            ("datacite", "zenodo"),
+            ("datacite", "zenodo", "dataverse"),
+        )
+        self.assertEqual(
+            config.residual_search.dataverse_endpoints,
+            (
+                "https://dataverse.harvard.edu/api/search",
+                "https://borealisdata.ca/api/search",
+            ),
         )
         self.assertEqual(config.residual_search.policy.results_per_provider, 77)
         self.assertEqual(config.residual_search.policy.max_total_results, 155)
         self.assertEqual(config.residual_search.policy.min_relevance_score, 0.65)
 
         text = path.read_text(encoding="utf-8").replace(
-            'providers = ["datacite", "zenodo"]',
+            'providers = ["datacite", "zenodo", "dataverse"]',
             'providers = ["unknown-provider"]',
         )
         path.write_text(text, encoding="utf-8")
         with self.assertRaisesRegex(ValueError, "unsupported residual_search.providers"):
+            load_source_discovery_config(path)
+
+    def test_dataverse_endpoint_list_fails_closed(self) -> None:
+        path = self.write_config()
+        with path.open("a", encoding="utf-8") as stream:
+            stream.write(
+                """
+[residual_search]
+enabled = true
+providers = ["dataverse"]
+dataverse_endpoints = []
+"""
+            )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "dataverse_endpoints",
+        ):
             load_source_discovery_config(path)
 
     def test_follow_query_rejects_string_truthiness(self) -> None:
