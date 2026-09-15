@@ -240,6 +240,16 @@ class ResidualSearchLedger:
                 updated_at REAL NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS residual_search_episode_cells (
+                episode_id TEXT PRIMARY KEY,
+                cell_key TEXT NOT NULL,
+                credited_eed REAL NOT NULL DEFAULT 0,
+                updated_at REAL NOT NULL,
+                FOREIGN KEY (cell_key)
+                    REFERENCES residual_search_cells(cell_key)
+                    ON DELETE CASCADE
+            );
+
             CREATE TABLE IF NOT EXISTS residual_search_cell_families (
                 cell_key TEXT NOT NULL,
                 family_key TEXT NOT NULL,
@@ -312,6 +322,9 @@ class ResidualSearchLedger:
                 )
                 self.connection.execute(
                     "DELETE FROM residual_search_cell_families"
+                )
+                self.connection.execute(
+                    "DELETE FROM residual_search_episode_cells"
                 )
         return previous is not None
 
@@ -395,6 +408,90 @@ class ResidualSearchLedger:
                 )
             )
         return result
+
+    def bind_search_episode(self, cell: SearchCell, episode_id: str) -> None:
+        """Bind one registry search episode to its residual search cell."""
+
+        if not isinstance(episode_id, str) or not episode_id.strip():
+            raise ValueError("episode_id must be non-empty")
+        self.ensure_cell(cell)
+        row = self.connection.execute(
+            "SELECT accepted_novel_eed FROM source_search_episodes WHERE episode_id=?",
+            (episode_id,),
+        ).fetchone()
+        if row is None:
+            raise KeyError(f"unknown search episode: {episode_id}")
+        credited = float(row["accepted_novel_eed"] or 0.0)
+        with self.connection:
+            self.connection.execute(
+                """
+                INSERT INTO residual_search_episode_cells(
+                    episode_id, cell_key, credited_eed, updated_at
+                ) VALUES (?, ?, ?, ?)
+                ON CONFLICT(episode_id) DO UPDATE SET
+                    cell_key=excluded.cell_key,
+                    credited_eed=excluded.credited_eed,
+                    updated_at=excluded.updated_at
+                """,
+                (episode_id, cell.key, credited, float(self.clock())),
+            )
+
+    def reconcile_search_rewards(self) -> tuple[int, float]:
+        """Pull idempotent registry search rewards into SearchCell economics."""
+
+        if not self._table_exists("source_search_episodes"):
+            return 0, 0.0
+        rows = self.connection.execute(
+            """
+            SELECT
+                m.episode_id,
+                m.cell_key,
+                m.credited_eed,
+                e.accepted_novel_eed
+            FROM residual_search_episode_cells AS m
+            JOIN source_search_episodes AS e
+              ON e.episode_id = m.episode_id
+            WHERE ABS(e.accepted_novel_eed - m.credited_eed) > 1e-12
+            """
+        ).fetchall()
+        if not rows:
+            return 0, 0.0
+        now = float(self.clock())
+        total_delta = 0.0
+        with self.connection:
+            for row in rows:
+                current = float(row["accepted_novel_eed"] or 0.0)
+                previous = float(row["credited_eed"] or 0.0)
+                delta = current - previous
+                total_delta += delta
+                self.connection.execute(
+                    """
+                    UPDATE residual_search_cells
+                    SET accepted_novel_eed = MAX(
+                            0,
+                            accepted_novel_eed + ?
+                        ),
+                        updated_at = ?
+                    WHERE cell_key = ?
+                    """,
+                    (delta, now, str(row["cell_key"])),
+                )
+                self.connection.execute(
+                    """
+                    UPDATE residual_search_episode_cells
+                    SET credited_eed = ?, updated_at = ?
+                    WHERE episode_id = ?
+                    """,
+                    (current, now, str(row["episode_id"])),
+                )
+        return len(rows), total_delta
+
+    def _table_exists(self, table: str) -> bool:
+        row = self.connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+            (table,),
+        ).fetchone()
+        return row is not None
 
     def exclusions(self, cell: SearchCell) -> tuple[str, ...]:
         rows = self.connection.execute(
