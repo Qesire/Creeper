@@ -33,6 +33,7 @@ from creeper.sources.archive.cdx import parse_cdx_line
 from creeper.sources.ftp_sitelist import parse_ftp_sitelist_zip
 from creeper.sources.format_binding import format_from_adapter_id
 from creeper.sources.locator import format_path_from_locator
+from creeper.sources.schema_binding import schema_from_adapter_id
 from creeper.sources.sbi_bbs import parse_sbi_bbs_zip
 from creeper.sources.non_snapshot import (
     extract_http_urls,
@@ -154,6 +155,7 @@ class StructuredProductionAdapter:
         self.source_id = reservoir.reservoir_id
         self.source = reservoir.root_locator
         format_binding = format_from_adapter_id(reservoir.adapter_id)
+        self.schema_binding = schema_from_adapter_id(reservoir.adapter_id)
         self.kind = (
             self._kind_from_locator(self.source)
             if format_binding is None
@@ -191,6 +193,26 @@ class StructuredProductionAdapter:
         if self.evidence_contract.parser_kind != self.kind:
             raise ProductionAdapterError(
                 "evidence contract parser_kind does not match structured source"
+            )
+        if (
+            self.schema_binding is not None
+            and self.schema_binding.parser_kind != self.kind
+        ):
+            raise ProductionAdapterError(
+                "record schema parser_kind does not match structured source"
+            )
+        if (
+            self.schema_binding is not None
+            and self.evidence_contract.grants_direct_web_year
+            and (
+                self.evidence_contract.hostname_field
+                != self.schema_binding.hostname_field
+                or self.evidence_contract.timestamp_field
+                != self.schema_binding.timestamp_field
+            )
+        ):
+            raise ProductionAdapterError(
+                "direct evidence contract field mapping disagrees with record schema"
             )
         if reservoir.evidence_mode != self.evidence_contract.evidence_mode:
             raise ProductionAdapterError(
@@ -560,7 +582,12 @@ class StructuredProductionAdapter:
 
         elif self.kind == "delimited":
             path = urlsplit(self.source).path.lower()
-            delimiter = "\t" if path.endswith((".tsv", ".tsv.gz")) else ","
+            delimiter = (
+                self.schema_binding.delimiter
+                if self.schema_binding is not None
+                and self.schema_binding.delimiter is not None
+                else ("\t" if path.endswith((".tsv", ".tsv.gz")) else ",")
+            )
             try:
                 row = next(csv.reader(io.StringIO(payload), delimiter=delimiter))
             except (StopIteration, csv.Error):
