@@ -17,6 +17,7 @@ from creeper.source_discovery.models import (
     SourceLevel,
     is_common_crawl_provenance,
     is_direct_evidence_entrypoint,
+    format_path_from_locator,
 )
 from creeper.source_discovery.residual_search import QueryPlan, SearchCell
 from creeper.source_discovery.search_identity import (
@@ -163,7 +164,7 @@ def relevance_score(cell: SearchCell, result: RawSearchResult) -> float:
     artifact_hit = (
         result.resource_type.lower() in {"dataset", "collection", "software"}
         or any(term in text for term in _ARTIFACT_TERMS)
-        or urlsplit(result.url).path.lower().endswith(_SOURCE_SUFFIXES)
+        or format_path_from_locator(result.url).endswith(_SOURCE_SUFFIXES)
     )
     score = 0.45 * float(mechanism_hit)
     score += 0.35 * float(year_hit)
@@ -196,7 +197,7 @@ def candidate_from_result(
     plan: QueryPlan,
     result: CanonicalSearchResult,
 ) -> SourceCandidate:
-    path = urlsplit(result.canonical_url).path.lower()
+    path = format_path_from_locator(result.canonical_url)
     source_like = path.endswith(_SOURCE_SUFFIXES)
     direct = is_direct_evidence_entrypoint(result.canonical_url)
     years = _period_years(plan.cell.period)
