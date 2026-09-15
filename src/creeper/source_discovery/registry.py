@@ -23,6 +23,7 @@ from creeper.source_discovery.models import (
     is_common_crawl_provenance,
 )
 from creeper.sources.format_binding import SourceFormatObservation
+from creeper.sources.schema_binding import SourceRecordSchema
 from creeper.storage.control_store import ControlStore
 
 
@@ -332,6 +333,21 @@ class SourceDiscoveryRegistry:
                 detection_method TEXT NOT NULL,
                 confidence REAL NOT NULL,
                 content_type TEXT NOT NULL,
+                policy_version TEXT NOT NULL,
+                observed_at REAL NOT NULL,
+                FOREIGN KEY(source_key) REFERENCES source_candidates(source_key)
+            ) WITHOUT ROWID;
+
+            CREATE TABLE IF NOT EXISTS source_record_schemas (
+                source_key TEXT PRIMARY KEY,
+                parser_kind TEXT NOT NULL,
+                hostname_field TEXT NOT NULL,
+                timestamp_field TEXT NOT NULL,
+                delimiter TEXT,
+                detection_method TEXT NOT NULL,
+                confidence REAL NOT NULL,
+                sample_records INTEGER NOT NULL,
+                matched_records INTEGER NOT NULL,
                 policy_version TEXT NOT NULL,
                 observed_at REAL NOT NULL,
                 FOREIGN KEY(source_key) REFERENCES source_candidates(source_key)
@@ -2658,6 +2674,102 @@ class SourceDiscoveryRegistry:
             detection_method=str(row["detection_method"]),
             confidence=float(row["confidence"]),
             content_type=str(row["content_type"] or ""),
+            policy_version=str(row["policy_version"]),
+        )
+
+    def record_schema_observation(
+        self,
+        source_key: str,
+        observation: SourceRecordSchema,
+    ) -> bool:
+        if self.get_candidate(source_key) is None:
+            raise KeyError(f"unknown source: {source_key}")
+        if not isinstance(observation, SourceRecordSchema):
+            raise TypeError("observation must be SourceRecordSchema")
+        current = self.get_schema_observation(source_key)
+        if current is not None:
+            same_schema = (
+                current.parser_kind == observation.parser_kind
+                and current.hostname_field == observation.hostname_field
+                and current.timestamp_field == observation.timestamp_field
+                and current.delimiter == observation.delimiter
+            )
+            if (
+                not same_schema
+                and current.confidence >= 0.95
+                and observation.confidence >= 0.95
+            ):
+                raise ValueError(
+                    "conflicting high-confidence record schema observations"
+                )
+            if observation.confidence < current.confidence:
+                return False
+            if observation == current:
+                return False
+
+        with self.connection:
+            self.connection.execute(
+                """
+                INSERT INTO source_record_schemas(
+                    source_key, parser_kind, hostname_field, timestamp_field,
+                    delimiter, detection_method, confidence,
+                    sample_records, matched_records, policy_version, observed_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(source_key) DO UPDATE SET
+                    parser_kind = excluded.parser_kind,
+                    hostname_field = excluded.hostname_field,
+                    timestamp_field = excluded.timestamp_field,
+                    delimiter = excluded.delimiter,
+                    detection_method = excluded.detection_method,
+                    confidence = excluded.confidence,
+                    sample_records = excluded.sample_records,
+                    matched_records = excluded.matched_records,
+                    policy_version = excluded.policy_version,
+                    observed_at = excluded.observed_at
+                """,
+                (
+                    source_key,
+                    observation.parser_kind,
+                    observation.hostname_field,
+                    observation.timestamp_field,
+                    observation.delimiter,
+                    observation.detection_method,
+                    observation.confidence,
+                    observation.sample_records,
+                    observation.matched_records,
+                    observation.policy_version,
+                    self._now(),
+                ),
+            )
+        return True
+
+    def get_schema_observation(
+        self,
+        source_key: str,
+    ) -> SourceRecordSchema | None:
+        row = self.connection.execute(
+            """
+            SELECT parser_kind, hostname_field, timestamp_field, delimiter,
+                   detection_method, confidence, sample_records,
+                   matched_records, policy_version
+            FROM source_record_schemas
+            WHERE source_key = ?
+            """,
+            (source_key,),
+        ).fetchone()
+        if row is None:
+            return None
+        return SourceRecordSchema(
+            parser_kind=str(row["parser_kind"]),
+            hostname_field=str(row["hostname_field"]),
+            timestamp_field=str(row["timestamp_field"]),
+            delimiter=(
+                None if row["delimiter"] is None else str(row["delimiter"])
+            ),
+            detection_method=str(row["detection_method"]),
+            confidence=float(row["confidence"]),
+            sample_records=int(row["sample_records"]),
+            matched_records=int(row["matched_records"]),
             policy_version=str(row["policy_version"]),
         )
 
