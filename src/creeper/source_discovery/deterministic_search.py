@@ -17,9 +17,9 @@ from creeper.source_discovery.models import (
     SourceLevel,
     is_common_crawl_provenance,
     is_direct_evidence_entrypoint,
-    format_path_from_locator,
 )
 from creeper.source_discovery.residual_search import QueryPlan, SearchCell
+from creeper.sources.locator import format_path_from_locator
 from creeper.source_discovery.search_identity import (
     CanonicalSearchResult,
     RawSearchResult,
