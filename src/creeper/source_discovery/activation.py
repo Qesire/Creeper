@@ -32,9 +32,9 @@ from creeper.source_discovery.index_space import RegionSynopsis, compile_candida
 from creeper.source_discovery.models import (
     SourceCandidate,
     SourceState,
-    format_path_from_locator,
 )
 from creeper.sources.domains import DomainState, SourceDomain
+from creeper.sources.locator import format_path_from_locator
 from creeper.sources.reservoirs import Reservoir, ReservoirState
 from creeper.storage.control_store import ControlStore
 from creeper.source_discovery.registry import SourceDiscoveryRegistry
