@@ -150,7 +150,8 @@ class DeterministicSearchTests(unittest.TestCase):
         self.assertEqual(candidate.expected_year_from, 1998)
         self.assertEqual(candidate.expected_year_to, 1998)
         self.assertEqual(candidate.discovery_strategy, "RESIDUAL_CELL_SEARCH")
-        self.assertEqual(candidate.source_family, "RESIDUAL_PROXY_ACCESS")
+        self.assertTrue(candidate.source_family.startswith("RESIDUAL_PROXY_ACCESS:"))
+        self.assertGreater(len(candidate.source_family), len("RESIDUAL_PROXY_ACCESS:"))
 
 
 if __name__ == "__main__":
