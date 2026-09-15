@@ -334,6 +334,61 @@ class SourceDiscoveryCoordinatorTests(unittest.IsolatedAsyncioTestCase):
             SourceState.WARM,
         )
 
+    async def test_conflicting_format_observation_holds_only_that_source(self) -> None:
+        candidate = self.candidate("opaque-format-conflict")
+        self.to_scout_ready(candidate)
+        first = SourceFormatObservation(
+            parser_kind="jsonl",
+            compression="none",
+            detection_method="content_signature",
+            confidence=0.97,
+        )
+        second = SourceFormatObservation(
+            parser_kind="cdxj",
+            compression="none",
+            detection_method="content_signature",
+            confidence=0.98,
+        )
+        self.registry.record_format_observation(candidate.source_key, first)
+
+        async def triage(_candidate: SourceCandidate) -> TriageResult:
+            raise AssertionError("no triage expected")
+
+        async def scout(_candidate: SourceCandidate) -> ScoutResult:
+            return ScoutResult(
+                ScoutDisposition.WARM,
+                measurement=self.measurement(),
+                format_observation=second,
+            )
+
+        async def search(_directive) -> SearchBatch:
+            raise AssertionError("no search expected")
+
+        coordinator = SourceDiscoveryCoordinator(
+            self.registry,
+            self.manager(),
+            lock_path=self.lock_path,
+            triage_executor=triage,
+            scout_executor=scout,
+            search_executor=search,
+        )
+
+        report = await coordinator.run_once()
+
+        self.assertEqual(report.scout_failures, 1)
+        self.assertEqual(report.scouted_hold, 1)
+        stored = self.registry.get_candidate(candidate.source_key)
+        self.assertIsNotNone(stored)
+        assert stored is not None
+        self.assertEqual(stored.state, SourceState.HOLD)
+        self.assertEqual(
+            self.registry.get_format_observation(candidate.source_key),
+            first,
+        )
+        reason = self.registry.suppression_reason(stored)
+        self.assertIsNotNone(reason)
+        self.assertIn("format observation failed closed", reason)
+
     async def test_deterministic_search_commits_identity_and_coverage_serially(self) -> None:
         cell = SearchCell(
             mechanism="proxy_access",
