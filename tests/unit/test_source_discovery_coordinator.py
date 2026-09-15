@@ -34,6 +34,7 @@ from creeper.source_discovery.search_identity import (
     canonicalize_search_result,
 )
 from creeper.sources.format_binding import SourceFormatObservation
+from creeper.sources.schema_binding import SourceRecordSchema
 from creeper.storage.control_store import ControlStore
 
 
@@ -333,6 +334,111 @@ class SourceDiscoveryCoordinatorTests(unittest.IsolatedAsyncioTestCase):
             self.registry.get_candidate(candidate.source_key).state,
             SourceState.WARM,
         )
+
+    async def test_scout_schema_observation_is_committed_by_coordinator(self) -> None:
+        candidate = self.candidate("opaque-schema")
+        self.to_scout_ready(candidate)
+        schema = SourceRecordSchema(
+            parser_kind="jsonl",
+            hostname_field="url",
+            timestamp_field="capture_year",
+            delimiter=None,
+            detection_method="stable_json_fields",
+            confidence=1.0,
+            sample_records=8,
+            matched_records=8,
+        )
+
+        async def triage(_candidate: SourceCandidate) -> TriageResult:
+            raise AssertionError("no triage expected")
+
+        async def scout(_candidate: SourceCandidate) -> ScoutResult:
+            return ScoutResult(
+                ScoutDisposition.WARM,
+                measurement=self.measurement(),
+                schema_observation=schema,
+            )
+
+        async def search(_directive) -> SearchBatch:
+            raise AssertionError("no search expected")
+
+        coordinator = SourceDiscoveryCoordinator(
+            self.registry,
+            self.manager(),
+            lock_path=self.lock_path,
+            triage_executor=triage,
+            scout_executor=scout,
+            search_executor=search,
+        )
+
+        report = await coordinator.run_once()
+
+        self.assertEqual(report.scouted_warm, 1)
+        self.assertEqual(
+            self.registry.get_schema_observation(candidate.source_key),
+            schema,
+        )
+
+    async def test_conflicting_schema_observation_holds_only_that_source(self) -> None:
+        candidate = self.candidate("opaque-schema-conflict")
+        self.to_scout_ready(candidate)
+        first = SourceRecordSchema(
+            parser_kind="delimited",
+            hostname_field="column:0",
+            timestamp_field="column:1",
+            delimiter=",",
+            detection_method="stable_delimited_columns",
+            confidence=1.0,
+            sample_records=8,
+            matched_records=8,
+        )
+        second = SourceRecordSchema(
+            parser_kind="delimited",
+            hostname_field="column:1",
+            timestamp_field="column:0",
+            delimiter=",",
+            detection_method="stable_delimited_columns",
+            confidence=1.0,
+            sample_records=8,
+            matched_records=8,
+        )
+        self.registry.record_schema_observation(candidate.source_key, first)
+
+        async def triage(_candidate: SourceCandidate) -> TriageResult:
+            raise AssertionError("no triage expected")
+
+        async def scout(_candidate: SourceCandidate) -> ScoutResult:
+            return ScoutResult(
+                ScoutDisposition.WARM,
+                measurement=self.measurement(),
+                schema_observation=second,
+            )
+
+        async def search(_directive) -> SearchBatch:
+            raise AssertionError("no search expected")
+
+        coordinator = SourceDiscoveryCoordinator(
+            self.registry,
+            self.manager(),
+            lock_path=self.lock_path,
+            triage_executor=triage,
+            scout_executor=scout,
+            search_executor=search,
+        )
+
+        report = await coordinator.run_once()
+
+        self.assertEqual(report.scout_failures, 1)
+        self.assertEqual(report.scouted_hold, 1)
+        self.assertEqual(
+            self.registry.get_schema_observation(candidate.source_key),
+            first,
+        )
+        reason = self.registry.suppression_reason(
+            self.registry.get_candidate(candidate.source_key)
+        )
+        self.assertIsNotNone(reason)
+        self.assertIn("schema observation failed closed", reason)
 
     async def test_conflicting_format_observation_holds_only_that_source(self) -> None:
         candidate = self.candidate("opaque-format-conflict")
