@@ -121,6 +121,79 @@ class ResidualSearchLedgerTests(unittest.TestCase):
         self.assertEqual(second.state, SearchCellState.SATURATED)
         self.assertEqual(SearchCellScheduler(self.ledger).next_plans(limit=1), ())
 
+    def test_low_relevance_new_results_saturate_after_enough_evidence(self) -> None:
+        first = self.ledger.record_episode(
+            self.cell,
+            result_count=10,
+            duplicate_results=0,
+            unique_roots=10,
+            new_families=10,
+            qualified_roots=0,
+        )
+        self.assertEqual(first.state, SearchCellState.ACTIVE)
+
+        second = self.ledger.record_episode(
+            self.cell,
+            result_count=10,
+            duplicate_results=0,
+            unique_roots=10,
+            new_families=10,
+            qualified_roots=0,
+        )
+        self.assertEqual(second.state, SearchCellState.SATURATED)
+
+    def test_repeated_empty_queries_saturate_without_waiting_for_result_floor(self) -> None:
+        self.ledger.record_episode(
+            self.cell,
+            result_count=0,
+            duplicate_results=0,
+            unique_roots=0,
+            new_families=0,
+            qualified_roots=0,
+        )
+        stats = self.ledger.record_episode(
+            self.cell,
+            result_count=0,
+            duplicate_results=0,
+            unique_roots=0,
+            new_families=0,
+            qualified_roots=0,
+        )
+        self.assertEqual(stats.state, SearchCellState.SATURATED)
+
+    def test_search_profile_change_reopens_cells_and_resets_local_metrics(self) -> None:
+        self.assertFalse(self.ledger.ensure_search_profile("providers=datacite"))
+        self.ledger.record_episode(
+            self.cell,
+            result_count=10,
+            duplicate_results=9,
+            unique_roots=1,
+            new_families=1,
+            qualified_roots=0,
+            family_keys=("famous source",),
+        )
+        self.ledger.record_episode(
+            self.cell,
+            result_count=10,
+            duplicate_results=9,
+            unique_roots=1,
+            new_families=1,
+            qualified_roots=0,
+            family_keys=("famous source",),
+        )
+        self.assertEqual(self.ledger.stats(self.cell).state, SearchCellState.SATURATED)
+
+        changed = self.ledger.ensure_search_profile(
+            "providers=datacite,oai"
+        )
+
+        self.assertTrue(changed)
+        reset = self.ledger.stats(self.cell)
+        self.assertEqual(reset.state, SearchCellState.OPEN)
+        self.assertEqual(reset.attempts, 0)
+        self.assertEqual(reset.result_count, 0)
+        self.assertEqual(self.ledger.exclusions(self.cell), ())
+
     def test_high_duplicate_but_real_new_family_supply_does_not_saturate(self) -> None:
         self.ledger.record_episode(
             self.cell,
