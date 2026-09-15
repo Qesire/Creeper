@@ -248,10 +248,17 @@ class SourceActivationCompiler:
                 )
             adapter_id = existing.adapter_id
         else:
+            locator_parser = parser_kind_from_locator(
+                stored.canonical_entrypoint
+            )
             actual_parser = (
                 trusted_format.parser_kind
                 if trusted_format is not None
-                else parser_kind_from_locator(stored.canonical_entrypoint)
+                else locator_parser
+            )
+            format_overrides_locator = (
+                trusted_format is not None
+                and actual_parser != locator_parser
             )
             reviewed_binding = self.reviewed_contracts.get_exact(
                 stored.canonical_entrypoint
@@ -292,11 +299,22 @@ class SourceActivationCompiler:
                         "versioned reviewed contract registry",
                         permanent=True,
                     )
-                contract = resolve_source_evidence_contract(
-                    stored.canonical_entrypoint,
-                    explicit_contracts=self.evidence_contracts,
-                    parser_kind=actual_parser,
-                )
+                if explicit is not None:
+                    contract = resolve_source_evidence_contract(
+                        stored.canonical_entrypoint,
+                        explicit_contracts=self.evidence_contracts,
+                        parser_kind=actual_parser,
+                    )
+                elif format_overrides_locator:
+                    # Content sniffing selects an execution parser only. It
+                    # cannot manufacture evidence authority for an opaque URL.
+                    contract = discovery_only_contract(actual_parser)
+                else:
+                    contract = resolve_source_evidence_contract(
+                        stored.canonical_entrypoint,
+                        explicit_contracts=self.evidence_contracts,
+                        parser_kind=actual_parser,
+                    )
 
             if reviewed_binding is not None:
                 base_adapter_id = bind_reviewed_artifact_to_adapter_id(
