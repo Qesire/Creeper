@@ -645,6 +645,14 @@ async def _open_runtime(config: SourceDiscoveryServiceConfig):
             search_identity = None
             if config.residual_search.enabled:
                 residual_ledger = ResidualSearchLedger(registry.connection)
+                profile_signature = (
+                    "residual-search-v2"
+                    f"|providers={','.join(config.residual_search.providers)}"
+                    f"|minrel={config.residual_search.policy.min_relevance_score:g}"
+                    f"|rpp={config.residual_search.policy.results_per_provider}"
+                    f"|max={config.residual_search.policy.max_total_results}"
+                )
+                residual_ledger.ensure_search_profile(profile_signature)
                 residual_ledger.ensure_cells(default_search_cells())
                 residual_scheduler = SearchCellScheduler(residual_ledger)
                 search_identity = SearchIdentityLedger(registry.connection)
