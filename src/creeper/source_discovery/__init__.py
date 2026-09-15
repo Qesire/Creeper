@@ -140,6 +140,10 @@ from creeper.source_discovery.scrapy_sidecar import (
     prepare_append_spool,
     prepare_jobdir_binding,
 )
+from creeper.sources.format_binding import SourceFormatObservation
+from creeper.sources.format_detection import detect_source_format
+from creeper.sources.schema_binding import SourceRecordSchema
+from creeper.sources.schema_detection import detect_record_schema
 from creeper.source_discovery.triage import (
     HttpSourceTriageExecutor,
     HttpTriagePolicy,
@@ -197,6 +201,7 @@ __all__ = [
     "TomographyActionKind",
     "SourceCapabilities",
     "SourceFactorySpec",
+    "SourceFormatObservation",
     "SourceIndexSpec",
     "MeasuredYieldScoutExecutor",
     "MeasuredYieldScoutPolicy",
@@ -230,6 +235,7 @@ __all__ = [
     "SourceDiscoveryRegistry",
     "SourceLevel",
     "SourcePoolTargets",
+    "SourceRecordSchema",
     "SourceReservoirManager",
     "SourceScoutRouter",
     "SourceScoutRouterPolicy",
@@ -247,6 +253,8 @@ __all__ = [
     "child_region",
     "compile_candidate_index_space",
     "default_search_cells",
+    "detect_record_schema",
+    "detect_source_format",
     "region_size_bytes",
     "split_byte_region",
     "expand_scrapy_spool",
