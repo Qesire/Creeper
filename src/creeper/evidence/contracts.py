@@ -21,7 +21,7 @@ from types import MappingProxyType
 from typing import Mapping
 from urllib.parse import urlsplit
 
-from creeper.source_discovery.models import format_path_from_locator
+from creeper.sources.locator import format_path_from_locator
 from creeper.sources.ftp_sitelist import (
     is_audited_ftp_sitelist_locator,
     is_ftp_sitelist_locator,
