@@ -25,6 +25,11 @@ from urllib.parse import urlsplit
 import httpx
 from creeper.authority.baseline_index import BaselineIndex, YEAR_BITS
 from creeper.authority.normalizer import normalize_official
+from creeper.source_discovery.adapter_compiler import (
+    AdapterCompilerExecutor,
+    AdapterCompilerProtocolError,
+    validate_adapter_proposal,
+)
 from creeper.source_discovery.coordinator import ScoutDisposition, ScoutResult
 from creeper.source_discovery.overlap import build_minhash
 from creeper.source_discovery.models import (
@@ -911,12 +916,14 @@ class MeasuredYieldScoutExecutor:
         english_weights: dict[str, Decimal],
         *,
         policy: MeasuredYieldScoutPolicy | None = None,
+        adapter_compiler: AdapterCompilerExecutor | None = None,
         clock=time.perf_counter,
     ) -> None:
         self.client = client
         self.baseline = baseline
         self.english_weights = dict(english_weights)
         self.policy = policy or MeasuredYieldScoutPolicy()
+        self.adapter_compiler = adapter_compiler
         self.clock = clock
 
     @staticmethod
@@ -1211,23 +1218,34 @@ class MeasuredYieldScoutExecutor:
         download: SampleDownload,
         *,
         started: float,
+        format_override: SourceFormatObservation | None = None,
+        schema_override: SourceRecordSchema | None = None,
+        adapter_compile_trace=None,
     ) -> ScoutResult:
         if download.content_type == "__permanent_missing__":
             return ScoutResult(
                 ScoutDisposition.HOLD,
                 reason="bulk source returned HTTP 404/410",
             )
-        format_observation = detect_source_format(
-            locator=candidate.canonical_entrypoint,
-            payload=download.payload,
-            content_type=download.content_type,
+        format_observation = (
+            format_override
+            if format_override is not None
+            else detect_source_format(
+                locator=candidate.canonical_entrypoint,
+                payload=download.payload,
+                content_type=download.content_type,
+            )
         )
         schema_observation = (
-            None
-            if format_observation is None
-            else detect_record_schema(
-                payload=download.payload,
-                format_observation=format_observation,
+            schema_override
+            if schema_override is not None
+            else (
+                None
+                if format_observation is None
+                else detect_record_schema(
+                    payload=download.payload,
+                    format_observation=format_observation,
+                )
             )
         )
         try:
@@ -1239,6 +1257,7 @@ class MeasuredYieldScoutExecutor:
                 truncated=download.truncated,
                 format_observation=format_observation,
                 schema_observation=schema_observation,
+                adapter_compile_trace=adapter_compile_trace,
             )
         except (WarcFormatError, ValueError, csv.Error) as exc:
             detail = str(exc).strip().replace("\n", " ")[:240]
@@ -1267,6 +1286,7 @@ class MeasuredYieldScoutExecutor:
                 ),
                 format_observation=format_observation,
                 schema_observation=schema_observation,
+                adapter_compile_trace=adapter_compile_trace,
             )
         if parsed is None:
             return ScoutResult(
@@ -1277,6 +1297,7 @@ class MeasuredYieldScoutExecutor:
                 ),
                 format_observation=format_observation,
                 schema_observation=schema_observation,
+                adapter_compile_trace=adapter_compile_trace,
             )
         parsed = _apply_source_year_hint(
             parsed,
@@ -1299,6 +1320,7 @@ class MeasuredYieldScoutExecutor:
                 reason="measured sample has too few unique hostnames",
                 format_observation=format_observation,
                 schema_observation=schema_observation,
+                adapter_compile_trace=adapter_compile_trace,
             )
         novel_fraction = novel_count / observed_count
         if (
@@ -1314,6 +1336,7 @@ class MeasuredYieldScoutExecutor:
                 ),
                 format_observation=format_observation,
                 schema_observation=schema_observation,
+                adapter_compile_trace=adapter_compile_trace,
             )
         return ScoutResult(
             ScoutDisposition.WARM,
@@ -1321,7 +1344,106 @@ class MeasuredYieldScoutExecutor:
             reason="bounded deterministic sample met warm-yield thresholds",
             format_observation=format_observation,
             schema_observation=schema_observation,
+            adapter_compile_trace=adapter_compile_trace,
         )
+
+    @staticmethod
+    def _needs_adapter_compile(result: ScoutResult) -> bool:
+        if result.format_observation is None:
+            return True
+        return (
+            result.format_observation.parser_kind in {"jsonl", "delimited"}
+            and result.schema_observation is None
+        )
+
+    async def _compile_adapter_fallback(
+        self,
+        candidate: SourceCandidate,
+        download: SampleDownload,
+        result: ScoutResult,
+        *,
+        started: float,
+    ) -> ScoutResult:
+        if (
+            self.adapter_compiler is None
+            or not self._needs_adapter_compile(result)
+            or not download.payload
+        ):
+            return result
+        try:
+            trace = await self.adapter_compiler(
+                candidate,
+                download.payload,
+                content_type=download.content_type,
+                format_observation=result.format_observation,
+            )
+        except AdapterCompilerProtocolError as exc:
+            return replace(
+                result,
+                reason=(
+                    result.reason
+                    + "; adapter compiler failed closed: "
+                    + str(exc).strip()[:200]
+                ).strip("; "),
+            )
+
+        if trace.proposal is None:
+            return replace(
+                result,
+                adapter_compile_trace=trace,
+                reason=(
+                    result.reason
+                    + "; adapter compiler returned unsupported"
+                ).strip("; "),
+            )
+        validated = validate_adapter_proposal(
+            trace.proposal,
+            payload=download.payload,
+            locator=candidate.canonical_entrypoint,
+            content_type=download.content_type,
+            known_format=result.format_observation,
+        )
+        if validated is None:
+            return replace(
+                result,
+                adapter_compile_trace=replace(
+                    trace,
+                    status="rejected_validation",
+                ),
+                reason=(
+                    result.reason
+                    + "; adapter proposal failed local sample validation"
+                ).strip("; "),
+            )
+        format_observation, schema_observation = validated
+        validated_trace = replace(trace, status="validated")
+        compiled = self._evaluate_download(
+            candidate,
+            download,
+            started=started,
+            format_override=format_observation,
+            schema_override=schema_observation,
+            adapter_compile_trace=validated_trace,
+        )
+        if (
+            trace.proposal.parser_kind == "lines"
+            and (
+                compiled.measurement is None
+                or compiled.measurement.unique_hosts < 3
+            )
+        ):
+            return replace(
+                result,
+                adapter_compile_trace=replace(
+                    trace,
+                    status="rejected_validation",
+                ),
+                reason=(
+                    result.reason
+                    + "; lines proposal did not parse at least three hosts"
+                ).strip("; "),
+            )
+        return compiled
 
     def _early_accept(self, result: ScoutResult) -> bool:
         measurement = result.measurement
@@ -1385,6 +1507,7 @@ class MeasuredYieldScoutExecutor:
             edge_relation=result.edge_relation,
             format_observation=result.format_observation,
             schema_observation=result.schema_observation,
+            adapter_compile_trace=result.adapter_compile_trace,
         )
 
     async def __call__(self, candidate: SourceCandidate) -> ScoutResult:
@@ -1401,9 +1524,15 @@ class MeasuredYieldScoutExecutor:
         )
         if not progressive:
             download = await self._download_sample(url)
-            return self._evaluate_download(
+            result = self._evaluate_download(
                 candidate,
                 download,
+                started=started,
+            )
+            return await self._compile_adapter_fallback(
+                candidate,
+                download,
+                result,
                 started=started,
             )
 
@@ -1421,6 +1550,7 @@ class MeasuredYieldScoutExecutor:
         spent_bytes = 0
         spent_requests = 0
         last_result: ScoutResult | None = None
+        adapter_compile_attempted = False
 
         for index, target in enumerate(stage_targets):
             incremental_budget = target - spent_bytes
@@ -1442,6 +1572,17 @@ class MeasuredYieldScoutExecutor:
                 download,
                 started=started,
             )
+            if (
+                not adapter_compile_attempted
+                and self._needs_adapter_compile(result)
+            ):
+                result = await self._compile_adapter_fallback(
+                    candidate,
+                    download,
+                    result,
+                    started=started,
+                )
+                adapter_compile_attempted = True
             result = self._with_cumulative_cost(
                 result,
                 requests=spent_requests,
@@ -1459,6 +1600,7 @@ class MeasuredYieldScoutExecutor:
                     ),
                     format_observation=result.format_observation,
                     schema_observation=result.schema_observation,
+                    adapter_compile_trace=result.adapter_compile_trace,
                 )
             if self._early_reject(result):
                 return ScoutResult(
@@ -1470,6 +1612,7 @@ class MeasuredYieldScoutExecutor:
                     ),
                     format_observation=result.format_observation,
                     schema_observation=result.schema_observation,
+                    adapter_compile_trace=result.adapter_compile_trace,
                 )
 
         assert last_result is not None
