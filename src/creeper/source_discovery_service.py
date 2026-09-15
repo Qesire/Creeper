@@ -779,6 +779,8 @@ _DISCOVERY_COUNTER_FIELDS = {
     "search_backoff_skipped": "discovery_search_backoff_skipped",
     "search_candidates_registered": "discovery_search_candidates_registered",
     "search_candidates_dropped": "discovery_search_candidates_dropped",
+    "deterministic_search_episodes": "discovery_deterministic_search_episodes",
+    "deterministic_search_failures": "discovery_deterministic_search_failures",
     "triaged_to_scout": "discovery_triaged_to_scout",
     "triaged_hold": "discovery_triaged_hold",
     "triaged_rejected": "discovery_triaged_rejected",
@@ -878,6 +880,36 @@ def _publish_discovery_telemetry(
             ),
         }
     )
+
+    residual_states = _durable_state_counts(
+        registry,
+        table="residual_search_cells",
+        column="state",
+        states=("OPEN", "ACTIVE", "SATURATED", "EXHAUSTED"),
+    )
+    if residual_states:
+        source_gauges["residual_search_cell_total"] = sum(
+            residual_states.values()
+        )
+        source_gauges.update(
+            {
+                f"residual_search_cell_{state.lower()}": count
+                for state, count in residual_states.items()
+            }
+        )
+    for table, gauge in (
+        ("residual_search_urls", "residual_search_unique_urls"),
+        ("residual_search_artifacts", "residual_search_unique_artifacts"),
+        ("residual_search_datasets", "residual_search_unique_datasets"),
+        ("residual_search_families", "residual_search_unique_families"),
+    ):
+        source_gauges[gauge] = int(
+            registry.connection.execute(
+                f"SELECT COUNT(*) AS n FROM {table}"
+                if _table_exists(registry, table)
+                else "SELECT 0 AS n"
+            ).fetchone()["n"]
+        )
 
     historical_states = _durable_state_counts(
         registry,
