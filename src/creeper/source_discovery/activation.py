@@ -37,6 +37,7 @@ from creeper.sources.domains import DomainState, SourceDomain
 from creeper.sources.format_binding import (
     SourceFormatObservation,
     bind_format_to_adapter_id,
+    format_from_adapter_id,
 )
 from creeper.sources.locator import format_path_from_locator
 from creeper.sources.reservoirs import Reservoir, ReservoirState
@@ -74,6 +75,7 @@ def _adapter_kind(
     *,
     parser_kind: str | None = None,
 ) -> tuple[str, str]:
+    explicit_parser = parser_kind is not None
     parser_kind = (
         parser_kind_from_locator(entrypoint)
         if parser_kind is None
@@ -85,7 +87,7 @@ def _adapter_kind(
         return "sbi_bbs", "structured_records"
     if parser_kind == "warc_arc":
         return "warc_arc", "archive_records"
-    if parser_kind in {
+    if explicit_parser and parser_kind in {
         "cdx",
         "cdxj",
         "jsonl",
@@ -95,12 +97,10 @@ def _adapter_kind(
         "squid_access",
         "dmoz_rdf_urls",
     }:
-        if parser_kind is not None:
-            # Explicit parser observations are sufficient for known mature
-            # structured parsers even when the transport URL has no useful
-            # filename suffix.
-            if parser_kind != parser_kind_from_locator(entrypoint):
-                return "structured", "structured_records"
+        # A trusted format observation is an execution fact, not evidence
+        # authority. It is sufficient to select an already-mature parser even
+        # when the transport locator has no useful filename suffix.
+        return "structured", "structured_records"
 
     path = PurePosixPath(format_path_from_locator(entrypoint))
     name = path.name
@@ -151,22 +151,32 @@ class SourceActivationCompiler:
         if stored.state not in {SourceState.ACTIVE, SourceState.ACTIVATING}:
             raise SourceActivationError("only ACTIVE or ACTIVATING candidates can be activated")
         source_key = candidate.source_key
+        domain_id = f"domain:{source_key.removeprefix('src:')}"
+        reservoir_id = f"reservoir:{source_key.removeprefix('src:')}"
+        existing = self.control_store.get_reservoir(reservoir_id)
+
         format_observation = self.registry.get_format_observation(source_key)
         trusted_format: SourceFormatObservation | None = None
+        if existing is not None:
+            trusted_format = format_from_adapter_id(existing.adapter_id)
         if (
-            format_observation is not None
+            trusted_format is None
+            and format_observation is not None
             and format_observation.confidence >= 0.90
         ):
             trusted_format = format_observation
-        adapter_kind, enumeration_kind = _adapter_kind(
-            candidate.canonical_entrypoint,
-            parser_kind=(
-                None if trusted_format is None
-                else trusted_format.parser_kind
-            ),
-        )
-        domain_id = f"domain:{source_key.removeprefix('src:')}"
-        reservoir_id = f"reservoir:{source_key.removeprefix('src:')}"
+
+        if existing is not None:
+            adapter_kind = existing.adapter_id.split(":", 1)[0]
+            enumeration_kind = existing.enumeration_kind
+        else:
+            adapter_kind, enumeration_kind = _adapter_kind(
+                candidate.canonical_entrypoint,
+                parser_kind=(
+                    None if trusted_format is None
+                    else trusted_format.parser_kind
+                ),
+            )
         base_adapter_id = f"{adapter_kind}:{source_key.removeprefix('src:')}"
         year_from = candidate.expected_year_from or 1996
         year_to = candidate.expected_year_to or 2001
@@ -176,7 +186,6 @@ class SourceActivationCompiler:
         # same. Once both the production reservoir and capability-aware index
         # exist, recompilation must be read-only. In particular, never replace a
         # real tomography synopsis with the older scout synopsis.
-        existing = self.control_store.get_reservoir(reservoir_id)
         if existing is not None:
             activation = self.control_store.get_activation(source_key)
             if activation is None:
@@ -231,7 +240,11 @@ class SourceActivationCompiler:
             if contract is None:
                 contract = resolve_source_evidence_contract(
                     existing.root_locator,
-                    parser_kind=parser_kind_from_locator(existing.root_locator),
+                    parser_kind=(
+                        trusted_format.parser_kind
+                        if trusted_format is not None
+                        else parser_kind_from_locator(existing.root_locator)
+                    ),
                 )
             adapter_id = existing.adapter_id
         else:
@@ -320,6 +333,11 @@ class SourceActivationCompiler:
                 else triage.get("content_length")
             ),
             direct_evidence_authority=contract.grants_direct_web_year,
+            parser_kind=(
+                trusted_format.parser_kind
+                if trusted_format is not None
+                else None
+            ),
         )
         self.index_registry.register_index_space(compiled_index_space)
         if (
