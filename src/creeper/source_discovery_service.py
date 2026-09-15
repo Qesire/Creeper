@@ -279,7 +279,7 @@ def load_source_discovery_config(config_path: Path) -> SourceDiscoveryServiceCon
 
     residual_raw = _table(root, "residual_search")
     residual_enabled = _strict_bool(
-        residual_raw.get("enabled", False),
+        residual_raw.get("enabled", True),
         name="residual_search.enabled",
     )
     provider_values = residual_raw.get("providers", ["datacite", "zenodo"])

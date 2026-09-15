@@ -62,6 +62,23 @@ class SourceDiscoveryCoordinatorTests(unittest.IsolatedAsyncioTestCase):
             confidence=0.7,
         )
 
+    def hold_structural_metasource(
+        self,
+        name: str = "structure-blocker",
+    ) -> SourceCandidate:
+        candidate = SourceCandidate(
+            canonical_entrypoint=f"https://catalog.example/{name}/",
+            source_family="RESOURCE_CATALOG",
+            level=SourceLevel.METASOURCE,
+            discovered_by="test",
+            discovery_strategy="DETERMINISTIC_LINK_EXPANSION",
+            expected_volume=100_000,
+            enumerability_prior=0.9,
+            confidence=0.8,
+        )
+        self.registry.register_proposal(candidate)
+        return self.registry.transition(candidate.source_key, SourceState.HOLD)
+
     def to_scout_ready(self, candidate: SourceCandidate) -> None:
         self.registry.register_proposal(candidate)
         self.registry.transition(candidate.source_key, SourceState.TRIAGED)
@@ -225,6 +242,7 @@ class SourceDiscoveryCoordinatorTests(unittest.IsolatedAsyncioTestCase):
         self.registry.register_proposal(discovered)
         scout = self.candidate("scout")
         self.to_scout_ready(scout)
+        self.hold_structural_metasource("overlap")
 
         labels: set[str] = set()
         all_stages_entered = asyncio.Event()
@@ -607,6 +625,7 @@ class SourceDiscoveryCoordinatorTests(unittest.IsolatedAsyncioTestCase):
             confidence=1.0,
         )
         self.to_scout_ready(bulk)
+        self.hold_structural_metasource("foreground-structure")
         scout_calls = 0
         search_calls = 0
 
@@ -839,6 +858,8 @@ class SourceDiscoveryCoordinatorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(report.scout_children_dropped, 2)
 
     async def test_search_executor_cannot_overfill_directive_budget(self) -> None:
+        self.hold_structural_metasource("budget-cap")
+
         async def triage(_candidate: SourceCandidate) -> TriageResult:
             return TriageResult(TriageDisposition.SCOUT)
 

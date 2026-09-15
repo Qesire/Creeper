@@ -51,7 +51,7 @@ evidence_timestamp 或等价的年份字段
 
 - **年度证据 authority 属于 item-level record，而不是 source 文件名或预先登记的 allowlist。**
 - 对 CDX/CDXJ，只要严格 parser 验证该行同时给出可规范化的 original URL/hostname、目标年份 capture timestamp，并保留 source/record locator，该行即可设置 `direct_year_mask`；即使下载 URL 是 opaque repository/API endpoint，也不得降级为 discovery-only。
-- 对 JSONL、CSV/TSV 等通用结构化记录，只要确定性 adapter/schema 能稳定绑定 hostname/URL 字段与 timestamp/year 字段，并逐条保留 provenance，该记录同样可形成 direct annual Evidence；人工 reviewed registry 可用于强化 artifact identity/字段语义，但不是 item-level 记录成立的必要前置条件。
+- 对 JSONL、CSV/TSV 等通用结构化记录，确定性 adapter/schema 必须同时稳定绑定 hostname/URL 字段与具有明确 Web 观测语义的 timestamp/year 字段，并逐条保留 provenance，记录才可自动形成 direct annual Evidence。仅发现一个数值落在 1996–2001 的裸 `year`/`date` 列、无语义的列号或数据集版本年份，不得仅凭结构稳定自动升级为 DIRECT_YEAR；这类记录默认保留为 year hint，直到来源语义由显式/审核 contract 或等价确定性规则确认。人工 reviewed registry 可用于强化 artifact identity/字段语义，但不是所有 item-level 记录成立的必要前置条件。
 - 仅“文件来自历史数据集”“搜索结果描述说是某年份”或 source-level metadata 仍不能替代逐条记录证据。
 
 ### 3.2 只能用于发现或规划的证据

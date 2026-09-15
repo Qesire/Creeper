@@ -349,6 +349,7 @@ class SourceDiscoveryRegistry:
                 confidence REAL NOT NULL,
                 sample_records INTEGER NOT NULL,
                 matched_records INTEGER NOT NULL,
+                direct_year_eligible INTEGER NOT NULL DEFAULT 0,
                 policy_version TEXT NOT NULL,
                 observed_at REAL NOT NULL,
                 FOREIGN KEY(source_key) REFERENCES source_candidates(source_key)
@@ -425,6 +426,18 @@ class SourceDiscoveryRegistry:
         }.items():
             if name not in search_episode_columns:
                 self.connection.execute(statement)
+
+        schema_columns = {
+            str(row[1])
+            for row in self.connection.execute(
+                "PRAGMA table_info(source_record_schemas)"
+            ).fetchall()
+        }
+        if "direct_year_eligible" not in schema_columns:
+            self.connection.execute(
+                "ALTER TABLE source_record_schemas "
+                "ADD COLUMN direct_year_eligible INTEGER NOT NULL DEFAULT 0"
+            )
 
         format_columns = {
             str(row[1])
@@ -2710,6 +2723,10 @@ class SourceDiscoveryRegistry:
                 and current.hostname_field == observation.hostname_field
                 and current.timestamp_field == observation.timestamp_field
                 and current.delimiter == observation.delimiter
+                and (
+                    current.direct_year_eligible
+                    == observation.direct_year_eligible
+                )
             )
             if (
                 not same_schema
@@ -2730,8 +2747,9 @@ class SourceDiscoveryRegistry:
                 INSERT INTO source_record_schemas(
                     source_key, parser_kind, hostname_field, timestamp_field,
                     delimiter, detection_method, confidence,
-                    sample_records, matched_records, policy_version, observed_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    sample_records, matched_records, direct_year_eligible,
+                    policy_version, observed_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(source_key) DO UPDATE SET
                     parser_kind = excluded.parser_kind,
                     hostname_field = excluded.hostname_field,
@@ -2741,6 +2759,7 @@ class SourceDiscoveryRegistry:
                     confidence = excluded.confidence,
                     sample_records = excluded.sample_records,
                     matched_records = excluded.matched_records,
+                    direct_year_eligible = excluded.direct_year_eligible,
                     policy_version = excluded.policy_version,
                     observed_at = excluded.observed_at
                 """,
@@ -2754,6 +2773,7 @@ class SourceDiscoveryRegistry:
                     observation.confidence,
                     observation.sample_records,
                     observation.matched_records,
+                    int(observation.direct_year_eligible),
                     observation.policy_version,
                     self._now(),
                 ),
@@ -2768,7 +2788,7 @@ class SourceDiscoveryRegistry:
             """
             SELECT parser_kind, hostname_field, timestamp_field, delimiter,
                    detection_method, confidence, sample_records,
-                   matched_records, policy_version
+                   matched_records, direct_year_eligible, policy_version
             FROM source_record_schemas
             WHERE source_key = ?
             """,
@@ -2787,6 +2807,7 @@ class SourceDiscoveryRegistry:
             confidence=float(row["confidence"]),
             sample_records=int(row["sample_records"]),
             matched_records=int(row["matched_records"]),
+            direct_year_eligible=bool(row["direct_year_eligible"]),
             policy_version=str(row["policy_version"]),
         )
 

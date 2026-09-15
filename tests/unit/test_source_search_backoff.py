@@ -13,7 +13,7 @@ from creeper.source_discovery.coordinator import (
     TriageResult,
 )
 from creeper.source_discovery.manager import SourcePoolTargets, SourceReservoirManager
-from creeper.source_discovery.models import SourceCandidate
+from creeper.source_discovery.models import SourceCandidate, SourceLevel, SourceState
 from creeper.source_discovery.registry import SourceDiscoveryRegistry
 from creeper.storage.control_store import ControlStore
 
@@ -31,6 +31,19 @@ class SourceSearchBackoffTests(unittest.IsolatedAsyncioTestCase):
         self.tmp.cleanup()
 
     def coordinator(self, search_executor) -> SourceDiscoveryCoordinator:
+        blocker = SourceCandidate(
+            canonical_entrypoint="https://catalog.example/resources/",
+            source_family="RESOURCE_CATALOG",
+            level=SourceLevel.METASOURCE,
+            discovered_by="test",
+            discovery_strategy="DETERMINISTIC_LINK_EXPANSION",
+            expected_volume=100_000,
+            enumerability_prior=0.9,
+            confidence=0.8,
+        )
+        self.registry.register_proposal(blocker)
+        self.registry.transition(blocker.source_key, SourceState.HOLD)
+
         manager = SourceReservoirManager(
             self.registry,
             targets=SourcePoolTargets(

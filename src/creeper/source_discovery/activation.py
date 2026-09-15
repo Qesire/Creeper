@@ -371,10 +371,15 @@ class SourceActivationCompiler:
                         explicit_contracts=self.evidence_contracts,
                         parser_kind=actual_parser,
                     )
-                elif trusted_schema is not None:
-                    # Stable item-level hostname/timestamp fields are themselves
-                    # sufficient annual evidence semantics. No source-level
-                    # reviewed allowlist is required.
+                elif (
+                    trusted_schema is not None
+                    and trusted_schema.direct_year_eligible
+                ):
+                    # Stable item-level hostname/time bindings become automatic
+                    # annual evidence only when the time field has explicit
+                    # web-observation semantics. Ambiguous year/date columns
+                    # remain discovery hints unless a reviewed/explicit
+                    # contract supplies the missing semantic authority.
                     contract = trusted_schema.direct_contract()
                 else:
                     contract = resolve_source_evidence_contract(

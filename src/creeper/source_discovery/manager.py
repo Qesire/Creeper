@@ -565,25 +565,26 @@ class SourceReservoirManager:
         deterministic_refill_managed: bool = False,
         deterministic_plans_available: bool = False,
     ) -> tuple[SearchDirective, ...]:
+        """Request LLM work only for unresolved structure or exhausted search space.
+
+        Ordinary source-reservoir refill is owned by deterministic residual
+        search. A cold deficit by itself is never sufficient reason to ask the
+        LLM for URLs, source families, or success-pattern siblings.
+
+        The legacy arguments remain for API/test compatibility while the
+        executor is still available for explicit operator-driven workflows.
+        """
+
+        del projected_warm, candidates
         needs_refill = effective_cold_count < self.targets.cold_min
-        ordinary_refill = needs_refill and not deterministic_refill_managed
         managed_stagnation = (
             needs_refill
             and deterministic_refill_managed
             and not deterministic_plans_available
         )
         structural_holds = self._structural_holds()
-        if not ordinary_refill and not structural_holds and not managed_stagnation:
+        if not structural_holds and not managed_stagnation:
             return ()
-
-        # Normal refill demand is measured against the diversity-bounded pool.
-        # Emergency direct/structural work can still request one bounded action
-        # even when the ordinary cold target is already satisfied.
-        gap = (
-            max(0, self.targets.cold_target - effective_cold_count)
-            if ordinary_refill
-            else 0
-        )
 
         specs: list[
             tuple[
@@ -617,7 +618,7 @@ class SourceReservoirManager:
                 subject_candidate.canonical_entrypoint,
                 (
                     "deterministic structural scouting left a catalog/metasource "
-                    "in HOLD; ask Codex for bounded resource/template hypotheses"
+                    "in HOLD; compile a reusable bounded enumerator/pivot rule"
                 ),
                 SourceIntelligenceTask.INTERPRET_STRUCTURE,
             )
@@ -629,140 +630,36 @@ class SourceReservoirManager:
                 None,
                 (
                     "deterministic residual-search space has no OPEN/ACTIVE cells; "
-                    "ask for a new data-generating mechanism, not another URL query"
+                    "propose a new data-generating mechanism/root/query family, "
+                    "not individual URLs"
                 ),
                 SourceIntelligenceTask.RECOVER_STAGNATION,
             )
 
-        if ordinary_refill:
-            best_family = self._best_measured_family(candidates)
-            if projected_warm < self.targets.warm_min and best_family is not None:
-                family, value = best_family
-                add_spec(
-                    SearchDirectiveKind.EXPLOIT_SOURCE_FAMILY,
-                    "EXPLOIT_SUCCESS",
-                    family,
-                    f"warm reserve low; measured family yield={value:.6g} novel EED/s",
-                    SourceIntelligenceTask.EXPLOIT_SUCCESS_PATTERN,
-                )
+        if not specs:
+            return ()
 
-            best_strategy = self._best_observed_search_strategy()
-            add_spec(
-                SearchDirectiveKind.REFILL_RESERVOIR,
-                best_strategy,
-                None,
-                (
-                    f"effective cold reserve {effective_cold_count} below "
-                    f"minimum {self.targets.cold_min}"
-                ),
-                SourceIntelligenceTask.DISCOVER_NEW_SOURCE,
-            )
-            add_spec(
-                SearchDirectiveKind.DISCOVER_NEW_FAMILY,
-                "EXPLORE_NEW_FAMILY",
-                None,
-                "retain explicit exploration while refilling the candidate reserve",
-                SourceIntelligenceTask.DISCOVER_NEW_SOURCE,
-            )
+        capacity = min(
+            len(specs),
+            self._adaptive_search_budget(
+                structural_hold=bool(structural_holds)
+            ),
+        )
+        if capacity <= 0:
+            return ()
 
-            if self._is_stagnating():
-                add_spec(
-                    SearchDirectiveKind.RECOVER_STAGNATION,
-                    "RECOVER_STAGNATION",
-                    None,
-                    "recent completed source-search episodes produced no credited EED",
-                    SourceIntelligenceTask.RECOVER_STAGNATION,
-                )
-
-        # Search capacity is reserved for genuinely new source discovery and
-        # structural recovery. Deterministic CDX/CDXJ work advances on the
-        # background lane and never reserves an agent-search arm.
-        structural = [
-            spec
-            for spec in specs
-            if spec[0] is SearchDirectiveKind.INTERPRET_STRUCTURE
-        ][:1]
-        refill = [
-            spec
-            for spec in specs
-            if spec[0] is SearchDirectiveKind.REFILL_RESERVOIR
-        ][:1]
-        optional = [
-            spec
-            for spec in specs
-            if spec not in structural and spec not in refill
-        ]
-        stagnating = self._is_stagnating()
-        optional.sort(
+        # Structure blockers take precedence because they unblock already-found
+        # high-value objects. Residual-stagnation recovery uses at most the
+        # remaining single low-frequency slot.
+        specs.sort(
             key=lambda spec: (
                 0
-                if (
-                    stagnating
-                    and spec[4]
-                    is SourceIntelligenceTask.RECOVER_STAGNATION
-                )
+                if spec[0] is SearchDirectiveKind.INTERPRET_STRUCTURE
                 else 1,
-                -self._llm_task_ucb(spec[4]),
+                spec[1],
+                spec[2] or "",
             )
         )
-
-        adaptive_budget = self._adaptive_search_budget(
-            structural_hold=bool(structural_holds)
-        )
-        capacity = (
-            min(gap, adaptive_budget)
-            if ordinary_refill
-            else min(len(specs), adaptive_budget)
-        )
-        selected: list[
-            tuple[
-                SearchDirectiveKind,
-                str,
-                str | None,
-                str,
-                SourceIntelligenceTask,
-            ]
-        ] = []
-        if structural and len(selected) < capacity:
-            selected.extend(structural)
-
-        # Once repeated searches have produced no downstream credit, spend the
-        # scarce single call on a qualitatively different recovery task rather
-        # than another refill query with the same search shape.
-        if stagnating and len(selected) < capacity:
-            recovery = [
-                spec
-                for spec in optional
-                if spec[4] is SourceIntelligenceTask.RECOVER_STAGNATION
-            ][:1]
-            selected.extend(recovery)
-            optional = [spec for spec in optional if spec not in recovery]
-
-        remaining = max(0, capacity - len(selected))
-        reserve_refill = int(bool(refill) and remaining > 0)
-        optional_slots = max(0, remaining - reserve_refill)
-        selected.extend(optional[:optional_slots])
-        if refill and len(selected) < capacity:
-            selected.extend(refill)
-        if not selected:
-            return ()
-        if ordinary_refill:
-            base, remainder = divmod(gap, len(selected))
-            directives = [
-                SearchDirective(
-                    kind=kind,
-                    strategy=strategy,
-                    desired_candidates=base + (1 if index < remainder else 0),
-                    subject=subject,
-                    reason=reason,
-                    task_type=task_type,
-                )
-                for index, (kind, strategy, subject, reason, task_type)
-                in enumerate(selected)
-            ]
-            assert sum(item.desired_candidates for item in directives) == gap
-            return tuple(directives)
-
         return tuple(
             SearchDirective(
                 kind=kind,
@@ -772,7 +669,7 @@ class SourceReservoirManager:
                 reason=reason,
                 task_type=task_type,
             )
-            for kind, strategy, subject, reason, task_type in selected
+            for kind, strategy, subject, reason, task_type in specs[:capacity]
         )
 
     def plan(self) -> ReservoirPlan:

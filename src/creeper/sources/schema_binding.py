@@ -25,7 +25,8 @@ class SourceRecordSchema:
     confidence: float
     sample_records: int
     matched_records: int
-    policy_version: str = "record-schema-v1"
+    direct_year_eligible: bool = False
+    policy_version: str = "record-schema-v2"
 
     def __post_init__(self) -> None:
         parser = str(self.parser_kind).strip().lower()
@@ -57,6 +58,8 @@ class SourceRecordSchema:
                 raise ValueError(f"{name} must be a positive integer")
         if self.matched_records > self.sample_records:
             raise ValueError("matched_records cannot exceed sample_records")
+        if not isinstance(self.direct_year_eligible, bool):
+            raise ValueError("direct_year_eligible must be boolean")
         object.__setattr__(self, "parser_kind", parser)
         object.__setattr__(self, "hostname_field", hostname_field)
         object.__setattr__(self, "timestamp_field", timestamp_field)
@@ -100,13 +103,21 @@ class SourceRecordSchema:
             "confidence",
             "sample_records",
             "matched_records",
+            "direct_year_eligible",
             "policy_version",
         }
-        if set(payload) != allowed:
+        legacy_allowed = allowed - {"direct_year_eligible"}
+        if set(payload) == legacy_allowed:
+            payload["direct_year_eligible"] = False
+        elif set(payload) != allowed:
             raise ValueError("invalid schema binding fields")
         return cls(**payload)
 
     def direct_contract(self) -> SourceEvidenceContract:
+        if not self.direct_year_eligible:
+            raise ValueError(
+                "record schema lacks automatic direct-year semantic authority"
+            )
         return SourceEvidenceContract(
             contract_id=f"auto-{self.parser_kind}-record-time-v1",
             authority=EvidenceAuthority.DIRECT_WEB_YEAR,
