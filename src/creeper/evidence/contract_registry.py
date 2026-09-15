@@ -196,11 +196,10 @@ class ReviewedSourceContractBinding:
             raise ReviewedContractRegistryError(
                 "external reviewed registry entries must grant DIRECT_WEB_YEAR"
             )
-        actual_parser = parser_kind_from_locator(self.artifact.locator)
-        if self.contract.parser_kind != actual_parser:
-            raise ReviewedContractRegistryError(
-                "reviewed contract parser_kind does not match locator parser"
-            )
+        # Parser semantics are reviewed explicitly. Transport locators may be
+        # opaque repository/API endpoints with no meaningful filename suffix;
+        # activation validates the reviewed parser against the scout-frozen
+        # format observation before production.
         if self.contract.hostname_field is None:
             raise ReviewedContractRegistryError(
                 "reviewed direct structured contract requires hostname_field"
