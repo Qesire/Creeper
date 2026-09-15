@@ -42,6 +42,7 @@ from creeper.source_discovery.deterministic_search import (
     DataCiteSearchProvider,
     DeterministicSearchExecutor,
     DeterministicSearchPolicy,
+    ZenodoSearchProvider,
 )
 from creeper.source_discovery.curated_seeds import ensure_curated_source_seeds
 from creeper.source_discovery.intelligence import SourceIntelligenceContextBuilder
@@ -107,7 +108,7 @@ class MeasurementConfig:
 @dataclass(frozen=True)
 class ResidualSearchConfig:
     enabled: bool = False
-    providers: tuple[str, ...] = ("datacite",)
+    providers: tuple[str, ...] = ("datacite", "zenodo")
     policy: DeterministicSearchPolicy = DeterministicSearchPolicy()
 
 
@@ -281,7 +282,7 @@ def load_source_discovery_config(config_path: Path) -> SourceDiscoveryServiceCon
         residual_raw.get("enabled", False),
         name="residual_search.enabled",
     )
-    provider_values = residual_raw.get("providers", ["datacite"])
+    provider_values = residual_raw.get("providers", ["datacite", "zenodo"])
     if (
         not isinstance(provider_values, list)
         or not provider_values
@@ -289,7 +290,7 @@ def load_source_discovery_config(config_path: Path) -> SourceDiscoveryServiceCon
     ):
         raise ValueError("residual_search.providers must be a non-empty string array")
     providers = tuple(item.strip().lower() for item in provider_values)
-    unsupported = sorted(set(providers) - {"datacite"})
+    unsupported = sorted(set(providers) - {"datacite", "zenodo"})
     if unsupported:
         raise ValueError(
             "unsupported residual_search.providers: " + ", ".join(unsupported)
@@ -725,6 +726,15 @@ async def _open_runtime(config: SourceDiscoveryServiceConfig):
                         if provider_name == "datacite":
                             deterministic_providers.append(
                                 DataCiteSearchProvider(
+                                    client,
+                                    timeout_seconds=(
+                                        config.residual_search.policy.timeout_seconds
+                                    ),
+                                )
+                            )
+                        elif provider_name == "zenodo":
+                            deterministic_providers.append(
+                                ZenodoSearchProvider(
                                     client,
                                     timeout_seconds=(
                                         config.residual_search.policy.timeout_seconds
