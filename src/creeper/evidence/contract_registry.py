@@ -516,7 +516,7 @@ def bind_reviewed_artifact_to_adapter_id(
 def reviewed_artifact_from_adapter_id(
     adapter_id: str,
 ) -> ReviewedArtifactBinding | None:
-    head = adapter_id.split(":evc1:", 1)[0]
+    head = adapter_id.split(":evc1:", 1)[0].split(":fmt1:", 1)[0]
     if _REVIEWED_IDENTITY_MARKER not in head:
         return None
     _prefix, token = head.rsplit(_REVIEWED_IDENTITY_MARKER, 1)
