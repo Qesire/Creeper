@@ -180,7 +180,7 @@ class SourceActivationCompilerTests(unittest.TestCase):
             finally:
                 control.close()
 
-    def test_content_detected_cdxj_does_not_self_grant_direct_authority(self) -> None:
+    def test_content_detected_cdxj_grants_direct_authority_from_record_semantics(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             control = ControlStore(Path(tmp) / "control.sqlite3")
             try:
@@ -205,7 +205,7 @@ class SourceActivationCompilerTests(unittest.TestCase):
                 ).compile(candidate)
 
                 self.assertEqual(spec.adapter_kind, "structured")
-                self.assertEqual(spec.evidence_mode, "discovery_only")
+                self.assertEqual(spec.evidence_mode, "direct_year")
                 reservoir = control.get_reservoir(spec.reservoir_id)
                 self.assertIsNotNone(reservoir)
                 assert reservoir is not None
@@ -213,7 +213,17 @@ class SourceActivationCompilerTests(unittest.TestCase):
                 self.assertIsNotNone(contract)
                 assert contract is not None
                 self.assertEqual(contract.parser_kind, "cdxj")
-                self.assertFalse(contract.grants_direct_web_year)
+                self.assertTrue(contract.grants_direct_web_year)
+                index_row = control.connection.execute(
+                    """
+                    SELECT direct_evidence_authority
+                    FROM source_indexes_v1
+                    WHERE source_key = ?
+                    """,
+                    (candidate.source_key,),
+                ).fetchone()
+                self.assertIsNotNone(index_row)
+                self.assertEqual(index_row["direct_evidence_authority"], 1)
             finally:
                 control.close()
 
