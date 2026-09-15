@@ -13,6 +13,10 @@ from creeper.sources.format_binding import (
     SourceFormatObservation,
     bind_format_to_adapter_id,
 )
+from creeper.sources.schema_binding import (
+    SourceRecordSchema,
+    bind_schema_to_adapter_id,
+)
 from creeper.sources.production import StructuredProductionAdapter
 from creeper.sources.reservoirs import Reservoir, ReservoirState
 
@@ -89,6 +93,63 @@ class StructuredProductionAdapterTests(unittest.TestCase):
         self.assertTrue(adapter.compressed)
         self.assertEqual(adapter.evidence_contract.parser_kind, "jsonl")
         self.assertFalse(adapter.evidence_contract.grants_direct_web_year)
+
+    def test_opaque_delimited_schema_restores_delimiter_and_direct_fields(self):
+        fmt = SourceFormatObservation(
+            parser_kind="delimited",
+            compression="none",
+            detection_method="content_signature",
+            confidence=0.92,
+        )
+        schema = SourceRecordSchema(
+            parser_kind="delimited",
+            hostname_field="column:0",
+            timestamp_field="column:1",
+            delimiter=";",
+            detection_method="stable_delimited_columns",
+            confidence=1.0,
+            sample_records=8,
+            matched_records=8,
+        )
+        adapter_id = bind_format_to_adapter_id(
+            "structured:opaque-table",
+            fmt,
+        )
+        adapter_id = bind_schema_to_adapter_id(adapter_id, schema)
+        adapter_id = bind_contract_to_adapter_id(
+            adapter_id,
+            schema.direct_contract(),
+        )
+        reservoir = Reservoir(
+            reservoir_id="reservoir:opaque-table",
+            domain_id="domain:opaque-table",
+            adapter_id=adapter_id,
+            root_locator="https://repo.example/api/download?id=table",
+            enumeration_kind="structured_records",
+            capacity_lower=0,
+            evidence_mode="direct_year",
+            state=ReservoirState.READY,
+        )
+
+        adapter = StructuredProductionAdapter(reservoir)
+        record = adapter._generic_record(
+            "https://schema-direct.example/a;1999;ignored",
+            locator="fixture:1",
+        )
+        self.assertIsNotNone(record)
+        assert record is not None
+        record = adapter._apply_contract_authority(record)
+        observations = tuple(adapter.extract_hosts(record))
+
+        self.assertEqual(adapter.kind, "delimited")
+        self.assertEqual(record.source_year, 1999)
+        self.assertEqual(record.direct_year_mask, YEAR_BITS[1999])
+        self.assertEqual(record.year_hint_mask, 0)
+        self.assertEqual(
+            [item.hostname for item in observations],
+            ["schema-direct.example"],
+        )
+        self.assertEqual(observations[0].direct_year_mask, YEAR_BITS[1999])
 
     def test_mailbox_adapter_persists_only_urls_and_year_hints(self):
         reservoir = Reservoir(
