@@ -19,6 +19,7 @@ from enum import StrEnum
 from pathlib import PurePosixPath
 from urllib.parse import urlsplit
 
+from creeper.sources.locator import format_path_from_locator
 from creeper.source_discovery.coordinator import TriageResult
 from creeper.source_discovery.models import (
     MeasurementMode,
@@ -313,10 +314,32 @@ def _stable_key(prefix: str, *parts: object) -> str:
     return f"{prefix}:" + hashlib.sha256(payload).hexdigest()
 
 
-def _source_format(entrypoint: str) -> tuple[str, bool, bool]:
+def _source_format(
+    entrypoint: str,
+    *,
+    parser_kind: str | None = None,
+) -> tuple[str, bool, bool]:
     """Return format, timestamp-bearing, sorted-index semantics."""
 
-    name = PurePosixPath(urlsplit(entrypoint).path.lower()).name
+    if parser_kind is not None:
+        parser = parser_kind.strip().lower()
+        mapped = {
+            "ftp_sitelist_zip": ("FTP_SITELIST", True, False),
+            "sbi_bbs_zip": ("SBI_BBS", True, False),
+            "cdxj": ("CDXJ", True, True),
+            "cdx": ("CDX", True, True),
+            "warc_arc": ("WARC_ARC", True, False),
+            "jsonl": ("JSONL", False, False),
+            "delimited": ("TABULAR", False, False),
+            "lines": ("TEXT", False, False),
+            "mbox_urls": ("MAILBOX", False, False),
+            "squid_access": ("SQUID_ACCESS", True, False),
+            "dmoz_rdf_urls": ("DMOZ", False, False),
+        }
+        if parser in mapped:
+            return mapped[parser]
+
+    name = PurePosixPath(format_path_from_locator(entrypoint)).name
     if name == "ftp-list.zip":
         return "FTP_SITELIST", True, False
     if name.endswith(".cdxj.gz") or name.endswith(".cdxj"):
@@ -342,6 +365,7 @@ def compile_candidate_index_space(
     content_length: int | None = None,
     query_hints: QueryCapabilityHints | None = None,
     direct_evidence_authority: bool | None = None,
+    parser_kind: str | None = None,
 ) -> CompiledIndexSpace:
     """Compile one existing discovery candidate into a P0 index-space contract.
 
@@ -356,7 +380,8 @@ def compile_candidate_index_space(
 
     hints = query_hints or QueryCapabilityHints()
     source_format, timestamp_bearing, sorted_index = _source_format(
-        candidate.canonical_entrypoint
+        candidate.canonical_entrypoint,
+        parser_kind=parser_kind,
     )
     observed_range = (
         range_supported
