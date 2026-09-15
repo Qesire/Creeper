@@ -182,6 +182,29 @@ class SourceDiscoveryRegistryTests(unittest.TestCase):
             observed,
         )
 
+    def test_delimited_format_observation_persists_dialect(self) -> None:
+        candidate = self.candidate("opaque-delimited")
+        self.registry.register_proposal(candidate)
+        observed = SourceFormatObservation(
+            parser_kind="delimited",
+            compression="none",
+            detection_method="content_signature",
+            confidence=0.92,
+            content_type="application/octet-stream",
+            delimiter=";",
+        )
+
+        self.assertTrue(
+            self.registry.record_format_observation(
+                candidate.source_key,
+                observed,
+            )
+        )
+        restored = self.registry.get_format_observation(candidate.source_key)
+        self.assertEqual(restored, observed)
+        assert restored is not None
+        self.assertEqual(restored.delimiter, ";")
+
     def test_weaker_format_observation_cannot_replace_stronger_one(self) -> None:
         candidate = self.candidate("opaque-download-weak")
         self.registry.register_proposal(candidate)
