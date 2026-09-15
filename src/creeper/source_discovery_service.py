@@ -789,6 +789,7 @@ _DISCOVERY_COUNTER_FIELDS = {
     "search_candidates_dropped": "discovery_search_candidates_dropped",
     "deterministic_search_episodes": "discovery_deterministic_search_episodes",
     "deterministic_search_failures": "discovery_deterministic_search_failures",
+    "residual_reward_updates": "discovery_residual_reward_updates",
     "triaged_to_scout": "discovery_triaged_to_scout",
     "triaged_hold": "discovery_triaged_hold",
     "triaged_rejected": "discovery_triaged_rejected",
@@ -918,6 +919,32 @@ def _publish_discovery_telemetry(
                 else "SELECT 0 AS n"
             ).fetchone()["n"]
         )
+
+    if _table_exists(registry, "residual_search_cells"):
+        reward_row = registry.connection.execute(
+            """
+            SELECT
+                COALESCE(SUM(accepted_novel_eed), 0) AS accepted_novel_eed,
+                COALESCE(SUM(search_cost_seconds), 0) AS search_cost_seconds,
+                COALESCE(SUM(result_count), 0) AS result_count,
+                COALESCE(SUM(duplicate_results), 0) AS duplicate_results
+            FROM residual_search_cells
+            """
+        ).fetchone()
+        source_gauges["residual_search_accepted_novel_eed"] = float(
+            reward_row["accepted_novel_eed"]
+        )
+        source_gauges["residual_search_cost_seconds"] = float(
+            reward_row["search_cost_seconds"]
+        )
+        results = int(reward_row["result_count"])
+        duplicates = int(reward_row["duplicate_results"])
+        source_gauges["residual_search_duplicate_fraction"] = (
+            duplicates / results if results > 0 else 0.0
+        )
+    source_gauges["residual_reward_eed_delta"] = float(
+        report.get("residual_reward_eed_delta", 0.0)
+    )
 
     historical_states = _durable_state_counts(
         registry,
