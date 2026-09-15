@@ -10,6 +10,7 @@ from creeper.source_discovery.deterministic_search import (
     DeterministicSearchExecutor,
     DeterministicSearchPolicy,
     HarvardDataverseSearchProvider,
+    InternetArchiveSearchProvider,
     ZenodoSearchProvider,
     candidate_from_result,
     classify_result,
@@ -242,6 +243,195 @@ class DeterministicSearchTests(unittest.TestCase):
         candidate = candidate_from_result(self.plan, classified)
         self.assertEqual(candidate.level, SourceLevel.SOURCE)
         self.assertEqual(candidate.discovered_by, "deterministic:harvard_dataverse")
+
+    def test_internet_archive_provider_expands_bounded_original_files(self) -> None:
+        requests: list[tuple[str, dict[str, str]]] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            requests.append(
+                (
+                    request.url.path,
+                    dict(request.url.params.multi_items()),
+                )
+            )
+            if request.url.path == "/advancedsearch.php":
+                self.assertEqual(request.url.params["rows"], "2")
+                self.assertEqual(request.url.params["output"], "json")
+                query = request.url.params["q"]
+                self.assertIn('"1998"', query)
+                self.assertIn('"proxy"', query)
+                self.assertIn('"university"', query)
+                self.assertIn('"trace"', query)
+                return httpx.Response(
+                    200,
+                    json={
+                        "response": {
+                            "numFound": 1,
+                            "start": 0,
+                            "docs": [
+                                {
+                                    "identifier": "proxy-trace-1998",
+                                    "title": "1998 University HTTP Proxy Trace",
+                                    "description": (
+                                        "Historical proxy access log dataset"
+                                    ),
+                                    "creator": ["Example Network Lab"],
+                                    "date": "1998-09-01",
+                                    "mediatype": "software",
+                                    "collection": ["opensource"],
+                                    "files_count": 300,
+                                }
+                            ],
+                        }
+                    },
+                )
+            if request.url.path == "/metadata/proxy-trace-1998/files":
+                self.assertEqual(request.url.params["start"], "0")
+                self.assertEqual(request.url.params["count"], "7")
+                return httpx.Response(
+                    200,
+                    json={
+                        "result": [
+                            {
+                                "name": "proxy-trace-1998_meta.xml",
+                                "source": "original",
+                                "format": "Metadata",
+                            },
+                            {
+                                "name": "derived.txt",
+                                "source": "derivative",
+                                "format": "Text",
+                            },
+                            {
+                                "name": "proxy access 1998.log",
+                                "source": "original",
+                                "format": "Text",
+                                "size": "12345",
+                            },
+                            {
+                                "name": "hosts.csv",
+                                "source": "original",
+                                "format": "CSV",
+                                "size": "23456",
+                            },
+                        ]
+                    },
+                )
+            raise AssertionError(f"unexpected request: {request.url}")
+
+        async def run():
+            async with httpx.AsyncClient(
+                transport=httpx.MockTransport(handler)
+            ) as client:
+                provider = InternetArchiveSearchProvider(
+                    client,
+                    max_items=2,
+                    files_per_item=2,
+                    file_slice_count=7,
+                )
+                return await provider.search(self.plan, limit=10)
+
+        results = asyncio.run(run())
+
+        self.assertEqual(len(requests), 2)
+        self.assertEqual(len(results), 2)
+        self.assertEqual(
+            {item.provider_result_id for item in results},
+            {
+                "proxy-trace-1998:hosts.csv",
+                "proxy-trace-1998:proxy access 1998.log",
+            },
+        )
+        self.assertEqual(
+            {item.content_length for item in results},
+            {12345, 23456},
+        )
+        log_result = next(
+            item for item in results
+            if item.provider_result_id.endswith("proxy access 1998.log")
+        )
+        self.assertEqual(
+            log_result.url,
+            (
+                "https://archive.org/download/proxy-trace-1998/"
+                "proxy%20access%201998.log"
+            ),
+        )
+        self.assertEqual(log_result.publication_year, 1998)
+        classified = [
+            classify_result(self.plan, item, policy=self.policy)
+            for item in results
+        ]
+        self.assertTrue(all(item is not None for item in classified))
+        canonical = [item for item in classified if item is not None]
+        self.assertEqual(
+            len({item.dataset_key for item in canonical}),
+            1,
+        )
+        candidate = candidate_from_result(self.plan, canonical[0])
+        self.assertEqual(candidate.level, SourceLevel.SOURCE)
+        self.assertEqual(
+            candidate.discovered_by,
+            "deterministic:internet_archive",
+        )
+
+    def test_internet_archive_provider_caps_item_expansion(self) -> None:
+        metadata_calls = 0
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal metadata_calls
+            if request.url.path == "/advancedsearch.php":
+                self.assertEqual(request.url.params["rows"], "2")
+                return httpx.Response(
+                    200,
+                    json={
+                        "response": {
+                            "docs": [
+                                {
+                                    "identifier": f"item-{index}",
+                                    "title": f"1998 Proxy Trace {index}",
+                                    "description": "proxy access log trace",
+                                    "date": "1998",
+                                }
+                                for index in range(5)
+                            ]
+                        }
+                    },
+                )
+            if request.url.path.startswith("/metadata/item-"):
+                metadata_calls += 1
+                identifier = request.url.path.split("/")[2]
+                return httpx.Response(
+                    200,
+                    json={
+                        "result": [
+                            {
+                                "name": f"{identifier}.log",
+                                "source": "original",
+                                "format": "Text",
+                                "size": "10",
+                            }
+                        ]
+                    },
+                )
+            raise AssertionError(f"unexpected request: {request.url}")
+
+        async def run():
+            async with httpx.AsyncClient(
+                transport=httpx.MockTransport(handler)
+            ) as client:
+                provider = InternetArchiveSearchProvider(
+                    client,
+                    max_items=2,
+                    files_per_item=1,
+                    file_slice_count=3,
+                )
+                return await provider.search(self.plan, limit=100)
+
+        results = asyncio.run(run())
+
+        self.assertEqual(metadata_calls, 2)
+        self.assertEqual(len(results), 2)
 
     def test_zenodo_provider_prefers_direct_file_and_bounds_page_size(self) -> None:
         observed_size = None
