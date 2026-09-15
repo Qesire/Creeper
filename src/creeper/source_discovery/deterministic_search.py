@@ -296,7 +296,7 @@ def _best_url(attributes: dict[str, object]) -> str | None:
         ranked = sorted(
             content,
             key=lambda value: (
-                not urlsplit(value).path.lower().endswith(_SOURCE_SUFFIXES),
+                not format_path_from_locator(value).endswith(_SOURCE_SUFFIXES),
                 len(value),
                 value,
             ),
@@ -496,7 +496,7 @@ def _zenodo_file_candidates(
         values.append((url, content_length, sha256))
     values.sort(
         key=lambda item: (
-            not urlsplit(item[0]).path.lower().endswith(_SOURCE_SUFFIXES),
+            not format_path_from_locator(item[0]).endswith(_SOURCE_SUFFIXES),
             item[1] is None,
             item[1] or 0,
             item[0],
