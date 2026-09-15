@@ -182,14 +182,13 @@ def detect_source_format(
         "application/ndjson": "jsonl",
         "text/csv": "delimited",
         "text/tab-separated-values": "delimited",
-        "text/plain": "lines",
     }
     if media in content_map:
         return SourceFormatObservation(
             parser_kind=content_map[media],
             compression=compression,
             detection_method="content_type",
-            confidence=0.96 if media != "text/plain" else 0.82,
+            confidence=0.96,
             content_type=content_type,
         )
 
