@@ -1108,20 +1108,35 @@ class DeterministicSearchExecutor:
         ]
         outcomes = await asyncio.gather(*calls, return_exceptions=True)
         successful: list[str] = []
-        raw_results: list[RawSearchResult] = []
+        provider_results: list[tuple[RawSearchResult, ...]] = []
         errors: list[Exception] = []
         for provider, outcome in zip(self.providers, outcomes, strict=True):
             if isinstance(outcome, Exception):
                 errors.append(outcome)
                 continue
             successful.append(provider.name)
-            raw_results.extend(outcome)
+            provider_results.append(tuple(outcome))
         if not successful:
             detail = "; ".join(type(error).__name__ for error in errors) or "no providers"
             raise RuntimeError(f"all deterministic search providers failed: {detail}")
 
+        # Preserve provider diversity under the global result cap. Concatenating
+        # provider buckets would silently starve later providers whenever
+        # len(providers) * results_per_provider exceeds max_total_results.
+        raw_results: list[RawSearchResult] = []
+        max_depth = max((len(items) for items in provider_results), default=0)
+        for rank in range(max_depth):
+            for items in provider_results:
+                if rank >= len(items):
+                    continue
+                raw_results.append(items[rank])
+                if len(raw_results) >= self.policy.max_total_results:
+                    break
+            if len(raw_results) >= self.policy.max_total_results:
+                break
+
         canonical: list[CanonicalSearchResult] = []
-        for result in raw_results[: self.policy.max_total_results]:
+        for result in raw_results:
             try:
                 classified = classify_result(plan, result, policy=self.policy)
             except ValueError:
