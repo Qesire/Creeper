@@ -142,6 +142,7 @@ max_returned_candidates = 17
             0.75,
         )
         self.assertEqual(config.agent.admission.min_enumerability_prior, 0.6)
+        self.assertTrue(config.residual_search.enabled)
 
     def test_residual_search_config_is_explicit_and_fail_closed(self) -> None:
         path = self.write_config()
@@ -199,7 +200,7 @@ timeout_seconds = 9.0
 
 
 class SourceDiscoveryServiceSmokeTests(unittest.IsolatedAsyncioTestCase):
-    async def test_empty_registry_runs_parallel_agent_refill_and_reports_inventory(self) -> None:
+    async def test_empty_registry_does_not_fall_back_to_ordinary_llm_refill(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             sidecar = root / "sidecar"
@@ -211,33 +212,7 @@ class SourceDiscoveryServiceSmokeTests(unittest.IsolatedAsyncioTestCase):
 
             agent = root / "agent.py"
             agent.write_text(
-                '''import argparse
-import json
-from pathlib import Path
-
-p = argparse.ArgumentParser()
-p.add_argument("--request", required=True)
-p.add_argument("--response", required=True)
-a = p.parse_args()
-request = json.loads(Path(a.request).read_text(encoding="utf-8"))
-strategy = request["strategy"]
-payload = {
-    "query": f"fake:{strategy}",
-    "candidates": [{
-        "canonical_entrypoint": f"https://example.invalid/{strategy.lower()}/",
-        "source_family": "TEST_META",
-        "level": "METASOURCE",
-        "expected_year_from": 1996,
-        "expected_year_to": 2001,
-        "expected_volume": 100000,
-        "temporal_semantics_prior": 0.5,
-        "enumerability_prior": 0.9,
-        "baseline_overlap_prior": 0.5,
-        "confidence": 0.7
-    }]
-}
-Path(a.response).write_text(json.dumps(payload), encoding="utf-8")
-''',
+                "raise SystemExit('ordinary LLM refill must not run')\n",
                 encoding="utf-8",
             )
 
@@ -286,6 +261,13 @@ Path(a.response).write_text(json.dumps(payload), encoding="utf-8")
                         min_confidence=0.35,
                     ),
                 ),
+                # Explicitly disable deterministic discovery to prove that a
+                # cold deficit alone does not reactivate the legacy LLM URL
+                # refill path.
+                residual_search=__import__(
+                    "creeper.source_discovery_service",
+                    fromlist=["ResidualSearchConfig"],
+                ).ResidualSearchConfig(enabled=False),
             )
 
             reports = await run_source_discovery_cycles(config, cycles=1)
@@ -294,24 +276,13 @@ Path(a.response).write_text(json.dumps(payload), encoding="utf-8")
             report = reports[0]
             self.assertEqual(report["cycle"], 1)
             self.assertGreaterEqual(report["elapsed_seconds"], 0.0)
-            self.assertEqual(report["search_episodes"], 2)
-            self.assertEqual(report["search_candidates_registered"], 2)
-            self.assertEqual(report["inventory"]["DISCOVERED"], 2)
-            invocation_root = root / "runtime" / "source-discovery" / "agent-invocations"
-            invocation_dirs = [path for path in invocation_root.iterdir() if path.is_dir()]
-            self.assertEqual(len(invocation_dirs), 2)
-            for invocation in invocation_dirs:
-                request = __import__("json").loads(
-                    (invocation / "request.json").read_text(encoding="utf-8")
-                )
-                self.assertEqual(request["admission"]["min_expected_volume"], 100000)
-                self.assertEqual(request["admission"]["direct_min_expected_volume"], 10000)
-                self.assertFalse(request["requirements"]["prefer_direct_evidence_bulk"])
-                audit = __import__("json").loads(
-                    (invocation / "admission.json").read_text(encoding="utf-8")
-                )
-                self.assertEqual(audit["accepted_count"], 1)
-                self.assertEqual(audit["rejected_count"], 0)
+            self.assertEqual(report["search_episodes"], 0)
+            self.assertEqual(report["search_candidates_registered"], 0)
+            self.assertEqual(report["inventory"].get("DISCOVERED", 0), 0)
+            invocation_root = (
+                root / "runtime" / "source-discovery" / "agent-invocations"
+            )
+            self.assertFalse(invocation_root.exists())
 
             with RuntimeTelemetryStore(
                 root / "runtime" / "telemetry.sqlite3"
@@ -319,23 +290,23 @@ Path(a.response).write_text(json.dumps(payload), encoding="utf-8")
                 snapshot = telemetry.snapshot()
 
             self.assertEqual(snapshot.counters["discovery_cycles"], 1)
-            self.assertEqual(snapshot.counters["discovery_search_episodes"], 2)
             self.assertEqual(
-                snapshot.counters["discovery_search_candidates_registered"],
-                2,
+                snapshot.counters.get("discovery_search_episodes", 0),
+                0,
+            )
+            self.assertEqual(
+                snapshot.counters.get(
+                    "discovery_search_candidates_registered",
+                    0,
+                ),
+                0,
             )
             self.assertEqual(snapshot.gauges["active_candidates"], 0.0)
             self.assertEqual(snapshot.gauges["active_direct_sources"], 0.0)
             self.assertEqual(
-                snapshot.gauges["source_candidates_discovered"],
-                2.0,
-            )
-            self.assertEqual(
-                snapshot.gauges["discovery_search_episodes_inflight"],
+                snapshot.gauges.get("source_candidates_discovered", 0.0),
                 0.0,
             )
-            self.assertEqual(snapshot.gauges["historical_index_total"], 0.0)
-            self.assertEqual(snapshot.gauges["platform_year_total"], 0.0)
 
 
 class ResidualDiscoveryTelemetryTests(unittest.TestCase):
