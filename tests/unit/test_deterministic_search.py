@@ -9,6 +9,7 @@ from creeper.source_discovery.deterministic_search import (
     DataCiteSearchProvider,
     DeterministicSearchExecutor,
     DeterministicSearchPolicy,
+    ZenodoSearchProvider,
     candidate_from_result,
     classify_result,
     relevance_score,
@@ -154,6 +155,115 @@ class DeterministicSearchTests(unittest.TestCase):
         self.assertIn('"university"', seen_query)
         self.assertIn('"trace"', seen_query)
         self.assertIn('-"famous proxy trace"', seen_query)
+
+    def test_zenodo_provider_prefers_direct_file_and_bounds_page_size(self) -> None:
+        observed_size = None
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal observed_size
+            self.assertEqual(request.url.path, "/api/records")
+            observed_size = int(request.url.params["size"])
+            query = request.url.params["q"]
+            self.assertIn('"1998"', query)
+            self.assertIn('"proxy"', query)
+            self.assertIn('"university"', query)
+            self.assertIn('"trace"', query)
+            return httpx.Response(
+                200,
+                json={
+                    "hits": {
+                        "hits": [
+                            {
+                                "id": 42,
+                                "pids": {
+                                    "doi": {
+                                        "identifier": "10.5281/zenodo.42"
+                                    }
+                                },
+                                "metadata": {
+                                    "title": "1998 University Proxy Trace",
+                                    "description": "HTTP access log dataset",
+                                    "publication_date": "2004-03-01",
+                                    "resource_type": {
+                                        "id": "dataset",
+                                        "title": "Dataset",
+                                    },
+                                    "creators": [
+                                        {
+                                            "person_or_org": {
+                                                "name": "Example Group"
+                                            }
+                                        }
+                                    ],
+                                    "keywords": ["proxy", "HTTP", "trace"],
+                                },
+                                "files": {
+                                    "entries": {
+                                        "proxy98.zip": {
+                                            "size": 123456,
+                                            "checksum": (
+                                                "sha256:"
+                                                + "a" * 64
+                                            ),
+                                            "links": {
+                                                "content": (
+                                                    "https://zenodo.org/api/records/"
+                                                    "42/files/proxy98.zip/content"
+                                                )
+                                            },
+                                        }
+                                    }
+                                },
+                                "links": {
+                                    "self_html": "https://zenodo.org/records/42"
+                                },
+                            }
+                        ]
+                    }
+                },
+            )
+
+        async def run():
+            async with httpx.AsyncClient(
+                transport=httpx.MockTransport(handler)
+            ) as client:
+                provider = ZenodoSearchProvider(client)
+                return await provider.search(self.plan, limit=100)
+
+        results = asyncio.run(run())
+        self.assertEqual(observed_size, 25)
+        self.assertEqual(len(results), 1)
+        self.assertEqual(
+            results[0].url,
+            "https://zenodo.org/api/records/42/files/proxy98.zip/content",
+        )
+        self.assertEqual(results[0].content_length, 123456)
+        self.assertEqual(results[0].checksum_sha256, "a" * 64)
+        self.assertEqual(results[0].identifiers, ("10.5281/zenodo.42",))
+
+    def test_zenodo_and_datacite_same_doi_collapse_to_one_dataset(self) -> None:
+        datacite = RawSearchResult(
+            provider="datacite",
+            provider_result_id="10.5281/zenodo.42",
+            url="https://doi.org/10.5281/zenodo.42",
+            title="1998 University Proxy Trace",
+            publisher="Zenodo",
+        )
+        zenodo = RawSearchResult(
+            provider="zenodo",
+            provider_result_id="42",
+            url="https://zenodo.org/api/records/42/files/proxy98.zip/content",
+            title="1998 University Proxy Trace",
+            publisher="Zenodo",
+            identifiers=("10.5281/zenodo.42",),
+        )
+
+        first = classify_result(self.plan, datacite, policy=self.policy)
+        second = classify_result(self.plan, zenodo, policy=self.policy)
+
+        self.assertIsNotNone(first)
+        self.assertIsNotNone(second)
+        self.assertEqual(first.dataset_key, second.dataset_key)
 
     def test_executor_returns_pure_canonical_results(self) -> None:
         class Provider:
