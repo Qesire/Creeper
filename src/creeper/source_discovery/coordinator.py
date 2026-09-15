@@ -91,6 +91,13 @@ class ScoutResult:
             raise ValueError("WARM scout result requires a deterministic measurement")
         if not self.edge_relation.strip():
             raise ValueError("scout child edge_relation is required")
+        if (
+            self.format_observation is not None
+            and not isinstance(self.format_observation, SourceFormatObservation)
+        ):
+            raise TypeError(
+                "format_observation must be SourceFormatObservation when provided"
+            )
         if any(
             candidate.state is not SourceState.DISCOVERED
             for candidate in self.discovered_candidates
