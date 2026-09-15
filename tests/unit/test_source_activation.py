@@ -29,6 +29,10 @@ from creeper.source_discovery.models import (
     SourceState,
 )
 from creeper.source_discovery.registry import SourceDiscoveryRegistry
+from creeper.sources.format_binding import (
+    SourceFormatObservation,
+    format_from_adapter_id,
+)
 from creeper.storage.control_store import ControlStore
 
 
@@ -121,6 +125,87 @@ class SourceActivationCompilerTests(unittest.TestCase):
                 self.assertEqual(reservoir.state.value, "READY")
                 activation = control.get_activation(spec.source_key)
                 self.assertEqual(activation["reservoir_id"], spec.reservoir_id)
+            finally:
+                control.close()
+
+    def test_unknown_locator_activates_from_trusted_format_observation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            control = ControlStore(Path(tmp) / "control.sqlite3")
+            try:
+                candidate = _candidate(
+                    "https://repo.example/api/download?id=opaque"
+                )
+                registry = self._registry(control, candidate)
+                observation = SourceFormatObservation(
+                    parser_kind="jsonl",
+                    compression="gzip",
+                    detection_method="content_signature",
+                    confidence=0.97,
+                    content_type="application/octet-stream",
+                )
+                registry.record_format_observation(
+                    candidate.source_key,
+                    observation,
+                )
+
+                spec = SourceActivationCompiler(
+                    control,
+                    registry=registry,
+                ).compile(candidate)
+
+                self.assertEqual(spec.adapter_kind, "structured")
+                self.assertEqual(spec.enumeration_kind, "structured_records")
+                self.assertEqual(spec.evidence_mode, "discovery_only")
+                reservoir = control.get_reservoir(spec.reservoir_id)
+                self.assertIsNotNone(reservoir)
+                assert reservoir is not None
+                self.assertEqual(
+                    format_from_adapter_id(reservoir.adapter_id),
+                    observation,
+                )
+                contract = contract_from_adapter_id(reservoir.adapter_id)
+                self.assertIsNotNone(contract)
+                assert contract is not None
+                self.assertEqual(contract.parser_kind, "jsonl")
+                index_row = control.connection.execute(
+                    """
+                    SELECT source_format
+                    FROM source_indexes_v1
+                    WHERE source_key = ?
+                    """,
+                    (candidate.source_key,),
+                ).fetchone()
+                self.assertIsNotNone(index_row)
+                self.assertEqual(index_row["source_format"], "JSONL")
+            finally:
+                control.close()
+
+    def test_low_confidence_unknown_format_does_not_auto_activate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            control = ControlStore(Path(tmp) / "control.sqlite3")
+            try:
+                candidate = _candidate(
+                    "https://repo.example/api/download?id=weak"
+                )
+                registry = self._registry(control, candidate)
+                registry.record_format_observation(
+                    candidate.source_key,
+                    SourceFormatObservation(
+                        parser_kind="lines",
+                        compression="none",
+                        detection_method="content_signature",
+                        confidence=0.88,
+                    ),
+                )
+
+                with self.assertRaisesRegex(
+                    SourceActivationError,
+                    "unsupported adapter",
+                ):
+                    SourceActivationCompiler(
+                        control,
+                        registry=registry,
+                    ).compile(candidate)
             finally:
                 control.close()
 
