@@ -75,7 +75,6 @@ class RecordSchemaDetectionTests(unittest.TestCase):
         assert schema is not None
         self.assertEqual(schema.hostname_field, "column:0")
         self.assertEqual(schema.timestamp_field, "column:1")
-        self.assertTrue(schema.direct_year_eligible)
         self.assertEqual(schema.delimiter, ";")
         self.assertEqual(schema.confidence, 1.0)
         self.assertFalse(schema.direct_year_eligible)
@@ -108,6 +107,7 @@ class RecordSchemaDetectionTests(unittest.TestCase):
         self.assertEqual(schema.delimiter, ",")
         self.assertEqual(schema.hostname_field, "column:0")
         self.assertEqual(schema.timestamp_field, "column:1")
+        self.assertTrue(schema.direct_year_eligible)
 
     def test_stable_but_ambiguous_year_field_is_not_auto_direct(self) -> None:
         payload = (
