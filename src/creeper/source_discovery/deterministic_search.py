@@ -413,6 +413,262 @@ class DataCiteSearchProvider:
         return tuple(results)
 
 
+def _zenodo_records(payload: object) -> list[dict[str, object]]:
+    if isinstance(payload, list):
+        return [item for item in payload if isinstance(item, dict)]
+    if not isinstance(payload, dict):
+        return []
+    hits = payload.get("hits")
+    if isinstance(hits, dict):
+        records = hits.get("hits")
+        if isinstance(records, list):
+            return [item for item in records if isinstance(item, dict)]
+    data = payload.get("data")
+    if isinstance(data, list):
+        return [item for item in data if isinstance(item, dict)]
+    return []
+
+
+def _zenodo_doi(item: dict[str, object], metadata: dict[str, object]) -> str | None:
+    for value in (item.get("doi"), metadata.get("doi")):
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    pids = item.get("pids")
+    if isinstance(pids, dict):
+        doi = pids.get("doi")
+        if isinstance(doi, dict):
+            identifier = doi.get("identifier")
+            if isinstance(identifier, str) and identifier.strip():
+                return identifier.strip()
+    return None
+
+
+def _zenodo_file_candidates(
+    item: dict[str, object],
+) -> list[tuple[str, int | None, str | None]]:
+    values: list[tuple[str, int | None, str | None]] = []
+    files = item.get("files")
+    raw_files: list[dict[str, object]] = []
+    if isinstance(files, list):
+        raw_files.extend(entry for entry in files if isinstance(entry, dict))
+    elif isinstance(files, dict):
+        entries = files.get("entries")
+        if isinstance(entries, dict):
+            raw_files.extend(
+                entry for entry in entries.values() if isinstance(entry, dict)
+            )
+    for entry in raw_files:
+        links = entry.get("links")
+        url = None
+        if isinstance(links, dict):
+            for key in ("content", "download", "self"):
+                candidate = links.get(key)
+                if isinstance(candidate, str) and candidate.startswith(
+                    ("http://", "https://")
+                ):
+                    url = candidate
+                    break
+        if url is None:
+            for key in ("download", "url"):
+                candidate = entry.get(key)
+                if isinstance(candidate, str) and candidate.startswith(
+                    ("http://", "https://")
+                ):
+                    url = candidate
+                    break
+        if url is None:
+            continue
+        size = entry.get("size")
+        if size is None:
+            size = entry.get("filesize")
+        try:
+            content_length = int(size) if size is not None else None
+        except (TypeError, ValueError):
+            content_length = None
+        checksum = entry.get("checksum")
+        sha256 = None
+        if isinstance(checksum, str):
+            lowered = checksum.lower()
+            if lowered.startswith("sha256:"):
+                candidate = lowered.split(":", 1)[1]
+                if re.fullmatch(r"[0-9a-f]{64}", candidate):
+                    sha256 = candidate
+        values.append((url, content_length, sha256))
+    values.sort(
+        key=lambda item: (
+            not urlsplit(item[0]).path.lower().endswith(_SOURCE_SUFFIXES),
+            item[1] is None,
+            item[1] or 0,
+            item[0],
+        )
+    )
+    return values
+
+
+def _zenodo_landing_url(item: dict[str, object]) -> str | None:
+    links = item.get("links")
+    if isinstance(links, dict):
+        for key in ("self_html", "html", "latest_html"):
+            value = links.get(key)
+            if isinstance(value, str) and value.startswith(("http://", "https://")):
+                return value
+    record_id = item.get("id")
+    if isinstance(record_id, (str, int)) and str(record_id).strip():
+        return f"https://zenodo.org/records/{record_id}"
+    return None
+
+
+def _zenodo_creators(metadata: dict[str, object]) -> tuple[str, ...]:
+    creators = metadata.get("creators")
+    if not isinstance(creators, list):
+        return ()
+    result: list[str] = []
+    for creator in creators[:8]:
+        if not isinstance(creator, dict):
+            continue
+        for key in ("name", "person_or_org"):
+            value = creator.get(key)
+            if isinstance(value, str) and value.strip():
+                result.append(value.strip())
+                break
+            if isinstance(value, dict):
+                name = value.get("name")
+                if isinstance(name, str) and name.strip():
+                    result.append(name.strip())
+                    break
+    return tuple(result)
+
+
+def _zenodo_resource_type(metadata: dict[str, object]) -> str:
+    value = metadata.get("resource_type")
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        for key in ("title", "id"):
+            item = value.get(key)
+            if isinstance(item, str):
+                return item
+    upload_type = metadata.get("upload_type")
+    return upload_type if isinstance(upload_type, str) else ""
+
+
+class ZenodoSearchProvider:
+    """Anonymous bounded Zenodo record search with direct-file preference."""
+
+    name = "zenodo"
+
+    def __init__(
+        self,
+        client: httpx.AsyncClient,
+        *,
+        endpoint: str = "https://zenodo.org/api/records",
+        timeout_seconds: float = 20.0,
+    ) -> None:
+        self.client = client
+        self.endpoint = endpoint
+        self.timeout_seconds = float(timeout_seconds)
+
+    @staticmethod
+    def _query(plan: QueryPlan) -> str:
+        variants = _MECHANISM_TERMS[plan.cell.mechanism]
+        phrase = variants[plan.variant % len(variants)]
+        institution = plan.cell.institution.replace("_", " ")
+        artifact = plan.cell.artifact.replace("_", " ")
+        clauses = [
+            f'"{plan.cell.period}"',
+            f'"{phrase}"',
+            f'"{institution}"',
+            f'"{artifact}"',
+        ]
+        clauses.extend(
+            f'NOT "{item}"'
+            for item in plan.exclusions
+            if item and len(item) <= 80
+        )
+        return " AND ".join(clauses)
+
+    async def search(
+        self,
+        plan: QueryPlan,
+        *,
+        limit: int,
+    ) -> tuple[RawSearchResult, ...]:
+        # Zenodo documents a maximum anonymous page size of 25.
+        page_size = min(25, max(1, int(limit)))
+        response = await self.client.get(
+            self.endpoint,
+            params={
+                "q": self._query(plan),
+                "size": page_size,
+                "sort": "bestmatch",
+            },
+            timeout=self.timeout_seconds,
+        )
+        response.raise_for_status()
+        records = _zenodo_records(response.json())
+        results: list[RawSearchResult] = []
+        for item in records:
+            metadata_raw = item.get("metadata")
+            metadata = metadata_raw if isinstance(metadata_raw, dict) else {}
+            record_id = item.get("id")
+            if not isinstance(record_id, (str, int)) or not str(record_id).strip():
+                continue
+            files = _zenodo_file_candidates(item)
+            if files:
+                url, content_length, sha256 = files[0]
+            else:
+                url = _zenodo_landing_url(item)
+                content_length = None
+                sha256 = None
+            if url is None:
+                continue
+            title = metadata.get("title")
+            if not isinstance(title, str):
+                raw_title = item.get("title")
+                title = raw_title if isinstance(raw_title, str) else ""
+            description = metadata.get("description")
+            description = description if isinstance(description, str) else ""
+            keywords = metadata.get("keywords")
+            if isinstance(keywords, list):
+                description = " ".join(
+                    (
+                        description,
+                        " ".join(
+                            str(value)
+                            for value in keywords[:16]
+                            if isinstance(value, str)
+                        ),
+                    )
+                ).strip()
+            publication_date = metadata.get("publication_date")
+            year = None
+            if isinstance(publication_date, str) and len(publication_date) >= 4:
+                prefix = publication_date[:4]
+                if prefix.isdigit():
+                    year = int(prefix)
+            doi = _zenodo_doi(item, metadata)
+            identifiers = (doi,) if doi is not None else ()
+            results.append(
+                RawSearchResult(
+                    provider=self.name,
+                    provider_result_id=str(record_id),
+                    url=url,
+                    title=title,
+                    description=description,
+                    publisher="Zenodo",
+                    creators=_zenodo_creators(metadata),
+                    publication_year=year,
+                    resource_type=_zenodo_resource_type(metadata),
+                    identifiers=identifiers,
+                    content_length=content_length,
+                    checksum_sha256=sha256,
+                )
+            )
+            if len(results) >= page_size:
+                break
+        return tuple(results)
+
+
 class DeterministicSearchExecutor:
     """Execute one search cell across independent structured providers."""
 
