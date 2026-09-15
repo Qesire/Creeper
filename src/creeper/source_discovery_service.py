@@ -109,7 +109,7 @@ class MeasurementConfig:
 @dataclass(frozen=True)
 class ResidualSearchConfig:
     enabled: bool = False
-    providers: tuple[str, ...] = ("datacite", "zenodo")
+    providers: tuple[str, ...] = ("datacite", "zenodo", "harvard_dataverse")
     policy: DeterministicSearchPolicy = DeterministicSearchPolicy()
 
 
