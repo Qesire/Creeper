@@ -81,7 +81,7 @@ class DeterministicSearchTests(unittest.TestCase):
             self.assertIn("query", request.url.params)
             query = request.url.params["query"]
             self.assertIn('"1998"', query)
-            self.assertIn('"proxy trace"', query)
+            self.assertIn('"proxy"', query)
             self.assertIn('"university"', query)
             self.assertIn('"trace"', query)
             return httpx.Response(
@@ -124,6 +124,36 @@ class DeterministicSearchTests(unittest.TestCase):
             "https://repo.example/files/proxy98.zip",
         )
         self.assertEqual(results[0].provider_result_id, "10.1234/proxy98")
+
+    def test_datacite_query_rotates_mechanism_variant_without_losing_cell_anchors(self) -> None:
+        variant_plan = QueryPlan(
+            cell=self.cell,
+            query='"1998" "access log" university "trace dataset"',
+            variant=2,
+            exclusions=("famous proxy trace",),
+            score=1.0,
+        )
+
+        seen_query = None
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal seen_query
+            seen_query = request.url.params["query"]
+            return httpx.Response(200, json={"data": []})
+
+        async def run() -> None:
+            async with httpx.AsyncClient(
+                transport=httpx.MockTransport(handler)
+            ) as client:
+                provider = DataCiteSearchProvider(client)
+                await provider.search(variant_plan, limit=10)
+
+        asyncio.run(run())
+        self.assertIsNotNone(seen_query)
+        self.assertIn('"access log"', seen_query)
+        self.assertIn('"university"', seen_query)
+        self.assertIn('"trace"', seen_query)
+        self.assertIn('-"famous proxy trace"', seen_query)
 
     def test_executor_returns_pure_canonical_results(self) -> None:
         class Provider:
