@@ -900,6 +900,28 @@ def _publish_discovery_telemetry(
         }
     )
 
+    for table, gauge in (
+        ("source_format_observations", "source_format_observation_total"),
+        ("source_record_schemas", "source_record_schema_total"),
+    ):
+        source_gauges[gauge] = int(
+            registry.connection.execute(
+                f"SELECT COUNT(*) AS n FROM {table}"
+                if _table_exists(registry, table)
+                else "SELECT 0 AS n"
+            ).fetchone()["n"]
+        )
+    if _table_exists(registry, "source_record_schemas"):
+        source_gauges["source_record_schema_high_confidence"] = int(
+            registry.connection.execute(
+                """
+                SELECT COUNT(*) AS n
+                FROM source_record_schemas
+                WHERE confidence >= 0.90
+                """
+            ).fetchone()["n"]
+        )
+
     residual_states = _durable_state_counts(
         registry,
         table="residual_search_cells",
