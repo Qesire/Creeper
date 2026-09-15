@@ -150,7 +150,7 @@ max_returned_candidates = 17
                 """
 [residual_search]
 enabled = true
-providers = ["datacite"]
+providers = ["datacite", "zenodo"]
 results_per_provider = 77
 max_total_results = 155
 min_relevance_score = 0.65
@@ -161,13 +161,16 @@ timeout_seconds = 9.0
         config = load_source_discovery_config(path)
 
         self.assertTrue(config.residual_search.enabled)
-        self.assertEqual(config.residual_search.providers, ("datacite",))
+        self.assertEqual(
+            config.residual_search.providers,
+            ("datacite", "zenodo"),
+        )
         self.assertEqual(config.residual_search.policy.results_per_provider, 77)
         self.assertEqual(config.residual_search.policy.max_total_results, 155)
         self.assertEqual(config.residual_search.policy.min_relevance_score, 0.65)
 
         text = path.read_text(encoding="utf-8").replace(
-            'providers = ["datacite"]',
+            'providers = ["datacite", "zenodo"]',
             'providers = ["unknown-provider"]',
         )
         path.write_text(text, encoding="utf-8")
