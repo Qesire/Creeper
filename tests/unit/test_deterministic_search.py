@@ -1,0 +1,157 @@
+from __future__ import annotations
+
+import asyncio
+import unittest
+
+import httpx
+
+from creeper.source_discovery.deterministic_search import (
+    DataCiteSearchProvider,
+    DeterministicSearchExecutor,
+    DeterministicSearchPolicy,
+    candidate_from_result,
+    classify_result,
+    relevance_score,
+)
+from creeper.source_discovery.residual_search import QueryPlan, SearchCell
+from creeper.source_discovery.search_identity import RawSearchResult
+
+
+class DeterministicSearchTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.cell = SearchCell(
+            mechanism="proxy_access",
+            institution="university",
+            period="1998",
+            artifact="trace",
+        )
+        self.plan = QueryPlan(
+            cell=self.cell,
+            query='"1998" "proxy trace" university "trace dataset"',
+            variant=0,
+            exclusions=(),
+            score=1.0,
+        )
+        self.policy = DeterministicSearchPolicy(
+            results_per_provider=10,
+            max_total_results=20,
+            min_relevance_score=0.55,
+            timeout_seconds=5.0,
+        )
+
+    def test_relevance_requires_target_mechanism_not_dataset_popularity(self) -> None:
+        relevant = RawSearchResult(
+            provider="datacite",
+            provider_result_id="10.1234/proxy",
+            url="https://data.example/proxy-1998.zip",
+            title="1998 University HTTP Proxy Trace Dataset",
+            resource_type="Dataset",
+        )
+        unrelated = RawSearchResult(
+            provider="datacite",
+            provider_result_id="10.1234/modern",
+            url="https://data.example/modern.zip",
+            title="Modern genomics dataset",
+            resource_type="Dataset",
+            publication_year=2026,
+        )
+
+        self.assertGreaterEqual(relevance_score(self.cell, relevant), 0.55)
+        self.assertLess(relevance_score(self.cell, unrelated), 0.55)
+        self.assertTrue(
+            classify_result(self.plan, relevant, policy=self.policy).qualified
+        )
+        self.assertFalse(
+            classify_result(self.plan, unrelated, policy=self.policy).qualified
+        )
+
+    def test_common_crawl_result_is_rejected_before_identity_registration(self) -> None:
+        result = RawSearchResult(
+            provider="datacite",
+            provider_result_id="10.1234/cc",
+            url="https://example.org/common-crawl-1998.zip",
+            title="1998 Common Crawl proxy trace dataset",
+            resource_type="Dataset",
+        )
+        self.assertIsNone(classify_result(self.plan, result, policy=self.policy))
+
+    def test_datacite_provider_prefers_direct_content_url(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            self.assertEqual(request.url.path, "/dois")
+            self.assertIn("query", request.url.params)
+            return httpx.Response(
+                200,
+                json={
+                    "data": [
+                        {
+                            "id": "10.1234/proxy98",
+                            "attributes": {
+                                "doi": "10.1234/proxy98",
+                                "titles": [{"title": "1998 University Proxy Trace"}],
+                                "publisher": "Example University",
+                                "publicationYear": 2004,
+                                "types": {"resourceTypeGeneral": "Dataset"},
+                                "url": "https://repo.example/record/1",
+                                "contentUrl": [
+                                    "https://repo.example/files/proxy98.zip"
+                                ],
+                                "creators": [{"name": "Research Group"}],
+                                "descriptions": [
+                                    {"description": "HTTP access log proxy dataset"}
+                                ],
+                            },
+                        }
+                    ]
+                },
+            )
+
+        async def run():
+            async with httpx.AsyncClient(
+                transport=httpx.MockTransport(handler)
+            ) as client:
+                provider = DataCiteSearchProvider(client)
+                return await provider.search(self.plan, limit=10)
+
+        results = asyncio.run(run())
+        self.assertEqual(len(results), 1)
+        self.assertEqual(
+            results[0].url,
+            "https://repo.example/files/proxy98.zip",
+        )
+        self.assertEqual(results[0].provider_result_id, "10.1234/proxy98")
+
+    def test_executor_returns_pure_canonical_results(self) -> None:
+        class Provider:
+            name = "fixture"
+
+            async def search(self, plan, *, limit):
+                return (
+                    RawSearchResult(
+                        provider=self.name,
+                        provider_result_id="fixture-1",
+                        url="https://example.edu/proxy98.txt",
+                        title="1998 Proxy Access Log Trace",
+                        publication_year=1998,
+                        resource_type="Dataset",
+                    ),
+                )
+
+        batch = asyncio.run(
+            DeterministicSearchExecutor(
+                (Provider(),),
+                policy=self.policy,
+            )(self.plan)
+        )
+        self.assertEqual(batch.backend, "fixture")
+        self.assertEqual(len(batch.results), 1)
+        self.assertTrue(batch.results[0].qualified)
+
+        candidate = candidate_from_result(self.plan, batch.results[0])
+        self.assertEqual(candidate.expected_year_from, 1998)
+        self.assertEqual(candidate.expected_year_to, 1998)
+        self.assertEqual(candidate.discovery_strategy, "RESIDUAL_CELL_SEARCH")
+        self.assertEqual(candidate.source_family, "RESIDUAL_PROXY_ACCESS")
+
+
+if __name__ == "__main__":
+    unittest.main()
