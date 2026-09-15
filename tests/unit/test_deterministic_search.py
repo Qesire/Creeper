@@ -14,6 +14,7 @@ from creeper.source_discovery.deterministic_search import (
     classify_result,
     relevance_score,
 )
+from creeper.source_discovery.models import SourceLevel
 from creeper.source_discovery.residual_search import QueryPlan, SearchCell
 from creeper.source_discovery.search_identity import RawSearchResult
 
@@ -240,6 +241,10 @@ class DeterministicSearchTests(unittest.TestCase):
         self.assertEqual(results[0].content_length, 123456)
         self.assertEqual(results[0].checksum_sha256, "a" * 64)
         self.assertEqual(results[0].identifiers, ("10.5281/zenodo.42",))
+        classified = classify_result(self.plan, results[0], policy=self.policy)
+        self.assertIsNotNone(classified)
+        candidate = candidate_from_result(self.plan, classified)
+        self.assertEqual(candidate.level, SourceLevel.SOURCE)
 
     def test_zenodo_and_datacite_same_doi_collapse_to_one_dataset(self) -> None:
         datacite = RawSearchResult(
