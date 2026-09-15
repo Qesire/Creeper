@@ -206,7 +206,10 @@ def candidate_from_result(
     ) else 0.60
     return SourceCandidate(
         canonical_entrypoint=result.canonical_url,
-        source_family=f"RESIDUAL_{plan.cell.mechanism.upper()}",
+        source_family=(
+            f"RESIDUAL_{plan.cell.mechanism.upper()}:"
+            f"{result.family_key.removeprefix('family:')[:20]}"
+        ),
         level=SourceLevel.SOURCE if source_like else SourceLevel.COLLECTION,
         discovered_by=f"deterministic:{result.raw.provider}",
         discovery_strategy="RESIDUAL_CELL_SEARCH",
