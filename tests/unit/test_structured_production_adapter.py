@@ -151,6 +151,48 @@ class StructuredProductionAdapterTests(unittest.TestCase):
         )
         self.assertEqual(observations[0].direct_year_mask, YEAR_BITS[1999])
 
+    def test_opaque_delimited_format_binding_replays_delimiter_without_schema(self):
+        observation = SourceFormatObservation(
+            parser_kind="delimited",
+            compression="none",
+            detection_method="content_signature",
+            confidence=0.92,
+            content_type="application/octet-stream",
+            delimiter=";",
+        )
+        reservoir = Reservoir(
+            reservoir_id="reservoir:opaque-delimited",
+            domain_id="domain:opaque-delimited",
+            adapter_id=bind_format_to_adapter_id(
+                "structured:opaque-delimited",
+                observation,
+            ),
+            root_locator="https://repo.example/api/download?id=opaque-table",
+            enumeration_kind="structured_records",
+            capacity_lower=0,
+            evidence_mode="discovery_only",
+            state=ReservoirState.READY,
+        )
+        adapter = StructuredProductionAdapter(
+            reservoir,
+            temporal_scope=(1996, 2001),
+        )
+
+        self.assertEqual(adapter.kind, "delimited")
+        self.assertEqual(adapter.delimiter, ";")
+        record = adapter._generic_record(
+            "https://semicolon.example/path;label",
+            locator="fixture:semicolon",
+        )
+
+        self.assertIsNotNone(record)
+        assert record is not None
+        observations = tuple(adapter.extract_hosts(record))
+        self.assertEqual(
+            [item.hostname for item in observations],
+            ["semicolon.example"],
+        )
+
     def test_mailbox_adapter_persists_only_urls_and_year_hints(self):
         reservoir = Reservoir(
             reservoir_id="reservoir:mbox",

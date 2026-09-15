@@ -722,6 +722,14 @@ def _extract_hosts(
                 io.StringIO(text),
                 delimiter=schema_observation.delimiter,
             )
+        elif (
+            format_observation is not None
+            and format_observation.delimiter is not None
+        ):
+            rows = csv.reader(
+                io.StringIO(text),
+                delimiter=format_observation.delimiter,
+            )
         else:
             dialect = (
                 "excel-tab"

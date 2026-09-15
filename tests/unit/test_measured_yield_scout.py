@@ -169,6 +169,56 @@ class MeasuredYieldScoutTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.measurement.unique_hosts, 3)
         self.assertEqual(result.measurement.novel_host_year_pairs, 3)
 
+    async def test_opaque_host_only_semicolon_table_uses_format_delimiter(self) -> None:
+        body = (
+            b"host;label\n"
+            b"known.com;known\n"
+            b"novel.com;novel\n"
+            b"other.org;other\n"
+        )
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            return streamed_response(
+                206,
+                body,
+                headers={"content-type": "application/octet-stream"},
+            )
+
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler)
+        ) as client:
+            scout = MeasuredYieldScoutExecutor(
+                client,
+                self.baseline,
+                {"com": Decimal("1"), "org": Decimal("0.5")},
+                policy=self.policy(
+                    min_unique_hosts=2,
+                    min_novel_hosts=1,
+                    min_novel_fraction=0.1,
+                    min_novel_eed=0.5,
+                ),
+            )
+            result = await scout(
+                self.candidate(
+                    "https://repo.example/api/download?id=hosts-only"
+                )
+            )
+
+        self.assertEqual(result.disposition, ScoutDisposition.WARM)
+        self.assertIsNotNone(result.format_observation)
+        assert result.format_observation is not None
+        self.assertEqual(result.format_observation.parser_kind, "delimited")
+        self.assertEqual(result.format_observation.delimiter, ";")
+        self.assertIsNone(result.schema_observation)
+        self.assertIsNotNone(result.measurement)
+        assert result.measurement is not None
+        self.assertEqual(
+            result.measurement.measurement_mode,
+            MeasurementMode.HOST_ONLY,
+        )
+        self.assertEqual(result.measurement.unique_hosts, 3)
+        self.assertEqual(result.measurement.novel_hosts, 2)
+
     async def test_headerless_delimited_schema_upgrades_scout_to_host_year(self) -> None:
         body = (
             b"https://known.com/a;1998;foo\n"

@@ -63,6 +63,27 @@ class SourceFormatDetectionTests(unittest.TestCase):
         assert observed is not None
         self.assertEqual(observed.parser_kind, "delimited")
         self.assertEqual(observed.compression, "gzip")
+        self.assertEqual(observed.delimiter, ",")
+        self.assertGreaterEqual(observed.confidence, 0.90)
+
+    def test_unknown_semicolon_table_freezes_detected_delimiter(self) -> None:
+        payload = (
+            "host;label\n"
+            "one.example;alpha\n"
+            "two.example;beta\n"
+            "three.example;gamma\n"
+        ).encode("utf-8")
+
+        observed = detect_source_format(
+            locator="https://repo.example/api/object/opaque-table",
+            payload=payload,
+            content_type="application/octet-stream",
+        )
+
+        self.assertIsNotNone(observed)
+        assert observed is not None
+        self.assertEqual(observed.parser_kind, "delimited")
+        self.assertEqual(observed.delimiter, ";")
         self.assertGreaterEqual(observed.confidence, 0.90)
 
     def test_truncated_gzip_probe_still_exposes_format_signature(self) -> None:
