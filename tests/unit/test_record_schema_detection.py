@@ -47,6 +47,7 @@ class RecordSchemaDetectionTests(unittest.TestCase):
         self.assertEqual(schema.matched_records, 3)
         self.assertEqual(schema.sample_records, 3)
         self.assertEqual(schema.confidence, 1.0)
+        self.assertTrue(schema.direct_year_eligible)
         contract = schema.direct_contract()
         self.assertTrue(contract.grants_direct_web_year)
         self.assertEqual(contract.hostname_field, "url")
@@ -74,8 +75,12 @@ class RecordSchemaDetectionTests(unittest.TestCase):
         assert schema is not None
         self.assertEqual(schema.hostname_field, "column:0")
         self.assertEqual(schema.timestamp_field, "column:1")
+        self.assertTrue(schema.direct_year_eligible)
         self.assertEqual(schema.delimiter, ";")
         self.assertEqual(schema.confidence, 1.0)
+        self.assertFalse(schema.direct_year_eligible)
+        with self.assertRaisesRegex(ValueError, "direct-year"):
+            schema.direct_contract()
 
     def test_gzip_schema_detection_uses_bounded_decompressed_prefix(self) -> None:
         payload = gzip.compress(
@@ -103,6 +108,31 @@ class RecordSchemaDetectionTests(unittest.TestCase):
         self.assertEqual(schema.delimiter, ",")
         self.assertEqual(schema.hostname_field, "column:0")
         self.assertEqual(schema.timestamp_field, "column:1")
+
+    def test_stable_but_ambiguous_year_field_is_not_auto_direct(self) -> None:
+        payload = (
+            b'{"url":"https://one.example/a","year":1998}\n'
+            b'{"url":"https://two.example/b","year":1999}\n'
+            b'{"url":"https://three.example/c","year":2000}\n'
+        )
+        fmt = SourceFormatObservation(
+            parser_kind="jsonl",
+            compression="none",
+            detection_method="content_signature",
+            confidence=0.97,
+        )
+
+        schema = detect_record_schema(
+            payload=payload,
+            format_observation=fmt,
+        )
+
+        self.assertIsNotNone(schema)
+        assert schema is not None
+        self.assertEqual(schema.timestamp_field, "year")
+        self.assertFalse(schema.direct_year_eligible)
+        with self.assertRaisesRegex(ValueError, "direct-year"):
+            schema.direct_contract()
 
     def test_unstable_field_pairs_do_not_gain_direct_schema(self) -> None:
         payload = (
