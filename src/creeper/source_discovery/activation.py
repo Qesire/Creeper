@@ -284,6 +284,12 @@ class SourceActivationCompiler:
                         permanent=True,
                     ) from exc
                 else:
+                    if reviewed_binding.contract.parser_kind != actual_parser:
+                        raise SourceActivationError(
+                            "reviewed contract parser_kind disagrees with "
+                            "the frozen source format",
+                            permanent=True,
+                        )
                     contract = reviewed_binding.contract
             else:
                 explicit = self.evidence_contracts.get(
