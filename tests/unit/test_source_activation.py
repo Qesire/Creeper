@@ -584,15 +584,32 @@ class SourceActivationCompilerTests(unittest.TestCase):
             finally:
                 control.close()
 
-    def test_reviewed_parser_kind_mismatch_fails(self) -> None:
-        with self.assertRaisesRegex(
-            ReviewedContractRegistryError,
-            "parser_kind",
-        ):
-            _reviewed_binding(
-                "https://trusted.example/history/records.jsonl",
-                parser_kind="delimited",
-            )
+    def test_reviewed_parser_kind_mismatch_fails_at_activation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            control = ControlStore(Path(tmp) / "control.sqlite3")
+            try:
+                candidate = _candidate(
+                    "https://trusted.example/history/records.jsonl"
+                )
+                registry = self._registry(control, candidate)
+                reviewed = _reviewed_binding(
+                    candidate.canonical_entrypoint,
+                    parser_kind="delimited",
+                )
+
+                with self.assertRaisesRegex(
+                    SourceActivationError,
+                    "parser_kind disagrees",
+                ):
+                    SourceActivationCompiler(
+                        control,
+                        registry=registry,
+                        reviewed_contracts=ReviewedContractRegistry(
+                            {candidate.canonical_entrypoint: reviewed}
+                        ),
+                    ).compile(candidate)
+            finally:
+                control.close()
 
     def test_reviewed_registry_is_exact_locator_only(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
