@@ -37,6 +37,7 @@ class SourceFormatObservation:
     detection_method: str
     confidence: float
     content_type: str = ""
+    delimiter: str | None = None
     policy_version: str = "source-format-v1"
 
     def __post_init__(self) -> None:
@@ -44,6 +45,9 @@ class SourceFormatObservation:
         compression = str(self.compression).strip().lower()
         method = str(self.detection_method).strip().lower()
         content_type = str(self.content_type).strip().lower()
+        delimiter = self.delimiter
+        if delimiter is not None:
+            delimiter = str(delimiter)
         policy = str(self.policy_version).strip()
         if parser_kind not in _SUPPORTED_PARSER_KINDS:
             raise ValueError(f"unsupported parser_kind: {parser_kind}")
@@ -51,6 +55,11 @@ class SourceFormatObservation:
             raise ValueError(f"unsupported compression: {compression}")
         if not method:
             raise ValueError("detection_method is required")
+        if delimiter is not None:
+            if parser_kind != "delimited":
+                raise ValueError("delimiter is valid only for delimited parser")
+            if delimiter not in {",", "\t", ";", "|"}:
+                raise ValueError("unsupported delimited parser delimiter")
         if (
             isinstance(self.confidence, bool)
             or not isinstance(self.confidence, (int, float))
@@ -64,6 +73,7 @@ class SourceFormatObservation:
         object.__setattr__(self, "compression", compression)
         object.__setattr__(self, "detection_method", method)
         object.__setattr__(self, "content_type", content_type)
+        object.__setattr__(self, "delimiter", delimiter)
         object.__setattr__(self, "confidence", float(self.confidence))
         object.__setattr__(self, "policy_version", policy)
 
@@ -100,9 +110,13 @@ class SourceFormatObservation:
             "detection_method",
             "confidence",
             "content_type",
+            "delimiter",
             "policy_version",
         }
-        if set(payload) != allowed:
+        legacy_allowed = allowed - {"delimiter"}
+        if set(payload) == legacy_allowed:
+            payload["delimiter"] = None
+        elif set(payload) != allowed:
             raise ValueError("invalid format binding fields")
         return cls(**payload)
 
