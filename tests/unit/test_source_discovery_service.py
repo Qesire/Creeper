@@ -144,6 +144,10 @@ max_returned_candidates = 17
         )
         self.assertEqual(config.agent.admission.min_enumerability_prior, 0.6)
         self.assertTrue(config.residual_search.enabled)
+        self.assertEqual(
+            config.residual_search.providers,
+            ("datacite", "zenodo", "harvard_dataverse"),
+        )
 
     def test_residual_search_config_is_explicit_and_fail_closed(self) -> None:
         path = self.write_config()
@@ -152,7 +156,7 @@ max_returned_candidates = 17
                 """
 [residual_search]
 enabled = true
-providers = ["datacite", "zenodo"]
+providers = ["datacite", "zenodo", "harvard_dataverse"]
 results_per_provider = 77
 max_total_results = 155
 min_relevance_score = 0.65
@@ -165,14 +169,14 @@ timeout_seconds = 9.0
         self.assertTrue(config.residual_search.enabled)
         self.assertEqual(
             config.residual_search.providers,
-            ("datacite", "zenodo"),
+            ("datacite", "zenodo", "harvard_dataverse"),
         )
         self.assertEqual(config.residual_search.policy.results_per_provider, 77)
         self.assertEqual(config.residual_search.policy.max_total_results, 155)
         self.assertEqual(config.residual_search.policy.min_relevance_score, 0.65)
 
         text = path.read_text(encoding="utf-8").replace(
-            'providers = ["datacite", "zenodo"]',
+            'providers = ["datacite", "zenodo", "harvard_dataverse"]',
             'providers = ["unknown-provider"]',
         )
         path.write_text(text, encoding="utf-8")
