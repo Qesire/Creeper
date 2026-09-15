@@ -122,7 +122,7 @@ def bind_format_to_adapter_id(
 
 
 def format_from_adapter_id(adapter_id: str) -> SourceFormatObservation | None:
-    head = adapter_id.split(_EVIDENCE_MARKER, 1)[0]
+    head = adapter_id.split(_EVIDENCE_MARKER, 1)[0].split(":sch1:", 1)[0]
     if _FORMAT_MARKER not in head:
         return None
     _prefix, token = head.rsplit(_FORMAT_MARKER, 1)
