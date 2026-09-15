@@ -37,6 +37,7 @@ from creeper.sources.archive.cdx import parse_cdx_line
 from creeper.sources.archive.warc import WarcFormatError, iter_warc_target_records
 from creeper.sources.format_binding import SourceFormatObservation
 from creeper.sources.format_detection import detect_source_format
+from creeper.sources.schema_detection import detect_record_schema
 from creeper.sources.locator import format_path_from_locator
 from creeper.sources.ftp_sitelist import (
     is_ftp_sitelist_locator,
@@ -1156,6 +1157,15 @@ class MeasuredYieldScoutExecutor:
             payload=download.payload,
             content_type=download.content_type,
         )
+        schema_observation = (
+            None
+            if format_observation is None
+            else detect_record_schema(
+                payload=download.payload,
+                format_observation=format_observation,
+                schema_observation=schema_observation,
+            )
+        )
         try:
             parsed = _extract_hosts(
                 download.payload,
@@ -1164,6 +1174,7 @@ class MeasuredYieldScoutExecutor:
                 policy=self.policy,
                 truncated=download.truncated,
                 format_observation=format_observation,
+                schema_observation=schema_observation,
             )
         except (WarcFormatError, ValueError, csv.Error) as exc:
             detail = str(exc).strip().replace("\n", " ")[:240]
@@ -1191,6 +1202,7 @@ class MeasuredYieldScoutExecutor:
                     "measured sample has too few unique hostnames"
                 ),
                 format_observation=format_observation,
+                schema_observation=schema_observation,
             )
         if parsed is None:
             return ScoutResult(
@@ -1200,6 +1212,7 @@ class MeasuredYieldScoutExecutor:
                     "format-specific mature parser"
                 ),
                 format_observation=format_observation,
+                schema_observation=schema_observation,
             )
         parsed = _apply_source_year_hint(
             parsed,
@@ -1221,6 +1234,7 @@ class MeasuredYieldScoutExecutor:
                 measurement=measurement,
                 reason="measured sample has too few unique hostnames",
                 format_observation=format_observation,
+                schema_observation=schema_observation,
             )
         novel_fraction = novel_count / observed_count
         if (
@@ -1235,6 +1249,7 @@ class MeasuredYieldScoutExecutor:
                     "measured baseline-external/EED yield below warm threshold"
                 ),
                 format_observation=format_observation,
+                schema_observation=schema_observation,
             )
         return ScoutResult(
             ScoutDisposition.WARM,
@@ -1304,6 +1319,7 @@ class MeasuredYieldScoutExecutor:
             discovered_candidates=result.discovered_candidates,
             edge_relation=result.edge_relation,
             format_observation=result.format_observation,
+            schema_observation=result.schema_observation,
         )
 
     async def __call__(self, candidate: SourceCandidate) -> ScoutResult:
@@ -1377,6 +1393,7 @@ class MeasuredYieldScoutExecutor:
                         f"fidelity stage {index + 1}/{len(stage_targets)}"
                     ),
                     format_observation=result.format_observation,
+                    schema_observation=result.schema_observation,
                 )
             if self._early_reject(result):
                 return ScoutResult(
@@ -1387,6 +1404,7 @@ class MeasuredYieldScoutExecutor:
                         f"fidelity stage {index + 1}/{len(stage_targets)}"
                     ),
                     format_observation=result.format_observation,
+                    schema_observation=result.schema_observation,
                 )
 
         assert last_result is not None
