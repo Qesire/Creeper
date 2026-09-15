@@ -198,8 +198,13 @@ class SourceActivationCompiler:
             adapter_kind, enumeration_kind = _adapter_kind(
                 candidate.canonical_entrypoint,
                 parser_kind=(
-                    None if trusted_format is None
-                    else trusted_format.parser_kind
+                    trusted_format.parser_kind
+                    if trusted_format is not None
+                    else (
+                        trusted_schema.parser_kind
+                        if trusted_schema is not None
+                        else None
+                    )
                 ),
             )
         base_adapter_id = f"{adapter_kind}:{source_key.removeprefix('src:')}"
@@ -268,7 +273,11 @@ class SourceActivationCompiler:
                     parser_kind=(
                         trusted_format.parser_kind
                         if trusted_format is not None
-                        else parser_kind_from_locator(existing.root_locator)
+                        else (
+                            trusted_schema.parser_kind
+                            if trusted_schema is not None
+                            else parser_kind_from_locator(existing.root_locator)
+                        )
                     ),
                 )
             adapter_id = existing.adapter_id
@@ -279,7 +288,11 @@ class SourceActivationCompiler:
             actual_parser = (
                 trusted_format.parser_kind
                 if trusted_format is not None
-                else locator_parser
+                else (
+                    trusted_schema.parser_kind
+                    if trusted_schema is not None
+                    else locator_parser
+                )
             )
             reviewed_binding = self.reviewed_contracts.get_exact(
                 stored.canonical_entrypoint
@@ -413,7 +426,11 @@ class SourceActivationCompiler:
             parser_kind=(
                 trusted_format.parser_kind
                 if trusted_format is not None
-                else None
+                else (
+                    trusted_schema.parser_kind
+                    if trusted_schema is not None
+                    else None
+                )
             ),
         )
         self.index_registry.register_index_space(compiled_index_space)
