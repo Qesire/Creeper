@@ -332,6 +332,34 @@ class DeterministicSearchTests(unittest.TestCase):
         candidate = candidate_from_result(self.plan, classified)
         self.assertEqual(candidate.level, SourceLevel.SOURCE)
 
+    def test_harvard_dataverse_and_datacite_doi_share_dataset_identity(self) -> None:
+        datacite = RawSearchResult(
+            provider="datacite",
+            provider_result_id="10.7910/DVN/PROXY98",
+            url="https://doi.org/10.7910/DVN/PROXY98",
+            title="1998 University Web Proxy Trace Dataset",
+            publisher="Harvard Dataverse",
+        )
+        dataverse = RawSearchResult(
+            provider="harvard_dataverse",
+            provider_result_id="12345",
+            url="https://dataverse.harvard.edu/api/access/datafile/12345",
+            title=(
+                "1998 University Web Proxy Trace Dataset — proxy98.log.gz"
+            ),
+            publisher="Harvard Dataverse",
+            resource_type="file",
+            identifiers=("10.7910/DVN/PROXY98",),
+        )
+
+        first = classify_result(self.plan, datacite, policy=self.policy)
+        second = classify_result(self.plan, dataverse, policy=self.policy)
+
+        self.assertIsNotNone(first)
+        self.assertIsNotNone(second)
+        assert first is not None and second is not None
+        self.assertEqual(first.dataset_key, second.dataset_key)
+
     def test_zenodo_and_datacite_same_doi_collapse_to_one_dataset(self) -> None:
         datacite = RawSearchResult(
             provider="datacite",
