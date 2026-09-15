@@ -501,7 +501,7 @@ class SourceReservoirManagerTests(unittest.TestCase):
         self.assertEqual(plan.effective_cold_count, 1)
         self.assertFalse(plan.needs_search)
 
-    def test_cold_deficit_uses_two_orthogonal_agent_calls(self) -> None:
+    def test_cold_deficit_alone_does_not_trigger_llm_refill(self) -> None:
         proven = self.candidate("proven", family="HIGH_YIELD_FAMILY")
         self.to_warm(proven, novel_eed=20.0, elapsed_seconds=2.0)
         manager = SourceReservoirManager(
@@ -519,51 +519,20 @@ class SourceReservoirManagerTests(unittest.TestCase):
 
         plan = manager.plan()
 
-        self.assertEqual(len(plan.search_directives), 2)
-        self.assertFalse(
-            any(
-                directive.strategy
-                in {"DIRECT_EVIDENCE_BULK", "EXPLOIT_DIRECT_ORIGIN"}
-                for directive in plan.search_directives
-            )
-        )
-        exploit = next(
-            directive
-            for directive in plan.search_directives
-            if directive.kind is SearchDirectiveKind.EXPLOIT_SOURCE_FAMILY
-        )
-        self.assertEqual(exploit.subject, "HIGH_YIELD_FAMILY")
-        self.assertEqual(exploit.strategy, "EXPLOIT_SUCCESS")
-        self.assertTrue(
-            any(
-                directive.kind is SearchDirectiveKind.REFILL_RESERVOIR
-                for directive in plan.search_directives
-            )
-        )
+        self.assertEqual(plan.search_directives, ())
+        self.assertFalse(plan.needs_search)
 
-    def test_empty_search_supply_reduces_budget_and_expands_global_cooldown(self) -> None:
-        now = [1_000.0]
-        self.registry.clock = lambda: now[0]
-        productive = self.registry.begin_search_episode(
-            strategy="YEAR_ARCHETYPE",
+    def test_legacy_search_history_does_not_reenable_ordinary_llm_refill(self) -> None:
+        episode = self.registry.begin_search_episode(
+            strategy="META_SOURCE_SEARCH",
             backend="test",
-            query="1996-2001 early web link list dataset",
+            query="legacy source refill",
             actor="test",
-            episode_id="search:productive",
-        )
-        discovered = self.candidate(
-            "new-dataset",
-            origin="https://research.example",
-        )
-        self.registry.register_proposal(
-            discovered,
-            episode_id=productive.episode_id,
+            episode_id="search:legacy-empty",
         )
         self.registry.finish_search_episode(
-            productive.episode_id,
+            episode.episode_id,
             search_cost_seconds=1.0,
-            accepted_proposals=1,
-            new_sources=1,
         )
         manager = SourceReservoirManager(
             self.registry,
@@ -579,42 +548,10 @@ class SourceReservoirManagerTests(unittest.TestCase):
             search_cooldown_seconds=30.0,
         )
 
-        now[0] += 31.0
-        self.assertEqual(len(manager.plan().search_directives), 2)
+        plan = manager.plan()
 
-        empty = self.registry.begin_search_episode(
-            strategy="EXPLORE_NEW_FAMILY",
-            backend="test",
-            query="1998 historical domain list dataset",
-            actor="test",
-            episode_id="search:empty",
-        )
-        self.registry.finish_search_episode(
-            empty.episode_id,
-            search_cost_seconds=1.0,
-        )
-
-        # One empty result reduces budget to one, but another orthogonal arm
-        # may run immediately. Only repeated empty supply triggers global
-        # exponential backoff.
-        first_empty_plan = manager.plan()
-        self.assertEqual(len(first_empty_plan.search_directives), 1)
-        second_empty = self.registry.begin_search_episode(
-            strategy=first_empty_plan.search_directives[0].strategy,
-            backend="test",
-            query="1999 historical registry allocation snapshot",
-            actor="test",
-            episode_id="search:empty:2",
-        )
-        self.registry.finish_search_episode(
-            second_empty.episode_id,
-            search_cost_seconds=1.0,
-        )
-
-        now[0] += 59.0
-        self.assertEqual(manager.plan().search_directives, ())
-        now[0] += 2.0
-        self.assertEqual(len(manager.plan().search_directives), 1)
+        self.assertEqual(plan.search_directives, ())
+        self.assertFalse(plan.needs_search)
 
     def test_proven_cdxj_stays_background_and_never_drives_agent_search(self) -> None:
         proven = SourceCandidate(
@@ -663,7 +600,7 @@ class SourceReservoirManagerTests(unittest.TestCase):
             )
         )
 
-    def test_refill_uses_best_observed_search_strategy(self) -> None:
+    def test_rewarded_legacy_search_strategy_does_not_drive_refill(self) -> None:
         episode = self.registry.begin_search_episode(
             strategy="RECOVERY",
             backend="web-search",
@@ -671,8 +608,14 @@ class SourceReservoirManagerTests(unittest.TestCase):
             actor="agent:recovery",
             episode_id="search:recovery",
         )
-        self.registry.finish_search_episode(episode.episode_id, search_cost_seconds=2.0)
-        self.registry.credit_search_episode(episode.episode_id, accepted_novel_eed=10.0)
+        self.registry.finish_search_episode(
+            episode.episode_id,
+            search_cost_seconds=2.0,
+        )
+        self.registry.credit_search_episode(
+            episode.episode_id,
+            accepted_novel_eed=10.0,
+        )
         manager = SourceReservoirManager(
             self.registry,
             targets=SourcePoolTargets(
@@ -688,29 +631,9 @@ class SourceReservoirManagerTests(unittest.TestCase):
 
         plan = manager.plan()
 
-        refill = next(
-            item
-            for item in plan.search_directives
-            if item.kind is SearchDirectiveKind.REFILL_RESERVOIR
-        )
-        self.assertEqual(refill.strategy, "RECOVERY")
+        self.assertEqual(plan.search_directives, ())
 
-    def test_specialized_strategy_reward_cannot_shadow_stagnation_recovery(self) -> None:
-        rewarded = self.registry.begin_search_episode(
-            strategy="RECOVER_STAGNATION",
-            backend="test",
-            query="historical recovery success",
-            actor="test",
-            episode_id="search:rewarded-recovery",
-        )
-        self.registry.finish_search_episode(
-            rewarded.episode_id,
-            search_cost_seconds=1.0,
-        )
-        self.registry.credit_search_episode(
-            rewarded.episode_id,
-            accepted_novel_eed=10.0,
-        )
+    def test_zero_credit_agent_tail_without_residual_exhaustion_does_not_recover(self) -> None:
         for index in range(6):
             episode = self.registry.begin_search_episode(
                 strategy=f"ZERO_{index}",
@@ -723,7 +646,6 @@ class SourceReservoirManagerTests(unittest.TestCase):
                 episode.episode_id,
                 search_cost_seconds=1.0,
             )
-
         manager = SourceReservoirManager(
             self.registry,
             targets=SourcePoolTargets(
@@ -740,21 +662,14 @@ class SourceReservoirManagerTests(unittest.TestCase):
 
         plan = manager.plan()
 
-        self.assertEqual(len(plan.search_directives), 1)
-        recovery = plan.search_directives[0]
-        self.assertEqual(recovery.kind, SearchDirectiveKind.RECOVER_STAGNATION)
-        self.assertEqual(
-            recovery.task_type,
-            SourceIntelligenceTask.RECOVER_STAGNATION,
-        )
-        self.assertEqual(recovery.strategy, "RECOVER_STAGNATION")
+        self.assertEqual(plan.search_directives, ())
 
-    def test_new_family_reward_cannot_shadow_dedicated_exploration(self) -> None:
+    def test_rewarded_new_family_agent_history_does_not_restart_exploration(self) -> None:
         episode = self.registry.begin_search_episode(
             strategy="EXPLORE_NEW_FAMILY",
             backend="test",
             query="orthogonal source family",
-            actor="test",
+            actor="agent:test",
             episode_id="search:rewarded-new-family",
         )
         self.registry.finish_search_episode(
@@ -782,18 +697,7 @@ class SourceReservoirManagerTests(unittest.TestCase):
 
         plan = manager.plan()
 
-        refill = next(
-            item
-            for item in plan.search_directives
-            if item.kind is SearchDirectiveKind.REFILL_RESERVOIR
-        )
-        explore = next(
-            item
-            for item in plan.search_directives
-            if item.kind is SearchDirectiveKind.DISCOVER_NEW_FAMILY
-        )
-        self.assertEqual(refill.strategy, "META_SOURCE_SEARCH")
-        self.assertEqual(explore.strategy, "EXPLORE_NEW_FAMILY")
+        self.assertEqual(plan.search_directives, ())
 
     def test_hold_metasource_allocates_interpret_structure_opportunity(self) -> None:
         catalog = SourceCandidate(
@@ -839,7 +743,7 @@ class SourceReservoirManagerTests(unittest.TestCase):
             catalog.canonical_entrypoint,
         )
 
-    def test_zero_credit_tail_prioritizes_recovery_codex_task(self) -> None:
+    def test_zero_credit_tail_alone_does_not_trigger_recovery_llm(self) -> None:
         for index in range(6):
             episode = self.registry.begin_search_episode(
                 strategy=f"ZERO_{index}",
@@ -868,16 +772,7 @@ class SourceReservoirManagerTests(unittest.TestCase):
 
         plan = manager.plan()
 
-        recovery = next(
-            item
-            for item in plan.search_directives
-            if item.task_type is SourceIntelligenceTask.RECOVER_STAGNATION
-        )
-        self.assertEqual(
-            recovery.kind,
-            SearchDirectiveKind.RECOVER_STAGNATION,
-        )
-        self.assertEqual(recovery.strategy, "RECOVER_STAGNATION")
+        self.assertEqual(plan.search_directives, ())
 
     def test_suppressed_candidates_do_not_satisfy_reserve_or_receive_work(self) -> None:
         candidate = self.candidate("suppressed", family="SATURATED")
@@ -903,7 +798,7 @@ class SourceReservoirManagerTests(unittest.TestCase):
 
         self.assertEqual(plan.cold_count, 0)
         self.assertEqual(plan.triage_source_keys, ())
-        self.assertTrue(plan.needs_search)
+        self.assertFalse(plan.needs_search)
 
     def test_scout_parallelism_subtracts_already_running_scouts(self) -> None:
         running = self.candidate("running")
