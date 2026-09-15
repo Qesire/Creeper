@@ -6,6 +6,7 @@ import csv
 import gzip
 import io
 import json
+import zlib
 from pathlib import PurePosixPath
 
 from creeper.authority.normalizer import normalize_official
@@ -59,10 +60,13 @@ def _known_locator_parser(locator: str) -> str | None:
 
 
 def _inflate_probe(payload: bytes, *, limit: int = 512 * 1024) -> bytes | None:
+    # Range probes commonly end before the final gzip trailer. zlib's streaming
+    # decoder can still expose the bounded prefix safely, unlike GzipFile.read()
+    # which treats the missing trailer as EOFError.
+    decoder = zlib.decompressobj(16 + zlib.MAX_WBITS)
     try:
-        with gzip.GzipFile(fileobj=io.BytesIO(payload), mode="rb") as stream:
-            return stream.read(limit)
-    except (OSError, EOFError, gzip.BadGzipFile):
+        return decoder.decompress(payload, limit)
+    except zlib.error:
         return None
 
 
