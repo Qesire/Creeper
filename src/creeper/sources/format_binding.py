@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import math
 import re
@@ -65,6 +66,10 @@ class SourceFormatObservation:
         object.__setattr__(self, "content_type", content_type)
         object.__setattr__(self, "confidence", float(self.confidence))
         object.__setattr__(self, "policy_version", policy)
+
+    @property
+    def binding_digest(self) -> str:
+        return hashlib.sha256(self.binding_token.encode("ascii")).hexdigest()
 
     @property
     def binding_token(self) -> str:
