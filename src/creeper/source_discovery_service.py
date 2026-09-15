@@ -43,6 +43,7 @@ from creeper.source_discovery.deterministic_search import (
     DeterministicSearchExecutor,
     DeterministicSearchPolicy,
     HarvardDataverseSearchProvider,
+    InternetArchiveSearchProvider,
     ZenodoSearchProvider,
 )
 from creeper.source_discovery.curated_seeds import ensure_curated_source_seeds
@@ -109,7 +110,12 @@ class MeasurementConfig:
 @dataclass(frozen=True)
 class ResidualSearchConfig:
     enabled: bool = False
-    providers: tuple[str, ...] = ("datacite", "zenodo", "harvard_dataverse")
+    providers: tuple[str, ...] = (
+        "datacite",
+        "zenodo",
+        "harvard_dataverse",
+        "internet_archive",
+    )
     policy: DeterministicSearchPolicy = DeterministicSearchPolicy()
 
 
@@ -285,7 +291,7 @@ def load_source_discovery_config(config_path: Path) -> SourceDiscoveryServiceCon
     )
     provider_values = residual_raw.get(
         "providers",
-        ["datacite", "zenodo", "harvard_dataverse"],
+        ["datacite", "zenodo", "harvard_dataverse", "internet_archive"],
     )
     if (
         not isinstance(provider_values, list)
@@ -295,7 +301,8 @@ def load_source_discovery_config(config_path: Path) -> SourceDiscoveryServiceCon
         raise ValueError("residual_search.providers must be a non-empty string array")
     providers = tuple(item.strip().lower() for item in provider_values)
     unsupported = sorted(
-        set(providers) - {"datacite", "zenodo", "harvard_dataverse"}
+        set(providers)
+        - {"datacite", "zenodo", "harvard_dataverse", "internet_archive"}
     )
     if unsupported:
         raise ValueError(
@@ -750,6 +757,15 @@ async def _open_runtime(config: SourceDiscoveryServiceConfig):
                         elif provider_name == "harvard_dataverse":
                             deterministic_providers.append(
                                 HarvardDataverseSearchProvider(
+                                    client,
+                                    timeout_seconds=(
+                                        config.residual_search.policy.timeout_seconds
+                                    ),
+                                )
+                            )
+                        elif provider_name == "internet_archive":
+                            deterministic_providers.append(
+                                InternetArchiveSearchProvider(
                                     client,
                                     timeout_seconds=(
                                         config.residual_search.policy.timeout_seconds
