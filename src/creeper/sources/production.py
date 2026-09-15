@@ -157,9 +157,13 @@ class StructuredProductionAdapter:
         format_binding = format_from_adapter_id(reservoir.adapter_id)
         self.schema_binding = schema_from_adapter_id(reservoir.adapter_id)
         self.kind = (
-            self._kind_from_locator(self.source)
-            if format_binding is None
-            else format_binding.parser_kind
+            format_binding.parser_kind
+            if format_binding is not None
+            else (
+                self.schema_binding.parser_kind
+                if self.schema_binding is not None
+                else self._kind_from_locator(self.source)
+            )
         )
         self.temporal_scope = temporal_scope
 
