@@ -1,8 +1,10 @@
 """Versioned reviewed direct-evidence contract registry.
 
-External structured sources never gain annual evidence authority from filename
-suffixes or agent priors. A reviewed registry binds one exact canonical locator
-to both a SourceEvidenceContract and an auditable artifact identity. The
+Generic structured sources never gain annual evidence authority from filename
+suffixes or agent priors alone. Self-describing record formats such as CDX/CDXJ
+derive authority from validated record semantics. A reviewed registry is an
+optional stronger binding for other schemas: it binds one exact canonical
+locator to both a SourceEvidenceContract and an auditable artifact identity. The
 artifact identity is frozen into the durable adapter id at activation so
 authority survives restart without mutable configuration reads in the record
 hot path.
@@ -24,7 +26,6 @@ from urllib.request import Request, urlopen
 from creeper.evidence.contracts import (
     EvidenceAuthority,
     SourceEvidenceContract,
-    parser_kind_from_locator,
 )
 from creeper.source_discovery.index_identity import normalize_strong_etag
 from creeper.source_discovery.models import canonicalize_source_entrypoint
