@@ -31,11 +31,11 @@ from creeper.source_discovery.models import (
     MeasurementMode,
     ScoutMeasurement,
     SourceCandidate,
-    format_path_from_locator,
 )
 from creeper.sources.archive.cdxj import parse_cdxj_line
 from creeper.sources.archive.cdx import parse_cdx_line
 from creeper.sources.archive.warc import WarcFormatError, iter_warc_target_records
+from creeper.sources.locator import format_path_from_locator
 from creeper.sources.ftp_sitelist import (
     is_ftp_sitelist_locator,
     parse_ftp_sitelist_zip,
