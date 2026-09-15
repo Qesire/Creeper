@@ -180,6 +180,43 @@ class SourceActivationCompilerTests(unittest.TestCase):
             finally:
                 control.close()
 
+    def test_content_detected_cdxj_does_not_self_grant_direct_authority(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            control = ControlStore(Path(tmp) / "control.sqlite3")
+            try:
+                candidate = _candidate(
+                    "https://repo.example/api/download?id=opaque-cdxj"
+                )
+                registry = self._registry(control, candidate)
+                registry.record_format_observation(
+                    candidate.source_key,
+                    SourceFormatObservation(
+                        parser_kind="cdxj",
+                        compression="none",
+                        detection_method="content_signature",
+                        confidence=0.98,
+                        content_type="application/octet-stream",
+                    ),
+                )
+
+                spec = SourceActivationCompiler(
+                    control,
+                    registry=registry,
+                ).compile(candidate)
+
+                self.assertEqual(spec.adapter_kind, "structured")
+                self.assertEqual(spec.evidence_mode, "discovery_only")
+                reservoir = control.get_reservoir(spec.reservoir_id)
+                self.assertIsNotNone(reservoir)
+                assert reservoir is not None
+                contract = contract_from_adapter_id(reservoir.adapter_id)
+                self.assertIsNotNone(contract)
+                assert contract is not None
+                self.assertEqual(contract.parser_kind, "cdxj")
+                self.assertFalse(contract.grants_direct_web_year)
+            finally:
+                control.close()
+
     def test_low_confidence_unknown_format_does_not_auto_activate(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             control = ControlStore(Path(tmp) / "control.sqlite3")
