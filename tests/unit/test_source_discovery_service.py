@@ -23,6 +23,7 @@ from creeper.source_discovery.triage import HttpTriagePolicy
 from creeper.source_discovery_service import (
     AgentConfig,
     CoordinatorConfig,
+    ResidualSearchConfig,
     SourceDiscoveryServiceConfig,
     load_source_discovery_config,
     run_source_discovery_cycles,
@@ -264,10 +265,7 @@ class SourceDiscoveryServiceSmokeTests(unittest.IsolatedAsyncioTestCase):
                 # Explicitly disable deterministic discovery to prove that a
                 # cold deficit alone does not reactivate the legacy LLM URL
                 # refill path.
-                residual_search=__import__(
-                    "creeper.source_discovery_service",
-                    fromlist=["ResidualSearchConfig"],
-                ).ResidualSearchConfig(enabled=False),
+                residual_search=ResidualSearchConfig(enabled=False),
             )
 
             reports = await run_source_discovery_cycles(config, cycles=1)
