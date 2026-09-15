@@ -158,10 +158,66 @@ class MeasuredYieldScoutTests(unittest.IsolatedAsyncioTestCase):
             "content_signature",
         )
         self.assertGreaterEqual(result.format_observation.confidence, 0.95)
+        self.assertIsNotNone(result.schema_observation)
+        assert result.schema_observation is not None
+        self.assertEqual(result.schema_observation.hostname_field, "url")
+        self.assertEqual(result.schema_observation.timestamp_field, "year")
+        self.assertEqual(result.schema_observation.confidence, 1.0)
         self.assertIsNotNone(result.measurement)
         assert result.measurement is not None
         self.assertEqual(result.measurement.measurement_mode, MeasurementMode.HOST_YEAR)
         self.assertEqual(result.measurement.unique_hosts, 3)
+        self.assertEqual(result.measurement.novel_host_year_pairs, 3)
+
+    async def test_headerless_delimited_schema_upgrades_scout_to_host_year(self) -> None:
+        body = (
+            b"https://known.com/a;1998;foo\n"
+            b"https://novel.com/b;1999;bar\n"
+            b"https://other.org/c;2000;baz\n"
+        )
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            return streamed_response(
+                206,
+                body,
+                headers={"content-type": "application/octet-stream"},
+            )
+
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler)
+        ) as client:
+            scout = MeasuredYieldScoutExecutor(
+                client,
+                self.baseline,
+                {"com": Decimal("1"), "org": Decimal("0.5")},
+                policy=self.policy(
+                    min_unique_hosts=2,
+                    min_novel_hosts=1,
+                    min_novel_fraction=0.1,
+                    min_novel_eed=0.5,
+                ),
+            )
+            result = await scout(
+                self.candidate(
+                    "https://repo.example/api/download?id=table"
+                )
+            )
+
+        self.assertEqual(result.disposition, ScoutDisposition.WARM)
+        self.assertIsNotNone(result.format_observation)
+        self.assertIsNotNone(result.schema_observation)
+        assert result.schema_observation is not None
+        self.assertEqual(result.schema_observation.parser_kind, "delimited")
+        self.assertEqual(result.schema_observation.delimiter, ";")
+        self.assertEqual(result.schema_observation.hostname_field, "column:0")
+        self.assertEqual(result.schema_observation.timestamp_field, "column:1")
+        self.assertIsNotNone(result.measurement)
+        assert result.measurement is not None
+        self.assertEqual(
+            result.measurement.measurement_mode,
+            MeasurementMode.HOST_YEAR,
+        )
+        self.assertEqual(result.measurement.observed_host_year_pairs, 3)
         self.assertEqual(result.measurement.novel_host_year_pairs, 3)
 
     async def test_dated_source_keeps_new_year_for_partially_known_hostname(self) -> None:
