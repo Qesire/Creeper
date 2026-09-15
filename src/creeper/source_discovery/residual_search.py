@@ -497,17 +497,44 @@ class SearchCellScheduler:
     def next_plans(self, *, limit: int = 1) -> tuple[QueryPlan, ...]:
         if isinstance(limit, bool) or limit < 1:
             raise ValueError("limit must be a positive integer")
-        candidates = self.ledger.list_stats(
+        remaining = self.ledger.list_stats(
             states=(SearchCellState.OPEN, SearchCellState.ACTIVE)
         )
-        ranked = sorted(
-            candidates,
-            key=lambda stats: (-self.score(stats), stats.attempts, stats.cell.key),
-        )
-        plans: list[QueryPlan] = []
-        for stats in ranked[:limit]:
-            plans.append(self._query_plan(stats))
-        return tuple(plans)
+        selected: list[SearchCellStats] = []
+        mechanism_counts: dict[str, int] = {}
+        institution_counts: dict[str, int] = {}
+
+        # Greedy diversity is batch-local only. It prevents a two-slot search
+        # cycle from spending both requests on near-identical unexplored cells,
+        # while a genuinely productive cell can still win when its measured
+        # residual score exceeds the bounded diversity penalty.
+        while remaining and len(selected) < limit:
+            def adjusted(stats: SearchCellStats) -> tuple[float, float, int, str]:
+                base = self.score(stats)
+                mechanism_penalty = 0.75 * mechanism_counts.get(
+                    stats.cell.mechanism, 0
+                )
+                institution_penalty = 0.20 * institution_counts.get(
+                    stats.cell.institution, 0
+                )
+                return (
+                    base - mechanism_penalty - institution_penalty,
+                    base,
+                    -stats.attempts,
+                    stats.cell.key,
+                )
+
+            winner = max(remaining, key=adjusted)
+            selected.append(winner)
+            mechanism_counts[winner.cell.mechanism] = (
+                mechanism_counts.get(winner.cell.mechanism, 0) + 1
+            )
+            institution_counts[winner.cell.institution] = (
+                institution_counts.get(winner.cell.institution, 0) + 1
+            )
+            remaining.remove(winner)
+
+        return tuple(self._query_plan(stats) for stats in selected)
 
     def _query_plan(self, stats: SearchCellStats) -> QueryPlan:
         cell = stats.cell
