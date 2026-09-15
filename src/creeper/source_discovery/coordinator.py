@@ -21,6 +21,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Generic, TypeVar
 
+from creeper.source_discovery.adapter_compiler import AdapterCompileTrace
 from creeper.source_discovery.deterministic_search import (
     DeterministicSearchBatch,
     candidate_from_result,
@@ -85,6 +86,7 @@ class ScoutResult:
     edge_relation: str = "enumerates"
     format_observation: SourceFormatObservation | None = None
     schema_observation: SourceRecordSchema | None = None
+    adapter_compile_trace: AdapterCompileTrace | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "disposition", ScoutDisposition(self.disposition))
@@ -106,6 +108,13 @@ class ScoutResult:
         ):
             raise TypeError(
                 "schema_observation must be SourceRecordSchema when provided"
+            )
+        if (
+            self.adapter_compile_trace is not None
+            and not isinstance(self.adapter_compile_trace, AdapterCompileTrace)
+        ):
+            raise TypeError(
+                "adapter_compile_trace must be AdapterCompileTrace when provided"
             )
         if any(
             candidate.state is not SourceState.DISCOVERED
@@ -631,6 +640,51 @@ class SourceDiscoveryCoordinator:
                 continue
             counts["scout_edges_added"] += int(added)
 
+    def _commit_adapter_compile_trace(
+        self,
+        candidate: SourceCandidate,
+        result: ScoutResult,
+    ) -> None:
+        trace = result.adapter_compile_trace
+        if trace is None:
+            return
+        self.registry.begin_llm_episode(
+            episode_id=trace.episode_id,
+            task_type="COMPILE_ADAPTER",
+            backend=trace.backend,
+            actor=trace.actor,
+            context_hash=trace.context_hash,
+            prompt_version=trace.prompt_version,
+        )
+        if trace.proposal is not None and trace.status == "validated":
+            hypothesis_id = f"{trace.episode_id}:proposal"
+            confidence = 0.0
+            if result.schema_observation is not None:
+                confidence = result.schema_observation.confidence
+            elif result.format_observation is not None:
+                confidence = result.format_observation.confidence
+            self.registry.register_llm_hypothesis(
+                trace.episode_id,
+                {
+                    "hypothesis_id": hypothesis_id,
+                    "action": "COMPILE_ADAPTER",
+                    "confidence": confidence,
+                    "parser_kind": trace.proposal.parser_kind,
+                    "hostname_field": trace.proposal.hostname_field,
+                    "timestamp_field": trace.proposal.timestamp_field,
+                    "delimiter": trace.proposal.delimiter,
+                    "validation": "local_sample",
+                },
+            )
+            self.registry.link_llm_source(
+                candidate.source_key,
+                hypothesis_id=hypothesis_id,
+            )
+        self.registry.finish_llm_episode(
+            trace.episode_id,
+            cost_seconds=trace.elapsed_seconds,
+        )
+
     def _commit_scouts(
         self,
         candidates: list[SourceCandidate],
@@ -647,6 +701,7 @@ class SourceDiscoveryCoordinator:
                 continue
             result = outcome.value
             assert result is not None
+            self._commit_adapter_compile_trace(candidate, result)
             measurement_current = True
             if result.format_observation is not None:
                 try:
