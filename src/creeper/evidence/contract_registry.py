@@ -510,7 +510,18 @@ def bind_reviewed_artifact_to_adapter_id(
                 "adapter_id is already bound to another reviewed artifact"
             )
         return adapter_id
-    return f"{adapter_id}{_REVIEWED_IDENTITY_MARKER}{artifact.binding_token}"
+
+    before_evidence, evidence_sep, evidence_tail = adapter_id.partition(":evc1:")
+    before_format, format_sep, format_tail = before_evidence.partition(":fmt1:")
+    bound = (
+        f"{before_format}{_REVIEWED_IDENTITY_MARKER}"
+        f"{artifact.binding_token}"
+    )
+    if format_sep:
+        bound = f"{bound}:fmt1:{format_tail}"
+    if evidence_sep:
+        bound = f"{bound}:evc1:{evidence_tail}"
+    return bound
 
 
 def reviewed_artifact_from_adapter_id(
