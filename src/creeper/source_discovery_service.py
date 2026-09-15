@@ -40,6 +40,7 @@ from creeper.source_discovery.coordinator import (
 )
 from creeper.source_discovery.deterministic_search import (
     DataCiteSearchProvider,
+    DataverseSearchProvider,
     DeterministicSearchExecutor,
     DeterministicSearchPolicy,
     ZenodoSearchProvider,
@@ -108,7 +109,11 @@ class MeasurementConfig:
 @dataclass(frozen=True)
 class ResidualSearchConfig:
     enabled: bool = False
-    providers: tuple[str, ...] = ("datacite", "zenodo")
+    providers: tuple[str, ...] = ("datacite", "zenodo", "dataverse")
+    dataverse_endpoints: tuple[str, ...] = (
+        "https://dataverse.harvard.edu/api/search",
+        "https://borealisdata.ca/api/search",
+    )
     policy: DeterministicSearchPolicy = DeterministicSearchPolicy()
 
 
@@ -282,7 +287,10 @@ def load_source_discovery_config(config_path: Path) -> SourceDiscoveryServiceCon
         residual_raw.get("enabled", True),
         name="residual_search.enabled",
     )
-    provider_values = residual_raw.get("providers", ["datacite", "zenodo"])
+    provider_values = residual_raw.get(
+        "providers",
+        ["datacite", "zenodo", "dataverse"],
+    )
     if (
         not isinstance(provider_values, list)
         or not provider_values
@@ -290,15 +298,40 @@ def load_source_discovery_config(config_path: Path) -> SourceDiscoveryServiceCon
     ):
         raise ValueError("residual_search.providers must be a non-empty string array")
     providers = tuple(item.strip().lower() for item in provider_values)
-    unsupported = sorted(set(providers) - {"datacite", "zenodo"})
+    unsupported = sorted(
+        set(providers) - {"datacite", "zenodo", "dataverse"}
+    )
     if unsupported:
         raise ValueError(
             "unsupported residual_search.providers: " + ", ".join(unsupported)
         )
+    dataverse_values = residual_raw.get(
+        "dataverse_endpoints",
+        [
+            "https://dataverse.harvard.edu/api/search",
+            "https://borealisdata.ca/api/search",
+        ],
+    )
+    if (
+        not isinstance(dataverse_values, list)
+        or not dataverse_values
+        or any(
+            not isinstance(item, str) or not item.strip()
+            for item in dataverse_values
+        )
+    ):
+        raise ValueError(
+            "residual_search.dataverse_endpoints must be a non-empty string array"
+        )
+    dataverse_endpoints = tuple(
+        dict.fromkeys(item.strip() for item in dataverse_values)
+    )
+
     residual_defaults = DeterministicSearchPolicy()
     residual_search = ResidualSearchConfig(
         enabled=residual_enabled,
         providers=providers,
+        dataverse_endpoints=dataverse_endpoints,
         policy=DeterministicSearchPolicy(
             results_per_provider=_positive_int(
                 residual_raw.get(
@@ -649,6 +682,7 @@ async def _open_runtime(config: SourceDiscoveryServiceConfig):
                 profile_signature = (
                     "residual-search-v2"
                     f"|providers={','.join(config.residual_search.providers)}"
+                    f"|dataverse={','.join(config.residual_search.dataverse_endpoints)}"
                     f"|minrel={config.residual_search.policy.min_relevance_score:g}"
                     f"|rpp={config.residual_search.policy.results_per_provider}"
                     f"|max={config.residual_search.policy.max_total_results}"
@@ -736,6 +770,18 @@ async def _open_runtime(config: SourceDiscoveryServiceConfig):
                             deterministic_providers.append(
                                 ZenodoSearchProvider(
                                     client,
+                                    timeout_seconds=(
+                                        config.residual_search.policy.timeout_seconds
+                                    ),
+                                )
+                            )
+                        elif provider_name == "dataverse":
+                            deterministic_providers.append(
+                                DataverseSearchProvider(
+                                    client,
+                                    endpoints=(
+                                        config.residual_search.dataverse_endpoints
+                                    ),
                                     timeout_seconds=(
                                         config.residual_search.policy.timeout_seconds
                                     ),
