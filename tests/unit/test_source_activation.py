@@ -208,6 +208,7 @@ class SourceActivationCompilerTests(unittest.TestCase):
                     confidence=1.0,
                     sample_records=8,
                     matched_records=8,
+                    direct_year_eligible=True,
                 )
                 registry.record_format_observation(candidate.source_key, fmt)
                 registry.record_schema_observation(candidate.source_key, schema)
@@ -245,6 +246,54 @@ class SourceActivationCompilerTests(unittest.TestCase):
                     (candidate.source_key,),
                 ).fetchone()
                 self.assertEqual(row["direct_evidence_authority"], 1)
+            finally:
+                control.close()
+
+    def test_ambiguous_year_schema_stays_discovery_only_without_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            control = ControlStore(Path(tmp) / "control.sqlite3")
+            try:
+                candidate = _candidate(
+                    "https://repo.example/api/download?id=ambiguous-jsonl"
+                )
+                registry = self._registry(control, candidate)
+                fmt = SourceFormatObservation(
+                    parser_kind="jsonl",
+                    compression="none",
+                    detection_method="content_signature",
+                    confidence=0.97,
+                    content_type="application/octet-stream",
+                )
+                schema = SourceRecordSchema(
+                    parser_kind="jsonl",
+                    hostname_field="url",
+                    timestamp_field="year",
+                    delimiter=None,
+                    detection_method="stable_json_fields",
+                    confidence=1.0,
+                    sample_records=8,
+                    matched_records=8,
+                    direct_year_eligible=False,
+                )
+                registry.record_format_observation(candidate.source_key, fmt)
+                registry.record_schema_observation(candidate.source_key, schema)
+
+                spec = SourceActivationCompiler(
+                    control,
+                    registry=registry,
+                ).compile(candidate)
+
+                self.assertEqual(spec.adapter_kind, "structured")
+                self.assertEqual(spec.evidence_mode, "discovery_only")
+                reservoir = control.get_reservoir(spec.reservoir_id)
+                self.assertIsNotNone(reservoir)
+                assert reservoir is not None
+                frozen_schema = schema_from_adapter_id(reservoir.adapter_id)
+                self.assertEqual(frozen_schema, schema)
+                contract = contract_from_adapter_id(reservoir.adapter_id)
+                self.assertIsNotNone(contract)
+                assert contract is not None
+                self.assertFalse(contract.grants_direct_web_year)
             finally:
                 control.close()
 
