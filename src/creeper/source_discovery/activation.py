@@ -256,10 +256,6 @@ class SourceActivationCompiler:
                 if trusted_format is not None
                 else locator_parser
             )
-            format_overrides_locator = (
-                trusted_format is not None
-                and actual_parser != locator_parser
-            )
             reviewed_binding = self.reviewed_contracts.get_exact(
                 stored.canonical_entrypoint
             )
@@ -311,11 +307,14 @@ class SourceActivationCompiler:
                         explicit_contracts=self.evidence_contracts,
                         parser_kind=actual_parser,
                     )
-                elif format_overrides_locator:
-                    # Content sniffing selects an execution parser only. It
-                    # cannot manufacture evidence authority for an opaque URL.
-                    contract = discovery_only_contract(actual_parser)
                 else:
+                    # Evidence authority follows record semantics, not the URL
+                    # suffix. Strictly recognized CDX/CDXJ records carry an
+                    # exact archived URL plus capture timestamp, so an opaque
+                    # transport endpoint is still direct annual evidence.
+                    # Generic JSONL/tabular/text formats remain discovery-only
+                    # unless their record semantics supply an explicit direct
+                    # contract.
                     contract = resolve_source_evidence_contract(
                         stored.canonical_entrypoint,
                         explicit_contracts=self.evidence_contracts,
