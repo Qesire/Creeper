@@ -24,9 +24,11 @@ max_search_directives = 2
 # the LLM for URLs when this lane is enabled; the LLM remains only for
 # structure/format interpretation and true search-space stagnation.
 enabled = true
-providers = ["datacite"]
-# DataCite allows much larger pages, but discovery intentionally keeps each
-# SearchCell probe bounded so duplicate/saturation feedback arrives quickly.
+providers = ["datacite", "zenodo"]
+# Structured public metadata channels. DataCite supplies DOI/repository
+# metadata; Zenodo adds file-level artifact URLs. Cross-channel duplicates are
+# collapsed by the shared URL -> artifact -> dataset -> source-family identity.
+# Every SearchCell probe stays bounded so saturation feedback arrives quickly.
 results_per_provider = 100
 max_total_results = 300
 min_relevance_score = 0.55
