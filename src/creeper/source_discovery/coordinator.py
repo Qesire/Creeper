@@ -640,10 +640,28 @@ class SourceDiscoveryCoordinator:
             assert result is not None
             measurement_current = True
             if result.format_observation is not None:
-                self.registry.record_format_observation(
-                    candidate.source_key,
-                    result.format_observation,
-                )
+                try:
+                    self.registry.record_format_observation(
+                        candidate.source_key,
+                        result.format_observation,
+                    )
+                except ValueError as exc:
+                    reason = (
+                        "source format observation failed closed: "
+                        + str(exc).strip()[:240]
+                    )
+                    self.registry.suppress_candidate(
+                        current,
+                        reason=reason,
+                        ttl_seconds=None,
+                    )
+                    self.registry.transition(
+                        candidate.source_key,
+                        SourceState.HOLD,
+                    )
+                    counts["scout_failures"] += 1
+                    counts["scouted_hold"] += 1
+                    continue
             if result.measurement is not None:
                 authority_kwargs: dict[str, str] = {}
                 if self.scout_authority is not None:
