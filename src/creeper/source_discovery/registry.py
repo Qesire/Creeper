@@ -2597,6 +2597,11 @@ class SourceDiscoveryRegistry:
             if observation.confidence < current.confidence:
                 return False
             if (
+                not same_format
+                and observation.confidence <= current.confidence
+            ):
+                return False
+            if (
                 observation.confidence == current.confidence
                 and current.policy_version == observation.policy_version
                 and current == observation
