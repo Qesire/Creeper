@@ -328,7 +328,8 @@ class DataCiteSearchProvider:
     def _query(plan: QueryPlan) -> str:
         # Provider queries must preserve all SearchCell dimensions; otherwise
         # distinct coverage cells collapse back into the same famous result set.
-        phrase = _MECHANISM_TERMS[plan.cell.mechanism][0]
+        variants = _MECHANISM_TERMS[plan.cell.mechanism]
+        phrase = variants[plan.variant % len(variants)]
         institution = plan.cell.institution.replace("_", " ")
         artifact = plan.cell.artifact.replace("_", " ")
         exclusions = " ".join(
