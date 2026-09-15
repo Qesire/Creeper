@@ -9,6 +9,7 @@ from creeper.source_discovery.deterministic_search import (
     DataCiteSearchProvider,
     DeterministicSearchExecutor,
     DeterministicSearchPolicy,
+    HarvardDataverseSearchProvider,
     ZenodoSearchProvider,
     candidate_from_result,
     classify_result,
@@ -157,6 +158,91 @@ class DeterministicSearchTests(unittest.TestCase):
         self.assertIn('"trace"', seen_query)
         self.assertIn('-"famous proxy trace"', seen_query)
 
+    def test_harvard_dataverse_provider_returns_direct_file_source(self) -> None:
+        observed = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            observed["path"] = request.url.path
+            observed["q"] = request.url.params["q"]
+            observed["type"] = request.url.params["type"]
+            observed["per_page"] = int(request.url.params["per_page"])
+            return httpx.Response(
+                200,
+                json={
+                    "status": "OK",
+                    "data": {
+                        "items": [
+                            {
+                                "name": "proxy98.log.gz",
+                                "type": "file",
+                                "url": (
+                                    "https://dataverse.harvard.edu/"
+                                    "api/access/datafile/12345"
+                                ),
+                                "file_id": "12345",
+                                "description": "HTTP proxy access log trace",
+                                "published_at": "2015-02-03T04:05:06Z",
+                                "file_type": "Gzip Archive",
+                                "file_content_type": "application/gzip",
+                                "size_in_bytes": 987654,
+                                "file_persistent_id": (
+                                    "doi:10.7910/DVN/PROXY98/FILE1"
+                                ),
+                                "dataset_name": (
+                                    "1998 University Web Proxy Trace Dataset"
+                                ),
+                                "dataset_persistent_id": (
+                                    "doi:10.7910/DVN/PROXY98"
+                                ),
+                                "dataset_citation": (
+                                    "Example Group, 2015, "
+                                    "\"1998 University Web Proxy Trace Dataset\""
+                                ),
+                            }
+                        ]
+                    },
+                },
+            )
+
+        async def run():
+            async with httpx.AsyncClient(
+                transport=httpx.MockTransport(handler)
+            ) as client:
+                provider = HarvardDataverseSearchProvider(client)
+                return await provider.search(self.plan, limit=100)
+
+        results = asyncio.run(run())
+
+        self.assertEqual(observed["path"], "/api/search")
+        self.assertEqual(observed["type"], "file")
+        self.assertEqual(observed["per_page"], 100)
+        self.assertIn('"1998"', observed["q"])
+        self.assertIn('"proxy"', observed["q"])
+        self.assertIn('"university"', observed["q"])
+        self.assertIn('"trace"', observed["q"])
+        self.assertEqual(len(results), 1)
+        result = results[0]
+        self.assertEqual(result.provider, "harvard_dataverse")
+        self.assertEqual(result.provider_result_id, "12345")
+        self.assertEqual(
+            result.url,
+            "https://dataverse.harvard.edu/api/access/datafile/12345",
+        )
+        self.assertEqual(result.content_length, 987654)
+        self.assertEqual(
+            result.identifiers,
+            (
+                "10.7910/DVN/PROXY98",
+                "10.7910/DVN/PROXY98/FILE1",
+            ),
+        )
+        classified = classify_result(self.plan, result, policy=self.policy)
+        self.assertIsNotNone(classified)
+        assert classified is not None
+        candidate = candidate_from_result(self.plan, classified)
+        self.assertEqual(candidate.level, SourceLevel.SOURCE)
+        self.assertEqual(candidate.discovered_by, "deterministic:harvard_dataverse")
+
     def test_zenodo_provider_prefers_direct_file_and_bounds_page_size(self) -> None:
         observed_size = None
 
@@ -245,6 +331,34 @@ class DeterministicSearchTests(unittest.TestCase):
         self.assertIsNotNone(classified)
         candidate = candidate_from_result(self.plan, classified)
         self.assertEqual(candidate.level, SourceLevel.SOURCE)
+
+    def test_harvard_dataverse_and_datacite_doi_share_dataset_identity(self) -> None:
+        datacite = RawSearchResult(
+            provider="datacite",
+            provider_result_id="10.7910/DVN/PROXY98",
+            url="https://doi.org/10.7910/DVN/PROXY98",
+            title="1998 University Web Proxy Trace Dataset",
+            publisher="Harvard Dataverse",
+        )
+        dataverse = RawSearchResult(
+            provider="harvard_dataverse",
+            provider_result_id="12345",
+            url="https://dataverse.harvard.edu/api/access/datafile/12345",
+            title=(
+                "1998 University Web Proxy Trace Dataset — proxy98.log.gz"
+            ),
+            publisher="Harvard Dataverse",
+            resource_type="file",
+            identifiers=("10.7910/DVN/PROXY98",),
+        )
+
+        first = classify_result(self.plan, datacite, policy=self.policy)
+        second = classify_result(self.plan, dataverse, policy=self.policy)
+
+        self.assertIsNotNone(first)
+        self.assertIsNotNone(second)
+        assert first is not None and second is not None
+        self.assertEqual(first.dataset_key, second.dataset_key)
 
     def test_zenodo_and_datacite_same_doi_collapse_to_one_dataset(self) -> None:
         datacite = RawSearchResult(

@@ -162,7 +162,8 @@ def relevance_score(cell: SearchCell, result: RawSearchResult) -> float:
     terms = _MECHANISM_TERMS[cell.mechanism]
     mechanism_hit = any(term in text for term in terms)
     artifact_hit = (
-        result.resource_type.lower() in {"dataset", "collection", "software"}
+        result.resource_type.lower()
+        in {"dataset", "collection", "software", "file", "datafile"}
         or any(term in text for term in _ARTIFACT_TERMS)
         or format_path_from_locator(result.url).endswith(_SOURCE_SUFFIXES)
     )
@@ -198,7 +199,10 @@ def candidate_from_result(
     result: CanonicalSearchResult,
 ) -> SourceCandidate:
     path = format_path_from_locator(result.canonical_url)
-    source_like = path.endswith(_SOURCE_SUFFIXES)
+    source_like = (
+        path.endswith(_SOURCE_SUFFIXES)
+        or result.raw.resource_type.lower() in {"file", "datafile"}
+    )
     direct = is_direct_evidence_entrypoint(result.canonical_url)
     years = _period_years(plan.cell.period)
     temporal = 0.85 if any(
@@ -662,6 +666,148 @@ class ZenodoSearchProvider:
                     identifiers=identifiers,
                     content_length=content_length,
                     checksum_sha256=sha256,
+                )
+            )
+            if len(results) >= page_size:
+                break
+        return tuple(results)
+
+
+class HarvardDataverseSearchProvider:
+    """Public file-level Harvard Dataverse search.
+
+    Dataverse search results expose stable file ids and direct public download
+    URLs, so this provider can hand concrete SOURCE objects to the existing
+    triage/scout pipeline without an additional landing-page resolver.
+    """
+
+    name = "harvard_dataverse"
+
+    def __init__(
+        self,
+        client: httpx.AsyncClient,
+        *,
+        endpoint: str = "https://dataverse.harvard.edu/api/search",
+        timeout_seconds: float = 20.0,
+    ) -> None:
+        self.client = client
+        self.endpoint = endpoint
+        self.timeout_seconds = float(timeout_seconds)
+
+    @staticmethod
+    def _query(plan: QueryPlan) -> str:
+        variants = _MECHANISM_TERMS[plan.cell.mechanism]
+        phrase = variants[plan.variant % len(variants)]
+        institution = plan.cell.institution.replace("_", " ")
+        artifact = plan.cell.artifact.replace("_", " ")
+        clauses = [
+            f'"{plan.cell.period}"',
+            f'"{phrase}"',
+            f'"{institution}"',
+            f'"{artifact}"',
+        ]
+        clauses.extend(
+            f'-"{item}"'
+            for item in plan.exclusions
+            if item and len(item) <= 80
+        )
+        return " ".join(clauses)
+
+    async def search(
+        self,
+        plan: QueryPlan,
+        *,
+        limit: int,
+    ) -> tuple[RawSearchResult, ...]:
+        page_size = min(1000, max(1, int(limit)))
+        response = await self.client.get(
+            self.endpoint,
+            params={
+                "q": self._query(plan),
+                "type": "file",
+                "per_page": page_size,
+                "start": 0,
+            },
+            timeout=self.timeout_seconds,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        data = payload.get("data") if isinstance(payload, dict) else None
+        items = data.get("items") if isinstance(data, dict) else None
+        if not isinstance(items, list):
+            return ()
+
+        results: list[RawSearchResult] = []
+        for item in items:
+            if not isinstance(item, dict) or item.get("type") != "file":
+                continue
+            record_id = item.get("file_id")
+            url = item.get("url")
+            if (
+                not isinstance(record_id, (str, int))
+                or not str(record_id).strip()
+                or not isinstance(url, str)
+                or not url.startswith(("http://", "https://"))
+            ):
+                continue
+
+            filename = item.get("name")
+            dataset_name = item.get("dataset_name")
+            title_parts = [
+                value.strip()
+                for value in (dataset_name, filename)
+                if isinstance(value, str) and value.strip()
+            ]
+            description_parts = [
+                value.strip()
+                for value in (
+                    item.get("description"),
+                    item.get("dataset_citation"),
+                    item.get("file_type"),
+                    item.get("file_content_type"),
+                )
+                if isinstance(value, str) and value.strip()
+            ]
+
+            content_length = item.get("size_in_bytes")
+            try:
+                content_length_value = (
+                    int(content_length) if content_length is not None else None
+                )
+            except (TypeError, ValueError):
+                content_length_value = None
+            if content_length_value is not None and content_length_value < 0:
+                content_length_value = None
+
+            published = item.get("published_at")
+            publication_year = None
+            if isinstance(published, str) and len(published) >= 4:
+                prefix = published[:4]
+                if prefix.isdigit():
+                    publication_year = int(prefix)
+
+            identifiers: list[str] = []
+            for key in ("dataset_persistent_id", "file_persistent_id"):
+                value = item.get(key)
+                if not isinstance(value, str) or not value.strip():
+                    continue
+                normalized = value.strip()
+                if normalized.lower().startswith("doi:"):
+                    normalized = normalized[4:]
+                identifiers.append(normalized)
+
+            results.append(
+                RawSearchResult(
+                    provider=self.name,
+                    provider_result_id=str(record_id),
+                    url=url,
+                    title=" — ".join(title_parts),
+                    description=" ".join(description_parts),
+                    publisher="Harvard Dataverse",
+                    publication_year=publication_year,
+                    resource_type="file",
+                    identifiers=tuple(identifiers),
+                    content_length=content_length_value,
                 )
             )
             if len(results) >= page_size:
