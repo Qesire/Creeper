@@ -1,8 +1,10 @@
 """Versioned reviewed direct-evidence contract registry.
 
-External structured sources never gain annual evidence authority from filename
-suffixes or agent priors. A reviewed registry binds one exact canonical locator
-to both a SourceEvidenceContract and an auditable artifact identity. The
+Generic structured sources never gain annual evidence authority from filename
+suffixes or agent priors alone. Self-describing record formats such as CDX/CDXJ
+derive authority from validated record semantics. A reviewed registry is an
+optional stronger binding for other schemas: it binds one exact canonical
+locator to both a SourceEvidenceContract and an auditable artifact identity. The
 artifact identity is frozen into the durable adapter id at activation so
 authority survives restart without mutable configuration reads in the record
 hot path.
@@ -24,7 +26,6 @@ from urllib.request import Request, urlopen
 from creeper.evidence.contracts import (
     EvidenceAuthority,
     SourceEvidenceContract,
-    parser_kind_from_locator,
 )
 from creeper.source_discovery.index_identity import normalize_strong_etag
 from creeper.source_discovery.models import canonicalize_source_entrypoint
@@ -196,11 +197,10 @@ class ReviewedSourceContractBinding:
             raise ReviewedContractRegistryError(
                 "external reviewed registry entries must grant DIRECT_WEB_YEAR"
             )
-        actual_parser = parser_kind_from_locator(self.artifact.locator)
-        if self.contract.parser_kind != actual_parser:
-            raise ReviewedContractRegistryError(
-                "reviewed contract parser_kind does not match locator parser"
-            )
+        # Parser semantics are reviewed explicitly. Transport locators may be
+        # opaque repository/API endpoints with no meaningful filename suffix;
+        # activation validates the reviewed parser against the scout-frozen
+        # format observation before production.
         if self.contract.hostname_field is None:
             raise ReviewedContractRegistryError(
                 "reviewed direct structured contract requires hostname_field"
@@ -510,13 +510,24 @@ def bind_reviewed_artifact_to_adapter_id(
                 "adapter_id is already bound to another reviewed artifact"
             )
         return adapter_id
-    return f"{adapter_id}{_REVIEWED_IDENTITY_MARKER}{artifact.binding_token}"
+
+    before_evidence, evidence_sep, evidence_tail = adapter_id.partition(":evc1:")
+    before_format, format_sep, format_tail = before_evidence.partition(":fmt1:")
+    bound = (
+        f"{before_format}{_REVIEWED_IDENTITY_MARKER}"
+        f"{artifact.binding_token}"
+    )
+    if format_sep:
+        bound = f"{bound}:fmt1:{format_tail}"
+    if evidence_sep:
+        bound = f"{bound}:evc1:{evidence_tail}"
+    return bound
 
 
 def reviewed_artifact_from_adapter_id(
     adapter_id: str,
 ) -> ReviewedArtifactBinding | None:
-    head = adapter_id.split(":evc1:", 1)[0]
+    head = adapter_id.split(":evc1:", 1)[0].split(":fmt1:", 1)[0]
     if _REVIEWED_IDENTITY_MARKER not in head:
         return None
     _prefix, token = head.rsplit(_REVIEWED_IDENTITY_MARKER, 1)

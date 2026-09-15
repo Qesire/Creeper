@@ -34,6 +34,11 @@ from creeper.source_discovery.models import (
     SourceState,
 )
 from creeper.sources.domains import DomainState, SourceDomain
+from creeper.sources.format_binding import (
+    SourceFormatObservation,
+    bind_format_to_adapter_id,
+    format_from_adapter_id,
+)
 from creeper.sources.locator import format_path_from_locator
 from creeper.sources.reservoirs import Reservoir, ReservoirState
 from creeper.storage.control_store import ControlStore
@@ -65,27 +70,51 @@ class ProductionSourceSpec:
     cursor: str | None
 
 
-def _adapter_kind(entrypoint: str) -> tuple[str, str]:
-    parser_kind = parser_kind_from_locator(entrypoint)
+def _adapter_kind(
+    entrypoint: str,
+    *,
+    parser_kind: str | None = None,
+) -> tuple[str, str]:
+    explicit_parser = parser_kind is not None
+    parser_kind = (
+        parser_kind_from_locator(entrypoint)
+        if parser_kind is None
+        else parser_kind.strip().lower()
+    )
     if parser_kind == "ftp_sitelist_zip":
         return "ftp_sitelist", "structured_records"
     if parser_kind == "sbi_bbs_zip":
         return "sbi_bbs", "structured_records"
-    if parser_kind in {"mbox_urls", "squid_access", "dmoz_rdf_urls"}:
+    if parser_kind == "warc_arc":
+        return "warc_arc", "archive_records"
+    if explicit_parser and parser_kind in {
+        "cdx",
+        "cdxj",
+        "jsonl",
+        "delimited",
+        "lines",
+        "mbox_urls",
+        "squid_access",
+        "dmoz_rdf_urls",
+    }:
+        # A trusted format observation is an execution fact, not evidence
+        # authority. It is sufficient to select an already-mature parser even
+        # when the transport locator has no useful filename suffix.
         return "structured", "structured_records"
 
     path = PurePosixPath(format_path_from_locator(entrypoint))
     name = path.name
-    suffixes = (".warc.gz", ".arc.gz", ".warc", ".arc")
-    if name.endswith(suffixes):
-        return "warc_arc", "archive_records"
     structured = (
         ".cdxj", ".cdxj.gz", ".cdx", ".cdx.gz",
         ".jsonl", ".jsonl.gz",
         ".csv", ".csv.gz", ".tsv", ".tsv.gz",
         ".txt", ".txt.gz", ".list", ".list.gz", ".urls", ".urls.gz",
     )
-    if name.endswith(structured):
+    if name.endswith(structured) or parser_kind in {
+        "mbox_urls",
+        "squid_access",
+        "dmoz_rdf_urls",
+    }:
         return "structured", "structured_records"
     raise SourceActivationError(
         f"unsupported adapter for discovered source: {entrypoint}",
@@ -121,10 +150,33 @@ class SourceActivationCompiler:
             raise SourceActivationError("candidate is not registered in discovery registry")
         if stored.state not in {SourceState.ACTIVE, SourceState.ACTIVATING}:
             raise SourceActivationError("only ACTIVE or ACTIVATING candidates can be activated")
-        adapter_kind, enumeration_kind = _adapter_kind(candidate.canonical_entrypoint)
         source_key = candidate.source_key
         domain_id = f"domain:{source_key.removeprefix('src:')}"
         reservoir_id = f"reservoir:{source_key.removeprefix('src:')}"
+        existing = self.control_store.get_reservoir(reservoir_id)
+
+        format_observation = self.registry.get_format_observation(source_key)
+        trusted_format: SourceFormatObservation | None = None
+        if existing is not None:
+            trusted_format = format_from_adapter_id(existing.adapter_id)
+        if (
+            trusted_format is None
+            and format_observation is not None
+            and format_observation.confidence >= 0.90
+        ):
+            trusted_format = format_observation
+
+        if existing is not None:
+            adapter_kind = existing.adapter_id.split(":", 1)[0]
+            enumeration_kind = existing.enumeration_kind
+        else:
+            adapter_kind, enumeration_kind = _adapter_kind(
+                candidate.canonical_entrypoint,
+                parser_kind=(
+                    None if trusted_format is None
+                    else trusted_format.parser_kind
+                ),
+            )
         base_adapter_id = f"{adapter_kind}:{source_key.removeprefix('src:')}"
         year_from = candidate.expected_year_from or 1996
         year_to = candidate.expected_year_to or 2001
@@ -134,7 +186,6 @@ class SourceActivationCompiler:
         # same. Once both the production reservoir and capability-aware index
         # exist, recompilation must be read-only. In particular, never replace a
         # real tomography synopsis with the older scout synopsis.
-        existing = self.control_store.get_reservoir(reservoir_id)
         if existing is not None:
             activation = self.control_store.get_activation(source_key)
             if activation is None:
@@ -189,12 +240,21 @@ class SourceActivationCompiler:
             if contract is None:
                 contract = resolve_source_evidence_contract(
                     existing.root_locator,
-                    parser_kind=parser_kind_from_locator(existing.root_locator),
+                    parser_kind=(
+                        trusted_format.parser_kind
+                        if trusted_format is not None
+                        else parser_kind_from_locator(existing.root_locator)
+                    ),
                 )
             adapter_id = existing.adapter_id
         else:
-            actual_parser = parser_kind_from_locator(
+            locator_parser = parser_kind_from_locator(
                 stored.canonical_entrypoint
+            )
+            actual_parser = (
+                trusted_format.parser_kind
+                if trusted_format is not None
+                else locator_parser
             )
             reviewed_binding = self.reviewed_contracts.get_exact(
                 stored.canonical_entrypoint
@@ -220,6 +280,12 @@ class SourceActivationCompiler:
                         permanent=True,
                     ) from exc
                 else:
+                    if reviewed_binding.contract.parser_kind != actual_parser:
+                        raise SourceActivationError(
+                            "reviewed contract parser_kind disagrees with "
+                            "the frozen source format",
+                            permanent=True,
+                        )
                     contract = reviewed_binding.contract
             else:
                 explicit = self.evidence_contracts.get(
@@ -235,16 +301,35 @@ class SourceActivationCompiler:
                         "versioned reviewed contract registry",
                         permanent=True,
                     )
-                contract = resolve_source_evidence_contract(
-                    stored.canonical_entrypoint,
-                    explicit_contracts=self.evidence_contracts,
-                    parser_kind=actual_parser,
-                )
+                if explicit is not None:
+                    contract = resolve_source_evidence_contract(
+                        stored.canonical_entrypoint,
+                        explicit_contracts=self.evidence_contracts,
+                        parser_kind=actual_parser,
+                    )
+                else:
+                    # Evidence authority follows record semantics, not the URL
+                    # suffix. Strictly recognized CDX/CDXJ records carry an
+                    # exact archived URL plus capture timestamp, so an opaque
+                    # transport endpoint is still direct annual evidence.
+                    # Generic JSONL/tabular/text formats remain discovery-only
+                    # unless their record semantics supply an explicit direct
+                    # contract.
+                    contract = resolve_source_evidence_contract(
+                        stored.canonical_entrypoint,
+                        explicit_contracts=self.evidence_contracts,
+                        parser_kind=actual_parser,
+                    )
 
             if reviewed_binding is not None:
                 base_adapter_id = bind_reviewed_artifact_to_adapter_id(
                     base_adapter_id,
                     reviewed_binding.artifact,
+                )
+            if trusted_format is not None:
+                base_adapter_id = bind_format_to_adapter_id(
+                    base_adapter_id,
+                    trusted_format,
                 )
             adapter_id = bind_contract_to_adapter_id(
                 base_adapter_id,
@@ -271,6 +356,11 @@ class SourceActivationCompiler:
                 else triage.get("content_length")
             ),
             direct_evidence_authority=contract.grants_direct_web_year,
+            parser_kind=(
+                trusted_format.parser_kind
+                if trusted_format is not None
+                else None
+            ),
         )
         self.index_registry.register_index_space(compiled_index_space)
         if (
@@ -330,6 +420,11 @@ class SourceActivationCompiler:
                     str(year_from),
                     str(year_to),
                     contract.binding_digest,
+                    (
+                        ""
+                        if trusted_format is None
+                        else trusted_format.binding_digest
+                    ),
                     (
                         ""
                         if reviewed_binding is None

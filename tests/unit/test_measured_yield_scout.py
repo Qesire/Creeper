@@ -115,6 +115,55 @@ class MeasuredYieldScoutTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(measurement.novel_pair_eed, 2.0)
         self.assertEqual(measurement.direct_host_years, 0)
 
+    async def test_unknown_extension_jsonl_is_detected_and_measured(self) -> None:
+        body = (
+            b'{"url":"https://known.com/a","year":1998}\n'
+            b'{"url":"https://novel.com/b","year":1999}\n'
+            b'{"url":"https://other.org/c","year":2000}\n'
+        )
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            return streamed_response(
+                206,
+                body,
+                headers={"content-type": "text/plain"},
+            )
+
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler)
+        ) as client:
+            scout = MeasuredYieldScoutExecutor(
+                client,
+                self.baseline,
+                {"com": Decimal("1"), "org": Decimal("0.5")},
+                policy=self.policy(
+                    min_unique_hosts=2,
+                    min_novel_hosts=1,
+                    min_novel_fraction=0.1,
+                    min_novel_eed=0.5,
+                ),
+            )
+            result = await scout(
+                self.candidate(
+                    "https://repo.example/api/download?id=opaque"
+                )
+            )
+
+        self.assertEqual(result.disposition, ScoutDisposition.WARM)
+        self.assertIsNotNone(result.format_observation)
+        assert result.format_observation is not None
+        self.assertEqual(result.format_observation.parser_kind, "jsonl")
+        self.assertEqual(
+            result.format_observation.detection_method,
+            "content_signature",
+        )
+        self.assertGreaterEqual(result.format_observation.confidence, 0.95)
+        self.assertIsNotNone(result.measurement)
+        assert result.measurement is not None
+        self.assertEqual(result.measurement.measurement_mode, MeasurementMode.HOST_YEAR)
+        self.assertEqual(result.measurement.unique_hosts, 3)
+        self.assertEqual(result.measurement.novel_host_year_pairs, 3)
+
     async def test_dated_source_keeps_new_year_for_partially_known_hostname(self) -> None:
         body = b'com,known)/ 19980101000000 {"url":"https://known.com/new"}\n'
 

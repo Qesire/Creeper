@@ -28,6 +28,7 @@ from creeper.source_discovery.deterministic_search import (
 from creeper.source_discovery.manager import SearchDirective, SourceReservoirManager
 from creeper.source_discovery.residual_search import QueryPlan
 from creeper.source_discovery.search_identity import SearchIdentityLedger
+from creeper.sources.format_binding import SourceFormatObservation
 from creeper.source_discovery.motifs import infer_year_sibling_candidates
 from creeper.source_discovery.models import (
     ScoutMeasurement,
@@ -81,6 +82,7 @@ class ScoutResult:
     reason: str = ""
     discovered_candidates: tuple[SourceCandidate, ...] = ()
     edge_relation: str = "enumerates"
+    format_observation: SourceFormatObservation | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "disposition", ScoutDisposition(self.disposition))
@@ -89,6 +91,13 @@ class ScoutResult:
             raise ValueError("WARM scout result requires a deterministic measurement")
         if not self.edge_relation.strip():
             raise ValueError("scout child edge_relation is required")
+        if (
+            self.format_observation is not None
+            and not isinstance(self.format_observation, SourceFormatObservation)
+        ):
+            raise TypeError(
+                "format_observation must be SourceFormatObservation when provided"
+            )
         if any(
             candidate.state is not SourceState.DISCOVERED
             for candidate in self.discovered_candidates
@@ -630,6 +639,29 @@ class SourceDiscoveryCoordinator:
             result = outcome.value
             assert result is not None
             measurement_current = True
+            if result.format_observation is not None:
+                try:
+                    self.registry.record_format_observation(
+                        candidate.source_key,
+                        result.format_observation,
+                    )
+                except ValueError as exc:
+                    reason = (
+                        "source format observation failed closed: "
+                        + str(exc).strip()[:240]
+                    )
+                    self.registry.suppress_candidate(
+                        current,
+                        reason=reason,
+                        ttl_seconds=None,
+                    )
+                    self.registry.transition(
+                        candidate.source_key,
+                        SourceState.HOLD,
+                    )
+                    counts["scout_failures"] += 1
+                    counts["scouted_hold"] += 1
+                    continue
             if result.measurement is not None:
                 authority_kwargs: dict[str, str] = {}
                 if self.scout_authority is not None:

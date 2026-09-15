@@ -15,6 +15,10 @@ from creeper.evidence.contracts import (
 )
 from creeper.evidence.planner import EvidencePlanner
 from creeper.scheduler.leases import WorkLease
+from creeper.sources.format_binding import (
+    SourceFormatObservation,
+    bind_format_to_adapter_id,
+)
 from creeper.sources.production import ProductionAdapterFactory
 from creeper.sources.reservoirs import Reservoir, ReservoirState
 
@@ -59,6 +63,60 @@ class DirectEvidenceContractTests(unittest.TestCase):
         contract = resolve_source_evidence_contract(locator)
         self.assertTrue(contract.grants_direct_web_year)
         self.assertEqual(contract.parser_kind, "cdxj")
+
+    def test_content_identified_cdxj_binding_produces_direct_year_records(self) -> None:
+        contract = resolve_source_evidence_contract(
+            "https://repo.example/object/opaque",
+            parser_kind="cdxj",
+        )
+        self.assertTrue(contract.grants_direct_web_year)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "opaque-artifact"
+            path.write_text(
+                'com,direct)/ 19990102030405 {"url":"http://direct.com/a"}\n',
+                encoding="utf-8",
+            )
+            observation = SourceFormatObservation(
+                parser_kind="cdxj",
+                compression="none",
+                detection_method="content_signature",
+                confidence=0.98,
+                content_type="text/plain",
+            )
+            adapter_id = bind_format_to_adapter_id(
+                "structured:opaque-cdxj",
+                observation,
+            )
+            adapter_id = bind_contract_to_adapter_id(
+                adapter_id,
+                contract,
+            )
+            reservoir = Reservoir(
+                reservoir_id="reservoir:opaque-cdxj",
+                domain_id="domain:opaque-cdxj",
+                adapter_id=adapter_id,
+                root_locator=str(path),
+                enumeration_kind="structured_records",
+                capacity_lower=1,
+                evidence_mode="direct_year",
+                state=ReservoirState.READY,
+            )
+
+            adapter = ProductionAdapterFactory.open(reservoir)
+            records, _result = adapter.execute(_lease(reservoir))
+            record = next(records)
+            host = next(iter(adapter.extract_hosts(record)))
+            adapter.close()
+
+        self.assertEqual(host.hostname, "direct.com")
+        self.assertEqual(host.source_year, 1999)
+        self.assertEqual(host.direct_year_mask, 1 << (1999 - 1996))
+        self.assertEqual(host.year_hint_mask, 0)
+        self.assertEqual(
+            host.evidence_contract_id,
+            contract.contract_id,
+        )
 
     def test_trusted_jsonl_contract_produces_direct_year_and_capsule_provenance(self) -> None:
         contract = _direct_contract(

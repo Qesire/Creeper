@@ -15,6 +15,7 @@ from creeper.source_discovery import (
     SuppressionScope,
     canonicalize_source_entrypoint,
 )
+from creeper.sources.format_binding import SourceFormatObservation
 from creeper.storage.control_store import ControlStore
 
 
@@ -157,6 +158,86 @@ class SourceDiscoveryRegistryTests(unittest.TestCase):
         self.assertEqual(len(rewards), 1)
         self.assertEqual(rewards[0].strategy, "META_SOURCE_SEARCH")
         self.assertEqual(rewards[0].reward_per_cost, 3.0)
+
+    def test_format_observation_round_trips_independently_of_scout_authority(self) -> None:
+        candidate = self.candidate("opaque-download")
+        self.registry.register_proposal(candidate)
+        observed = SourceFormatObservation(
+            parser_kind="jsonl",
+            compression="gzip",
+            detection_method="content_signature",
+            confidence=0.97,
+            content_type="application/octet-stream",
+        )
+
+        changed = self.registry.record_format_observation(
+            candidate.source_key,
+            observed,
+        )
+
+        self.assertTrue(changed)
+        self.assertEqual(
+            self.registry.get_format_observation(candidate.source_key),
+            observed,
+        )
+
+    def test_weaker_format_observation_cannot_replace_stronger_one(self) -> None:
+        candidate = self.candidate("opaque-download-weak")
+        self.registry.register_proposal(candidate)
+        strong = SourceFormatObservation(
+            parser_kind="jsonl",
+            compression="none",
+            detection_method="content_signature",
+            confidence=0.97,
+        )
+        weak = SourceFormatObservation(
+            parser_kind="lines",
+            compression="none",
+            detection_method="content_signature",
+            confidence=0.88,
+        )
+        self.registry.record_format_observation(candidate.source_key, strong)
+
+        changed = self.registry.record_format_observation(
+            candidate.source_key,
+            weak,
+        )
+
+        self.assertFalse(changed)
+        self.assertEqual(
+            self.registry.get_format_observation(candidate.source_key),
+            strong,
+        )
+
+    def test_conflicting_high_confidence_format_observations_fail_closed(self) -> None:
+        candidate = self.candidate("opaque-download-conflict")
+        self.registry.register_proposal(candidate)
+        first = SourceFormatObservation(
+            parser_kind="jsonl",
+            compression="none",
+            detection_method="content_signature",
+            confidence=0.97,
+        )
+        second = SourceFormatObservation(
+            parser_kind="cdxj",
+            compression="none",
+            detection_method="content_signature",
+            confidence=0.98,
+        )
+        self.registry.record_format_observation(candidate.source_key, first)
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "conflicting high-confidence",
+        ):
+            self.registry.record_format_observation(
+                candidate.source_key,
+                second,
+            )
+        self.assertEqual(
+            self.registry.get_format_observation(candidate.source_key),
+            first,
+        )
 
     def test_registry_rejects_invalid_clock_before_durable_write(self) -> None:
         bad = SourceDiscoveryRegistry(
