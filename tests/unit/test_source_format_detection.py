@@ -3,6 +3,12 @@ from __future__ import annotations
 import gzip
 import unittest
 
+from creeper.evidence.contract_registry import (
+    ReviewedArtifactBinding,
+    ReviewedArtifactIdentity,
+    bind_reviewed_artifact_to_adapter_id,
+    reviewed_artifact_from_adapter_id,
+)
 from creeper.evidence.contracts import (
     bind_contract_to_adapter_id,
     contract_from_adapter_id,
@@ -59,6 +65,27 @@ class SourceFormatDetectionTests(unittest.TestCase):
         self.assertEqual(observed.compression, "gzip")
         self.assertGreaterEqual(observed.confidence, 0.90)
 
+    def test_truncated_gzip_probe_still_exposes_format_signature(self) -> None:
+        full = gzip.compress(
+            (
+                '{"url":"https://one.example/a","year":1998}\n'
+                '{"url":"https://two.example/b","year":1999}\n'
+                '{"url":"https://three.example/c","year":2000}\n'
+            ).encode("utf-8")
+        )
+        payload = full[:-8]
+
+        observed = detect_source_format(
+            locator="https://repo.example/api/blob/partial",
+            payload=payload,
+            content_type="application/octet-stream",
+        )
+
+        self.assertIsNotNone(observed)
+        assert observed is not None
+        self.assertEqual(observed.parser_kind, "jsonl")
+        self.assertEqual(observed.compression, "gzip")
+
     def test_unknown_cdxj_locator_is_detected_from_record_parser(self) -> None:
         payload = (
             b'com,one)/ 19980101000000 {"url":"http://one.com/a"}\n'
@@ -111,6 +138,36 @@ class SourceFormatDetectionTests(unittest.TestCase):
         self.assertIsNotNone(contract)
         assert contract is not None
         self.assertEqual(contract.parser_kind, "jsonl")
+
+    def test_reviewed_binding_remains_readable_when_added_after_format(self) -> None:
+        locator = "https://repo.example/artifact.jsonl"
+        observation = SourceFormatObservation(
+            parser_kind="jsonl",
+            compression="none",
+            detection_method="locator",
+            confidence=1.0,
+        )
+        artifact = ReviewedArtifactBinding(
+            locator=locator,
+            source_identity=ReviewedArtifactIdentity(
+                kind="immutable_locator",
+                value=locator,
+            ),
+            custodian="Example Custodian",
+            edition="v1",
+        )
+        adapter_id = bind_format_to_adapter_id(
+            "structured:fixture",
+            observation,
+        )
+
+        adapter_id = bind_reviewed_artifact_to_adapter_id(
+            adapter_id,
+            artifact,
+        )
+
+        self.assertEqual(format_from_adapter_id(adapter_id), observation)
+        self.assertEqual(reviewed_artifact_from_adapter_id(adapter_id), artifact)
 
     def test_format_binding_can_be_inserted_before_existing_evidence_token(self) -> None:
         contract = discovery_only_contract("delimited")
