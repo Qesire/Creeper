@@ -332,6 +332,7 @@ class SourceDiscoveryRegistry:
                 detection_method TEXT NOT NULL,
                 confidence REAL NOT NULL,
                 content_type TEXT NOT NULL,
+                delimiter TEXT,
                 policy_version TEXT NOT NULL,
                 observed_at REAL NOT NULL,
                 FOREIGN KEY(source_key) REFERENCES source_candidates(source_key)
@@ -408,6 +409,17 @@ class SourceDiscoveryRegistry:
         }.items():
             if name not in search_episode_columns:
                 self.connection.execute(statement)
+
+        format_columns = {
+            str(row[1])
+            for row in self.connection.execute(
+                "PRAGMA table_info(source_format_observations)"
+            ).fetchall()
+        }
+        if "delimiter" not in format_columns:
+            self.connection.execute(
+                "ALTER TABLE source_format_observations ADD COLUMN delimiter TEXT"
+            )
 
         source_run_columns = {
             str(row[1])
@@ -2613,14 +2625,15 @@ class SourceDiscoveryRegistry:
                 """
                 INSERT INTO source_format_observations(
                     source_key, parser_kind, compression, detection_method,
-                    confidence, content_type, policy_version, observed_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    confidence, content_type, delimiter, policy_version, observed_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(source_key) DO UPDATE SET
                     parser_kind = excluded.parser_kind,
                     compression = excluded.compression,
                     detection_method = excluded.detection_method,
                     confidence = excluded.confidence,
                     content_type = excluded.content_type,
+                    delimiter = excluded.delimiter,
                     policy_version = excluded.policy_version,
                     observed_at = excluded.observed_at
                 """,
@@ -2631,6 +2644,7 @@ class SourceDiscoveryRegistry:
                     observation.detection_method,
                     observation.confidence,
                     observation.content_type,
+                    observation.delimiter,
                     observation.policy_version,
                     self._now(),
                 ),
@@ -2644,7 +2658,7 @@ class SourceDiscoveryRegistry:
         row = self.connection.execute(
             """
             SELECT parser_kind, compression, detection_method, confidence,
-                   content_type, policy_version
+                   content_type, delimiter, policy_version
             FROM source_format_observations
             WHERE source_key = ?
             """,
@@ -2658,6 +2672,9 @@ class SourceDiscoveryRegistry:
             detection_method=str(row["detection_method"]),
             confidence=float(row["confidence"]),
             content_type=str(row["content_type"] or ""),
+            delimiter=(
+                None if row["delimiter"] is None else str(row["delimiter"])
+            ),
             policy_version=str(row["policy_version"]),
         )
 
