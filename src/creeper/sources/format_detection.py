@@ -90,9 +90,11 @@ def _looks_like_host(value: str) -> bool:
     return normalize_official(text) is not None
 
 
-def _signature_parser(payload: bytes) -> tuple[str, float] | None:
+def _signature_parser(
+    payload: bytes,
+) -> tuple[str, float, str | None] | None:
     if payload.startswith((b"WARC/", b"filedesc://")):
-        return "warc_arc", 0.99
+        return "warc_arc", 0.99, None
 
     lines = _text_lines(payload)
     if not lines:
@@ -100,21 +102,21 @@ def _signature_parser(payload: bytes) -> tuple[str, float] | None:
 
     squid_hits = sum(parse_squid_access_line(line) is not None for line in lines[:24])
     if squid_hits >= 3 and squid_hits / min(24, len(lines)) >= 0.6:
-        return "squid_access", 0.98
+        return "squid_access", 0.98, None
 
     cdxj_hits = sum(
         parse_cdxj_line(line, source_id="format-detect", locator=str(index)) is not None
         for index, line in enumerate(lines[:24])
     )
     if cdxj_hits >= 3 and cdxj_hits / min(24, len(lines)) >= 0.6:
-        return "cdxj", 0.98
+        return "cdxj", 0.98, None
 
     cdx_hits = sum(
         parse_cdx_line(line, source_id="format-detect", locator=str(index)) is not None
         for index, line in enumerate(lines[:24])
     )
     if cdx_hits >= 3 and cdx_hits / min(24, len(lines)) >= 0.6:
-        return "cdx", 0.98
+        return "cdx", 0.98, None
 
     json_hits = 0
     json_host_hits = 0
@@ -132,7 +134,7 @@ def _signature_parser(payload: bytes) -> tuple[str, float] | None:
                     json_host_hits += 1
                     break
     if json_hits >= 3 and json_host_hits >= 2 and json_hits / min(24, len(lines)) >= 0.6:
-        return "jsonl", 0.97
+        return "jsonl", 0.97, None
 
     text = payload.decode("utf-8", errors="replace")
     try:
@@ -147,11 +149,11 @@ def _signature_parser(payload: bytes) -> tuple[str, float] | None:
                 if any(_looks_like_host(cell) for cell in row):
                     host_rows += 1
             if host_rows >= 2:
-                return "delimited", 0.92
+                return "delimited", 0.92, dialect.delimiter
 
     host_lines = sum(_looks_like_host(line) for line in lines[:32])
     if host_lines >= 3 and host_lines / min(32, len(lines)) >= 0.5:
-        return "lines", 0.88
+        return "lines", 0.88, None
     return None
 
 
@@ -168,12 +170,17 @@ def detect_source_format(
     compression = "gzip" if locator_gzip or gzip_magic else "none"
     parser = _known_locator_parser(locator)
     if parser is not None:
+        delimiter = None
+        if parser == "delimited":
+            path = format_path_from_locator(locator)
+            delimiter = "\t" if path.endswith((".tsv", ".tsv.gz")) else ","
         return SourceFormatObservation(
             parser_kind=parser,
             compression=compression,
             detection_method="locator",
             confidence=1.0,
             content_type=content_type,
+            delimiter=delimiter,
         )
 
     media = content_type.split(";", 1)[0].strip().lower()
@@ -188,12 +195,17 @@ def detect_source_format(
         "text/tab-separated-values": "delimited",
     }
     if media in content_map:
+        parser_kind = content_map[media]
+        delimiter = None
+        if parser_kind == "delimited":
+            delimiter = "\t" if media == "text/tab-separated-values" else ","
         return SourceFormatObservation(
-            parser_kind=content_map[media],
+            parser_kind=parser_kind,
             compression=compression,
             detection_method="content_type",
             confidence=0.96,
             content_type=content_type,
+            delimiter=delimiter,
         )
 
     sniff_payload = payload
@@ -206,11 +218,12 @@ def detect_source_format(
     signature = _signature_parser(sniff_payload)
     if signature is None:
         return None
-    parser_kind, confidence = signature
+    parser_kind, confidence, delimiter = signature
     return SourceFormatObservation(
         parser_kind=parser_kind,
         compression=compression,
         detection_method="content_signature",
         confidence=confidence,
         content_type=content_type,
+        delimiter=delimiter,
     )
