@@ -33,6 +33,7 @@ from creeper.source_discovery.search_identity import (
     SearchIdentityLedger,
     canonicalize_search_result,
 )
+from creeper.sources.format_binding import SourceFormatObservation
 from creeper.storage.control_store import ControlStore
 
 
@@ -287,6 +288,51 @@ class SourceDiscoveryCoordinatorTests(unittest.IsolatedAsyncioTestCase):
         ]
         self.assertGreaterEqual(len(searched), 1)
         self.assertEqual(searched[0].discovered_by, "agent:test")
+
+    async def test_scout_format_observation_is_committed_by_coordinator(self) -> None:
+        candidate = self.candidate("opaque-format")
+        self.to_scout_ready(candidate)
+        observation = SourceFormatObservation(
+            parser_kind="jsonl",
+            compression="gzip",
+            detection_method="content_signature",
+            confidence=0.97,
+            content_type="application/octet-stream",
+        )
+
+        async def triage(_candidate: SourceCandidate) -> TriageResult:
+            raise AssertionError("no triage expected")
+
+        async def scout(_candidate: SourceCandidate) -> ScoutResult:
+            return ScoutResult(
+                ScoutDisposition.WARM,
+                measurement=self.measurement(),
+                format_observation=observation,
+            )
+
+        async def search(_directive) -> SearchBatch:
+            raise AssertionError("no search expected")
+
+        coordinator = SourceDiscoveryCoordinator(
+            self.registry,
+            self.manager(),
+            lock_path=self.lock_path,
+            triage_executor=triage,
+            scout_executor=scout,
+            search_executor=search,
+        )
+
+        report = await coordinator.run_once()
+
+        self.assertEqual(report.scouted_warm, 1)
+        self.assertEqual(
+            self.registry.get_format_observation(candidate.source_key),
+            observation,
+        )
+        self.assertEqual(
+            self.registry.get_candidate(candidate.source_key).state,
+            SourceState.WARM,
+        )
 
     async def test_deterministic_search_commits_identity_and_coverage_serially(self) -> None:
         cell = SearchCell(
