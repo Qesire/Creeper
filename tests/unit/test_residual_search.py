@@ -185,6 +185,76 @@ class ResidualSearchLedgerTests(unittest.TestCase):
         self.assertEqual(plans[0].cell, productive)
         self.assertEqual(plans[1].cell, unseen)
 
+    def test_multi_plan_batch_prefers_distinct_mechanisms(self) -> None:
+        cells = (
+            SearchCell(
+                mechanism="proxy_access",
+                institution="university",
+                period="1998",
+                artifact="trace",
+            ),
+            SearchCell(
+                mechanism="proxy_access",
+                institution="research_lab",
+                period="1997",
+                artifact="log",
+            ),
+            SearchCell(
+                mechanism="dns_survey",
+                institution="nic",
+                period="1998",
+                artifact="dump",
+            ),
+        )
+        self.ledger.ensure_cells(cells)
+
+        plans = SearchCellScheduler(self.ledger).next_plans(limit=2)
+
+        self.assertEqual(len(plans), 2)
+        self.assertEqual(
+            len({plan.cell.mechanism for plan in plans}),
+            2,
+        )
+
+    def test_strong_measured_yield_can_override_batch_diversity_penalty(self) -> None:
+        productive_a = SearchCell(
+            mechanism="proxy_access",
+            institution="university",
+            period="1998",
+            artifact="trace",
+        )
+        productive_b = SearchCell(
+            mechanism="proxy_access",
+            institution="isp",
+            period="1999",
+            artifact="log",
+        )
+        unexplored = SearchCell(
+            mechanism="dns_survey",
+            institution="nic",
+            period="1997",
+            artifact="dump",
+        )
+        self.ledger.ensure_cells((productive_a, productive_b, unexplored))
+        for cell in (productive_a, productive_b):
+            self.ledger.record_episode(
+                cell,
+                result_count=20,
+                duplicate_results=0,
+                unique_roots=20,
+                new_families=20,
+                qualified_roots=20,
+                accepted_novel_eed=100.0,
+                search_cost_seconds=1.0,
+            )
+
+        plans = SearchCellScheduler(self.ledger).next_plans(limit=2)
+
+        self.assertEqual(
+            {plan.cell for plan in plans},
+            {productive_a, productive_b},
+        )
+
     def test_variant_rotation_is_finite_and_deterministic(self) -> None:
         self.ledger.ensure_cell(self.cell)
         scheduler = SearchCellScheduler(self.ledger)
