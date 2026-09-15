@@ -98,6 +98,16 @@ from creeper.source_discovery.promotion import (
     PromotionPolicy,
 )
 from creeper.source_discovery.registry import SourceDiscoveryRegistry
+from creeper.source_discovery.residual_search import (
+    QueryPlan,
+    ResidualSearchLedger,
+    ResidualSearchPolicy,
+    SearchCell,
+    SearchCellScheduler,
+    SearchCellState,
+    SearchCellStats,
+    default_search_cells,
+)
 from creeper.source_discovery.scout_router import SourceScoutRouter, SourceScoutRouterPolicy
 from creeper.source_discovery.scrapy_scout import (
     ScrapyStructuralScoutExecutor,
@@ -152,6 +162,9 @@ __all__ = [
     "RegionTomographyReport",
     "RegionTomographyService",
     "RegionSynopsis",
+    "QueryPlan",
+    "ResidualSearchLedger",
+    "ResidualSearchPolicy",
     "SampledByteRange",
     "SourceAccessMode",
     "TomographyAction",
@@ -180,6 +193,10 @@ __all__ = [
     "SearchBatch",
     "SearchDirective",
     "SearchDirectiveKind",
+    "SearchCell",
+    "SearchCellScheduler",
+    "SearchCellState",
+    "SearchCellStats",
     "SearchEpisode",
     "SourceCandidate",
     "SourceDiscoveryCoordinator",
@@ -198,6 +215,7 @@ __all__ = [
     "canonicalize_source_entrypoint",
     "child_region",
     "compile_candidate_index_space",
+    "default_search_cells",
     "region_size_bytes",
     "split_byte_region",
     "expand_scrapy_spool",
