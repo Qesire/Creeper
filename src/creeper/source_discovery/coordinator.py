@@ -28,6 +28,7 @@ from creeper.source_discovery.deterministic_search import (
 from creeper.source_discovery.manager import SearchDirective, SourceReservoirManager
 from creeper.source_discovery.residual_search import QueryPlan
 from creeper.source_discovery.search_identity import SearchIdentityLedger
+from creeper.sources.format_binding import SourceFormatObservation
 from creeper.source_discovery.motifs import infer_year_sibling_candidates
 from creeper.source_discovery.models import (
     ScoutMeasurement,
@@ -81,6 +82,7 @@ class ScoutResult:
     reason: str = ""
     discovered_candidates: tuple[SourceCandidate, ...] = ()
     edge_relation: str = "enumerates"
+    format_observation: SourceFormatObservation | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "disposition", ScoutDisposition(self.disposition))
@@ -630,6 +632,11 @@ class SourceDiscoveryCoordinator:
             result = outcome.value
             assert result is not None
             measurement_current = True
+            if result.format_observation is not None:
+                self.registry.record_format_observation(
+                    candidate.source_key,
+                    result.format_observation,
+                )
             if result.measurement is not None:
                 authority_kwargs: dict[str, str] = {}
                 if self.scout_authority is not None:
