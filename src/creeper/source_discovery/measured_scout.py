@@ -1163,7 +1163,6 @@ class MeasuredYieldScoutExecutor:
             else detect_record_schema(
                 payload=download.payload,
                 format_observation=format_observation,
-                schema_observation=schema_observation,
             )
         )
         try:
@@ -1174,7 +1173,6 @@ class MeasuredYieldScoutExecutor:
                 policy=self.policy,
                 truncated=download.truncated,
                 format_observation=format_observation,
-                schema_observation=schema_observation,
             )
         except (WarcFormatError, ValueError, csv.Error) as exc:
             detail = str(exc).strip().replace("\n", " ")[:240]
@@ -1256,6 +1254,7 @@ class MeasuredYieldScoutExecutor:
             measurement=measurement,
             reason="bounded deterministic sample met warm-yield thresholds",
             format_observation=format_observation,
+            schema_observation=schema_observation,
         )
 
     def _early_accept(self, result: ScoutResult) -> bool:
