@@ -29,6 +29,7 @@ from creeper.source_discovery.manager import SearchDirective, SourceReservoirMan
 from creeper.source_discovery.residual_search import QueryPlan
 from creeper.source_discovery.search_identity import SearchIdentityLedger
 from creeper.sources.format_binding import SourceFormatObservation
+from creeper.sources.schema_binding import SourceRecordSchema
 from creeper.source_discovery.motifs import infer_year_sibling_candidates
 from creeper.source_discovery.models import (
     ScoutMeasurement,
@@ -83,6 +84,7 @@ class ScoutResult:
     discovered_candidates: tuple[SourceCandidate, ...] = ()
     edge_relation: str = "enumerates"
     format_observation: SourceFormatObservation | None = None
+    schema_observation: SourceRecordSchema | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "disposition", ScoutDisposition(self.disposition))
@@ -97,6 +99,13 @@ class ScoutResult:
         ):
             raise TypeError(
                 "format_observation must be SourceFormatObservation when provided"
+            )
+        if (
+            self.schema_observation is not None
+            and not isinstance(self.schema_observation, SourceRecordSchema)
+        ):
+            raise TypeError(
+                "schema_observation must be SourceRecordSchema when provided"
             )
         if any(
             candidate.state is not SourceState.DISCOVERED
@@ -648,6 +657,29 @@ class SourceDiscoveryCoordinator:
                 except ValueError as exc:
                     reason = (
                         "source format observation failed closed: "
+                        + str(exc).strip()[:240]
+                    )
+                    self.registry.suppress_candidate(
+                        current,
+                        reason=reason,
+                        ttl_seconds=None,
+                    )
+                    self.registry.transition(
+                        candidate.source_key,
+                        SourceState.HOLD,
+                    )
+                    counts["scout_failures"] += 1
+                    counts["scouted_hold"] += 1
+                    continue
+            if result.schema_observation is not None:
+                try:
+                    self.registry.record_schema_observation(
+                        candidate.source_key,
+                        result.schema_observation,
+                    )
+                except ValueError as exc:
+                    reason = (
+                        "source schema observation failed closed: "
                         + str(exc).strip()[:240]
                     )
                     self.registry.suppress_candidate(

@@ -16,6 +16,7 @@ from creeper.source_discovery import (
     canonicalize_source_entrypoint,
 )
 from creeper.sources.format_binding import SourceFormatObservation
+from creeper.sources.schema_binding import SourceRecordSchema
 from creeper.storage.control_store import ControlStore
 
 
@@ -236,6 +237,66 @@ class SourceDiscoveryRegistryTests(unittest.TestCase):
             )
         self.assertEqual(
             self.registry.get_format_observation(candidate.source_key),
+            first,
+        )
+
+    def test_record_schema_round_trips_independently_of_scout_authority(self) -> None:
+        candidate = self.candidate("schema-source")
+        self.registry.register_proposal(candidate)
+        schema = SourceRecordSchema(
+            parser_kind="jsonl",
+            hostname_field="url",
+            timestamp_field="capture_year",
+            delimiter=None,
+            detection_method="stable_json_fields",
+            confidence=1.0,
+            sample_records=10,
+            matched_records=10,
+        )
+
+        changed = self.registry.record_schema_observation(
+            candidate.source_key,
+            schema,
+        )
+
+        self.assertTrue(changed)
+        self.assertEqual(
+            self.registry.get_schema_observation(candidate.source_key),
+            schema,
+        )
+
+    def test_conflicting_high_confidence_record_schemas_fail_closed(self) -> None:
+        candidate = self.candidate("schema-conflict")
+        self.registry.register_proposal(candidate)
+        first = SourceRecordSchema(
+            parser_kind="delimited",
+            hostname_field="column:0",
+            timestamp_field="column:1",
+            delimiter=",",
+            detection_method="stable_delimited_columns",
+            confidence=1.0,
+            sample_records=10,
+            matched_records=10,
+        )
+        second = SourceRecordSchema(
+            parser_kind="delimited",
+            hostname_field="column:1",
+            timestamp_field="column:0",
+            delimiter=",",
+            detection_method="stable_delimited_columns",
+            confidence=1.0,
+            sample_records=10,
+            matched_records=10,
+        )
+        self.registry.record_schema_observation(candidate.source_key, first)
+
+        with self.assertRaisesRegex(ValueError, "conflicting high-confidence"):
+            self.registry.record_schema_observation(
+                candidate.source_key,
+                second,
+            )
+        self.assertEqual(
+            self.registry.get_schema_observation(candidate.source_key),
             first,
         )
 

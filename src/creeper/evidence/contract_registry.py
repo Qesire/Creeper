@@ -512,13 +512,16 @@ def bind_reviewed_artifact_to_adapter_id(
         return adapter_id
 
     before_evidence, evidence_sep, evidence_tail = adapter_id.partition(":evc1:")
-    before_format, format_sep, format_tail = before_evidence.partition(":fmt1:")
+    before_schema, schema_sep, schema_tail = before_evidence.partition(":sch1:")
+    before_format, format_sep, format_tail = before_schema.partition(":fmt1:")
     bound = (
         f"{before_format}{_REVIEWED_IDENTITY_MARKER}"
         f"{artifact.binding_token}"
     )
     if format_sep:
         bound = f"{bound}:fmt1:{format_tail}"
+    if schema_sep:
+        bound = f"{bound}:sch1:{schema_tail}"
     if evidence_sep:
         bound = f"{bound}:evc1:{evidence_tail}"
     return bound
@@ -527,7 +530,11 @@ def bind_reviewed_artifact_to_adapter_id(
 def reviewed_artifact_from_adapter_id(
     adapter_id: str,
 ) -> ReviewedArtifactBinding | None:
-    head = adapter_id.split(":evc1:", 1)[0].split(":fmt1:", 1)[0]
+    head = (
+        adapter_id.split(":evc1:", 1)[0]
+        .split(":sch1:", 1)[0]
+        .split(":fmt1:", 1)[0]
+    )
     if _REVIEWED_IDENTITY_MARKER not in head:
         return None
     _prefix, token = head.rsplit(_REVIEWED_IDENTITY_MARKER, 1)

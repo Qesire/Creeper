@@ -37,6 +37,8 @@ from creeper.sources.archive.cdx import parse_cdx_line
 from creeper.sources.archive.warc import WarcFormatError, iter_warc_target_records
 from creeper.sources.format_binding import SourceFormatObservation
 from creeper.sources.format_detection import detect_source_format
+from creeper.sources.schema_binding import SourceRecordSchema
+from creeper.sources.schema_detection import detect_record_schema
 from creeper.sources.locator import format_path_from_locator
 from creeper.sources.ftp_sitelist import (
     is_ftp_sitelist_locator,
@@ -448,6 +450,7 @@ def _extract_hosts(
     policy: MeasuredYieldScoutPolicy,
     truncated: bool = False,
     format_observation: SourceFormatObservation | None = None,
+    schema_observation: SourceRecordSchema | None = None,
 ) -> ParsedHostSample | None:
     if is_ftp_sitelist_locator(url):
         # ZIP central-directory parsing is the completeness check. This is more
@@ -662,6 +665,26 @@ def _extract_hosts(
                 value = json.loads(line)
             except json.JSONDecodeError:
                 continue
+            if schema_observation is not None:
+                if not isinstance(value, dict):
+                    continue
+                lowered = {
+                    str(key).strip().lower(): item
+                    for key, item in value.items()
+                }
+                hostname = _hostname_from_scalar(
+                    lowered.get(schema_observation.hostname_field.lower())
+                )
+                year = _year_from_scalar(
+                    lowered.get(schema_observation.timestamp_field.lower()),
+                    policy=policy,
+                )
+                if hostname is not None and year is not None:
+                    hosts.add(hostname)
+                    host_year_pairs.add((hostname, year))
+                    observations.append(f"{hostname}\t{year}")
+                continue
+
             hostname, year = _mapping_host_year(value, policy=policy)
             if hostname is not None:
                 hosts.add(hostname)
@@ -691,12 +714,21 @@ def _extract_hosts(
         )
     ):
         text = payload.decode("utf-8", errors="replace")
-        dialect = (
-            "excel-tab"
-            if suffix == ".tsv" or "tab-separated-values" in lower_type
-            else "excel"
-        )
-        rows = csv.reader(io.StringIO(text), dialect=dialect)
+        if (
+            schema_observation is not None
+            and schema_observation.delimiter is not None
+        ):
+            rows = csv.reader(
+                io.StringIO(text),
+                delimiter=schema_observation.delimiter,
+            )
+        else:
+            dialect = (
+                "excel-tab"
+                if suffix == ".tsv" or "tab-separated-values" in lower_type
+                else "excel"
+            )
+            rows = csv.reader(io.StringIO(text), dialect=dialect)
         try:
             first = next(rows)
         except StopIteration:
@@ -706,6 +738,40 @@ def _extract_hosts(
                 host_year_pairs=host_year_pairs,
                 measurement_mode=MeasurementMode.HOST_ONLY,
                 observation_keys=(),
+            )
+
+        if schema_observation is not None:
+            host_index = int(
+                schema_observation.hostname_field.removeprefix("column:")
+            )
+            time_index = int(
+                schema_observation.timestamp_field.removeprefix("column:")
+            )
+
+            def consume_schema_row(row: list[str]) -> None:
+                if host_index >= len(row) or time_index >= len(row):
+                    return
+                hostname = _hostname_from_scalar(row[host_index])
+                year = _year_from_scalar(row[time_index], policy=policy)
+                if hostname is None or year is None:
+                    return
+                hosts.add(hostname)
+                host_year_pairs.add((hostname, year))
+                observations.append(f"{hostname}\t{year}")
+
+            sampled += 1
+            consume_schema_row(first)
+            for row in rows:
+                if sampled >= policy.max_records:
+                    break
+                sampled += 1
+                consume_schema_row(row)
+            return ParsedHostSample(
+                sampled_records=sampled,
+                hosts=hosts,
+                host_year_pairs=host_year_pairs,
+                measurement_mode=MeasurementMode.HOST_YEAR,
+                observation_keys=tuple(observations),
             )
 
         known_fields = {
@@ -1156,6 +1222,14 @@ class MeasuredYieldScoutExecutor:
             payload=download.payload,
             content_type=download.content_type,
         )
+        schema_observation = (
+            None
+            if format_observation is None
+            else detect_record_schema(
+                payload=download.payload,
+                format_observation=format_observation,
+            )
+        )
         try:
             parsed = _extract_hosts(
                 download.payload,
@@ -1164,6 +1238,7 @@ class MeasuredYieldScoutExecutor:
                 policy=self.policy,
                 truncated=download.truncated,
                 format_observation=format_observation,
+                schema_observation=schema_observation,
             )
         except (WarcFormatError, ValueError, csv.Error) as exc:
             detail = str(exc).strip().replace("\n", " ")[:240]
@@ -1191,6 +1266,7 @@ class MeasuredYieldScoutExecutor:
                     "measured sample has too few unique hostnames"
                 ),
                 format_observation=format_observation,
+                schema_observation=schema_observation,
             )
         if parsed is None:
             return ScoutResult(
@@ -1200,6 +1276,7 @@ class MeasuredYieldScoutExecutor:
                     "format-specific mature parser"
                 ),
                 format_observation=format_observation,
+                schema_observation=schema_observation,
             )
         parsed = _apply_source_year_hint(
             parsed,
@@ -1221,6 +1298,7 @@ class MeasuredYieldScoutExecutor:
                 measurement=measurement,
                 reason="measured sample has too few unique hostnames",
                 format_observation=format_observation,
+                schema_observation=schema_observation,
             )
         novel_fraction = novel_count / observed_count
         if (
@@ -1235,12 +1313,14 @@ class MeasuredYieldScoutExecutor:
                     "measured baseline-external/EED yield below warm threshold"
                 ),
                 format_observation=format_observation,
+                schema_observation=schema_observation,
             )
         return ScoutResult(
             ScoutDisposition.WARM,
             measurement=measurement,
             reason="bounded deterministic sample met warm-yield thresholds",
             format_observation=format_observation,
+            schema_observation=schema_observation,
         )
 
     def _early_accept(self, result: ScoutResult) -> bool:
@@ -1304,6 +1384,7 @@ class MeasuredYieldScoutExecutor:
             discovered_candidates=result.discovered_candidates,
             edge_relation=result.edge_relation,
             format_observation=result.format_observation,
+            schema_observation=result.schema_observation,
         )
 
     async def __call__(self, candidate: SourceCandidate) -> ScoutResult:
@@ -1377,6 +1458,7 @@ class MeasuredYieldScoutExecutor:
                         f"fidelity stage {index + 1}/{len(stage_targets)}"
                     ),
                     format_observation=result.format_observation,
+                    schema_observation=result.schema_observation,
                 )
             if self._early_reject(result):
                 return ScoutResult(
@@ -1387,6 +1469,7 @@ class MeasuredYieldScoutExecutor:
                         f"fidelity stage {index + 1}/{len(stage_targets)}"
                     ),
                     format_observation=result.format_observation,
+                    schema_observation=result.schema_observation,
                 )
 
         assert last_result is not None
