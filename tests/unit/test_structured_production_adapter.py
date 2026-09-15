@@ -9,6 +9,10 @@ from creeper.evidence.contracts import (
     bind_contract_to_adapter_id,
 )
 from creeper.scheduler.leases import WorkLease
+from creeper.sources.format_binding import (
+    SourceFormatObservation,
+    bind_format_to_adapter_id,
+)
 from creeper.sources.production import StructuredProductionAdapter
 from creeper.sources.reservoirs import Reservoir, ReservoirState
 
@@ -56,6 +60,35 @@ class StructuredProductionAdapterTests(unittest.TestCase):
     def test_cursor_parser_rejects_non_string_cursor(self):
         with self.assertRaisesRegex(ValueError, "expected byte"):
             StructuredProductionAdapter._cursor_value(1)
+
+    def test_opaque_locator_uses_frozen_jsonl_gzip_format_binding(self):
+        observation = SourceFormatObservation(
+            parser_kind="jsonl",
+            compression="gzip",
+            detection_method="content_signature",
+            confidence=0.97,
+            content_type="application/octet-stream",
+        )
+        reservoir = Reservoir(
+            reservoir_id="reservoir:opaque",
+            domain_id="domain:opaque",
+            adapter_id=bind_format_to_adapter_id(
+                "structured:opaque",
+                observation,
+            ),
+            root_locator="https://repo.example/api/download?id=opaque",
+            enumeration_kind="structured_records",
+            capacity_lower=0,
+            evidence_mode="discovery_only",
+            state=ReservoirState.READY,
+        )
+
+        adapter = StructuredProductionAdapter(reservoir)
+
+        self.assertEqual(adapter.kind, "jsonl")
+        self.assertTrue(adapter.compressed)
+        self.assertEqual(adapter.evidence_contract.parser_kind, "jsonl")
+        self.assertFalse(adapter.evidence_contract.grants_direct_web_year)
 
     def test_mailbox_adapter_persists_only_urls_and_year_hints(self):
         reservoir = Reservoir(
