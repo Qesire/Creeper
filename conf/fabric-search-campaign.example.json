@@ -1,0 +1,44 @@
+{
+  "name": "historical-homepage-exploration-v1",
+  "version": "search-campaign-v1",
+  "templates": [
+    "{operator} {anchor} {source} {era} {topology} {language}",
+    "{anchor} {topology} {source} {era} {operator} {language}"
+  ],
+  "anchors": [
+    "personal homepage",
+    "university homepage",
+    "company homepage",
+    "web directory"
+  ],
+  "source_terms": [
+    "links",
+    "members",
+    "directory",
+    "resources"
+  ],
+  "era_terms": [
+    "1996",
+    "1997",
+    "1998",
+    "1999",
+    "2000",
+    "2001"
+  ],
+  "topology_terms": [
+    "webring",
+    "guestbook",
+    "friends",
+    "member list"
+  ],
+  "language_terms": [
+    "",
+    "english"
+  ],
+  "operators": [
+    "",
+    "intitle:links",
+    "inurl:members",
+    "inurl:users"
+  ]
+}
