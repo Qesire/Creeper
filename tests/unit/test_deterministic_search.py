@@ -7,6 +7,7 @@ import httpx
 
 from creeper.source_discovery.deterministic_search import (
     DataCiteSearchProvider,
+    DataverseSearchProvider,
     DeterministicSearchExecutor,
     DeterministicSearchPolicy,
     ZenodoSearchProvider,
@@ -156,6 +157,152 @@ class DeterministicSearchTests(unittest.TestCase):
         self.assertIn('"university"', seen_query)
         self.assertIn('"trace"', seen_query)
         self.assertIn('-"famous proxy trace"', seen_query)
+
+    def test_dataverse_provider_returns_file_artifacts_from_multiple_installations(self) -> None:
+        seen_hosts: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            host = request.url.host
+            seen_hosts.append(host)
+            self.assertEqual(request.url.path, "/api/search")
+            self.assertEqual(request.url.params["type"], "file")
+            self.assertEqual(
+                request.url.params["fq"],
+                "publicationStatus:Published",
+            )
+            self.assertEqual(request.url.params["per_page"], "1")
+            query = request.url.params["q"]
+            self.assertIn('"1998"', query)
+            self.assertIn('"proxy"', query)
+            self.assertIn('"university"', query)
+            self.assertIn('"trace"', query)
+            suffix = "H" if host == "harvard.example" else "B"
+            return httpx.Response(
+                200,
+                json={
+                    "status": "OK",
+                    "data": {
+                        "items": [
+                            {
+                                "name": f"1998 Proxy Trace {suffix}.txt",
+                                "type": "file",
+                                "url": (
+                                    f"https://{host}/api/access/datafile/"
+                                    f"{1 if suffix == 'H' else 2}"
+                                ),
+                                "file_id": 1 if suffix == "H" else 2,
+                                "description": "HTTP proxy access log trace",
+                                "published_at": "2004-05-06T00:00:00Z",
+                                "file_persistent_id": (
+                                    f"doi:10.1234/PROXY98{suffix}"
+                                ),
+                                "dataset_name": (
+                                    f"Historical Web Trace {suffix}"
+                                ),
+                                "dataset_citation": (
+                                    f"Example, 2004, Historical Web Trace {suffix}"
+                                ),
+                                "name_of_dataverse": (
+                                    f"Example Dataverse {suffix}"
+                                ),
+                                "size_in_bytes": 1234,
+                            }
+                        ],
+                    },
+                },
+            )
+
+        async def run():
+            async with httpx.AsyncClient(
+                transport=httpx.MockTransport(handler)
+            ) as client:
+                provider = DataverseSearchProvider(
+                    client,
+                    endpoints=(
+                        "https://harvard.example/api/search",
+                        "https://borealis.example/api/search",
+                    ),
+                )
+                return await provider.search(self.plan, limit=2)
+
+        results = asyncio.run(run())
+
+        self.assertEqual(
+            set(seen_hosts),
+            {"harvard.example", "borealis.example"},
+        )
+        self.assertEqual(len(results), 2)
+        self.assertEqual(
+            [item.provider for item in results],
+            [
+                "dataverse:harvard.example",
+                "dataverse:borealis.example",
+            ],
+        )
+        self.assertTrue(
+            all(item.resource_type == "File" for item in results)
+        )
+        self.assertTrue(
+            all(item.content_length == 1234 for item in results)
+        )
+        classified = classify_result(
+            self.plan,
+            results[0],
+            policy=self.policy,
+        )
+        self.assertIsNotNone(classified)
+        assert classified is not None
+        self.assertEqual(
+            classified.dataset_key,
+            "dataset:doi:10.1234/proxy98h",
+        )
+        candidate = candidate_from_result(self.plan, classified)
+        self.assertEqual(candidate.level, SourceLevel.SOURCE)
+
+    def test_dataverse_provider_survives_one_failed_installation(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.host == "down.example":
+                return httpx.Response(503)
+            return httpx.Response(
+                200,
+                json={
+                    "status": "OK",
+                    "data": {
+                        "items": [
+                            {
+                                "name": "1998 University Proxy Trace.txt",
+                                "type": "file",
+                                "url": (
+                                    "https://up.example/api/access/datafile/7"
+                                ),
+                                "file_id": 7,
+                                "description": "proxy access log trace",
+                                "size_in_bytes": 10,
+                            }
+                        ]
+                    },
+                },
+            )
+
+        async def run():
+            async with httpx.AsyncClient(
+                transport=httpx.MockTransport(handler)
+            ) as client:
+                provider = DataverseSearchProvider(
+                    client,
+                    endpoints=(
+                        "https://down.example/api/search",
+                        "https://up.example/api/search",
+                    ),
+                )
+                return await provider.search(self.plan, limit=4)
+
+        results = asyncio.run(run())
+        self.assertEqual(len(results), 1)
+        self.assertEqual(
+            results[0].url,
+            "https://up.example/api/access/datafile/7",
+        )
 
     def test_zenodo_provider_prefers_direct_file_and_bounds_page_size(self) -> None:
         observed_size = None
