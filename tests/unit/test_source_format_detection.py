@@ -96,12 +96,13 @@ class SourceFormatDetectionTests(unittest.TestCase):
         observed = detect_source_format(
             locator="https://repo.example/object/opaque",
             payload=payload,
-            content_type="application/octet-stream",
+            content_type="text/plain",
         )
 
         self.assertIsNotNone(observed)
         assert observed is not None
         self.assertEqual(observed.parser_kind, "cdxj")
+        self.assertEqual(observed.detection_method, "content_signature")
         self.assertEqual(observed.compression, "none")
 
     def test_random_prose_does_not_compile_into_a_source_parser(self) -> None:
