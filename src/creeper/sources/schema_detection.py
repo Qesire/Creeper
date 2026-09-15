@@ -37,6 +37,16 @@ _TIME_KEYS = (
     "warc_date",
     "crawl_date",
 )
+_AUTO_DIRECT_TIME_KEYS = frozenset(
+    {
+        "timestamp",
+        "capture_timestamp",
+        "capture_time",
+        "capture_year",
+        "warc_date",
+        "crawl_date",
+    }
+)
 _YEAR_RE = re.compile(
     r"^(?:19(?:9[6-9])|200[01])(?:$|[-/T ])"
 )
@@ -153,6 +163,7 @@ def _jsonl_schema(
         confidence=confidence,
         sample_records=len(records),
         matched_records=matched,
+        direct_year_eligible=time_field in _AUTO_DIRECT_TIME_KEYS,
     )
 
 
@@ -197,9 +208,12 @@ def _delimited_schema(
     if not rows:
         return None
 
-    # Ignore one obvious header row: no host/year pair in row 0 while data rows
-    # consistently contain a pair.
+    # Preserve one obvious header row for semantic authority. Stable columns
+    # alone prove a parser/schema mapping, but only an explicit web-observation
+    # time label can auto-upgrade generic tabular records to DIRECT_YEAR.
+    header: list[str] | None = None
     if len(rows) > min_records and not _row_candidate_pairs(rows[0]):
+        header = [cell.strip().lower() for cell in rows[0]]
         rows = rows[1:]
     if len(rows) < min_records:
         return None
@@ -216,6 +230,20 @@ def _delimited_schema(
     if matched < min_records or confidence < min_fraction:
         return None
 
+    header_host = (
+        header[host_index]
+        if header is not None and host_index < len(header)
+        else None
+    )
+    header_time = (
+        header[time_index]
+        if header is not None and time_index < len(header)
+        else None
+    )
+    direct_year_eligible = (
+        header_host in _HOST_KEYS
+        and header_time in _AUTO_DIRECT_TIME_KEYS
+    )
     return SourceRecordSchema(
         parser_kind="delimited",
         hostname_field=f"column:{host_index}",
@@ -225,6 +253,7 @@ def _delimited_schema(
         confidence=confidence,
         sample_records=len(rows),
         matched_records=matched,
+        direct_year_eligible=direct_year_eligible,
     )
 
 
