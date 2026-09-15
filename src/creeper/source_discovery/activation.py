@@ -308,18 +308,24 @@ class SourceActivationCompiler:
                         parser_kind=actual_parser,
                     )
                 else:
-                    # Evidence authority follows record semantics, not the URL
-                    # suffix. Strictly recognized CDX/CDXJ records carry an
-                    # exact archived URL plus capture timestamp, so an opaque
-                    # transport endpoint is still direct annual evidence.
-                    # Generic JSONL/tabular/text formats remain discovery-only
-                    # unless their record semantics supply an explicit direct
-                    # contract.
-                    contract = resolve_source_evidence_contract(
-                        stored.canonical_entrypoint,
-                        explicit_contracts=self.evidence_contracts,
-                        parser_kind=actual_parser,
-                    )
+                    # Format recognition decides how to parse; it must not
+                    # silently grant evidence authority. Code-level direct
+                    # contracts remain available when the locator itself
+                    # identifies that reviewed parser family. Opaque endpoints
+                    # discovered only from content signatures stay
+                    # discovery-only until an explicit/reviewed contract binds
+                    # their temporal semantics and artifact identity.
+                    if (
+                        trusted_format is not None
+                        and locator_parser != actual_parser
+                    ):
+                        contract = discovery_only_contract(actual_parser)
+                    else:
+                        contract = resolve_source_evidence_contract(
+                            stored.canonical_entrypoint,
+                            explicit_contracts=self.evidence_contracts,
+                            parser_kind=actual_parser,
+                        )
 
             if reviewed_binding is not None:
                 base_adapter_id = bind_reviewed_artifact_to_adapter_id(
