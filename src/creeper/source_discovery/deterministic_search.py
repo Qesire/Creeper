@@ -162,7 +162,8 @@ def relevance_score(cell: SearchCell, result: RawSearchResult) -> float:
     terms = _MECHANISM_TERMS[cell.mechanism]
     mechanism_hit = any(term in text for term in terms)
     artifact_hit = (
-        result.resource_type.lower() in {"dataset", "collection", "software"}
+        result.resource_type.lower()
+        in {"dataset", "collection", "software", "file", "datafile"}
         or any(term in text for term in _ARTIFACT_TERMS)
         or format_path_from_locator(result.url).endswith(_SOURCE_SUFFIXES)
     )
