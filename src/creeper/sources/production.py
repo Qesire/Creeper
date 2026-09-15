@@ -31,6 +31,7 @@ from creeper.sources.archive.warc_source import WarcSourceLeaseExecutor
 from creeper.sources.archive.cdxj import parse_cdxj_line
 from creeper.sources.archive.cdx import parse_cdx_line
 from creeper.sources.ftp_sitelist import parse_ftp_sitelist_zip
+from creeper.sources.locator import format_path_from_locator
 from creeper.sources.sbi_bbs import parse_sbi_bbs_zip
 from creeper.sources.non_snapshot import (
     extract_http_urls,
@@ -190,7 +191,7 @@ class StructuredProductionAdapter:
                 "reservoir evidence_mode disagrees with frozen evidence contract"
             )
 
-        path = urlsplit(self.source).path.lower()
+        path = format_path_from_locator(self.source)
         self.compressed = path.endswith(".gz")
         self._stream = None
         self._pending_line: tuple[int, bytes] | None = None
