@@ -2723,6 +2723,10 @@ class SourceDiscoveryRegistry:
                 and current.hostname_field == observation.hostname_field
                 and current.timestamp_field == observation.timestamp_field
                 and current.delimiter == observation.delimiter
+                and (
+                    current.direct_year_eligible
+                    == observation.direct_year_eligible
+                )
             )
             if (
                 not same_schema
