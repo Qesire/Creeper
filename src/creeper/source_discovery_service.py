@@ -42,6 +42,7 @@ from creeper.source_discovery.deterministic_search import (
     DataCiteSearchProvider,
     DeterministicSearchExecutor,
     DeterministicSearchPolicy,
+    HarvardDataverseSearchProvider,
     ZenodoSearchProvider,
 )
 from creeper.source_discovery.curated_seeds import ensure_curated_source_seeds
@@ -282,7 +283,10 @@ def load_source_discovery_config(config_path: Path) -> SourceDiscoveryServiceCon
         residual_raw.get("enabled", True),
         name="residual_search.enabled",
     )
-    provider_values = residual_raw.get("providers", ["datacite", "zenodo"])
+    provider_values = residual_raw.get(
+        "providers",
+        ["datacite", "zenodo", "harvard_dataverse"],
+    )
     if (
         not isinstance(provider_values, list)
         or not provider_values
@@ -290,7 +294,9 @@ def load_source_discovery_config(config_path: Path) -> SourceDiscoveryServiceCon
     ):
         raise ValueError("residual_search.providers must be a non-empty string array")
     providers = tuple(item.strip().lower() for item in provider_values)
-    unsupported = sorted(set(providers) - {"datacite", "zenodo"})
+    unsupported = sorted(
+        set(providers) - {"datacite", "zenodo", "harvard_dataverse"}
+    )
     if unsupported:
         raise ValueError(
             "unsupported residual_search.providers: " + ", ".join(unsupported)
@@ -735,6 +741,15 @@ async def _open_runtime(config: SourceDiscoveryServiceConfig):
                         elif provider_name == "zenodo":
                             deterministic_providers.append(
                                 ZenodoSearchProvider(
+                                    client,
+                                    timeout_seconds=(
+                                        config.residual_search.policy.timeout_seconds
+                                    ),
+                                )
+                            )
+                        elif provider_name == "harvard_dataverse":
+                            deterministic_providers.append(
+                                HarvardDataverseSearchProvider(
                                     client,
                                     timeout_seconds=(
                                         config.residual_search.policy.timeout_seconds
