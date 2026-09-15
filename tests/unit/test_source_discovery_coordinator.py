@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from creeper.source_discovery.deterministic_search import DeterministicSearchBatch
 from creeper.source_discovery.coordinator import (
     CoordinatorBusyError,
     ScoutDisposition,
@@ -22,6 +23,16 @@ from creeper.source_discovery.models import (
     SourceState,
 )
 from creeper.source_discovery.registry import SourceDiscoveryRegistry
+from creeper.source_discovery.residual_search import (
+    ResidualSearchLedger,
+    SearchCell,
+    SearchCellScheduler,
+)
+from creeper.source_discovery.search_identity import (
+    RawSearchResult,
+    SearchIdentityLedger,
+    canonicalize_search_result,
+)
 from creeper.storage.control_store import ControlStore
 
 
@@ -276,6 +287,104 @@ class SourceDiscoveryCoordinatorTests(unittest.IsolatedAsyncioTestCase):
         ]
         self.assertGreaterEqual(len(searched), 1)
         self.assertEqual(searched[0].discovered_by, "agent:test")
+
+    async def test_deterministic_search_commits_identity_and_coverage_serially(self) -> None:
+        cell = SearchCell(
+            mechanism="proxy_access",
+            institution="university",
+            period="1998",
+            artifact="trace",
+        )
+        coverage = ResidualSearchLedger(self.registry.connection)
+        coverage.ensure_cell(cell)
+        scheduler = SearchCellScheduler(coverage)
+        manager = SourceReservoirManager(
+            self.registry,
+            targets=SourcePoolTargets(
+                active_min=0,
+                active_target=0,
+                warm_min=0,
+                warm_target=0,
+                cold_min=1,
+                cold_target=1,
+                triage_batch=4,
+                scout_parallelism=1,
+                max_search_directives=1,
+            ),
+            residual_search_scheduler=scheduler,
+        )
+        identities = SearchIdentityLedger(self.registry.connection)
+
+        async def triage(_candidate: SourceCandidate) -> TriageResult:
+            raise AssertionError("new search results are committed after this cycle")
+
+        async def scout(_candidate: SourceCandidate) -> ScoutResult:
+            raise AssertionError("no scout expected")
+
+        async def agent_search(_directive) -> SearchBatch:
+            raise AssertionError("ordinary LLM refill must be suppressed")
+
+        async def deterministic(plan) -> DeterministicSearchBatch:
+            first = canonicalize_search_result(
+                RawSearchResult(
+                    provider="fixture",
+                    provider_result_id="r1",
+                    url="https://repo.example/proxy98.zip",
+                    title="1998 University Proxy Trace Dataset",
+                    publisher="Example University",
+                    identifiers=("10.1234/proxy98",),
+                ),
+                relevance_score=1.0,
+                qualified=True,
+            )
+            mirror = canonicalize_search_result(
+                RawSearchResult(
+                    provider="fixture",
+                    provider_result_id="r2",
+                    url="https://mirror.example/proxy98.zip",
+                    title="1998 University Proxy Trace Dataset",
+                    publisher="Example University",
+                    identifiers=("10.1234/proxy98",),
+                ),
+                relevance_score=1.0,
+                qualified=True,
+            )
+            return DeterministicSearchBatch(
+                backend="fixture",
+                query=plan.query,
+                actor="deterministic:test",
+                results=(first, mirror),
+                search_cost_seconds=0.1,
+            )
+
+        coordinator = SourceDiscoveryCoordinator(
+            self.registry,
+            manager,
+            lock_path=self.lock_path,
+            triage_executor=triage,
+            scout_executor=scout,
+            search_executor=agent_search,
+            deterministic_search_executor=deterministic,
+            search_identity_ledger=identities,
+        )
+
+        report = await coordinator.run_once()
+
+        self.assertEqual(report.deterministic_search_plans_planned, 1)
+        self.assertEqual(report.deterministic_search_episodes, 1)
+        self.assertEqual(report.search_episodes, 1)
+        self.assertEqual(report.search_candidates_registered, 1)
+        self.assertEqual(report.search_candidates_dropped, 1)
+        stats = coverage.stats(cell)
+        self.assertEqual(stats.attempts, 1)
+        self.assertEqual(stats.result_count, 2)
+        self.assertEqual(stats.duplicate_results, 1)
+        self.assertEqual(stats.unique_roots, 1)
+        self.assertEqual(stats.new_families, 1)
+        self.assertEqual(stats.qualified_roots, 1)
+        discovered = self.registry.list_candidates(state=SourceState.DISCOVERED)
+        self.assertEqual(len(discovered), 1)
+        self.assertEqual(discovered[0].discovered_by, "deterministic:fixture")
 
     async def test_background_cdxj_is_deferred_while_foreground_search_runs(self) -> None:
         bulk = SourceCandidate(

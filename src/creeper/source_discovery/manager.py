@@ -14,6 +14,7 @@ from creeper.source_discovery.models import (
 )
 from creeper.source_discovery.overlap import MinHashSketch
 from creeper.source_discovery.registry import SourceDiscoveryRegistry
+from creeper.source_discovery.residual_search import QueryPlan, SearchCellScheduler
 from creeper.source_discovery.value import InterpretableSourceValueModel
 
 
@@ -122,6 +123,7 @@ class ReservoirPlan:
     scout_source_keys: tuple[str, ...]
     activate_source_keys: tuple[str, ...]
     search_directives: tuple[SearchDirective, ...]
+    deterministic_search_plans: tuple[QueryPlan, ...] = ()
     background_triage_source_keys: tuple[str, ...] = ()
     background_scout_source_keys: tuple[str, ...] = ()
     background_activate_source_keys: tuple[str, ...] = ()
@@ -131,7 +133,7 @@ class ReservoirPlan:
 
     @property
     def needs_search(self) -> bool:
-        return bool(self.search_directives)
+        return bool(self.search_directives or self.deterministic_search_plans)
 
 
 class SourceReservoirManager:
@@ -174,6 +176,7 @@ class SourceReservoirManager:
         search_cooldown_seconds: float = 0.0,
         search_ucb_exploration: float = 0.35,
         stagnation_window: int = 6,
+        residual_search_scheduler: SearchCellScheduler | None = None,
     ) -> None:
         for name, value in (
             ("search_cooldown_seconds", search_cooldown_seconds),
@@ -197,6 +200,7 @@ class SourceReservoirManager:
         self.search_cooldown_seconds = float(search_cooldown_seconds)
         self.search_ucb_exploration = float(search_ucb_exploration)
         self.stagnation_window = int(stagnation_window)
+        self.residual_search_scheduler = residual_search_scheduler
         self.value_model = InterpretableSourceValueModel(registry)
 
     def _usable(self, candidates: list[SourceCandidate]) -> list[SourceCandidate]:
@@ -538,16 +542,38 @@ class SourceReservoirManager:
         elapsed = float(self.registry.clock()) - float(row["finished_at"])
         return elapsed >= self.search_cooldown_seconds
 
+    def _deterministic_search_plans(
+        self,
+        *,
+        effective_cold_count: int,
+    ) -> tuple[QueryPlan, ...]:
+        if (
+            self.residual_search_scheduler is None
+            or effective_cold_count >= self.targets.cold_min
+        ):
+            return ()
+        gap = max(1, self.targets.cold_target - effective_cold_count)
+        limit = min(gap, self.targets.max_search_directives)
+        return self.residual_search_scheduler.next_plans(limit=limit)
+
     def _search_directives(
         self,
         *,
         effective_cold_count: int,
         projected_warm: int,
         candidates: list[SourceCandidate],
+        deterministic_refill_managed: bool = False,
+        deterministic_plans_available: bool = False,
     ) -> tuple[SearchDirective, ...]:
-        ordinary_refill = effective_cold_count < self.targets.cold_min
+        needs_refill = effective_cold_count < self.targets.cold_min
+        ordinary_refill = needs_refill and not deterministic_refill_managed
+        managed_stagnation = (
+            needs_refill
+            and deterministic_refill_managed
+            and not deterministic_plans_available
+        )
         structural_holds = self._structural_holds()
-        if not ordinary_refill and not structural_holds:
+        if not ordinary_refill and not structural_holds and not managed_stagnation:
             return ()
 
         # Normal refill demand is measured against the diversity-bounded pool.
@@ -594,6 +620,18 @@ class SourceReservoirManager:
                     "in HOLD; ask Codex for bounded resource/template hypotheses"
                 ),
                 SourceIntelligenceTask.INTERPRET_STRUCTURE,
+            )
+
+        if managed_stagnation:
+            add_spec(
+                SearchDirectiveKind.RECOVER_STAGNATION,
+                "RECOVER_STAGNATION",
+                None,
+                (
+                    "deterministic residual-search space has no OPEN/ACTIVE cells; "
+                    "ask for a new data-generating mechanism, not another URL query"
+                ),
+                SourceIntelligenceTask.RECOVER_STAGNATION,
             )
 
         if ordinary_refill:
@@ -807,10 +845,15 @@ class SourceReservoirManager:
         )
         scout = scout_candidates[:scout_slots]
 
+        deterministic_search_plans = self._deterministic_search_plans(
+            effective_cold_count=effective_cold_count,
+        )
         directives = self._search_directives(
             effective_cold_count=effective_cold_count,
             projected_warm=projected_warm,
             candidates=foreground,
+            deterministic_refill_managed=self.residual_search_scheduler is not None,
+            deterministic_plans_available=bool(deterministic_search_plans),
         )
 
         # Background work is intentionally serialized. The coordinator will
@@ -841,6 +884,7 @@ class SourceReservoirManager:
             scout_source_keys=tuple(item.source_key for item in scout),
             activate_source_keys=tuple(item.source_key for item in activate),
             search_directives=directives,
+            deterministic_search_plans=deterministic_search_plans,
             background_triage_source_keys=tuple(
                 item.source_key for item in background_triage
             ),

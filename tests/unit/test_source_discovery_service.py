@@ -12,6 +12,12 @@ from creeper.source_discovery.index_space import RegionState, compile_candidate_
 from creeper.source_discovery.manager import SourcePoolTargets
 from creeper.source_discovery.models import SourceCandidate, SourceLevel
 from creeper.source_discovery.registry import SourceDiscoveryRegistry
+from creeper.source_discovery.residual_search import ResidualSearchLedger, SearchCell
+from creeper.source_discovery.search_identity import (
+    RawSearchResult,
+    SearchIdentityLedger,
+    canonicalize_search_result,
+)
 from creeper.source_discovery.scrapy_scout import ScrapyStructuralScoutPolicy
 from creeper.source_discovery.triage import HttpTriagePolicy
 from creeper.source_discovery_service import (
@@ -136,6 +142,40 @@ max_returned_candidates = 17
             0.75,
         )
         self.assertEqual(config.agent.admission.min_enumerability_prior, 0.6)
+
+    def test_residual_search_config_is_explicit_and_fail_closed(self) -> None:
+        path = self.write_config()
+        with path.open("a", encoding="utf-8") as stream:
+            stream.write(
+                """
+[residual_search]
+enabled = true
+providers = ["datacite", "zenodo"]
+results_per_provider = 77
+max_total_results = 155
+min_relevance_score = 0.65
+timeout_seconds = 9.0
+"""
+            )
+
+        config = load_source_discovery_config(path)
+
+        self.assertTrue(config.residual_search.enabled)
+        self.assertEqual(
+            config.residual_search.providers,
+            ("datacite", "zenodo"),
+        )
+        self.assertEqual(config.residual_search.policy.results_per_provider, 77)
+        self.assertEqual(config.residual_search.policy.max_total_results, 155)
+        self.assertEqual(config.residual_search.policy.min_relevance_score, 0.65)
+
+        text = path.read_text(encoding="utf-8").replace(
+            'providers = ["datacite", "zenodo"]',
+            'providers = ["unknown-provider"]',
+        )
+        path.write_text(text, encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "unsupported residual_search.providers"):
+            load_source_discovery_config(path)
 
     def test_follow_query_rejects_string_truthiness(self) -> None:
         with self.assertRaisesRegex(ValueError, "scrapy.follow_query must be a boolean"):
@@ -296,6 +336,67 @@ Path(a.response).write_text(json.dumps(payload), encoding="utf-8")
             )
             self.assertEqual(snapshot.gauges["historical_index_total"], 0.0)
             self.assertEqual(snapshot.gauges["platform_year_total"], 0.0)
+
+
+class ResidualDiscoveryTelemetryTests(unittest.TestCase):
+    def test_residual_search_coverage_and_identity_are_visible(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            control = ControlStore(root / "control.sqlite3")
+            try:
+                registry = SourceDiscoveryRegistry(control)
+                coverage = ResidualSearchLedger(registry.connection)
+                cell = SearchCell(
+                    mechanism="proxy_access",
+                    institution="university",
+                    period="1998",
+                    artifact="trace",
+                )
+                coverage.ensure_cell(cell)
+                coverage.record_episode(
+                    cell,
+                    result_count=2,
+                    duplicate_results=0,
+                    unique_roots=2,
+                    new_families=2,
+                    qualified_roots=1,
+                    search_cost_seconds=0.1,
+                )
+                identities = SearchIdentityLedger(registry.connection)
+                result = canonicalize_search_result(
+                    RawSearchResult(
+                        provider="fixture",
+                        provider_result_id="r1",
+                        url="https://example.edu/proxy98.zip",
+                        title="1998 University Proxy Trace",
+                        publisher="Example University",
+                    ),
+                    relevance_score=1.0,
+                    qualified=True,
+                )
+                identities.register(cell_key=cell.key, result=result)
+
+                _publish_discovery_telemetry(
+                    registry,
+                    {
+                        "deterministic_search_episodes": 1,
+                        "deterministic_search_failures": 0,
+                    },
+                )
+
+                with RuntimeTelemetryStore(root / "telemetry.sqlite3") as telemetry:
+                    snapshot = telemetry.snapshot()
+                self.assertEqual(
+                    snapshot.counters["discovery_deterministic_search_episodes"],
+                    1,
+                )
+                self.assertEqual(snapshot.gauges["residual_search_cell_total"], 1.0)
+                self.assertEqual(snapshot.gauges["residual_search_cell_active"], 1.0)
+                self.assertEqual(snapshot.gauges["residual_search_unique_urls"], 1.0)
+                self.assertEqual(snapshot.gauges["residual_search_unique_datasets"], 1.0)
+                self.assertEqual(snapshot.gauges["residual_search_unique_families"], 1.0)
+            finally:
+                control.close()
 
 
 class DiscoveryTelemetryStateTests(unittest.TestCase):

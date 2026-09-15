@@ -16,6 +16,16 @@ from creeper.source_discovery.coordinator import (
     TriageDisposition,
     TriageResult,
 )
+from creeper.source_discovery.deterministic_search import (
+    DataCiteSearchProvider,
+    DeterministicSearchBatch,
+    DeterministicSearchExecutor,
+    DeterministicSearchPolicy,
+    ZenodoSearchProvider,
+    candidate_from_result,
+    classify_result,
+    relevance_score,
+)
 from creeper.source_discovery.expander import ExpansionResult, expand_scrapy_spool
 from creeper.source_discovery.harvest import (
     RegionHarvestError,
@@ -98,6 +108,24 @@ from creeper.source_discovery.promotion import (
     PromotionPolicy,
 )
 from creeper.source_discovery.registry import SourceDiscoveryRegistry
+from creeper.source_discovery.residual_search import (
+    QueryPlan,
+    ResidualSearchLedger,
+    ResidualSearchPolicy,
+    SearchCell,
+    SearchCellScheduler,
+    SearchCellState,
+    SearchCellStats,
+    default_search_cells,
+)
+from creeper.source_discovery.search_identity import (
+    CanonicalSearchResult,
+    IdentityRegistration,
+    RawSearchResult,
+    SearchIdentityLedger,
+    canonicalize_result_url,
+    canonicalize_search_result,
+)
 from creeper.source_discovery.scout_router import SourceScoutRouter, SourceScoutRouterPolicy
 from creeper.source_discovery.scrapy_scout import (
     ScrapyStructuralScoutExecutor,
@@ -119,13 +147,21 @@ from creeper.source_discovery.triage import (
 )
 
 __all__ = [
+    "CanonicalSearchResult",
     "CommandAgentSearchExecutor",
     "CommandAgentSearchPolicy",
     "CoordinatorBusyError",
     "CoordinatorCycleReport",
+    "DataCiteSearchProvider",
+    "DeterministicSearchBatch",
+    "DeterministicSearchExecutor",
+    "DeterministicSearchPolicy",
+    "ZenodoSearchProvider",
     "ExpansionResult",
     "HttpSourceTriageExecutor",
     "HttpTriagePolicy",
+    "IdentityRegistration",
+    "RawSearchResult",
     "RegionHarvestError",
     "RegionHarvestExecutor",
     "RegionHarvestPolicy",
@@ -152,6 +188,9 @@ __all__ = [
     "RegionTomographyReport",
     "RegionTomographyService",
     "RegionSynopsis",
+    "QueryPlan",
+    "ResidualSearchLedger",
+    "ResidualSearchPolicy",
     "SampledByteRange",
     "SourceAccessMode",
     "TomographyAction",
@@ -180,7 +219,12 @@ __all__ = [
     "SearchBatch",
     "SearchDirective",
     "SearchDirectiveKind",
+    "SearchCell",
+    "SearchCellScheduler",
+    "SearchCellState",
+    "SearchCellStats",
     "SearchEpisode",
+    "SearchIdentityLedger",
     "SourceCandidate",
     "SourceDiscoveryCoordinator",
     "SourceDiscoveryRegistry",
@@ -195,15 +239,21 @@ __all__ = [
     "TriageDisposition",
     "TriageResult",
     "TriageTransientError",
+    "candidate_from_result",
+    "canonicalize_result_url",
+    "canonicalize_search_result",
     "canonicalize_source_entrypoint",
+    "classify_result",
     "child_region",
     "compile_candidate_index_space",
+    "default_search_cells",
     "region_size_bytes",
     "split_byte_region",
     "expand_scrapy_spool",
     "iter_scrapy_link_discoveries",
     "prepare_append_spool",
     "prepare_jobdir_binding",
+    "relevance_score",
     "source_key",
     "source_origin",
 ]

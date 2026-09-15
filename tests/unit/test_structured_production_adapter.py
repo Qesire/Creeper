@@ -255,6 +255,26 @@ class StructuredProductionAdapterTests(unittest.TestCase):
         self.assertEqual(record.direct_year_mask, YEAR_BITS[2000])
         self.assertEqual(record.year_hint_mask, 0)
 
+    def test_wrapped_gzip_locator_preserves_parser_and_compression(self):
+        reservoir = Reservoir(
+            reservoir_id="reservoir:wrapped",
+            domain_id="domain:wrapped",
+            adapter_id="structured:wrapped",
+            root_locator=(
+                "https://repo.example/api/records/7/files/"
+                "hosts.csv.gz/content"
+            ),
+            enumeration_kind="structured_records",
+            capacity_lower=0,
+            evidence_mode="discovery_only",
+            state=ReservoirState.READY,
+        )
+
+        adapter = StructuredProductionAdapter(reservoir)
+
+        self.assertEqual(adapter.kind, "delimited")
+        self.assertTrue(adapter.compressed)
+
     def test_non_range_http_source_reopens_as_stream_and_skips_cursor(self):
         payload = b"ignored.example\nkept.example\n"
         files = []

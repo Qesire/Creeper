@@ -10,6 +10,8 @@ from dataclasses import dataclass
 from enum import StrEnum
 from urllib.parse import SplitResult, urlsplit, urlunsplit
 
+from creeper.sources.locator import format_path_from_locator
+
 
 class SourceLevel(StrEnum):
     """Source graph level; larger-scale enumerators are discovered first."""
@@ -106,7 +108,7 @@ _DIRECT_EVIDENCE_SUFFIXES = (
 def is_direct_evidence_entrypoint(value: str) -> bool:
     """Whether a source resource encodes exact capture timestamp + URL rows."""
     try:
-        path = urlsplit(canonicalize_source_entrypoint(value)).path.lower()
+        path = format_path_from_locator(canonicalize_source_entrypoint(value))
     except ValueError:
         return False
     return path.endswith(_DIRECT_EVIDENCE_SUFFIXES)

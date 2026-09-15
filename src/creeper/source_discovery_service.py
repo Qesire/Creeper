@@ -38,9 +38,20 @@ from creeper.source_discovery.coordinator import (
     CoordinatorBusyError,
     SourceDiscoveryCoordinator,
 )
+from creeper.source_discovery.deterministic_search import (
+    DataCiteSearchProvider,
+    DeterministicSearchExecutor,
+    DeterministicSearchPolicy,
+    ZenodoSearchProvider,
+)
 from creeper.source_discovery.curated_seeds import ensure_curated_source_seeds
 from creeper.source_discovery.intelligence import SourceIntelligenceContextBuilder
 from creeper.source_discovery.manager import SourcePoolTargets, SourceReservoirManager
+from creeper.source_discovery.residual_search import (
+    ResidualSearchLedger,
+    SearchCellScheduler,
+    default_search_cells,
+)
 from creeper.source_discovery.measured_scout import (
     MeasuredYieldScoutExecutor,
     MeasuredYieldScoutPolicy,
@@ -48,6 +59,7 @@ from creeper.source_discovery.measured_scout import (
 from creeper.source_discovery.models import SourceState
 from creeper.source_discovery.models import is_direct_evidence_entrypoint
 from creeper.source_discovery.registry import SourceDiscoveryRegistry
+from creeper.source_discovery.search_identity import SearchIdentityLedger
 from creeper.source_discovery.saturation import (
     SaturationPolicy,
     SourceSaturationController,
@@ -94,6 +106,13 @@ class MeasurementConfig:
 
 
 @dataclass(frozen=True)
+class ResidualSearchConfig:
+    enabled: bool = False
+    providers: tuple[str, ...] = ("datacite", "zenodo")
+    policy: DeterministicSearchPolicy = DeterministicSearchPolicy()
+
+
+@dataclass(frozen=True)
 class SourceDiscoveryServiceConfig:
     runtime_data_root: Path
     scrapy_project_dir: Path
@@ -102,6 +121,7 @@ class SourceDiscoveryServiceConfig:
     triage: HttpTriagePolicy
     scrapy: ScrapyStructuralScoutPolicy
     agent: AgentConfig
+    residual_search: ResidualSearchConfig = ResidualSearchConfig()
     saturation: SaturationPolicy = SaturationPolicy()
     measurement: MeasurementConfig | None = None
 
@@ -254,6 +274,60 @@ def load_source_discovery_config(config_path: Path) -> SourceDiscoveryServiceCon
         stagnation_window=_positive_int(
             coordinator_raw.get("stagnation_window", 6),
             name="coordinator.stagnation_window",
+        ),
+    )
+
+    residual_raw = _table(root, "residual_search")
+    residual_enabled = _strict_bool(
+        residual_raw.get("enabled", False),
+        name="residual_search.enabled",
+    )
+    provider_values = residual_raw.get("providers", ["datacite", "zenodo"])
+    if (
+        not isinstance(provider_values, list)
+        or not provider_values
+        or any(not isinstance(item, str) or not item.strip() for item in provider_values)
+    ):
+        raise ValueError("residual_search.providers must be a non-empty string array")
+    providers = tuple(item.strip().lower() for item in provider_values)
+    unsupported = sorted(set(providers) - {"datacite", "zenodo"})
+    if unsupported:
+        raise ValueError(
+            "unsupported residual_search.providers: " + ", ".join(unsupported)
+        )
+    residual_defaults = DeterministicSearchPolicy()
+    residual_search = ResidualSearchConfig(
+        enabled=residual_enabled,
+        providers=providers,
+        policy=DeterministicSearchPolicy(
+            results_per_provider=_positive_int(
+                residual_raw.get(
+                    "results_per_provider",
+                    residual_defaults.results_per_provider,
+                ),
+                name="residual_search.results_per_provider",
+            ),
+            max_total_results=_positive_int(
+                residual_raw.get(
+                    "max_total_results",
+                    residual_defaults.max_total_results,
+                ),
+                name="residual_search.max_total_results",
+            ),
+            min_relevance_score=_unit_float(
+                residual_raw.get(
+                    "min_relevance_score",
+                    residual_defaults.min_relevance_score,
+                ),
+                name="residual_search.min_relevance_score",
+            ),
+            timeout_seconds=_positive_float(
+                residual_raw.get(
+                    "timeout_seconds",
+                    residual_defaults.timeout_seconds,
+                ),
+                name="residual_search.timeout_seconds",
+            ),
         ),
     )
 
@@ -467,6 +541,7 @@ def load_source_discovery_config(config_path: Path) -> SourceDiscoveryServiceCon
         triage=triage,
         scrapy=scrapy,
         agent=agent,
+        residual_search=residual_search,
         saturation=saturation,
         measurement=measurement,
     )
@@ -566,12 +641,30 @@ async def _open_runtime(config: SourceDiscoveryServiceConfig):
                 registry,
                 policy=config.saturation,
             )
+            residual_ledger = None
+            residual_scheduler = None
+            search_identity = None
+            if config.residual_search.enabled:
+                residual_ledger = ResidualSearchLedger(registry.connection)
+                profile_signature = (
+                    "residual-search-v2"
+                    f"|providers={','.join(config.residual_search.providers)}"
+                    f"|minrel={config.residual_search.policy.min_relevance_score:g}"
+                    f"|rpp={config.residual_search.policy.results_per_provider}"
+                    f"|max={config.residual_search.policy.max_total_results}"
+                )
+                residual_ledger.ensure_search_profile(profile_signature)
+                residual_ledger.ensure_cells(default_search_cells())
+                residual_scheduler = SearchCellScheduler(residual_ledger)
+                search_identity = SearchIdentityLedger(registry.connection)
+
             manager = SourceReservoirManager(
                 registry,
                 targets=config.pool,
                 search_cooldown_seconds=config.coordinator.search_cooldown_seconds,
                 search_ucb_exploration=config.coordinator.search_ucb_exploration,
                 stagnation_window=config.coordinator.stagnation_window,
+                residual_search_scheduler=residual_scheduler,
             )
             max_io = max(config.coordinator.triage_parallelism, config.coordinator.scout_parallelism)
             limits = httpx.Limits(
@@ -625,6 +718,34 @@ async def _open_runtime(config: SourceDiscoveryServiceConfig):
                     admission_policy=config.agent.admission,
                     context_builder=intelligence_context,
                 )
+
+                deterministic_search = None
+                if config.residual_search.enabled:
+                    deterministic_providers = []
+                    for provider_name in config.residual_search.providers:
+                        if provider_name == "datacite":
+                            deterministic_providers.append(
+                                DataCiteSearchProvider(
+                                    client,
+                                    timeout_seconds=(
+                                        config.residual_search.policy.timeout_seconds
+                                    ),
+                                )
+                            )
+                        elif provider_name == "zenodo":
+                            deterministic_providers.append(
+                                ZenodoSearchProvider(
+                                    client,
+                                    timeout_seconds=(
+                                        config.residual_search.policy.timeout_seconds
+                                    ),
+                                )
+                            )
+                    deterministic_search = DeterministicSearchExecutor(
+                        tuple(deterministic_providers),
+                        policy=config.residual_search.policy,
+                    )
+
                 coordinator = SourceDiscoveryCoordinator(
                     registry,
                     manager,
@@ -632,6 +753,8 @@ async def _open_runtime(config: SourceDiscoveryServiceConfig):
                     triage_executor=triage,
                     scout_executor=scout,
                     search_executor=search,
+                    deterministic_search_executor=deterministic_search,
+                    search_identity_ledger=search_identity,
                     scout_authority=scout_authority,
                     saturation_controller=saturation,
                     triage_parallelism=config.coordinator.triage_parallelism,
@@ -674,6 +797,9 @@ _DISCOVERY_COUNTER_FIELDS = {
     "search_backoff_skipped": "discovery_search_backoff_skipped",
     "search_candidates_registered": "discovery_search_candidates_registered",
     "search_candidates_dropped": "discovery_search_candidates_dropped",
+    "deterministic_search_episodes": "discovery_deterministic_search_episodes",
+    "deterministic_search_failures": "discovery_deterministic_search_failures",
+    "residual_reward_updates": "discovery_residual_reward_updates",
     "triaged_to_scout": "discovery_triaged_to_scout",
     "triaged_hold": "discovery_triaged_hold",
     "triaged_rejected": "discovery_triaged_rejected",
@@ -772,6 +898,62 @@ def _publish_discovery_telemetry(
                 ).fetchone()["n"]
             ),
         }
+    )
+
+    residual_states = _durable_state_counts(
+        registry,
+        table="residual_search_cells",
+        column="state",
+        states=("OPEN", "ACTIVE", "SATURATED", "EXHAUSTED"),
+    )
+    if residual_states:
+        source_gauges["residual_search_cell_total"] = sum(
+            residual_states.values()
+        )
+        source_gauges.update(
+            {
+                f"residual_search_cell_{state.lower()}": count
+                for state, count in residual_states.items()
+            }
+        )
+    for table, gauge in (
+        ("residual_search_urls", "residual_search_unique_urls"),
+        ("residual_search_artifacts", "residual_search_unique_artifacts"),
+        ("residual_search_datasets", "residual_search_unique_datasets"),
+        ("residual_search_families", "residual_search_unique_families"),
+    ):
+        source_gauges[gauge] = int(
+            registry.connection.execute(
+                f"SELECT COUNT(*) AS n FROM {table}"
+                if _table_exists(registry, table)
+                else "SELECT 0 AS n"
+            ).fetchone()["n"]
+        )
+
+    if _table_exists(registry, "residual_search_cells"):
+        reward_row = registry.connection.execute(
+            """
+            SELECT
+                COALESCE(SUM(accepted_novel_eed), 0) AS accepted_novel_eed,
+                COALESCE(SUM(search_cost_seconds), 0) AS search_cost_seconds,
+                COALESCE(SUM(result_count), 0) AS result_count,
+                COALESCE(SUM(duplicate_results), 0) AS duplicate_results
+            FROM residual_search_cells
+            """
+        ).fetchone()
+        source_gauges["residual_search_accepted_novel_eed"] = float(
+            reward_row["accepted_novel_eed"]
+        )
+        source_gauges["residual_search_cost_seconds"] = float(
+            reward_row["search_cost_seconds"]
+        )
+        results = int(reward_row["result_count"])
+        duplicates = int(reward_row["duplicate_results"])
+        source_gauges["residual_search_duplicate_fraction"] = (
+            duplicates / results if results > 0 else 0.0
+        )
+    source_gauges["residual_reward_eed_delta"] = float(
+        report.get("residual_reward_eed_delta", 0.0)
     )
 
     historical_states = _durable_state_counts(

@@ -21,7 +21,13 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Generic, TypeVar
 
+from creeper.source_discovery.deterministic_search import (
+    DeterministicSearchBatch,
+    candidate_from_result,
+)
 from creeper.source_discovery.manager import SearchDirective, SourceReservoirManager
+from creeper.source_discovery.residual_search import QueryPlan
+from creeper.source_discovery.search_identity import SearchIdentityLedger
 from creeper.source_discovery.motifs import infer_year_sibling_candidates
 from creeper.source_discovery.models import (
     ScoutMeasurement,
@@ -230,6 +236,11 @@ class CoordinatorCycleReport:
     usable_cold_count: int = 0
     effective_cold_count: int = 0
     search_directives_planned: int = 0
+    deterministic_search_plans_planned: int = 0
+    deterministic_search_episodes: int = 0
+    deterministic_search_failures: int = 0
+    residual_reward_updates: int = 0
+    residual_reward_eed_delta: float = 0.0
     search_zero_new_streak: int = 0
     search_adaptive_cooldown_seconds: float = 0.0
     search_call_budget: int = 0
@@ -268,6 +279,7 @@ class _Outcome(Generic[T]):
 TriageExecutor = Callable[[SourceCandidate], Awaitable[TriageResult]]
 ScoutExecutor = Callable[[SourceCandidate], Awaitable[ScoutResult]]
 SearchExecutor = Callable[[SearchDirective], Awaitable[SearchBatch]]
+DeterministicSearchExecutor = Callable[[QueryPlan], Awaitable[DeterministicSearchBatch]]
 
 
 @contextmanager
@@ -310,6 +322,8 @@ class SourceDiscoveryCoordinator:
         triage_executor: TriageExecutor,
         scout_executor: ScoutExecutor,
         search_executor: SearchExecutor,
+        deterministic_search_executor: DeterministicSearchExecutor | None = None,
+        search_identity_ledger: SearchIdentityLedger | None = None,
         scout_authority: tuple[str, str] | None = None,
         saturation_controller: SourceSaturationController | None = None,
         triage_parallelism: int = 4,
@@ -347,6 +361,12 @@ class SourceDiscoveryCoordinator:
         self.triage_executor = triage_executor
         self.scout_executor = scout_executor
         self.search_executor = search_executor
+        self.deterministic_search_executor = deterministic_search_executor
+        self.search_identity_ledger = search_identity_ledger
+        if deterministic_search_executor is not None and search_identity_ledger is None:
+            raise ValueError(
+                "deterministic search requires a SearchIdentityLedger"
+            )
         if scout_authority is not None and (
             not isinstance(scout_authority, tuple)
             or len(scout_authority) != 2
@@ -435,6 +455,26 @@ class SourceDiscoveryCoordinator:
                 skipped += 1
             else:
                 eligible.append(directive)
+        return tuple(eligible), skipped
+
+    def _eligible_deterministic_plans(
+        self,
+        plans: tuple[QueryPlan, ...],
+    ) -> tuple[tuple[QueryPlan, ...], int]:
+        now = self._retry_now()
+        self._search_retry_deadlines = {
+            key: deadline
+            for key, deadline in self._search_retry_deadlines.items()
+            if deadline > now
+        }
+        eligible: list[QueryPlan] = []
+        skipped = 0
+        for plan in plans:
+            key = f"residual:{plan.cell.key}"
+            if self._search_retry_deadlines.get(key, 0.0) > now:
+                skipped += 1
+            else:
+                eligible.append(plan)
         return tuple(eligible), skipped
 
     def _claim_scouts(self, source_keys: tuple[str, ...]) -> list[SourceCandidate]:
@@ -741,6 +781,122 @@ class SourceDiscoveryCoordinator:
             counts["search_candidates_registered"] += registered_count
             counts["search_candidates_dropped"] += dropped
 
+    def _commit_deterministic_searches(
+        self,
+        plans: tuple[QueryPlan, ...],
+        outcomes: list[_Outcome[DeterministicSearchBatch]],
+        counts: dict[str, int],
+    ) -> None:
+        if not plans:
+            return
+        scheduler = self.manager.residual_search_scheduler
+        if scheduler is None or self.search_identity_ledger is None:
+            raise RuntimeError(
+                "deterministic search plans require residual and identity ledgers"
+            )
+        coverage = scheduler.ledger
+        now = self._retry_now()
+        candidate_cap = max(1, self.manager.targets.triage_batch * 2)
+
+        for plan, outcome in zip(plans, outcomes, strict=True):
+            retry_key = f"residual:{plan.cell.key}"
+            if outcome.error is not None:
+                self._search_retry_deadlines[retry_key] = (
+                    now + self.failure_retry_seconds
+                )
+                counts["search_failures"] += 1
+                counts["deterministic_search_failures"] += 1
+                continue
+
+            self._search_retry_deadlines.pop(retry_key, None)
+            batch = outcome.value
+            assert batch is not None
+            cost = (
+                outcome.elapsed_seconds
+                if batch.search_cost_seconds is None
+                else batch.search_cost_seconds
+            )
+            episode = self.registry.begin_search_episode(
+                strategy=f"RESIDUAL_CELL:{plan.cell.mechanism}",
+                backend=batch.backend,
+                query=batch.query,
+                actor=batch.actor,
+            )
+            coverage.bind_search_episode(plan.cell, episode.episode_id)
+
+            raw_count = len(batch.results)
+            duplicate_results = 0
+            unique_roots = 0
+            new_families = 0
+            qualified_roots = 0
+            family_labels: list[str] = []
+            registered_count = 0
+            new_source_count = 0
+            dropped = 0
+            seen_sources: set[str] = set()
+
+            for result in batch.results:
+                registration = self.search_identity_ledger.register(
+                    cell_key=plan.cell.key,
+                    result=result,
+                )
+                family_labels.append(result.family_label)
+                duplicate_results += int(not registration.new_family)
+                unique_roots += int(registration.new_dataset)
+                new_families += int(registration.new_family)
+
+                if not result.qualified or not registration.new_dataset:
+                    dropped += 1
+                    continue
+                qualified_roots += 1
+                if registered_count >= candidate_cap:
+                    dropped += 1
+                    continue
+
+                candidate = candidate_from_result(plan, result)
+                if candidate.source_key in seen_sources:
+                    dropped += 1
+                    continue
+                seen_sources.add(candidate.source_key)
+                if (
+                    self.registry.suppression_reason(candidate) is not None
+                    or is_common_crawl_provenance(
+                        candidate.source_family,
+                        candidate.canonical_entrypoint,
+                        candidate.discovered_by,
+                    )
+                ):
+                    dropped += 1
+                    continue
+
+                _stored, inserted = self.registry.register_proposal(
+                    candidate,
+                    episode_id=episode.episode_id,
+                )
+                registered_count += 1
+                new_source_count += int(inserted)
+
+            coverage.record_episode(
+                plan.cell,
+                result_count=raw_count,
+                duplicate_results=duplicate_results,
+                unique_roots=unique_roots,
+                new_families=new_families,
+                qualified_roots=qualified_roots,
+                family_keys=family_labels,
+                search_cost_seconds=cost,
+            )
+            self.registry.finish_search_episode(
+                episode.episode_id,
+                search_cost_seconds=cost,
+                accepted_proposals=registered_count,
+                new_sources=new_source_count,
+            )
+            counts["search_episodes"] += 1
+            counts["deterministic_search_episodes"] += 1
+            counts["search_candidates_registered"] += registered_count
+            counts["search_candidates_dropped"] += dropped
+
     async def run_once(self) -> CoordinatorCycleReport:
         """Run one finite cycle. Independent external work overlaps; commits do not."""
         with _coordinator_lock(self.lock_path):
@@ -767,10 +923,27 @@ class SourceDiscoveryCoordinator:
                     for decision in saturation_decisions
                 )
 
+            residual_reward_updates = 0
+            residual_reward_eed_delta = 0.0
+            if self.manager.residual_search_scheduler is not None:
+                (
+                    residual_reward_updates,
+                    residual_reward_eed_delta,
+                ) = (
+                    self.manager.residual_search_scheduler.ledger
+                    .reconcile_search_rewards()
+                )
+
             plan = self.manager.plan()
             search_directives, search_backoff_skipped = self._eligible_search_directives(
                 plan.search_directives
             )
+            deterministic_plans, deterministic_backoff_skipped = (
+                self._eligible_deterministic_plans(
+                    plan.deterministic_search_plans
+                )
+            )
+            search_backoff_skipped += deterministic_backoff_skipped
             counts = {
                 "recovered_scouts": recovered,
                 "production_exhausted": production_exhausted,
@@ -783,6 +956,13 @@ class SourceDiscoveryCoordinator:
                 "usable_cold_count": plan.cold_count,
                 "effective_cold_count": plan.effective_cold_count,
                 "search_directives_planned": len(plan.search_directives),
+                "deterministic_search_plans_planned": len(
+                    plan.deterministic_search_plans
+                ),
+                "deterministic_search_episodes": 0,
+                "deterministic_search_failures": 0,
+                "residual_reward_updates": residual_reward_updates,
+                "residual_reward_eed_delta": residual_reward_eed_delta,
                 "search_zero_new_streak": plan.search_zero_new_streak,
                 "search_adaptive_cooldown_seconds": (
                     plan.search_adaptive_cooldown_seconds
@@ -840,6 +1020,7 @@ class SourceDiscoveryCoordinator:
                 or triage_candidates
                 or scout_candidates
                 or search_directives
+                or deterministic_plans
             )
             if has_background and foreground_busy:
                 counts["background_bulk_deferred"] += 1
@@ -894,10 +1075,33 @@ class SourceDiscoveryCoordinator:
                 self.search_executor,
                 self.search_parallelism,
             )
-            triage_outcomes, scout_outcomes, search_outcomes = await asyncio.gather(
+
+            async def missing_deterministic_executor(
+                _plan: QueryPlan,
+            ) -> DeterministicSearchBatch:
+                raise RuntimeError(
+                    "deterministic search plan has no configured executor"
+                )
+
+            deterministic_executor = (
+                self.deterministic_search_executor
+                or missing_deterministic_executor
+            )
+            deterministic_search_task = self._bounded_batch(
+                deterministic_plans,
+                deterministic_executor,
+                self.search_parallelism,
+            )
+            (
+                triage_outcomes,
+                scout_outcomes,
+                search_outcomes,
+                deterministic_search_outcomes,
+            ) = await asyncio.gather(
                 triage_task,
                 scout_task,
                 search_task,
+                deterministic_search_task,
             )
 
             # All durable mutations return to this coordinator task. This keeps
@@ -905,5 +1109,10 @@ class SourceDiscoveryCoordinator:
             self._commit_triage(all_triage_candidates, triage_outcomes, counts)
             self._commit_scouts(all_scout_candidates, scout_outcomes, counts)
             self._commit_searches(search_directives, search_outcomes, counts)
+            self._commit_deterministic_searches(
+                deterministic_plans,
+                deterministic_search_outcomes,
+                counts,
+            )
 
             return CoordinatorCycleReport(**counts)

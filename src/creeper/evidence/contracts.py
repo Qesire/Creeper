@@ -21,6 +21,7 @@ from types import MappingProxyType
 from typing import Mapping
 from urllib.parse import urlsplit
 
+from creeper.sources.locator import format_path_from_locator
 from creeper.sources.ftp_sitelist import (
     is_audited_ftp_sitelist_locator,
     is_ftp_sitelist_locator,
@@ -227,7 +228,7 @@ SBI_BBS_DIRECT_CONTRACT = SourceEvidenceContract(
 
 
 def parser_kind_from_locator(locator: str) -> str:
-    path = urlsplit(locator).path.lower()
+    path = format_path_from_locator(locator)
     if is_mailbox_url_locator(locator):
         return "mbox_urls"
     if is_squid_access_locator(locator):

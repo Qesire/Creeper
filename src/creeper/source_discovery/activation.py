@@ -29,8 +29,12 @@ from creeper.evidence.contract_registry import (
 from creeper.source_discovery.index_identity import HistoricalIndexObjectIdentity
 from creeper.source_discovery.index_registry import IndexSpaceRegistry
 from creeper.source_discovery.index_space import RegionSynopsis, compile_candidate_index_space
-from creeper.source_discovery.models import SourceCandidate, SourceState
+from creeper.source_discovery.models import (
+    SourceCandidate,
+    SourceState,
+)
 from creeper.sources.domains import DomainState, SourceDomain
+from creeper.sources.locator import format_path_from_locator
 from creeper.sources.reservoirs import Reservoir, ReservoirState
 from creeper.storage.control_store import ControlStore
 from creeper.source_discovery.registry import SourceDiscoveryRegistry
@@ -70,7 +74,7 @@ def _adapter_kind(entrypoint: str) -> tuple[str, str]:
     if parser_kind in {"mbox_urls", "squid_access", "dmoz_rdf_urls"}:
         return "structured", "structured_records"
 
-    path = PurePosixPath(urlsplit(entrypoint).path.lower())
+    path = PurePosixPath(format_path_from_locator(entrypoint))
     name = path.name
     suffixes = (".warc.gz", ".arc.gz", ".warc", ".arc")
     if name.endswith(suffixes):

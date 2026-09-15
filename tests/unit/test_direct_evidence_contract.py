@@ -50,6 +50,16 @@ def _direct_contract(
 
 
 class DirectEvidenceContractTests(unittest.TestCase):
+    def test_wrapped_cdxj_locator_keeps_parser_and_direct_authority(self) -> None:
+        locator = (
+            "https://repository.example/api/records/7/files/"
+            "historical-index.cdxj.gz/content"
+        )
+        self.assertEqual(parser_kind_from_locator(locator), "cdxj")
+        contract = resolve_source_evidence_contract(locator)
+        self.assertTrue(contract.grants_direct_web_year)
+        self.assertEqual(contract.parser_kind, "cdxj")
+
     def test_trusted_jsonl_contract_produces_direct_year_and_capsule_provenance(self) -> None:
         contract = _direct_contract(
             "jsonl",
