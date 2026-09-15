@@ -35,6 +35,8 @@ from creeper.source_discovery.models import (
 from creeper.sources.archive.cdxj import parse_cdxj_line
 from creeper.sources.archive.cdx import parse_cdx_line
 from creeper.sources.archive.warc import WarcFormatError, iter_warc_target_records
+from creeper.sources.format_binding import SourceFormatObservation
+from creeper.sources.format_detection import detect_source_format
 from creeper.sources.locator import format_path_from_locator
 from creeper.sources.ftp_sitelist import (
     is_ftp_sitelist_locator,
@@ -445,6 +447,7 @@ def _extract_hosts(
     content_type: str,
     policy: MeasuredYieldScoutPolicy,
     truncated: bool = False,
+    format_observation: SourceFormatObservation | None = None,
 ) -> ParsedHostSample | None:
     if is_ftp_sitelist_locator(url):
         # ZIP central-directory parsing is the completeness check. This is more
@@ -509,9 +512,22 @@ def _extract_hosts(
             observation_keys=tuple(observations),
         )
 
-    suffix, compressed = _suffix(format_path_from_locator(url))
+    suffix, locator_compressed = _suffix(format_path_from_locator(url))
     lower_type = content_type.lower()
-    if _is_warc_resource(suffix=suffix, content_type=content_type):
+    parser_kind = (
+        None
+        if format_observation is None
+        else format_observation.parser_kind
+    )
+    compressed = (
+        locator_compressed
+        if format_observation is None
+        else format_observation.compression == "gzip"
+    )
+    if parser_kind == "warc_arc" or (
+        parser_kind is None
+        and _is_warc_resource(suffix=suffix, content_type=content_type)
+    ):
         if compressed or payload.startswith(b"\x1f\x8b"):
             _enforce_gzip_expansion_budget(
                 payload,
@@ -533,14 +549,18 @@ def _extract_hosts(
     saw_undated_host = False
     sampled = 0
 
-    if suffix in {".cdxj", ".cdx"}:
+    if parser_kind in {"cdxj", "cdx"} or (
+        parser_kind is None and suffix in {".cdxj", ".cdx"}
+    ):
         for line in lines:
             if sampled >= policy.max_records:
                 break
             sampled += 1
             record = (
                 parse_cdxj_line(line, source_id="measured-scout", locator=str(sampled))
-                if suffix == ".cdxj"
+                if parser_kind == "cdxj" or (
+                    parser_kind is None and suffix == ".cdxj"
+                )
                 else parse_cdx_line(line, source_id="measured-scout", locator=str(sampled))
             )
             if (
@@ -564,7 +584,7 @@ def _extract_hosts(
             observation_keys=tuple(observations),
         )
 
-    if is_mailbox_url_locator(url):
+    if parser_kind == "mbox_urls" or is_mailbox_url_locator(url):
         for line in lines:
             urls = extract_http_urls(line)
             if not urls:
@@ -585,7 +605,7 @@ def _extract_hosts(
             observation_keys=tuple(observations),
         )
 
-    if is_dmoz_content_locator(url):
+    if parser_kind == "dmoz_rdf_urls" or is_dmoz_content_locator(url):
         for line in lines:
             observed_url = parse_dmoz_external_page_line(line)
             if observed_url is None:
@@ -605,7 +625,7 @@ def _extract_hosts(
             observation_keys=tuple(observations),
         )
 
-    if is_squid_access_locator(url):
+    if parser_kind == "squid_access" or is_squid_access_locator(url):
         for line in lines:
             parsed_access = parse_squid_access_line(line)
             if parsed_access is None:
@@ -628,7 +648,10 @@ def _extract_hosts(
             observation_keys=tuple(observations),
         )
 
-    if suffix in {".jsonl", ".ndjson"} or "ndjson" in lower_type:
+    if parser_kind == "jsonl" or (
+        parser_kind is None
+        and (suffix in {".jsonl", ".ndjson"} or "ndjson" in lower_type)
+    ):
         for line in lines:
             if sampled >= policy.max_records:
                 break
@@ -659,9 +682,20 @@ def _extract_hosts(
             observation_keys=tuple(observations),
         )
 
-    if suffix in {".csv", ".tsv"} or "text/csv" in lower_type or "tab-separated-values" in lower_type:
+    if parser_kind == "delimited" or (
+        parser_kind is None
+        and (
+            suffix in {".csv", ".tsv"}
+            or "text/csv" in lower_type
+            or "tab-separated-values" in lower_type
+        )
+    ):
         text = payload.decode("utf-8", errors="replace")
-        dialect = "excel-tab" if suffix == ".tsv" or "tab-separated-values" in lower_type else "excel"
+        dialect = (
+            "excel-tab"
+            if suffix == ".tsv" or "tab-separated-values" in lower_type
+            else "excel"
+        )
         rows = csv.reader(io.StringIO(text), dialect=dialect)
         try:
             first = next(rows)
@@ -735,7 +769,13 @@ def _extract_hosts(
             observation_keys=tuple(observations),
         )
 
-    if suffix in {"", ".txt", ".list", ".urls"} or lower_type.startswith("text/plain"):
+    if parser_kind == "lines" or (
+        parser_kind is None
+        and (
+            suffix in {"", ".txt", ".list", ".urls"}
+            or lower_type.startswith("text/plain")
+        )
+    ):
         for line in lines:
             if sampled >= policy.max_records:
                 break
@@ -1111,6 +1151,11 @@ class MeasuredYieldScoutExecutor:
                 ScoutDisposition.HOLD,
                 reason="bulk source returned HTTP 404/410",
             )
+        format_observation = detect_source_format(
+            locator=candidate.canonical_entrypoint,
+            payload=download.payload,
+            content_type=download.content_type,
+        )
         try:
             parsed = _extract_hosts(
                 download.payload,
@@ -1118,6 +1163,7 @@ class MeasuredYieldScoutExecutor:
                 content_type=download.content_type,
                 policy=self.policy,
                 truncated=download.truncated,
+                format_observation=format_observation,
             )
         except (WarcFormatError, ValueError, csv.Error) as exc:
             detail = str(exc).strip().replace("\n", " ")[:240]
@@ -1144,6 +1190,7 @@ class MeasuredYieldScoutExecutor:
                     f"measured source parse failed closed: {detail}; "
                     "measured sample has too few unique hostnames"
                 ),
+                format_observation=format_observation,
             )
         if parsed is None:
             return ScoutResult(
@@ -1152,6 +1199,7 @@ class MeasuredYieldScoutExecutor:
                     "unsupported measured source format; requires a "
                     "format-specific mature parser"
                 ),
+                format_observation=format_observation,
             )
         parsed = _apply_source_year_hint(
             parsed,
@@ -1172,6 +1220,7 @@ class MeasuredYieldScoutExecutor:
                 ScoutDisposition.HOLD,
                 measurement=measurement,
                 reason="measured sample has too few unique hostnames",
+                format_observation=format_observation,
             )
         novel_fraction = novel_count / observed_count
         if (
@@ -1185,11 +1234,13 @@ class MeasuredYieldScoutExecutor:
                 reason=(
                     "measured baseline-external/EED yield below warm threshold"
                 ),
+                format_observation=format_observation,
             )
         return ScoutResult(
             ScoutDisposition.WARM,
             measurement=measurement,
             reason="bounded deterministic sample met warm-yield thresholds",
+            format_observation=format_observation,
         )
 
     def _early_accept(self, result: ScoutResult) -> bool:
@@ -1252,6 +1303,7 @@ class MeasuredYieldScoutExecutor:
             reason=result.reason,
             discovered_candidates=result.discovered_candidates,
             edge_relation=result.edge_relation,
+            format_observation=result.format_observation,
         )
 
     async def __call__(self, candidate: SourceCandidate) -> ScoutResult:
@@ -1324,6 +1376,7 @@ class MeasuredYieldScoutExecutor:
                         "progressive scout early-accepted a strongly positive "
                         f"fidelity stage {index + 1}/{len(stage_targets)}"
                     ),
+                    format_observation=result.format_observation,
                 )
             if self._early_reject(result):
                 return ScoutResult(
@@ -1333,6 +1386,7 @@ class MeasuredYieldScoutExecutor:
                         "progressive scout early-stopped a saturated low-yield "
                         f"fidelity stage {index + 1}/{len(stage_targets)}"
                     ),
+                    format_observation=result.format_observation,
                 )
 
         assert last_result is not None
