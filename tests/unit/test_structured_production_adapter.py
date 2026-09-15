@@ -110,6 +110,10 @@ class StructuredProductionAdapterTests(unittest.TestCase):
             confidence=1.0,
             sample_records=8,
             matched_records=8,
+            # This fixture models a schema whose temporal semantics were
+            # explicitly validated before freezing; headerless auto-detection
+            # itself would leave this flag false.
+            direct_year_eligible=True,
         )
         adapter_id = bind_format_to_adapter_id(
             "structured:opaque-table",
