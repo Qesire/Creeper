@@ -144,6 +144,12 @@ class SearchCellStats:
             return 0.0
         return min(1.0, self.new_families / self.result_count)
 
+    @property
+    def qualified_fraction(self) -> float:
+        if self.result_count <= 0:
+            return 0.0
+        return min(1.0, self.qualified_roots / self.result_count)
+
 
 @dataclass(frozen=True, slots=True)
 class ResidualSearchPolicy:
@@ -151,6 +157,7 @@ class ResidualSearchPolicy:
     saturation_min_results: int = 30
     saturation_duplicate_fraction: float = 0.90
     saturation_max_new_family_fraction: float = 0.05
+    saturation_max_qualified_fraction: float = 0.01
     max_exclusions: int = 8
     exclusion_min_hits: int = 2
     exploration_weight: float = 1.0
@@ -166,6 +173,8 @@ class ResidualSearchPolicy:
             raise ValueError("saturation_duplicate_fraction must be within [0,1]")
         if not 0 <= self.saturation_max_new_family_fraction <= 1:
             raise ValueError("saturation_max_new_family_fraction must be within [0,1]")
+        if not 0 <= self.saturation_max_qualified_fraction <= 1:
+            raise ValueError("saturation_max_qualified_fraction must be within [0,1]")
         if self.max_exclusions < 0 or self.exclusion_min_hits < 1:
             raise ValueError("invalid exclusion policy")
 
@@ -205,6 +214,12 @@ class ResidualSearchLedger:
     def _initialize(self) -> None:
         self.connection.executescript(
             """
+            CREATE TABLE IF NOT EXISTS residual_search_meta (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                updated_at REAL NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS residual_search_cells (
                 cell_key TEXT PRIMARY KEY,
                 mechanism TEXT NOT NULL,
@@ -242,6 +257,63 @@ class ResidualSearchLedger:
                 ON residual_search_cell_families(cell_key, hit_count DESC);
             """
         )
+
+    def ensure_search_profile(self, signature: str) -> bool:
+        """Install one deterministic-search profile and reopen cells on change.
+
+        Search saturation is meaningful only for the provider/query-policy set
+        that produced it. Adding a new provider must therefore reopen coverage
+        rather than inheriting a stale SATURATED state. Stable URL/dataset
+        identity remains durable in SearchIdentityLedger and will quickly
+        rediscover duplicates without losing global memory.
+
+        Returns True when an existing profile changed and coverage was reset.
+        """
+
+        if not isinstance(signature, str) or not signature.strip():
+            raise ValueError("search profile signature must be non-empty")
+        signature = signature.strip()
+        row = self.connection.execute(
+            "SELECT value FROM residual_search_meta WHERE key='search_profile'"
+        ).fetchone()
+        previous = None if row is None else str(row["value"])
+        now = float(self.clock())
+        if previous == signature:
+            return False
+        with self.connection:
+            self.connection.execute(
+                """
+                INSERT INTO residual_search_meta(key, value, updated_at)
+                VALUES('search_profile', ?, ?)
+                ON CONFLICT(key) DO UPDATE SET
+                    value=excluded.value,
+                    updated_at=excluded.updated_at
+                """,
+                (signature, now),
+            )
+            if previous is not None:
+                self.connection.execute(
+                    """
+                    UPDATE residual_search_cells
+                    SET state='OPEN',
+                        attempts=0,
+                        result_count=0,
+                        duplicate_results=0,
+                        unique_roots=0,
+                        new_families=0,
+                        qualified_roots=0,
+                        accepted_novel_eed=0,
+                        search_cost_seconds=0,
+                        variant_cursor=0,
+                        last_searched_at=NULL,
+                        updated_at=?
+                    """,
+                    (now,),
+                )
+                self.connection.execute(
+                    "DELETE FROM residual_search_cell_families"
+                )
+        return previous is not None
 
     def ensure_cell(self, cell: SearchCell) -> None:
         now = float(self.clock())
@@ -449,12 +521,25 @@ class ResidualSearchLedger:
 
     def _should_saturate(self, stats: SearchCellStats) -> bool:
         policy = self.policy
-        return (
-            stats.attempts >= policy.saturation_min_attempts
-            and stats.result_count >= policy.saturation_min_results
-            and stats.duplicate_fraction >= policy.saturation_duplicate_fraction
-            and stats.new_family_fraction <= policy.saturation_max_new_family_fraction
+        if stats.attempts < policy.saturation_min_attempts:
+            return False
+        # Repeated empty queries are evidence that this provider/profile cannot
+        # cover the cell. Do not keep paraphrasing forever waiting to reach a
+        # minimum result count that will never arrive.
+        if stats.result_count == 0:
+            return True
+        if stats.result_count < policy.saturation_min_results:
+            return False
+        duplicate_saturation = (
+            stats.duplicate_fraction >= policy.saturation_duplicate_fraction
+            and stats.new_family_fraction
+            <= policy.saturation_max_new_family_fraction
         )
+        relevance_saturation = (
+            stats.qualified_fraction
+            <= policy.saturation_max_qualified_fraction
+        )
+        return duplicate_saturation or relevance_saturation
 
     def variant_cursor(self, cell: SearchCell) -> int:
         self.ensure_cell(cell)
