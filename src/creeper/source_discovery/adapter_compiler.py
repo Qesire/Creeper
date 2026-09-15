@@ -20,7 +20,7 @@ import uuid
 import zlib
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 from creeper.source_discovery.models import SourceCandidate
 from creeper.sources.format_binding import SourceFormatObservation
@@ -268,6 +268,17 @@ def validate_adapter_proposal(
         ),
         None,
     )
+
+
+class AdapterCompilerExecutor(Protocol):
+    async def __call__(
+        self,
+        candidate: SourceCandidate,
+        payload: bytes,
+        *,
+        content_type: str,
+        format_observation: SourceFormatObservation | None,
+    ) -> AdapterCompileTrace: ...
 
 
 class CommandAdapterCompilerExecutor:
