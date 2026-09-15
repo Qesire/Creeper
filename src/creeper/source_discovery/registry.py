@@ -22,6 +22,7 @@ from creeper.source_discovery.models import (
     SuppressionScope,
     is_common_crawl_provenance,
 )
+from creeper.sources.format_binding import SourceFormatObservation
 from creeper.storage.control_store import ControlStore
 
 
@@ -320,6 +321,18 @@ class SourceDiscoveryRegistry:
                 content_type TEXT,
                 content_length INTEGER,
                 range_supported INTEGER,
+                observed_at REAL NOT NULL,
+                FOREIGN KEY(source_key) REFERENCES source_candidates(source_key)
+            ) WITHOUT ROWID;
+
+            CREATE TABLE IF NOT EXISTS source_format_observations (
+                source_key TEXT PRIMARY KEY,
+                parser_kind TEXT NOT NULL,
+                compression TEXT NOT NULL,
+                detection_method TEXT NOT NULL,
+                confidence REAL NOT NULL,
+                content_type TEXT NOT NULL,
+                policy_version TEXT NOT NULL,
                 observed_at REAL NOT NULL,
                 FOREIGN KEY(source_key) REFERENCES source_candidates(source_key)
             ) WITHOUT ROWID;
@@ -2549,6 +2562,99 @@ class SourceDiscoveryRegistry:
             ),
             "observed_at": float(row["observed_at"]),
         }
+
+    def record_format_observation(
+        self,
+        source_key: str,
+        observation: SourceFormatObservation,
+    ) -> bool:
+        """Persist the strongest deterministic parser/compression observation.
+
+        Format facts are deliberately independent of baseline/model authority.
+        A weaker observation cannot replace a stronger one, and conflicting
+        high-confidence observations fail closed instead of silently changing
+        production semantics.
+        """
+
+        if self.get_candidate(source_key) is None:
+            raise KeyError(f"unknown source: {source_key}")
+        if not isinstance(observation, SourceFormatObservation):
+            raise TypeError("observation must be SourceFormatObservation")
+        current = self.get_format_observation(source_key)
+        if current is not None:
+            same_format = (
+                current.parser_kind == observation.parser_kind
+                and current.compression == observation.compression
+            )
+            if (
+                not same_format
+                and current.confidence >= 0.95
+                and observation.confidence >= 0.95
+            ):
+                raise ValueError(
+                    "conflicting high-confidence source format observations"
+                )
+            if observation.confidence < current.confidence:
+                return False
+            if (
+                observation.confidence == current.confidence
+                and current.policy_version == observation.policy_version
+                and current == observation
+            ):
+                return False
+
+        with self.connection:
+            self.connection.execute(
+                """
+                INSERT INTO source_format_observations(
+                    source_key, parser_kind, compression, detection_method,
+                    confidence, content_type, policy_version, observed_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(source_key) DO UPDATE SET
+                    parser_kind = excluded.parser_kind,
+                    compression = excluded.compression,
+                    detection_method = excluded.detection_method,
+                    confidence = excluded.confidence,
+                    content_type = excluded.content_type,
+                    policy_version = excluded.policy_version,
+                    observed_at = excluded.observed_at
+                """,
+                (
+                    source_key,
+                    observation.parser_kind,
+                    observation.compression,
+                    observation.detection_method,
+                    observation.confidence,
+                    observation.content_type,
+                    observation.policy_version,
+                    self._now(),
+                ),
+            )
+        return True
+
+    def get_format_observation(
+        self,
+        source_key: str,
+    ) -> SourceFormatObservation | None:
+        row = self.connection.execute(
+            """
+            SELECT parser_kind, compression, detection_method, confidence,
+                   content_type, policy_version
+            FROM source_format_observations
+            WHERE source_key = ?
+            """,
+            (source_key,),
+        ).fetchone()
+        if row is None:
+            return None
+        return SourceFormatObservation(
+            parser_kind=str(row["parser_kind"]),
+            compression=str(row["compression"]),
+            detection_method=str(row["detection_method"]),
+            confidence=float(row["confidence"]),
+            content_type=str(row["content_type"] or ""),
+            policy_version=str(row["policy_version"]),
+        )
 
     def record_scout_measurement(
         self,
