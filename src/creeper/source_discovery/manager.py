@@ -630,8 +630,8 @@ class SourceReservoirManager:
                 None,
                 (
                     "deterministic residual-search space has no OPEN/ACTIVE cells; "
-                    "propose a new acquisition mechanism/root/query family, not "
-                    "individual URLs"
+                    "propose a new data-generating mechanism/root/query family, "
+                    "not individual URLs"
                 ),
                 SourceIntelligenceTask.RECOVER_STAGNATION,
             )
