@@ -275,6 +275,7 @@ class SourceDiscoveryRegistryTests(unittest.TestCase):
             confidence=1.0,
             sample_records=10,
             matched_records=10,
+            direct_year_eligible=True,
         )
 
         changed = self.registry.record_schema_observation(
