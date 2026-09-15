@@ -147,6 +147,11 @@ def _family_label(result: RawSearchResult, canonical_url: str) -> str:
         title = host
     if publisher and publisher not in title:
         return f"{title} | {publisher}"[:240]
+    if len(title) >= 8:
+        # A strong normalized title is a better cross-mirror family identity
+        # than the hosting origin. Mirrors frequently change host while keeping
+        # the dataset title stable.
+        return title[:240]
     return f"{title} | {host}"[:240]
 
 
