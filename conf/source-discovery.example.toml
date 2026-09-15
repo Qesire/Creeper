@@ -25,10 +25,11 @@ max_search_directives = 2
 # the LLM for URLs when this lane is enabled; the LLM remains only for
 # structure/format interpretation and true search-space stagnation.
 enabled = true
-providers = ["datacite", "zenodo", "harvard_dataverse"]
+providers = ["datacite", "zenodo", "harvard_dataverse", "internet_archive"]
 # Structured public metadata channels. DataCite supplies DOI/repository
 # metadata; Zenodo and Harvard Dataverse add file-level artifact URLs from
-# independent repository indexes. Cross-channel duplicates are
+# repository indexes; Internet Archive adds a bounded item->original-file
+# expansion over an independent archive catalog. Cross-channel duplicates are
 # collapsed by the shared URL -> artifact -> dataset -> source-family identity.
 # Every SearchCell probe stays bounded so saturation feedback arrives quickly.
 results_per_provider = 100

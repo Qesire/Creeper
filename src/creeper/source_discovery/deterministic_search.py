@@ -8,7 +8,7 @@ import re
 import time
 from dataclasses import dataclass
 from typing import Protocol
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
 import httpx
 
@@ -68,6 +68,13 @@ _SOURCE_SUFFIXES = (
     ".tsv",
     ".json",
     ".jsonl",
+    ".log",
+    ".list",
+    ".lst",
+    ".dat",
+    ".db",
+    ".sqlite",
+    ".sql",
     ".xml",
     ".rdf",
     ".zip",
@@ -815,6 +822,268 @@ class HarvardDataverseSearchProvider:
         return tuple(results)
 
 
+def _ia_text(value: object) -> str:
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, list):
+        return " ".join(
+            item.strip()
+            for item in value[:16]
+            if isinstance(item, str) and item.strip()
+        )
+    return ""
+
+
+def _ia_creators(item: dict[str, object]) -> tuple[str, ...]:
+    value = item.get("creator")
+    if isinstance(value, str) and value.strip():
+        return (value.strip(),)
+    if isinstance(value, list):
+        return tuple(
+            entry.strip()
+            for entry in value[:8]
+            if isinstance(entry, str) and entry.strip()
+        )
+    return ()
+
+
+def _ia_publication_year(item: dict[str, object]) -> int | None:
+    value = item.get("date")
+    values = value if isinstance(value, list) else (value,)
+    for entry in values:
+        if not isinstance(entry, str):
+            continue
+        match = re.search(r"\b(\d{4})\b", entry)
+        if match is not None:
+            year = int(match.group(1))
+            if 1000 <= year <= 9999:
+                return year
+    return None
+
+
+def _ia_source_file(entry: dict[str, object]) -> bool:
+    name = entry.get("name")
+    if not isinstance(name, str) or not name.strip():
+        return False
+    if str(entry.get("source") or "").lower() != "original":
+        return False
+    lowered = name.lower()
+    if lowered.endswith(
+        (
+            "_meta.xml",
+            "_files.xml",
+            "_reviews.xml",
+            "_archive.torrent",
+        )
+    ) or lowered.endswith("__ia_thumb.jpg"):
+        return False
+    if str(entry.get("format") or "").lower() == "metadata":
+        return False
+    return lowered.endswith(_SOURCE_SUFFIXES)
+
+
+class InternetArchiveSearchProvider:
+    """Bounded item-search to original-file expansion for archive.org.
+
+    Advanced Search discovers independent archive items. Only a small fixed
+    number of high-ranked items are expanded, and each expansion reads a fixed
+    slice of the Item Metadata API files array. The provider emits concrete
+    canonical download URLs rather than details-page collection roots.
+    """
+
+    name = "internet_archive"
+
+    def __init__(
+        self,
+        client: httpx.AsyncClient,
+        *,
+        search_endpoint: str = "https://archive.org/advancedsearch.php",
+        metadata_endpoint: str = "https://archive.org/metadata",
+        download_endpoint: str = "https://archive.org/download",
+        timeout_seconds: float = 20.0,
+        max_items: int = 8,
+        files_per_item: int = 4,
+        file_slice_count: int = 128,
+    ) -> None:
+        for name, value in (
+            ("max_items", max_items),
+            ("files_per_item", files_per_item),
+            ("file_slice_count", file_slice_count),
+        ):
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise ValueError(f"{name} must be a positive integer")
+        if not math.isfinite(float(timeout_seconds)) or timeout_seconds <= 0:
+            raise ValueError("timeout_seconds must be finite and positive")
+        self.client = client
+        self.search_endpoint = search_endpoint.rstrip("/")
+        self.metadata_endpoint = metadata_endpoint.rstrip("/")
+        self.download_endpoint = download_endpoint.rstrip("/")
+        self.timeout_seconds = float(timeout_seconds)
+        self.max_items = max_items
+        self.files_per_item = files_per_item
+        self.file_slice_count = file_slice_count
+
+    @staticmethod
+    def _query(plan: QueryPlan) -> str:
+        variants = _MECHANISM_TERMS[plan.cell.mechanism]
+        phrase = variants[plan.variant % len(variants)]
+        institution = plan.cell.institution.replace("_", " ")
+        artifact = plan.cell.artifact.replace("_", " ")
+        clauses = [
+            f'"{plan.cell.period}"',
+            f'"{phrase}"',
+            f'"{institution}"',
+            f'"{artifact}"',
+        ]
+        clauses.extend(
+            f'NOT "{item}"'
+            for item in plan.exclusions
+            if item and len(item) <= 80
+        )
+        return " AND ".join(clauses)
+
+    async def _files(self, identifier: str) -> tuple[dict[str, object], ...]:
+        response = await self.client.get(
+            f"{self.metadata_endpoint}/{quote(identifier, safe='')}/files",
+            params={"start": 0, "count": self.file_slice_count},
+            timeout=self.timeout_seconds,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        raw = payload.get("result") if isinstance(payload, dict) else None
+        if not isinstance(raw, list):
+            return ()
+        return tuple(entry for entry in raw if isinstance(entry, dict))
+
+    async def search(
+        self,
+        plan: QueryPlan,
+        *,
+        limit: int,
+    ) -> tuple[RawSearchResult, ...]:
+        result_limit = max(1, int(limit))
+        item_limit = min(
+            self.max_items,
+            max(1, math.ceil(result_limit / self.files_per_item)),
+        )
+        params: list[tuple[str, object]] = [
+            ("q", self._query(plan)),
+            ("rows", item_limit),
+            ("page", 1),
+            ("output", "json"),
+        ]
+        for field in (
+            "identifier",
+            "title",
+            "description",
+            "creator",
+            "date",
+            "mediatype",
+            "collection",
+            "item_size",
+            "files_count",
+        ):
+            params.append(("fl[]", field))
+
+        response = await self.client.get(
+            self.search_endpoint,
+            params=params,
+            timeout=self.timeout_seconds,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        raw_response = (
+            payload.get("response") if isinstance(payload, dict) else None
+        )
+        docs = (
+            raw_response.get("docs")
+            if isinstance(raw_response, dict)
+            else None
+        )
+        if not isinstance(docs, list):
+            return ()
+
+        items: list[tuple[str, dict[str, object]]] = []
+        for doc in docs[:item_limit]:
+            if not isinstance(doc, dict):
+                continue
+            identifier = doc.get("identifier")
+            if not isinstance(identifier, str) or not identifier.strip():
+                continue
+            items.append((identifier.strip(), doc))
+        if not items:
+            return ()
+
+        file_outcomes = await asyncio.gather(
+            *(self._files(identifier) for identifier, _doc in items),
+            return_exceptions=True,
+        )
+        results: list[RawSearchResult] = []
+        for (identifier, doc), outcome in zip(
+            items,
+            file_outcomes,
+            strict=True,
+        ):
+            if isinstance(outcome, Exception):
+                continue
+            item_title = _ia_text(doc.get("title"))
+            item_description = " ".join(
+                value
+                for value in (
+                    _ia_text(doc.get("description")),
+                    _ia_text(doc.get("collection")),
+                    _ia_text(doc.get("mediatype")),
+                )
+                if value
+            )
+            selected = [entry for entry in outcome if _ia_source_file(entry)]
+            selected.sort(
+                key=lambda entry: (
+                    str(entry.get("name") or "").lower(),
+                    str(entry.get("format") or "").lower(),
+                )
+            )
+            for entry in selected[: self.files_per_item]:
+                filename = str(entry["name"]).strip()
+                size = entry.get("size")
+                try:
+                    content_length = int(size) if size is not None else None
+                except (TypeError, ValueError):
+                    content_length = None
+                if content_length is not None and content_length < 0:
+                    content_length = None
+                file_description = " ".join(
+                    value
+                    for value in (
+                        item_description,
+                        filename,
+                        _ia_text(entry.get("format")),
+                    )
+                    if value
+                )
+                results.append(
+                    RawSearchResult(
+                        provider=self.name,
+                        provider_result_id=f"{identifier}:{filename}",
+                        url=(
+                            f"{self.download_endpoint}/"
+                            f"{quote(identifier, safe='')}/"
+                            f"{quote(filename, safe='/')}"
+                        ),
+                        title=item_title or identifier,
+                        description=file_description,
+                        publisher="Internet Archive",
+                        creators=_ia_creators(doc),
+                        publication_year=_ia_publication_year(doc),
+                        resource_type="file",
+                        content_length=content_length,
+                    )
+                )
+                if len(results) >= result_limit:
+                    return tuple(results)
+        return tuple(results)
+
+
 class DeterministicSearchExecutor:
     """Execute one search cell across independent structured providers."""
 
@@ -839,20 +1108,35 @@ class DeterministicSearchExecutor:
         ]
         outcomes = await asyncio.gather(*calls, return_exceptions=True)
         successful: list[str] = []
-        raw_results: list[RawSearchResult] = []
+        provider_results: list[tuple[RawSearchResult, ...]] = []
         errors: list[Exception] = []
         for provider, outcome in zip(self.providers, outcomes, strict=True):
             if isinstance(outcome, Exception):
                 errors.append(outcome)
                 continue
             successful.append(provider.name)
-            raw_results.extend(outcome)
+            provider_results.append(tuple(outcome))
         if not successful:
             detail = "; ".join(type(error).__name__ for error in errors) or "no providers"
             raise RuntimeError(f"all deterministic search providers failed: {detail}")
 
+        # Preserve provider diversity under the global result cap. Concatenating
+        # provider buckets would silently starve later providers whenever
+        # len(providers) * results_per_provider exceeds max_total_results.
+        raw_results: list[RawSearchResult] = []
+        max_depth = max((len(items) for items in provider_results), default=0)
+        for rank in range(max_depth):
+            for items in provider_results:
+                if rank >= len(items):
+                    continue
+                raw_results.append(items[rank])
+                if len(raw_results) >= self.policy.max_total_results:
+                    break
+            if len(raw_results) >= self.policy.max_total_results:
+                break
+
         canonical: list[CanonicalSearchResult] = []
-        for result in raw_results[: self.policy.max_total_results]:
+        for result in raw_results:
             try:
                 classified = classify_result(plan, result, policy=self.policy)
             except ValueError:
