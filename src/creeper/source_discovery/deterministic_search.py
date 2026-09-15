@@ -162,7 +162,7 @@ def relevance_score(cell: SearchCell, result: RawSearchResult) -> float:
     terms = _MECHANISM_TERMS[cell.mechanism]
     mechanism_hit = any(term in text for term in terms)
     artifact_hit = (
-        result.resource_type.lower() in {"dataset", "collection", "software"}
+        result.resource_type.lower() in {"dataset", "collection", "software", "file"}
         or any(term in text for term in _ARTIFACT_TERMS)
         or format_path_from_locator(result.url).endswith(_SOURCE_SUFFIXES)
     )
@@ -198,7 +198,10 @@ def candidate_from_result(
     result: CanonicalSearchResult,
 ) -> SourceCandidate:
     path = format_path_from_locator(result.canonical_url)
-    source_like = path.endswith(_SOURCE_SUFFIXES)
+    source_like = (
+        path.endswith(_SOURCE_SUFFIXES)
+        or result.raw.resource_type.lower() == "file"
+    )
     direct = is_direct_evidence_entrypoint(result.canonical_url)
     years = _period_years(plan.cell.period)
     temporal = 0.85 if any(
@@ -411,6 +414,216 @@ class DataCiteSearchProvider:
             if len(results) >= page_size:
                 break
         return tuple(results)
+
+
+def _dataverse_query(plan: QueryPlan) -> str:
+    variants = _MECHANISM_TERMS[plan.cell.mechanism]
+    phrase = variants[plan.variant % len(variants)]
+    institution = plan.cell.institution.replace("_", " ")
+    artifact = plan.cell.artifact.replace("_", " ")
+    clauses = [
+        f'"{plan.cell.period}"',
+        f'"{phrase}"',
+        f'"{institution}"',
+        f'"{artifact}"',
+    ]
+    clauses.extend(
+        f'-"{item}"'
+        for item in plan.exclusions
+        if item and len(item) <= 80
+    )
+    return " ".join(clauses)
+
+
+def _dataverse_year(value: object) -> int | None:
+    if not isinstance(value, str) or len(value) < 4:
+        return None
+    prefix = value[:4]
+    if not prefix.isdigit():
+        return None
+    year = int(prefix)
+    return year if 1000 <= year <= 9999 else None
+
+
+def _dataverse_identifiers(item: dict[str, object]) -> tuple[str, ...]:
+    # File-level persistent IDs keep different files in one dataset distinct.
+    value = item.get("file_persistent_id")
+    if isinstance(value, str) and value.strip():
+        return (value.strip(),)
+    return ()
+
+
+def _dataverse_description(item: dict[str, object]) -> str:
+    values: list[str] = []
+    for key in ("description", "dataset_name", "dataset_citation"):
+        value = item.get(key)
+        if isinstance(value, str) and value.strip():
+            values.append(value.strip())
+    return " ".join(values)
+
+
+class DataverseSearchProvider:
+    """Bounded public Dataverse file search across configured installations."""
+
+    name = "dataverse"
+
+    def __init__(
+        self,
+        client: httpx.AsyncClient,
+        *,
+        endpoints: tuple[str, ...],
+        timeout_seconds: float = 20.0,
+    ) -> None:
+        if not endpoints:
+            raise ValueError("Dataverse provider requires at least one endpoint")
+        normalized: list[str] = []
+        for endpoint in endpoints:
+            parsed = urlsplit(endpoint.strip())
+            if (
+                parsed.scheme not in {"http", "https"}
+                or parsed.hostname is None
+                or parsed.query
+                or parsed.fragment
+            ):
+                raise ValueError(
+                    "Dataverse endpoints must be absolute http(s) URLs "
+                    "without query/fragment"
+                )
+            normalized.append(endpoint.rstrip("/"))
+        self.client = client
+        self.endpoints = tuple(dict.fromkeys(normalized))
+        self.timeout_seconds = float(timeout_seconds)
+
+    async def _search_endpoint(
+        self,
+        endpoint: str,
+        plan: QueryPlan,
+        *,
+        limit: int,
+    ) -> tuple[RawSearchResult, ...]:
+        response = await self.client.get(
+            endpoint,
+            params=[
+                ("q", _dataverse_query(plan)),
+                ("type", "file"),
+                ("fq", "publicationStatus:Published"),
+                ("per_page", str(min(1000, max(1, int(limit))))),
+                ("start", "0"),
+                ("sort", "score"),
+                ("order", "desc"),
+                ("query_entities", "false"),
+            ],
+            timeout=self.timeout_seconds,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, dict) or payload.get("status") != "OK":
+            return ()
+        data = payload.get("data")
+        if not isinstance(data, dict):
+            return ()
+        items = data.get("items")
+        if not isinstance(items, list):
+            return ()
+
+        provider_name = f"dataverse:{urlsplit(endpoint).hostname}"
+        results: list[RawSearchResult] = []
+        for item in items:
+            if not isinstance(item, dict) or item.get("type") != "file":
+                continue
+            url = item.get("url")
+            if not isinstance(url, str) or not url.startswith(("http://", "https://")):
+                continue
+            file_id = item.get("file_id")
+            persistent_id = item.get("file_persistent_id")
+            record_id = (
+                str(file_id)
+                if isinstance(file_id, (str, int)) and str(file_id).strip()
+                else (
+                    str(persistent_id)
+                    if isinstance(persistent_id, str) and persistent_id.strip()
+                    else url
+                )
+            )
+            title = item.get("name")
+            title = title if isinstance(title, str) else ""
+            size = item.get("size_in_bytes")
+            try:
+                content_length = int(size) if size is not None else None
+            except (TypeError, ValueError):
+                content_length = None
+            results.append(
+                RawSearchResult(
+                    provider=provider_name,
+                    provider_result_id=record_id,
+                    url=url,
+                    title=title,
+                    description=_dataverse_description(item),
+                    publisher=str(
+                        item.get("name_of_dataverse")
+                        or item.get("publisher")
+                        or urlsplit(endpoint).hostname
+                        or ""
+                    ),
+                    publication_year=_dataverse_year(
+                        item.get("published_at")
+                        or item.get("releaseOrCreateDate")
+                    ),
+                    resource_type="File",
+                    identifiers=_dataverse_identifiers(item),
+                    content_length=content_length,
+                )
+            )
+            if len(results) >= limit:
+                break
+        return tuple(results)
+
+    async def search(
+        self,
+        plan: QueryPlan,
+        *,
+        limit: int,
+    ) -> tuple[RawSearchResult, ...]:
+        total_limit = max(1, int(limit))
+        per_endpoint = max(
+            1,
+            math.ceil(total_limit / len(self.endpoints)),
+        )
+        outcomes = await asyncio.gather(
+            *(
+                self._search_endpoint(
+                    endpoint,
+                    plan,
+                    limit=per_endpoint,
+                )
+                for endpoint in self.endpoints
+            ),
+            return_exceptions=True,
+        )
+        successful: list[tuple[RawSearchResult, ...]] = []
+        errors: list[Exception] = []
+        for outcome in outcomes:
+            if isinstance(outcome, Exception):
+                errors.append(outcome)
+            else:
+                successful.append(outcome)
+        if not successful:
+            detail = "; ".join(type(error).__name__ for error in errors)
+            raise RuntimeError(
+                f"all Dataverse installations failed: {detail or 'no results'}"
+            )
+
+        # Round-robin results so one large installation cannot consume the
+        # entire bounded SearchCell budget before smaller installations appear.
+        merged: list[RawSearchResult] = []
+        max_rows = max((len(rows) for rows in successful), default=0)
+        for index in range(max_rows):
+            for rows in successful:
+                if index < len(rows):
+                    merged.append(rows[index])
+                    if len(merged) >= total_limit:
+                        return tuple(merged)
+        return tuple(merged)
 
 
 def _zenodo_records(payload: object) -> list[dict[str, object]]:
