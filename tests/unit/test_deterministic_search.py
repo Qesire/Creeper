@@ -574,6 +574,44 @@ class DeterministicSearchTests(unittest.TestCase):
         self.assertIsNotNone(second)
         self.assertEqual(first.dataset_key, second.dataset_key)
 
+    def test_executor_round_robins_providers_before_global_cap(self) -> None:
+        class Provider:
+            def __init__(self, name: str) -> None:
+                self.name = name
+
+            async def search(self, plan, *, limit):
+                return tuple(
+                    RawSearchResult(
+                        provider=self.name,
+                        provider_result_id=f"{self.name}-{index}",
+                        url=f"https://{self.name}.example/proxy-{index}.log",
+                        title=f"1998 University Proxy Trace {self.name} {index}",
+                        description="HTTP proxy access log trace",
+                        publication_year=1998,
+                        resource_type="file",
+                    )
+                    for index in range(2)
+                )
+
+        policy = DeterministicSearchPolicy(
+            results_per_provider=2,
+            max_total_results=4,
+            min_relevance_score=0.55,
+            timeout_seconds=5.0,
+        )
+        batch = asyncio.run(
+            DeterministicSearchExecutor(
+                tuple(Provider(f"p{index}") for index in range(4)),
+                policy=policy,
+            )(self.plan)
+        )
+
+        self.assertEqual(len(batch.results), 4)
+        self.assertEqual(
+            [item.raw.provider for item in batch.results],
+            ["p0", "p1", "p2", "p3"],
+        )
+
     def test_executor_returns_pure_canonical_results(self) -> None:
         class Provider:
             name = "fixture"
