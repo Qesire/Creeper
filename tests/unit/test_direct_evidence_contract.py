@@ -64,12 +64,15 @@ class DirectEvidenceContractTests(unittest.TestCase):
         self.assertTrue(contract.grants_direct_web_year)
         self.assertEqual(contract.parser_kind, "cdxj")
 
-    def test_content_identified_cdxj_binding_produces_direct_year_records(self) -> None:
-        contract = resolve_source_evidence_contract(
-            "https://repo.example/object/opaque",
+    def test_content_identified_cdxj_binding_without_authority_is_hint_only(self) -> None:
+        contract = SourceEvidenceContract(
+            contract_id="opaque-cdxj-discovery-v1",
+            authority=EvidenceAuthority.DISCOVERY_ONLY,
             parser_kind="cdxj",
+            temporal_semantics="unreviewed_archive_index_record",
+            evidence_type="discovery_candidate",
+            policy_version="source-evidence-v1",
         )
-        self.assertTrue(contract.grants_direct_web_year)
 
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "opaque-artifact"
@@ -99,7 +102,7 @@ class DirectEvidenceContractTests(unittest.TestCase):
                 root_locator=str(path),
                 enumeration_kind="structured_records",
                 capacity_lower=1,
-                evidence_mode="direct_year",
+                evidence_mode="discovery_only",
                 state=ReservoirState.READY,
             )
 
@@ -111,12 +114,9 @@ class DirectEvidenceContractTests(unittest.TestCase):
 
         self.assertEqual(host.hostname, "direct.com")
         self.assertEqual(host.source_year, 1999)
-        self.assertEqual(host.direct_year_mask, 1 << (1999 - 1996))
-        self.assertEqual(host.year_hint_mask, 0)
-        self.assertEqual(
-            host.evidence_contract_id,
-            contract.contract_id,
-        )
+        self.assertEqual(host.direct_year_mask, 0)
+        self.assertEqual(host.year_hint_mask, 1 << (1999 - 1996))
+        self.assertEqual(host.evidence_contract_id, "")
 
     def test_trusted_jsonl_contract_produces_direct_year_and_capsule_provenance(self) -> None:
         contract = _direct_contract(
