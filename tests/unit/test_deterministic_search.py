@@ -79,6 +79,11 @@ class DeterministicSearchTests(unittest.TestCase):
         def handler(request: httpx.Request) -> httpx.Response:
             self.assertEqual(request.url.path, "/dois")
             self.assertIn("query", request.url.params)
+            query = request.url.params["query"]
+            self.assertIn('"1998"', query)
+            self.assertIn('"proxy trace"', query)
+            self.assertIn('"university"', query)
+            self.assertIn('"trace"', query)
             return httpx.Response(
                 200,
                 json={
