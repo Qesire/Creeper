@@ -145,6 +145,7 @@ class ResidualSearchLedgerTests(unittest.TestCase):
         self.assertEqual(second.state, SearchCellState.SATURATED)
 
     def test_empty_queries_require_full_query_program_before_saturation(self) -> None:
+        self.ledger.ensure_cell(self.cell)
         scheduler = SearchCellScheduler(self.ledger)
         expected_steps = query_program_length(self.cell)
         self.assertEqual(
