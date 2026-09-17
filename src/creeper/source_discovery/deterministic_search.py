@@ -980,14 +980,24 @@ class InternetArchiveSearchProvider:
             *(self._files(identifier) for identifier, _doc in items),
             return_exceptions=True,
         )
+        file_errors = [
+            outcome
+            for outcome in file_outcomes
+            if isinstance(outcome, Exception)
+        ]
+        if file_errors:
+            detail = "; ".join(type(error).__name__ for error in file_errors)
+            raise RuntimeError(
+                "Internet Archive bounded item expansion incomplete: " + detail
+            ) from file_errors[0]
+
         results: list[RawSearchResult] = []
         for (identifier, doc), outcome in zip(
             items,
             file_outcomes,
             strict=True,
         ):
-            if isinstance(outcome, Exception):
-                continue
+            assert not isinstance(outcome, Exception)
             item_title = _ia_text(doc.get("title"))
             item_description = " ".join(
                 value
@@ -1071,16 +1081,21 @@ class DeterministicSearchExecutor:
         outcomes = await asyncio.gather(*calls, return_exceptions=True)
         successful: list[str] = []
         provider_results: list[tuple[RawSearchResult, ...]] = []
-        errors: list[Exception] = []
+        errors: list[tuple[str, Exception]] = []
         for provider, outcome in zip(self.providers, outcomes, strict=True):
             if isinstance(outcome, Exception):
-                errors.append(outcome)
+                errors.append((provider.name, outcome))
                 continue
             successful.append(provider.name)
             provider_results.append(tuple(outcome))
-        if not successful:
-            detail = "; ".join(type(error).__name__ for error in errors) or "no providers"
-            raise RuntimeError(f"all deterministic search providers failed: {detail}")
+        if errors:
+            detail = "; ".join(
+                f"{provider}: {type(error).__name__}"
+                for provider, error in errors
+            )
+            raise RuntimeError(
+                "configured deterministic search providers incomplete: " + detail
+            ) from errors[0][1]
 
         # Preserve provider diversity under the global result cap. Concatenating
         # provider buckets would silently starve later providers whenever
