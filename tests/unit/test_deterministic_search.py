@@ -31,10 +31,13 @@ class DeterministicSearchTests(unittest.TestCase):
         )
         self.plan = QueryPlan(
             cell=self.cell,
-            query='"1998" "proxy trace" university "trace dataset"',
+            query='"1998" "proxy" university trace',
             variant=0,
             exclusions=(),
             score=1.0,
+            mechanism_phrase="proxy",
+            include_institution=True,
+            query_shape="STRICT_4D",
         )
         self.policy = DeterministicSearchPolicy(
             results_per_provider=10,
@@ -78,6 +81,31 @@ class DeterministicSearchTests(unittest.TestCase):
             resource_type="Dataset",
         )
         self.assertIsNone(classify_result(self.plan, result, policy=self.policy))
+
+    def test_provider_queries_follow_scheduler_relaxed_shape(self) -> None:
+        relaxed = QueryPlan(
+            cell=self.cell,
+            query='"1998" "proxy" trace',
+            variant=1,
+            exclusions=("famous proxy trace",),
+            score=1.0,
+            mechanism_phrase="proxy",
+            include_institution=False,
+            query_shape="RELAX_INSTITUTION",
+        )
+
+        for provider_type in (
+            DataCiteSearchProvider,
+            ZenodoSearchProvider,
+            HarvardDataverseSearchProvider,
+            InternetArchiveSearchProvider,
+        ):
+            query = provider_type._query(relaxed)
+            self.assertIn('"1998"', query)
+            self.assertIn('"proxy"', query)
+            self.assertIn('"trace"', query)
+            self.assertNotIn("university", query.lower())
+            self.assertIn("famous proxy trace", query)
 
     def test_datacite_provider_prefers_direct_content_url(self) -> None:
         def handler(request: httpx.Request) -> httpx.Response:
@@ -129,13 +157,16 @@ class DeterministicSearchTests(unittest.TestCase):
         )
         self.assertEqual(results[0].provider_result_id, "10.1234/proxy98")
 
-    def test_datacite_query_rotates_mechanism_variant_without_losing_cell_anchors(self) -> None:
+    def test_datacite_query_uses_scheduler_phrase_without_losing_cell_anchors(self) -> None:
         variant_plan = QueryPlan(
             cell=self.cell,
-            query='"1998" "access log" university "trace dataset"',
-            variant=2,
+            query='"1998" "access log" university trace',
+            variant=4,
             exclusions=("famous proxy trace",),
             score=1.0,
+            mechanism_phrase="access log",
+            include_institution=True,
+            query_shape="STRICT_4D",
         )
 
         seen_query = None
