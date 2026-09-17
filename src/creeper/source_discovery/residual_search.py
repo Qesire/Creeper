@@ -32,8 +32,9 @@ class SearchCellState(StrEnum):
 
 
 # These mappings are the single authority for the semantic clauses sent to
-# deterministic providers. Provider-specific code may translate syntax (AND,
-# exclusion operator, pagination), but must not invent different query terms.
+# deterministic providers. Mechanism synonyms are explored explicitly; the
+# institution/artifact dimensions use the canonical SearchCell labels so the
+# ledger and provider queries cannot drift onto different vocabularies.
 MECHANISM_QUERY_TERMS: dict[str, tuple[str, ...]] = {
     "proxy_access": ("proxy", "cache", "access log", "http trace"),
     "client_trace": ("client trace", "web trace", "http trace", "browser trace"),
@@ -54,29 +55,29 @@ MECHANISM_QUERY_TERMS: dict[str, tuple[str, ...]] = {
 
 INSTITUTION_QUERY_TERMS: dict[str, str] = {
     "university": "university",
-    "research_lab": "research laboratory",
-    "isp": "ISP",
-    "nren": "research network",
-    "nic": "network information center",
+    "research_lab": "research lab",
+    "isp": "isp",
+    "nren": "nren",
+    "nic": "nic",
     "government": "government",
     "software_archive": "software archive",
-    "conference_project": "research project",
+    "conference_project": "conference project",
     "commercial": "commercial",
 }
 
 ARTIFACT_QUERY_TERMS: dict[str, str] = {
     "log": "log",
-    "trace": "trace dataset",
-    "dump": "data dump",
-    "list": "host list",
+    "trace": "trace",
+    "dump": "dump",
+    "list": "list",
     "index": "index",
     "database": "database",
     "catalog": "catalog",
-    "supplement": "supplementary data",
-    "archive": "tar zip archive",
-    "directory": "FTP directory",
-    "cdrom": "CD-ROM data",
-    "companion": "paper companion data",
+    "supplement": "supplement",
+    "archive": "archive",
+    "directory": "directory",
+    "cdrom": "cdrom",
+    "companion": "companion",
 }
 
 _QUERY_SHAPES: tuple[str, ...] = ("STRICT_4D", "RELAX_INSTITUTION")
@@ -637,11 +638,11 @@ class ResidualSearchLedger:
 
     def _should_saturate(self, stats: SearchCellStats) -> bool:
         policy = self.policy
-        # Zero-result saturation is coverage-based, not attempt-count based.
-        # A cell is empty only after every mechanism phrase has been tested in
-        # both strict and institution-relaxed shapes at least once.
+        # Zero-result saturation is coverage-based, not a proxy for query
+        # quality. Each record_episode corresponds to one query that actually
+        # completed, so attempts is the unambiguous executed-program counter.
         if stats.result_count == 0:
-            return stats.variant_cursor >= query_program_length(stats.cell)
+            return stats.attempts >= query_program_length(stats.cell)
         if stats.attempts < policy.saturation_min_attempts:
             return False
         if stats.result_count < policy.saturation_min_results:
