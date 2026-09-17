@@ -36,6 +36,7 @@ class ResidualSearchProgramCoverageTests(unittest.TestCase):
                 period="1998",
                 artifact="trace",
             )
+            ledger.ensure_cell(cell)
             scheduler = SearchCellScheduler(ledger)
             program_length = query_program_length(cell)
             self.assertEqual(
