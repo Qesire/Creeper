@@ -24,8 +24,10 @@ class ResidualProviderCompletenessTests(unittest.TestCase):
             query='"1998" "proxy" "university" "trace"',
             exclusions=(),
             variant=0,
+            score=1.0,
             mechanism_phrase="proxy",
             include_institution=True,
+            query_shape="STRICT_4D",
         )
 
     def test_executor_fails_closed_when_any_configured_provider_fails(self) -> None:
