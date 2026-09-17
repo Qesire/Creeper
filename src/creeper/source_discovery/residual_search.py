@@ -31,9 +31,9 @@ class SearchCellState(StrEnum):
     EXHAUSTED = "EXHAUSTED"
 
 
-# This is the single authority for mechanism search phrases. Providers consume
-# the phrase selected into QueryPlan instead of maintaining their own synonym
-# tables, so the coverage ledger records the query that was actually executed.
+# These mappings are the single authority for the semantic clauses sent to
+# deterministic providers. Provider-specific code may translate syntax (AND,
+# exclusion operator, pagination), but must not invent different query terms.
 MECHANISM_QUERY_TERMS: dict[str, tuple[str, ...]] = {
     "proxy_access": ("proxy", "cache", "access log", "http trace"),
     "client_trace": ("client trace", "web trace", "http trace", "browser trace"),
@@ -52,7 +52,7 @@ MECHANISM_QUERY_TERMS: dict[str, tuple[str, ...]] = {
     "software_mirror": ("mirror sites", "software mirror", "mirror list"),
 }
 
-_INSTITUTION_PHRASES: dict[str, str] = {
+INSTITUTION_QUERY_TERMS: dict[str, str] = {
     "university": "university",
     "research_lab": "research laboratory",
     "isp": "ISP",
@@ -64,7 +64,7 @@ _INSTITUTION_PHRASES: dict[str, str] = {
     "commercial": "commercial",
 }
 
-_ARTIFACT_PHRASES: dict[str, str] = {
+ARTIFACT_QUERY_TERMS: dict[str, str] = {
     "log": "log",
     "trace": "trace dataset",
     "dump": "data dump",
@@ -101,9 +101,9 @@ class SearchCell:
                 raise ValueError(f"{name} must be a non-empty string")
         if self.mechanism not in MECHANISM_QUERY_TERMS:
             raise ValueError(f"unsupported mechanism: {self.mechanism}")
-        if self.institution not in _INSTITUTION_PHRASES:
+        if self.institution not in INSTITUTION_QUERY_TERMS:
             raise ValueError(f"unsupported institution: {self.institution}")
-        if self.artifact not in _ARTIFACT_PHRASES:
+        if self.artifact not in ARTIFACT_QUERY_TERMS:
             raise ValueError(f"unsupported artifact: {self.artifact}")
         if not _valid_period(self.period):
             raise ValueError("period must overlap 1996-2001")
@@ -747,15 +747,15 @@ class SearchCellScheduler:
         mechanism = mechanism_variants[mechanism_index]
         query_shape = _QUERY_SHAPES[shape_index]
         include_institution = query_shape == "STRICT_4D"
-        institution = _INSTITUTION_PHRASES[cell.institution]
-        artifact = _ARTIFACT_PHRASES[cell.artifact]
+        institution = INSTITUTION_QUERY_TERMS[cell.institution]
+        artifact = ARTIFACT_QUERY_TERMS[cell.artifact]
         anchors = [
             f'"{cell.period}"',
             f'"{mechanism}"',
         ]
         if include_institution:
-            anchors.append(institution)
-        anchors.extend((artifact, '(URL OR hostname OR host)'))
+            anchors.append(f'"{institution}"')
+        anchors.append(f'"{artifact}"')
         exclusions = self.ledger.exclusions(cell)
         exclusion_text = " ".join(
             f'-"{family}"' for family in exclusions if len(family) <= 80
