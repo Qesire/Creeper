@@ -259,7 +259,7 @@ def _provider_rows(connection: sqlite3.Connection) -> list[dict[str, Any]]:
         )
         SELECT
             r.provider AS provider,
-            COUNT(*) AS references,
+            COUNT(*) AS reference_count,
             SUM(r.qualified) AS qualified_references,
             COUNT(DISTINCT r.url_key) AS distinct_urls,
             COUNT(DISTINCT r.artifact_key) AS distinct_artifacts,
@@ -380,7 +380,8 @@ def build_residual_search_report(
     episodes = _shape_rows(connection)
     providers = _provider_rows(connection)
     for item in providers:
-        references = int(item["references"])
+        references = int(item.pop("reference_count"))
+        item["references"] = references
         qualified = int(item["qualified_references"] or 0)
         item["qualified_fraction"] = _safe_ratio(qualified, references)
         item["mean_relevance_score"] = float(item["mean_relevance_score"] or 0.0)
