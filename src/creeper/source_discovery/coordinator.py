@@ -2,24 +2,37 @@
 
 The generic coordinator implementation lives in :mod:`coordinator_core`.  This
 facade keeps its public API stable while strengthening deterministic residual
-search with an all-or-nothing SQLite commit boundary.
+search with an all-or-nothing SQLite commit boundary and conservative protocol
+upgrade recovery.
 """
 
 from __future__ import annotations
 
 from creeper.source_discovery import coordinator_core as _core
 from creeper.source_discovery.residual_atomic import commit_deterministic_residual_batch
+from creeper.source_discovery.residual_recovery import recover_residual_protocol_state
 
 # Preserve the historical module surface, including the few underscore helpers
 # used by tests/debugging.  Base-class method globals intentionally remain in
-# coordinator_core; only the residual durable-commit hook is overridden below.
+# coordinator_core; only residual durability hooks are overridden below.
 for _name in dir(_core):
     if not _name.startswith("__"):
         globals()[_name] = getattr(_core, _name)
 
 
 class SourceDiscoveryCoordinator(_core.SourceDiscoveryCoordinator):
-    """Coordinator with crash-safe deterministic residual result commits."""
+    """Coordinator with crash-safe deterministic residual state."""
+
+    def _recover_stranded_activations(self) -> int:
+        recovered = super()._recover_stranded_activations()
+        scheduler = self.manager.residual_search_scheduler
+        if scheduler is not None and self.search_identity_ledger is not None:
+            recover_residual_protocol_state(
+                self.registry,
+                scheduler.ledger,
+                self.search_identity_ledger,
+            )
+        return recovered
 
     def _commit_deterministic_searches(self, plans, outcomes, counts) -> None:
         if not plans:
