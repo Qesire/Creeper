@@ -1,7 +1,7 @@
 """Deterministic residual-search public facade with fail-closed provider schemas.
 
 The provider implementation is retained verbatim in ``deterministic_search_core``.
-This facade strengthens only two protocol boundaries:
+This facade strengthens three protocol boundaries:
 
 * HTTP 2xx is not equivalent to a successful search unless the documented
   result container is structurally present.  A WAF page, API drift, or partial
@@ -9,6 +9,10 @@ This facade strengthens only two protocol boundaries:
   a legitimate zero-result response.
 * configured provider names must be unique, so one physical provider cannot be
   counted twice toward complete residual coverage.
+* the global result cap must reserve at least one canonicalization slot for
+  every configured provider, otherwise a provider could execute successfully
+  while all of its returned results are silently discarded before identity and
+  novelty accounting.
 """
 
 from __future__ import annotations
@@ -197,6 +201,7 @@ class InternetArchiveSearchProvider(_core.InternetArchiveSearchProvider):
 
 class DeterministicSearchExecutor(_core.DeterministicSearchExecutor):
     def __init__(self, providers, *, policy=None, actor="deterministic:residual-search"):
+        providers = tuple(providers)
         names: list[str] = []
         for provider in providers:
             name = getattr(provider, "name", None)
@@ -205,4 +210,10 @@ class DeterministicSearchExecutor(_core.DeterministicSearchExecutor):
             names.append(name.strip().casefold())
         if len(names) != len(set(names)):
             raise ValueError("deterministic search provider names must be unique")
-        super().__init__(tuple(providers), policy=policy, actor=actor)
+        effective_policy = policy or DeterministicSearchPolicy()
+        if providers and effective_policy.max_total_results < len(providers):
+            raise ValueError(
+                "max_total_results must be at least the number of configured "
+                "deterministic search providers"
+            )
+        super().__init__(providers, policy=effective_policy, actor=actor)
