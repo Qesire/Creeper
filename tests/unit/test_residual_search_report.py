@@ -6,6 +6,10 @@ import unittest
 from pathlib import Path
 
 from creeper.source_discovery.registry import SourceDiscoveryRegistry
+from creeper.source_discovery.residual_recovery import (
+    RESIDUAL_PROTOCOL_REVISION,
+    recover_residual_protocol_state,
+)
 from creeper.source_discovery.residual_report import (
     REPORT_VERSION,
     ResidualSearchReportError,
@@ -41,6 +45,11 @@ class ResidualSearchReportTests(unittest.TestCase):
         )
         self.ledger.ensure_search_profile("providers=alpha,beta")
         self.ledger.ensure_cell(self.cell)
+        recover_residual_protocol_state(
+            self.registry,
+            self.ledger,
+            self.identity,
+        )
 
     def tearDown(self) -> None:
         self.control.close()
@@ -162,6 +171,10 @@ class ResidualSearchReportTests(unittest.TestCase):
         report = build_residual_search_report(self.registry.connection)
 
         self.assertEqual(report["report_version"], REPORT_VERSION)
+        self.assertEqual(
+            report["residual_protocol_revision"],
+            RESIDUAL_PROTOCOL_REVISION,
+        )
         self.assertTrue(
             str(report["search_profile"]).startswith(
                 "residual-query-program-v3|providers=alpha,beta"
@@ -249,6 +262,30 @@ class ResidualSearchReportTests(unittest.TestCase):
             ).fetchone()[0],
             1,
         )
+
+    def test_stale_protocol_revision_fails_closed(self) -> None:
+        self.registry.connection.execute(
+            "UPDATE residual_search_meta SET value='legacy' "
+            "WHERE key='residual_protocol_revision'"
+        )
+        with self.assertRaisesRegex(
+            ResidualSearchReportError,
+            "protocol recovery is required",
+        ):
+            build_residual_search_report(self.registry.connection)
+
+    def test_unfinished_residual_episode_fails_closed(self) -> None:
+        self.registry.begin_search_episode(
+            strategy="RESIDUAL_CELL:proxy_access",
+            backend="alpha+beta",
+            query='"1998" "proxy" "university" "trace"',
+            actor="deterministic:alpha+beta",
+        )
+        with self.assertRaisesRegex(
+            ResidualSearchReportError,
+            "unfinished residual search episode",
+        ):
+            build_residual_search_report(self.registry.connection)
 
     def test_missing_tables_fail_closed(self) -> None:
         connection = sqlite3.connect(":memory:")
