@@ -18,7 +18,11 @@ from creeper.source_discovery.models import (
     is_common_crawl_provenance,
     is_direct_evidence_entrypoint,
 )
-from creeper.source_discovery.residual_search import QueryPlan, SearchCell
+from creeper.source_discovery.residual_search import (
+    MECHANISM_QUERY_TERMS,
+    QueryPlan,
+    SearchCell,
+)
 from creeper.sources.locator import format_path_from_locator
 from creeper.source_discovery.search_identity import (
     CanonicalSearchResult,
@@ -27,23 +31,6 @@ from creeper.source_discovery.search_identity import (
 )
 
 
-_MECHANISM_TERMS: dict[str, tuple[str, ...]] = {
-    "proxy_access": ("proxy", "cache", "access log", "http trace"),
-    "client_trace": ("client trace", "web trace", "http trace", "browser trace"),
-    "dns_survey": ("dns", "host survey", "zone transfer", "hostcount"),
-    "ftp": ("ftp", "anonymous ftp", "ftp sites"),
-    "bbs_telnet": ("bbs", "telnet", "bulletin board"),
-    "gopher": ("gopher",),
-    "mail": ("mail archive", "mailing list", "mbox"),
-    "usenet": ("usenet", "netnews"),
-    "search_engine": ("search engine", "web index", "search index"),
-    "crawler_frontier": ("crawler frontier", "crawl seeds", "seed list"),
-    "human_directory": ("web directory", "internet directory", "site directory"),
-    "link_graph": ("link graph", "hyperlink graph", "web links"),
-    "nic_registry": ("nic", "registry", "host list"),
-    "isp_inventory": ("isp", "host inventory", "network inventory"),
-    "software_mirror": ("mirror sites", "software mirror", "mirror list"),
-}
 _ARTIFACT_TERMS = (
     "dataset",
     "data set",
@@ -166,7 +153,7 @@ def relevance_score(cell: SearchCell, result: RawSearchResult) -> float:
         result.publication_year in years
         or any(re.search(rf"\b{year}\b", text) for year in years)
     )
-    terms = _MECHANISM_TERMS[cell.mechanism]
+    terms = MECHANISM_QUERY_TERMS[cell.mechanism]
     mechanism_hit = any(term in text for term in terms)
     artifact_hit = (
         result.resource_type.lower()
@@ -235,6 +222,17 @@ def candidate_from_result(
         adapter_cost_prior=0.40 if source_like else 0.90,
         confidence=max(0.35, result.relevance_score),
     )
+
+
+def _provider_clauses(plan: QueryPlan) -> list[str]:
+    clauses = [
+        f'"{plan.cell.period}"',
+        f'"{plan.mechanism_phrase}"',
+    ]
+    if plan.include_institution:
+        clauses.append(f'"{plan.cell.institution.replace("_", " ")}"')
+    clauses.append(f'"{plan.cell.artifact.replace("_", " ")}"')
+    return clauses
 
 
 def _string_publisher(value: object) -> str:
@@ -337,22 +335,13 @@ class DataCiteSearchProvider:
 
     @staticmethod
     def _query(plan: QueryPlan) -> str:
-        # Provider queries must preserve all SearchCell dimensions; otherwise
-        # distinct coverage cells collapse back into the same famous result set.
-        variants = _MECHANISM_TERMS[plan.cell.mechanism]
-        phrase = variants[plan.variant % len(variants)]
-        institution = plan.cell.institution.replace("_", " ")
-        artifact = plan.cell.artifact.replace("_", " ")
-        exclusions = " ".join(
+        clauses = _provider_clauses(plan)
+        clauses.extend(
             f'-"{item}"'
             for item in plan.exclusions
             if item and len(item) <= 80
         )
-        query = (
-            f'"{plan.cell.period}" "{phrase}" '
-            f'"{institution}" "{artifact}"'
-        )
-        return f"{query} {exclusions}".strip()
+        return " ".join(clauses)
 
     async def search(
         self,
@@ -581,16 +570,7 @@ class ZenodoSearchProvider:
 
     @staticmethod
     def _query(plan: QueryPlan) -> str:
-        variants = _MECHANISM_TERMS[plan.cell.mechanism]
-        phrase = variants[plan.variant % len(variants)]
-        institution = plan.cell.institution.replace("_", " ")
-        artifact = plan.cell.artifact.replace("_", " ")
-        clauses = [
-            f'"{plan.cell.period}"',
-            f'"{phrase}"',
-            f'"{institution}"',
-            f'"{artifact}"',
-        ]
+        clauses = _provider_clauses(plan)
         clauses.extend(
             f'NOT "{item}"'
             for item in plan.exclusions
@@ -703,16 +683,7 @@ class HarvardDataverseSearchProvider:
 
     @staticmethod
     def _query(plan: QueryPlan) -> str:
-        variants = _MECHANISM_TERMS[plan.cell.mechanism]
-        phrase = variants[plan.variant % len(variants)]
-        institution = plan.cell.institution.replace("_", " ")
-        artifact = plan.cell.artifact.replace("_", " ")
-        clauses = [
-            f'"{plan.cell.period}"',
-            f'"{phrase}"',
-            f'"{institution}"',
-            f'"{artifact}"',
-        ]
+        clauses = _provider_clauses(plan)
         clauses.extend(
             f'-"{item}"'
             for item in plan.exclusions
@@ -925,16 +896,7 @@ class InternetArchiveSearchProvider:
 
     @staticmethod
     def _query(plan: QueryPlan) -> str:
-        variants = _MECHANISM_TERMS[plan.cell.mechanism]
-        phrase = variants[plan.variant % len(variants)]
-        institution = plan.cell.institution.replace("_", " ")
-        artifact = plan.cell.artifact.replace("_", " ")
-        clauses = [
-            f'"{plan.cell.period}"',
-            f'"{phrase}"',
-            f'"{institution}"',
-            f'"{artifact}"',
-        ]
+        clauses = _provider_clauses(plan)
         clauses.extend(
             f'NOT "{item}"'
             for item in plan.exclusions

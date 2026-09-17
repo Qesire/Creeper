@@ -31,50 +31,57 @@ class SearchCellState(StrEnum):
     EXHAUSTED = "EXHAUSTED"
 
 
-_MECHANISM_PHRASES: dict[str, tuple[str, ...]] = {
-    "proxy_access": ("proxy trace", "HTTP access log", "cache trace"),
-    "client_trace": ("web client trace", "HTTP client trace"),
-    "dns_survey": ("DNS survey", "host survey", "zone inventory"),
-    "ftp": ("FTP site list", "anonymous FTP list"),
-    "bbs_telnet": ("BBS list", "telnet hosts"),
-    "gopher": ("Gopher directory", "Gopher server list"),
-    "mail": ("mail archive URLs", "mailing list URLs"),
-    "usenet": ("Usenet URLs", "Usenet hostname list"),
-    "search_engine": ("search engine index", "crawler seed list"),
-    "crawler_frontier": ("crawler frontier", "crawl seed list"),
-    "human_directory": ("web directory", "Internet directory"),
-    "link_graph": ("hyperlink graph", "web link list"),
-    "nic_registry": ("NIC host list", "registry host list"),
-    "isp_inventory": ("ISP host inventory", "network host list"),
-    "software_mirror": ("software mirror list", "mirror site list"),
+# These mappings are the single authority for the semantic clauses sent to
+# deterministic providers. Mechanism synonyms are explored explicitly; the
+# institution/artifact dimensions use the canonical SearchCell labels so the
+# ledger and provider queries cannot drift onto different vocabularies.
+MECHANISM_QUERY_TERMS: dict[str, tuple[str, ...]] = {
+    "proxy_access": ("proxy", "cache", "access log", "http trace"),
+    "client_trace": ("client trace", "web trace", "http trace", "browser trace"),
+    "dns_survey": ("dns", "host survey", "zone transfer", "hostcount"),
+    "ftp": ("ftp", "anonymous ftp", "ftp sites"),
+    "bbs_telnet": ("bbs", "telnet", "bulletin board"),
+    "gopher": ("gopher",),
+    "mail": ("mail archive", "mailing list", "mbox"),
+    "usenet": ("usenet", "netnews"),
+    "search_engine": ("search engine", "web index", "search index"),
+    "crawler_frontier": ("crawler frontier", "crawl seeds", "seed list"),
+    "human_directory": ("web directory", "internet directory", "site directory"),
+    "link_graph": ("link graph", "hyperlink graph", "web links"),
+    "nic_registry": ("nic", "registry", "host list"),
+    "isp_inventory": ("isp", "host inventory", "network inventory"),
+    "software_mirror": ("mirror sites", "software mirror", "mirror list"),
 }
 
-_INSTITUTION_PHRASES: dict[str, str] = {
+INSTITUTION_QUERY_TERMS: dict[str, str] = {
     "university": "university",
-    "research_lab": "research laboratory",
-    "isp": "ISP",
-    "nren": "research network",
-    "nic": "network information center",
+    "research_lab": "research lab",
+    "isp": "isp",
+    "nren": "nren",
+    "nic": "nic",
     "government": "government",
     "software_archive": "software archive",
-    "conference_project": "research project",
+    "conference_project": "conference project",
     "commercial": "commercial",
 }
 
-_ARTIFACT_PHRASES: dict[str, str] = {
+ARTIFACT_QUERY_TERMS: dict[str, str] = {
     "log": "log",
-    "trace": "trace dataset",
-    "dump": "data dump",
-    "list": "host list",
+    "trace": "trace",
+    "dump": "dump",
+    "list": "list",
     "index": "index",
     "database": "database",
     "catalog": "catalog",
-    "supplement": "supplementary data",
-    "archive": "tar zip archive",
-    "directory": "FTP directory",
-    "cdrom": "CD-ROM data",
-    "companion": "paper companion data",
+    "supplement": "supplement",
+    "archive": "archive",
+    "directory": "directory",
+    "cdrom": "cdrom",
+    "companion": "companion",
 }
+
+_QUERY_SHAPES: tuple[str, ...] = ("STRICT_4D", "RELAX_INSTITUTION")
+_SEARCH_PROFILE_SCHEMA = "residual-query-program-v3"
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,11 +100,11 @@ class SearchCell:
         ):
             if not isinstance(value, str) or not value.strip():
                 raise ValueError(f"{name} must be a non-empty string")
-        if self.mechanism not in _MECHANISM_PHRASES:
+        if self.mechanism not in MECHANISM_QUERY_TERMS:
             raise ValueError(f"unsupported mechanism: {self.mechanism}")
-        if self.institution not in _INSTITUTION_PHRASES:
+        if self.institution not in INSTITUTION_QUERY_TERMS:
             raise ValueError(f"unsupported institution: {self.institution}")
-        if self.artifact not in _ARTIFACT_PHRASES:
+        if self.artifact not in ARTIFACT_QUERY_TERMS:
             raise ValueError(f"unsupported artifact: {self.artifact}")
         if not _valid_period(self.period):
             raise ValueError("period must overlap 1996-2001")
@@ -117,6 +124,9 @@ class QueryPlan:
     variant: int
     exclusions: tuple[str, ...]
     score: float
+    mechanism_phrase: str
+    include_institution: bool
+    query_shape: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -131,6 +141,7 @@ class SearchCellStats:
     qualified_roots: int
     accepted_novel_eed: float
     search_cost_seconds: float
+    variant_cursor: int
 
     @property
     def duplicate_fraction(self) -> float:
@@ -177,6 +188,12 @@ class ResidualSearchPolicy:
             raise ValueError("saturation_max_qualified_fraction must be within [0,1]")
         if self.max_exclusions < 0 or self.exclusion_min_hits < 1:
             raise ValueError("invalid exclusion policy")
+
+
+def query_program_length(cell: SearchCell) -> int:
+    """Return the finite number of deterministic query shapes for one cell."""
+
+    return len(MECHANISM_QUERY_TERMS[cell.mechanism]) * len(_QUERY_SHAPES)
 
 
 def _valid_period(period: str) -> bool:
@@ -272,17 +289,18 @@ class ResidualSearchLedger:
         """Install one deterministic-search profile and reopen cells on change.
 
         Search saturation is meaningful only for the provider/query-policy set
-        that produced it. Adding a new provider must therefore reopen coverage
-        rather than inheriting a stale SATURATED state. Stable URL/dataset
-        identity remains durable in SearchIdentityLedger and will quickly
-        rediscover duplicates without losing global memory.
+        that produced it. Adding a new provider or changing the finite query
+        program must therefore reopen coverage rather than inherit stale
+        SATURATED state. Stable URL/dataset identity remains durable in
+        SearchIdentityLedger and quickly rediscovers duplicates without losing
+        global memory.
 
         Returns True when an existing profile changed and coverage was reset.
         """
 
         if not isinstance(signature, str) or not signature.strip():
             raise ValueError("search profile signature must be non-empty")
-        signature = signature.strip()
+        signature = f"{_SEARCH_PROFILE_SCHEMA}|{signature.strip()}"
         row = self.connection.execute(
             "SELECT value FROM residual_search_meta WHERE key='search_profile'"
         ).fetchone()
@@ -371,6 +389,7 @@ class ResidualSearchLedger:
             qualified_roots=int(row["qualified_roots"]),
             accepted_novel_eed=float(row["accepted_novel_eed"]),
             search_cost_seconds=float(row["search_cost_seconds"]),
+            variant_cursor=int(row["variant_cursor"]),
         )
 
     def list_stats(
@@ -405,6 +424,7 @@ class ResidualSearchLedger:
                     qualified_roots=int(row["qualified_roots"]),
                     accepted_novel_eed=float(row["accepted_novel_eed"]),
                     search_cost_seconds=float(row["search_cost_seconds"]),
+                    variant_cursor=int(row["variant_cursor"]),
                 )
             )
         return result
@@ -618,13 +638,13 @@ class ResidualSearchLedger:
 
     def _should_saturate(self, stats: SearchCellStats) -> bool:
         policy = self.policy
+        # Zero-result saturation is coverage-based, not a proxy for query
+        # quality. Each record_episode corresponds to one query that actually
+        # completed, so attempts is the unambiguous executed-program counter.
+        if stats.result_count == 0:
+            return stats.attempts >= query_program_length(stats.cell)
         if stats.attempts < policy.saturation_min_attempts:
             return False
-        # Repeated empty queries are evidence that this provider/profile cannot
-        # cover the cell. Do not keep paraphrasing forever waiting to reach a
-        # minimum result count that will never arrive.
-        if stats.result_count == 0:
-            return True
         if stats.result_count < policy.saturation_min_results:
             return False
         duplicate_saturation = (
@@ -720,19 +740,23 @@ class SearchCellScheduler:
 
     def _query_plan(self, stats: SearchCellStats) -> QueryPlan:
         cell = stats.cell
-        mechanism_variants = _MECHANISM_PHRASES[cell.mechanism]
+        mechanism_variants = MECHANISM_QUERY_TERMS[cell.mechanism]
         cursor = self.ledger.variant_cursor(cell)
-        variant = cursor % len(mechanism_variants)
-        mechanism = mechanism_variants[variant]
-        institution = _INSTITUTION_PHRASES[cell.institution]
-        artifact = _ARTIFACT_PHRASES[cell.artifact]
-        anchors = (
+        program_variant = cursor % query_program_length(cell)
+        mechanism_index = program_variant // len(_QUERY_SHAPES)
+        shape_index = program_variant % len(_QUERY_SHAPES)
+        mechanism = mechanism_variants[mechanism_index]
+        query_shape = _QUERY_SHAPES[shape_index]
+        include_institution = query_shape == "STRICT_4D"
+        institution = INSTITUTION_QUERY_TERMS[cell.institution]
+        artifact = ARTIFACT_QUERY_TERMS[cell.artifact]
+        anchors = [
             f'"{cell.period}"',
             f'"{mechanism}"',
-            institution,
-            artifact,
-            '(URL OR hostname OR host)',
-        )
+        ]
+        if include_institution:
+            anchors.append(f'"{institution}"')
+        anchors.append(f'"{artifact}"')
         exclusions = self.ledger.exclusions(cell)
         exclusion_text = " ".join(
             f'-"{family}"' for family in exclusions if len(family) <= 80
@@ -743,9 +767,12 @@ class SearchCellScheduler:
         return QueryPlan(
             cell=cell,
             query=query,
-            variant=variant,
+            variant=program_variant,
             exclusions=exclusions,
             score=self.score(stats),
+            mechanism_phrase=mechanism,
+            include_institution=include_institution,
+            query_shape=query_shape,
         )
 
 
