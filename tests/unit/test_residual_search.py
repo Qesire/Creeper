@@ -12,12 +12,14 @@ from creeper.source_discovery.manager import (
 )
 from creeper.source_discovery.registry import SourceDiscoveryRegistry
 from creeper.source_discovery.residual_search import (
+    MECHANISM_QUERY_TERMS,
     ResidualSearchLedger,
     ResidualSearchPolicy,
     SearchCell,
     SearchCellScheduler,
     SearchCellState,
     default_search_cells,
+    query_program_length,
 )
 from creeper.storage.control_store import ControlStore
 
@@ -142,24 +144,36 @@ class ResidualSearchLedgerTests(unittest.TestCase):
         )
         self.assertEqual(second.state, SearchCellState.SATURATED)
 
-    def test_repeated_empty_queries_saturate_without_waiting_for_result_floor(self) -> None:
-        self.ledger.record_episode(
-            self.cell,
-            result_count=0,
-            duplicate_results=0,
-            unique_roots=0,
-            new_families=0,
-            qualified_roots=0,
+    def test_empty_queries_require_full_query_program_before_saturation(self) -> None:
+        scheduler = SearchCellScheduler(self.ledger)
+        expected_steps = query_program_length(self.cell)
+        self.assertEqual(
+            expected_steps,
+            len(MECHANISM_QUERY_TERMS["proxy_access"]) * 2,
         )
-        stats = self.ledger.record_episode(
-            self.cell,
-            result_count=0,
-            duplicate_results=0,
-            unique_roots=0,
-            new_families=0,
-            qualified_roots=0,
-        )
-        self.assertEqual(stats.state, SearchCellState.SATURATED)
+
+        seen: list[tuple[str, bool]] = []
+        for index in range(expected_steps):
+            plan = scheduler.next_plans(limit=1)[0]
+            seen.append((plan.mechanism_phrase, plan.include_institution))
+            stats = self.ledger.record_episode(
+                self.cell,
+                result_count=0,
+                duplicate_results=0,
+                unique_roots=0,
+                new_families=0,
+                qualified_roots=0,
+            )
+            expected_state = (
+                SearchCellState.SATURATED
+                if index == expected_steps - 1
+                else SearchCellState.ACTIVE
+            )
+            self.assertEqual(stats.state, expected_state)
+
+        self.assertEqual(len(seen), expected_steps)
+        self.assertEqual(len(set(seen)), expected_steps)
+        self.assertEqual(SearchCellScheduler(self.ledger).next_plans(limit=1), ())
 
     def test_search_profile_change_reopens_cells_and_resets_local_metrics(self) -> None:
         self.assertFalse(self.ledger.ensure_search_profile("providers=datacite"))
@@ -192,6 +206,7 @@ class ResidualSearchLedgerTests(unittest.TestCase):
         self.assertEqual(reset.state, SearchCellState.OPEN)
         self.assertEqual(reset.attempts, 0)
         self.assertEqual(reset.result_count, 0)
+        self.assertEqual(reset.variant_cursor, 0)
         self.assertEqual(self.ledger.exclusions(self.cell), ())
 
     def test_high_duplicate_but_real_new_family_supply_does_not_saturate(self) -> None:
@@ -331,7 +346,12 @@ class ResidualSearchLedgerTests(unittest.TestCase):
     def test_variant_rotation_is_finite_and_deterministic(self) -> None:
         self.ledger.ensure_cell(self.cell)
         scheduler = SearchCellScheduler(self.ledger)
+
         first = scheduler.next_plans(limit=1)[0]
+        self.assertEqual(first.query_shape, "STRICT_4D")
+        self.assertTrue(first.include_institution)
+        self.assertIn('"university"', first.query)
+
         self.ledger.record_episode(
             self.cell,
             result_count=1,
@@ -341,8 +361,24 @@ class ResidualSearchLedgerTests(unittest.TestCase):
             qualified_roots=1,
         )
         second = scheduler.next_plans(limit=1)[0]
-        self.assertNotEqual(first.variant, second.variant)
-        self.assertNotEqual(first.query, second.query)
+        self.assertEqual(second.query_shape, "RELAX_INSTITUTION")
+        self.assertFalse(second.include_institution)
+        self.assertEqual(second.mechanism_phrase, first.mechanism_phrase)
+        self.assertNotIn("university", second.query.lower())
+
+        self.ledger.record_episode(
+            self.cell,
+            result_count=1,
+            duplicate_results=0,
+            unique_roots=1,
+            new_families=1,
+            qualified_roots=1,
+        )
+        third = scheduler.next_plans(limit=1)[0]
+        self.assertEqual(third.query_shape, "STRICT_4D")
+        self.assertTrue(third.include_institution)
+        self.assertNotEqual(third.mechanism_phrase, first.mechanism_phrase)
+        self.assertEqual(third.variant, 2)
 
     def test_default_space_is_bounded_and_all_cells_target_competition_years(self) -> None:
         cells = default_search_cells()
