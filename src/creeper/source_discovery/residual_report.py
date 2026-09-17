@@ -290,26 +290,56 @@ def _provider_rows(connection: sqlite3.Connection) -> list[dict[str, Any]]:
 
 
 def _provider_overlap(connection: sqlite3.Connection) -> list[dict[str, Any]]:
-    rows = _rows(
+    dataset_rows = _rows(
         connection,
         """
         SELECT
             a.provider AS provider_a,
             b.provider AS provider_b,
-            COUNT(DISTINCT a.dataset_key) AS shared_datasets,
+            COUNT(DISTINCT a.dataset_key) AS shared_datasets
+        FROM residual_search_references AS a
+        JOIN residual_search_references AS b
+          ON a.provider < b.provider
+         AND a.dataset_key = b.dataset_key
+        GROUP BY a.provider, b.provider
+        """,
+    )
+    family_rows = _rows(
+        connection,
+        """
+        SELECT
+            a.provider AS provider_a,
+            b.provider AS provider_b,
             COUNT(DISTINCT a.family_key) AS shared_families
         FROM residual_search_references AS a
         JOIN residual_search_references AS b
           ON a.provider < b.provider
-         AND (
-              a.dataset_key = b.dataset_key
-              OR a.family_key = b.family_key
-         )
+         AND a.family_key = b.family_key
         GROUP BY a.provider, b.provider
-        ORDER BY a.provider, b.provider
         """,
     )
-    return rows
+    combined: dict[tuple[str, str], dict[str, Any]] = {}
+    for row in dataset_rows:
+        key = (str(row["provider_a"]), str(row["provider_b"]))
+        combined[key] = {
+            "provider_a": key[0],
+            "provider_b": key[1],
+            "shared_datasets": int(row["shared_datasets"]),
+            "shared_families": 0,
+        }
+    for row in family_rows:
+        key = (str(row["provider_a"]), str(row["provider_b"]))
+        payload = combined.setdefault(
+            key,
+            {
+                "provider_a": key[0],
+                "provider_b": key[1],
+                "shared_datasets": 0,
+                "shared_families": 0,
+            },
+        )
+        payload["shared_families"] = int(row["shared_families"])
+    return [combined[key] for key in sorted(combined)]
 
 
 def build_residual_search_report(
