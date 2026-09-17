@@ -99,7 +99,7 @@ class ResidualSearchLedgerTests(unittest.TestCase):
         plan = SearchCellScheduler(self.ledger).next_plans(limit=1)[0]
         self.assertIn('-"digital proxy trace"', plan.query)
         self.assertIn('"1998"', plan.query)
-        self.assertIn("URL OR hostname OR host", plan.query)
+        self.assertNotIn("URL OR hostname OR host", plan.query)
 
     def test_saturation_is_driven_by_duplicate_results_not_query_count_alone(self) -> None:
         first = self.ledger.record_episode(
@@ -164,6 +164,8 @@ class ResidualSearchLedgerTests(unittest.TestCase):
                 new_families=0,
                 qualified_roots=0,
             )
+            self.assertEqual(stats.attempts, index + 1)
+            self.assertEqual(stats.variant_cursor, index + 1)
             expected_state = (
                 SearchCellState.SATURATED
                 if index == expected_steps - 1
