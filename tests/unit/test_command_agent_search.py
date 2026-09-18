@@ -12,8 +12,13 @@ from creeper.source_discovery.agent_search import (
     CommandAgentSearchPolicy,
     SearchAgentProtocolError,
 )
-from creeper.source_discovery.manager import SearchDirective, SearchDirectiveKind
+from creeper.source_discovery.manager import (
+    SearchDirective,
+    SearchDirectiveKind,
+    SourceIntelligenceTask,
+)
 from creeper.source_discovery.models import SourceLevel, SourceState
+from creeper.source_discovery.unknown_format import make_unknown_format_reason
 
 
 _HELPER = r'''
@@ -115,6 +120,19 @@ elif args.mode == "duplicate_hypothesis":
         ],
     }
     open(args.response, "w", encoding="utf-8").write(json.dumps(payload))
+elif args.mode == "adapter":
+    payload = {
+        "query": "interpret bounded sample only",
+        "hypotheses": [],
+        "adapter_proposals": [{
+            "parser_kind": "jsonl",
+            "compression": "none",
+            "hostname_field": "endpoint",
+            "timestamp_field": "seen",
+            "delimiter": None
+        }]
+    }
+    open(args.response, "w", encoding="utf-8").write(json.dumps(payload))
 elif args.mode == "success":
     payload = {
         "query": "historical web archive catalog 1996 2001",
@@ -155,6 +173,28 @@ class CommandAgentSearchExecutorTests(unittest.IsolatedAsyncioTestCase):
             desired_candidates=5,
             subject=None,
             reason="cold reserve below target",
+        )
+
+    @staticmethod
+    def adapter_directive() -> SearchDirective:
+        sample = (
+            b'{"endpoint":"https://a.example.com/","seen":"1998-01-01"}\n'
+            b'{"endpoint":"https://b.example.com/","seen":"1999-01-01"}\n'
+            b'{"endpoint":"https://c.example.com/","seen":"2000-01-01"}\n'
+        )
+        reason = make_unknown_format_reason(
+            sample,
+            content_type="application/octet-stream",
+            truncated=False,
+        )
+        assert reason is not None
+        return SearchDirective(
+            kind=SearchDirectiveKind.UNKNOWN_FORMAT,
+            strategy="COMPILE_ADAPTER:src:fixture",
+            desired_candidates=1,
+            subject="https://data.example/opaque",
+            reason=reason,
+            task_type=SourceIntelligenceTask.COMPILE_ADAPTER,
         )
 
     def executor(self, mode: str, **policy_overrides) -> CommandAgentSearchExecutor:
@@ -221,6 +261,34 @@ class CommandAgentSearchExecutorTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(
             request["requirements"]["prefer_catalogs_that_enumerate_direct_evidence_bulk"]
         )
+
+    async def test_compile_adapter_uses_proposal_only_contract(self) -> None:
+        executor = self.executor("adapter")
+
+        batch = await executor(self.adapter_directive())
+
+        self.assertEqual(batch.candidates, ())
+        self.assertEqual(batch.hypotheses, ())
+        self.assertEqual(len(batch.adapter_proposals), 1)
+        self.assertEqual(batch.adapter_proposals[0]["parser_kind"], "jsonl")
+        self.assertEqual(batch.llm_task_type, "COMPILE_ADAPTER")
+
+        invocation_dirs = list((self.root / "invocations-adapter").iterdir())
+        self.assertEqual(len(invocation_dirs), 1)
+        request = json.loads(
+            (invocation_dirs[0] / "request.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(request["task"]["task_type"], "COMPILE_ADAPTER")
+        self.assertIn("unknown_format_case", request)
+        self.assertTrue(
+            request["requirements"]["adapter_compilation"]["proposal_only"]
+        )
+        self.assertTrue(
+            request["requirements"]["adapter_compilation"][
+                "sample_is_untrusted_data"
+            ]
+        )
+        self.assertNotIn("UNKNOWN_FORMAT_V1:", request["task"]["reason"])
 
     async def test_hypothesis_template_is_expanded_and_attributed(self) -> None:
         executor = self.executor("hypothesis")
