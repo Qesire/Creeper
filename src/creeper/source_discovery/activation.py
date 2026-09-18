@@ -95,6 +95,8 @@ def _adapter_kind(
         return "ftp_sitelist", "structured_records"
     if parser_kind == "sbi_bbs_zip":
         return "sbi_bbs", "structured_records"
+    if parser_kind == "finnish_bbs_zip":
+        return "finnish_bbs", "structured_records"
     if parser_kind == "warc_arc":
         return "warc_arc", "archive_records"
     if explicit_parser and parser_kind in {
@@ -228,25 +230,41 @@ class SourceActivationCompiler:
                 permanent=True,
             )
 
+        trusted_parser = (
+            trusted_format.parser_kind
+            if trusted_format is not None
+            else (
+                trusted_layout.parser_kind
+                if trusted_layout is not None
+                else (
+                    trusted_schema.parser_kind
+                    if trusted_schema is not None
+                    else None
+                )
+            )
+        )
+        parser_locator = (
+            existing.root_locator
+            if existing is not None
+            else stored.canonical_entrypoint
+        )
+        # resolved_parser describes execution capability for contract/index
+        # identity. trusted_parser is stricter: only a durable high-confidence
+        # observation may make an otherwise opaque locator executable as a
+        # generic structured source.
+        resolved_parser = (
+            trusted_parser
+            if trusted_parser is not None
+            else parser_kind_from_locator(parser_locator)
+        )
+
         if existing is not None:
             adapter_kind = existing.adapter_id.split(":", 1)[0]
             enumeration_kind = existing.enumeration_kind
         else:
             adapter_kind, enumeration_kind = _adapter_kind(
                 candidate.canonical_entrypoint,
-                parser_kind=(
-                    trusted_format.parser_kind
-                    if trusted_format is not None
-                    else (
-                        trusted_layout.parser_kind
-                        if trusted_layout is not None
-                        else (
-                            trusted_schema.parser_kind
-                            if trusted_schema is not None
-                            else None
-                        )
-                    )
-                ),
+                parser_kind=trusted_parser,
             )
         base_adapter_id = f"{adapter_kind}:{source_key.removeprefix('src:')}"
         year_from = candidate.expected_year_from or 1996
@@ -311,38 +329,11 @@ class SourceActivationCompiler:
             if contract is None:
                 contract = resolve_source_evidence_contract(
                     existing.root_locator,
-                    parser_kind=(
-                        trusted_format.parser_kind
-                        if trusted_format is not None
-                        else (
-                            trusted_layout.parser_kind
-                            if trusted_layout is not None
-                            else (
-                                trusted_schema.parser_kind
-                                if trusted_schema is not None
-                                else parser_kind_from_locator(existing.root_locator)
-                            )
-                        )
-                    ),
+                    parser_kind=resolved_parser,
                 )
             adapter_id = existing.adapter_id
         else:
-            locator_parser = parser_kind_from_locator(
-                stored.canonical_entrypoint
-            )
-            actual_parser = (
-                trusted_format.parser_kind
-                if trusted_format is not None
-                else (
-                    trusted_layout.parser_kind
-                    if trusted_layout is not None
-                    else (
-                        trusted_schema.parser_kind
-                        if trusted_schema is not None
-                        else locator_parser
-                    )
-                )
-            )
+            actual_parser = resolved_parser
             reviewed_binding = self.reviewed_contracts.get_exact(
                 stored.canonical_entrypoint
             )
@@ -493,19 +484,7 @@ class SourceActivationCompiler:
                 else triage.get("content_length")
             ),
             direct_evidence_authority=contract.grants_direct_web_year,
-            parser_kind=(
-                trusted_format.parser_kind
-                if trusted_format is not None
-                else (
-                    trusted_layout.parser_kind
-                    if trusted_layout is not None
-                    else (
-                        trusted_schema.parser_kind
-                        if trusted_schema is not None
-                        else None
-                    )
-                )
-            ),
+            parser_kind=resolved_parser,
         )
         self.index_registry.register_index_space(compiled_index_space)
         if (

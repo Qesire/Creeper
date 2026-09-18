@@ -326,6 +326,7 @@ def _source_format(
         mapped = {
             "ftp_sitelist_zip": ("FTP_SITELIST", True, False),
             "sbi_bbs_zip": ("SBI_BBS", True, False),
+            "finnish_bbs_zip": ("FINNISH_BBS", True, False),
             "cdxj": ("CDXJ", True, True),
             "cdx": ("CDX", True, True),
             "warc_arc": ("WARC_ARC", True, False),

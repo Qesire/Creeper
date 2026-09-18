@@ -571,6 +571,55 @@ class SourceActivationCompilerTests(unittest.TestCase):
                 assert contract is not None
                 self.assertEqual(contract.parser_kind, "sbi_bbs_zip")
                 self.assertTrue(contract.grants_direct_web_year)
+                index_row = control.connection.execute(
+                    """
+                    SELECT source_format, direct_evidence_authority
+                    FROM source_indexes_v1
+                    WHERE source_key = ?
+                    """,
+                    (candidate.source_key,),
+                ).fetchone()
+                self.assertIsNotNone(index_row)
+                self.assertEqual(index_row["source_format"], "SBI_BBS")
+                self.assertEqual(index_row["direct_evidence_authority"], 1)
+            finally:
+                control.close()
+
+    def test_audited_finnish_bbs_activates_with_direct_year_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            control = ControlStore(Path(tmp) / "control.sqlite3")
+            try:
+                candidate = _candidate(
+                    "https://files.mpoli.fi/software/TEXTS/MISC/FI980225.ZIP"
+                )
+                registry = self._registry(control, candidate)
+                spec = SourceActivationCompiler(
+                    control,
+                    registry=registry,
+                ).compile(candidate)
+
+                self.assertEqual(spec.adapter_kind, "finnish_bbs")
+                self.assertEqual(spec.enumeration_kind, "structured_records")
+                self.assertEqual(spec.evidence_mode, "direct_year")
+                reservoir = control.get_reservoir(spec.reservoir_id)
+                self.assertIsNotNone(reservoir)
+                assert reservoir is not None
+                contract = contract_from_adapter_id(reservoir.adapter_id)
+                self.assertIsNotNone(contract)
+                assert contract is not None
+                self.assertEqual(contract.parser_kind, "finnish_bbs_zip")
+                self.assertTrue(contract.grants_direct_web_year)
+                index_row = control.connection.execute(
+                    """
+                    SELECT source_format, direct_evidence_authority
+                    FROM source_indexes_v1
+                    WHERE source_key = ?
+                    """,
+                    (candidate.source_key,),
+                ).fetchone()
+                self.assertIsNotNone(index_row)
+                self.assertEqual(index_row["source_format"], "FINNISH_BBS")
+                self.assertEqual(index_row["direct_evidence_authority"], 1)
             finally:
                 control.close()
 
