@@ -13,6 +13,10 @@ from creeper.sources.format_binding import (
     SourceFormatObservation,
     bind_format_to_adapter_id,
 )
+from creeper.sources.layout_binding import (
+    SourceRecordLayout,
+    bind_layout_to_adapter_id,
+)
 from creeper.sources.schema_binding import (
     SourceRecordSchema,
     bind_schema_to_adapter_id,
@@ -93,6 +97,79 @@ class StructuredProductionAdapterTests(unittest.TestCase):
         self.assertTrue(adapter.compressed)
         self.assertEqual(adapter.evidence_contract.parser_kind, "jsonl")
         self.assertFalse(adapter.evidence_contract.grants_direct_web_year)
+
+    def test_custom_json_layout_capture_schema_emits_direct_year(self):
+        fmt = SourceFormatObservation(
+            parser_kind="jsonl",
+            compression="none",
+            detection_method="content_signature",
+            confidence=1.0,
+        )
+        layout = SourceRecordLayout(
+            parser_kind="jsonl",
+            hostname_field="endpoint",
+            delimiter=None,
+            detection_method="stable_json_host_field",
+            confidence=1.0,
+            sample_records=4,
+            matched_records=4,
+        )
+        schema = SourceRecordSchema(
+            parser_kind="jsonl",
+            hostname_field="endpoint",
+            timestamp_field="capture_timestamp",
+            delimiter=None,
+            detection_method="stable_json_layout_time_field",
+            confidence=1.0,
+            sample_records=4,
+            matched_records=4,
+            direct_year_eligible=True,
+        )
+        adapter_id = bind_format_to_adapter_id(
+            "structured:custom-json",
+            fmt,
+        )
+        adapter_id = bind_layout_to_adapter_id(adapter_id, layout)
+        adapter_id = bind_schema_to_adapter_id(adapter_id, schema)
+        adapter_id = bind_contract_to_adapter_id(
+            adapter_id,
+            schema.direct_contract(),
+        )
+        reservoir = Reservoir(
+            reservoir_id="reservoir:custom-json",
+            domain_id="domain:custom-json",
+            adapter_id=adapter_id,
+            root_locator="https://repo.example/custom-json",
+            enumeration_kind="structured_records",
+            capacity_lower=0,
+            evidence_mode="direct_year",
+            state=ReservoirState.READY,
+        )
+
+        adapter = StructuredProductionAdapter(reservoir)
+        record = adapter._generic_record(
+            '{"endpoint":"https://custom.example/path",'
+            '"capture_timestamp":"19990102030405"}',
+            locator="fixture:custom-json",
+        )
+        self.assertIsNotNone(record)
+        assert record is not None
+        record = adapter._apply_contract_authority(record)
+        observations = tuple(adapter.extract_hosts(record))
+
+        self.assertEqual(record.source_year, 1999)
+        self.assertEqual(record.source_time, "19990102030405")
+        self.assertEqual(record.direct_year_mask, YEAR_BITS[1999])
+        self.assertEqual(record.year_hint_mask, 0)
+        self.assertEqual(record.payload, "https://custom.example/path")
+        self.assertEqual(
+            [item.hostname for item in observations],
+            ["custom.example"],
+        )
+        self.assertEqual(
+            observations[0].direct_year_mask,
+            YEAR_BITS[1999],
+        )
 
     def test_opaque_delimited_schema_restores_delimiter_and_direct_fields(self):
         fmt = SourceFormatObservation(
