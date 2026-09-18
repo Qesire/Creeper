@@ -26,6 +26,7 @@ _SUPPORTED_PARSER_KINDS = frozenset(
         "dmoz_rdf_urls",
         "ftp_sitelist_zip",
         "sbi_bbs_zip",
+        "finnish_bbs_zip",
         "warc_arc",
     }
 )
