@@ -423,9 +423,6 @@ class SourceProducerCliTests(unittest.TestCase):
                         bytes_read=1024,
                         elapsed_seconds=1.0,
                         novel_eed=50.0,
-                        observed_host_year_pairs=100,
-                        novel_host_year_pairs=50,
-                        measurement_mode=MeasurementMode.HOST_YEAR,
                     ),
                 )
             finally:
