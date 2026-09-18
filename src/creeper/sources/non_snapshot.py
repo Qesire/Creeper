@@ -27,10 +27,21 @@ _MAILBOX_SUFFIXES = (
     ".mail.gz",
     ".mail",
 )
-_MAILBOX_EXTENSIONLESS_PATH_MARKERS = (
-    "/archive/mbox/",
+_GENERIC_MAILBOX_SUFFIXES = (
+    ".mbox.gz",
+    ".mbox",
+)
+_IETF_MAILBOX_SUFFIXES = (
+    ".mail.gz",
+    ".mail",
+)
+_IETF_MAILBOX_PATH_MARKERS = (
     "/ietf-ftp/ietf-mail-archive/",
     "/pub/ietf/ietf-mail-archive/",
+)
+_MAILBOX_EXTENSIONLESS_PATH_MARKERS = (
+    "/archive/mbox/",
+    *_IETF_MAILBOX_PATH_MARKERS,
 )
 _SQUID_PATH_MARKERS = (
     "/cache/squid/rawlogs/",
@@ -74,11 +85,15 @@ def mailbox_year_from_locator(locator: str) -> int | None:
 
 
 def is_mailbox_url_locator(locator: str) -> bool:
-    """Recognize explicit mailbox files and audited extensionless archives."""
+    """Recognize generic mbox files plus audited institutional mail archives."""
     parsed = urlsplit(locator)
     path = parsed.path.lower().rstrip("/")
-    if path.endswith(_MAILBOX_SUFFIXES):
+    if path.endswith(_GENERIC_MAILBOX_SUFFIXES):
         return True
+    if path.endswith(_IETF_MAILBOX_SUFFIXES):
+        if not any(marker in path for marker in _IETF_MAILBOX_PATH_MARKERS):
+            return False
+        return mailbox_year_from_locator(locator) is not None
     if not any(
         marker in path
         for marker in _MAILBOX_EXTENSIONLESS_PATH_MARKERS
