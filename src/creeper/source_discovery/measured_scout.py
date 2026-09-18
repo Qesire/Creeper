@@ -40,6 +40,7 @@ from creeper.sources.archive.warc import WarcFormatError, iter_warc_target_recor
 from creeper.sources.format_binding import SourceFormatObservation
 from creeper.sources.format_detection import detect_source_format
 from creeper.sources.layout_binding import SourceRecordLayout
+from creeper.sources.layout_detection import detect_record_layout, layout_from_schema
 from creeper.sources.schema_binding import SourceRecordSchema
 from creeper.sources.schema_detection import detect_record_schema
 from creeper.sources.locator import format_path_from_locator
@@ -1327,6 +1328,13 @@ class MeasuredYieldScoutExecutor:
                 )
             ):
                 schema_observation = detected_schema
+        if layout_observation is None and schema_observation is not None:
+            layout_observation = layout_from_schema(schema_observation)
+        if layout_observation is None and format_observation is not None:
+            layout_observation = detect_record_layout(
+                payload=download.payload,
+                format_observation=format_observation,
+            )
         if (
             format_observation is not None
             and layout_observation is not None
@@ -1391,9 +1399,19 @@ class MeasuredYieldScoutExecutor:
                     "measured sample has too few unique hostnames"
                 ),
                 format_observation=format_observation,
+                layout_observation=layout_observation,
                 schema_observation=schema_observation,
             )
-        if parsed is None:
+        structured_unbound = (
+            parsed is not None
+            and parsed.sampled_records >= 3
+            and not parsed.hosts
+            and layout_observation is None
+            and schema_observation is None
+            and format_observation is not None
+            and format_observation.parser_kind in {"jsonl", "delimited"}
+        )
+        if parsed is None or structured_unbound:
             unknown_reason = make_unknown_format_reason(
                 download.payload,
                 content_type=download.content_type,
@@ -1409,6 +1427,7 @@ class MeasuredYieldScoutExecutor:
                     )
                 ),
                 format_observation=format_observation,
+                layout_observation=layout_observation,
                 schema_observation=schema_observation,
             )
         parsed = _apply_source_year_hint(
@@ -1431,6 +1450,7 @@ class MeasuredYieldScoutExecutor:
                 measurement=measurement,
                 reason="measured sample has too few unique hostnames",
                 format_observation=format_observation,
+                layout_observation=layout_observation,
                 schema_observation=schema_observation,
             )
         novel_fraction = novel_count / observed_count
@@ -1446,6 +1466,7 @@ class MeasuredYieldScoutExecutor:
                     "measured baseline-external/EED yield below warm threshold"
                 ),
                 format_observation=format_observation,
+                layout_observation=layout_observation,
                 schema_observation=schema_observation,
             )
         return ScoutResult(
@@ -1517,6 +1538,7 @@ class MeasuredYieldScoutExecutor:
             discovered_candidates=result.discovered_candidates,
             edge_relation=result.edge_relation,
             format_observation=result.format_observation,
+            layout_observation=result.layout_observation,
             schema_observation=result.schema_observation,
         )
 
