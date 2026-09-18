@@ -33,6 +33,7 @@ from creeper.sources.archive.cdx import parse_cdx_line
 from creeper.sources.ftp_sitelist import parse_ftp_sitelist_zip
 from creeper.sources.format_binding import format_from_adapter_id
 from creeper.sources.locator import format_path_from_locator
+from creeper.sources.layout_binding import layout_from_adapter_id
 from creeper.sources.schema_binding import schema_from_adapter_id
 from creeper.sources.sbi_bbs import parse_sbi_bbs_zip
 from creeper.sources.non_snapshot import (
@@ -155,14 +156,19 @@ class StructuredProductionAdapter:
         self.source_id = reservoir.reservoir_id
         self.source = reservoir.root_locator
         format_binding = format_from_adapter_id(reservoir.adapter_id)
+        self.layout_binding = layout_from_adapter_id(reservoir.adapter_id)
         self.schema_binding = schema_from_adapter_id(reservoir.adapter_id)
         self.kind = (
             format_binding.parser_kind
             if format_binding is not None
             else (
-                self.schema_binding.parser_kind
-                if self.schema_binding is not None
-                else self._kind_from_locator(self.source)
+                self.layout_binding.parser_kind
+                if self.layout_binding is not None
+                else (
+                    self.schema_binding.parser_kind
+                    if self.schema_binding is not None
+                    else self._kind_from_locator(self.source)
+                )
             )
         )
         self.temporal_scope = temporal_scope
@@ -199,11 +205,39 @@ class StructuredProductionAdapter:
                 "evidence contract parser_kind does not match structured source"
             )
         if (
+            self.layout_binding is not None
+            and self.layout_binding.parser_kind != self.kind
+        ):
+            raise ProductionAdapterError(
+                "record layout parser_kind does not match structured source"
+            )
+        if (
             self.schema_binding is not None
             and self.schema_binding.parser_kind != self.kind
         ):
             raise ProductionAdapterError(
                 "record schema parser_kind does not match structured source"
+            )
+        if (
+            self.layout_binding is not None
+            and self.schema_binding is not None
+            and (
+                self.layout_binding.parser_kind != self.schema_binding.parser_kind
+                or self.layout_binding.hostname_field != self.schema_binding.hostname_field
+            )
+        ):
+            raise ProductionAdapterError(
+                "record layout disagrees with temporal schema"
+            )
+        if (
+            self.layout_binding is not None
+            and self.evidence_contract.grants_direct_web_year
+            and self.evidence_contract.hostname_field is not None
+            and self.evidence_contract.hostname_field
+            != self.layout_binding.hostname_field
+        ):
+            raise ProductionAdapterError(
+                "direct evidence contract hostname mapping disagrees with record layout"
             )
         if (
             self.schema_binding is not None
@@ -234,10 +268,15 @@ class StructuredProductionAdapter:
             if self.schema_binding is not None
             and self.schema_binding.delimiter is not None
             else (
-                format_binding.delimiter
-                if format_binding is not None
-                and format_binding.delimiter is not None
-                else ("\t" if path.endswith((".tsv", ".tsv.gz")) else ",")
+                self.layout_binding.delimiter
+                if self.layout_binding is not None
+                and self.layout_binding.delimiter is not None
+                else (
+                    format_binding.delimiter
+                    if format_binding is not None
+                    and format_binding.delimiter is not None
+                    else ("\t" if path.endswith((".tsv", ".tsv.gz")) else ",")
+                )
             )
         )
         self._stream = None
@@ -550,10 +589,20 @@ class StructuredProductionAdapter:
                 return None
             lowered = {str(key).strip().lower(): item for key, item in value.items()}
             selected: str | None = None
-            if self.schema_binding is not None:
-                raw = lowered.get(self.schema_binding.hostname_field.lower())
+            hostname_binding = (
+                self.schema_binding.hostname_field
+                if self.schema_binding is not None
+                else (
+                    self.layout_binding.hostname_field
+                    if self.layout_binding is not None
+                    else None
+                )
+            )
+            if hostname_binding is not None:
+                raw = lowered.get(hostname_binding.lower())
                 if isinstance(raw, str) and self._hostname_from_scalar(raw) is not None:
                     selected = raw.strip()
+            if self.schema_binding is not None:
                 raw_time = lowered.get(self.schema_binding.timestamp_field.lower())
                 schema_year = self._year_from_scalar(raw_time)
                 if schema_year is not None:
@@ -619,17 +668,27 @@ class StructuredProductionAdapter:
             selected: str | None = None
             explicit_year: int | None = None
             explicit_time: str | None = None
-            if self.schema_binding is not None:
+            hostname_binding = (
+                self.schema_binding.hostname_field
+                if self.schema_binding is not None
+                else (
+                    self.layout_binding.hostname_field
+                    if self.layout_binding is not None
+                    else None
+                )
+            )
+            if hostname_binding is not None:
                 raw_host = self._delimited_contract_cell(
                     row,
-                    self.schema_binding.hostname_field,
+                    hostname_binding,
                 )
+                if raw_host is not None and self._hostname_from_scalar(raw_host) is not None:
+                    selected = raw_host.strip()
+            if self.schema_binding is not None:
                 raw_time = self._delimited_contract_cell(
                     row,
                     self.schema_binding.timestamp_field,
                 )
-                if raw_host is not None and self._hostname_from_scalar(raw_host) is not None:
-                    selected = raw_host.strip()
                 schema_year = self._year_from_scalar(raw_time)
                 if schema_year is not None:
                     explicit_year = schema_year
