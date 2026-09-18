@@ -89,8 +89,8 @@ class ScoutResult:
     discovered_candidates: tuple[SourceCandidate, ...] = ()
     edge_relation: str = "enumerates"
     format_observation: SourceFormatObservation | None = None
-    layout_observation: SourceRecordLayout | None = None
     schema_observation: SourceRecordSchema | None = None
+    layout_observation: SourceRecordLayout | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "disposition", ScoutDisposition(self.disposition))
