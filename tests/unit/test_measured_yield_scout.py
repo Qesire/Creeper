@@ -395,11 +395,15 @@ class MeasuredYieldScoutTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.disposition, ScoutDisposition.WARM)
         self.assertIsNotNone(result.measurement)
         assert result.measurement is not None
+        # Generic monthly mailbox sources may still use the shard's exact
+        # year as a ranking hint, but that does not grant annual evidence
+        # authority. The GNU-specific path differs by binding each URL to the
+        # complete message's own Date header.
         self.assertEqual(
             result.measurement.measurement_mode,
-            MeasurementMode.HOST_ONLY,
+            MeasurementMode.HOST_YEAR,
         )
-        self.assertEqual(result.measurement.observed_host_year_pairs, 0)
+        self.assertEqual(result.measurement.direct_host_years, 0)
 
     async def test_dmoz_scout_uses_exact_dump_year_as_ranking_hint(self) -> None:
         raw = (
