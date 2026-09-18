@@ -22,6 +22,7 @@ from urllib.parse import urlsplit
 from creeper.sources.locator import format_path_from_locator
 from creeper.source_discovery.coordinator import TriageResult
 from creeper.sources.mailbox_records import is_audited_gnu_mbox_locator
+from creeper.sources.non_snapshot import is_mailbox_url_locator
 from creeper.source_discovery.models import (
     MeasurementMode,
     SourceCandidate,
