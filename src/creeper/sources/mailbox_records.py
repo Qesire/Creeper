@@ -37,7 +37,13 @@ def is_audited_gnu_mbox_locator(locator: str) -> bool:
         return False
     if parsed.query or parsed.fragment:
         return False
-    if not parsed.path.lower().startswith("/archive/mbox/"):
+    path = parsed.path.lower()
+    if not path.startswith("/archive/mbox/"):
+        return False
+    name = path.rstrip("/").rsplit("/", 1)[-1]
+    # Keep GNU authority forms frozen even if generic mailbox discovery later
+    # learns additional institutional suffixes such as IETF .mail/.mail.gz.
+    if name.endswith((".mail", ".mail.gz")):
         return False
     return mailbox_year_from_locator(locator) is not None
 
