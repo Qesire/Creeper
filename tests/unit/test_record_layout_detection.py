@@ -139,6 +139,38 @@ class StructuredLayoutScoutRoutingTests(unittest.TestCase):
         self.assertIsNone(result.schema_observation)
         self.assertIsNone(parse_unknown_format_reason(result.reason))
 
+    def test_custom_host_with_capture_timestamp_becomes_host_year(self) -> None:
+        payload = (
+            b'{"endpoint":"https://a.example.com/x","capture_timestamp":"19980101000000"}\n'
+            b'{"endpoint":"https://b.example.com/y","capture_timestamp":"19990101000000"}\n'
+            b'{"endpoint":"https://c.example.com/z","capture_timestamp":"20000101000000"}\n'
+        )
+        result = self.executor()._evaluate_download(
+            self.candidate(),
+            SampleDownload(
+                payload=payload,
+                content_type="application/octet-stream",
+                truncated=False,
+                requests=1,
+                bytes_read=len(payload),
+            ),
+            started=0.0,
+        )
+        self.assertEqual(result.disposition.value, "WARM")
+        self.assertIsNotNone(result.layout_observation)
+        self.assertIsNotNone(result.schema_observation)
+        assert result.schema_observation is not None
+        self.assertEqual(result.schema_observation.hostname_field, "endpoint")
+        self.assertEqual(
+            result.schema_observation.timestamp_field,
+            "capture_timestamp",
+        )
+        self.assertTrue(result.schema_observation.direct_year_eligible)
+        self.assertIsNotNone(result.measurement)
+        assert result.measurement is not None
+        self.assertEqual(result.measurement.measurement_mode.value, "HOST_YEAR")
+        self.assertEqual(result.measurement.observed_host_year_pairs, 3)
+
     def test_ambiguous_custom_fields_enter_unknown_format_loop(self) -> None:
         payload = (
             b'{"left":"https://a.example.com/","right":"https://x.example.net/"}\n'
