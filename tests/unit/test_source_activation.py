@@ -193,6 +193,74 @@ class SourceActivationCompilerTests(unittest.TestCase):
             finally:
                 control.close()
 
+    def test_custom_hostname_layout_with_capture_schema_activates_direct_year(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            control = ControlStore(Path(tmp) / "control.sqlite3")
+            try:
+                candidate = _candidate(
+                    "https://repo.example/api/download?id=custom-dated-jsonl"
+                )
+                registry = self._registry(control, candidate)
+                fmt = SourceFormatObservation(
+                    parser_kind="jsonl",
+                    compression="none",
+                    detection_method="content_signature",
+                    confidence=0.97,
+                    content_type="application/octet-stream",
+                )
+                layout = SourceRecordLayout(
+                    parser_kind="jsonl",
+                    hostname_field="endpoint",
+                    delimiter=None,
+                    detection_method="stable_json_host_field",
+                    confidence=1.0,
+                    sample_records=8,
+                    matched_records=8,
+                )
+                schema = SourceRecordSchema(
+                    parser_kind="jsonl",
+                    hostname_field="endpoint",
+                    timestamp_field="capture_timestamp",
+                    delimiter=None,
+                    detection_method="stable_json_layout_time_field",
+                    confidence=1.0,
+                    sample_records=8,
+                    matched_records=8,
+                    direct_year_eligible=True,
+                )
+                registry.record_format_observation(candidate.source_key, fmt)
+                registry.record_layout_observation(candidate.source_key, layout)
+                registry.record_schema_observation(candidate.source_key, schema)
+
+                spec = SourceActivationCompiler(
+                    control,
+                    registry=registry,
+                ).compile(candidate)
+
+                self.assertEqual(spec.evidence_mode, "direct_year")
+                reservoir = control.get_reservoir(spec.reservoir_id)
+                self.assertIsNotNone(reservoir)
+                assert reservoir is not None
+                self.assertEqual(
+                    layout_from_adapter_id(reservoir.adapter_id),
+                    layout,
+                )
+                self.assertEqual(
+                    schema_from_adapter_id(reservoir.adapter_id),
+                    schema,
+                )
+                contract = contract_from_adapter_id(reservoir.adapter_id)
+                self.assertIsNotNone(contract)
+                assert contract is not None
+                self.assertTrue(contract.grants_direct_web_year)
+                self.assertEqual(contract.hostname_field, "endpoint")
+                self.assertEqual(
+                    contract.timestamp_field,
+                    "capture_timestamp",
+                )
+            finally:
+                control.close()
+
     def test_unknown_locator_activates_from_trusted_format_observation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             control = ControlStore(Path(tmp) / "control.sqlite3")
