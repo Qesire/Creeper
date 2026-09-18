@@ -208,14 +208,19 @@ class SourceActivationCompiler:
             )
         if (
             trusted_schema is not None
+            and trusted_format is not None
+            and trusted_schema.parser_kind != trusted_format.parser_kind
+        ):
+            raise SourceActivationError(
+                "record schema parser_kind disagrees with frozen source format",
+                permanent=True,
+            )
+        if (
+            trusted_schema is not None
+            and trusted_layout is not None
             and (
-                trusted_format is not None
-                and trusted_schema.parser_kind != trusted_format.parser_kind
-                or trusted_layout is not None
-                and (
-                    trusted_schema.parser_kind != trusted_layout.parser_kind
-                    or trusted_schema.hostname_field != trusted_layout.hostname_field
-                )
+                trusted_schema.parser_kind != trusted_layout.parser_kind
+                or trusted_schema.hostname_field != trusted_layout.hostname_field
             )
         ):
             raise SourceActivationError(
