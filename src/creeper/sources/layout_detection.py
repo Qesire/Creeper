@@ -16,6 +16,27 @@ from creeper.sources.layout_binding import SourceRecordLayout
 from creeper.sources.schema_binding import SourceRecordSchema
 
 
+
+_AUTO_DIRECT_LAYOUT_METHODS = frozenset(
+    {
+        "stable_json_host_field",
+        "stable_delimited_host_column",
+        "schema:stable_json_fields",
+        "schema:stable_delimited_columns",
+    }
+)
+
+
+def layout_allows_auto_direct(layout: SourceRecordLayout) -> bool:
+    """Return whether layout provenance is deterministic enough for auto-direct.
+
+    Layout itself never grants authority. This gate only prevents a model-chosen
+    hostname field from becoming direct-year authority indirectly when a later
+    deterministic scout discovers a capture timestamp.
+    """
+
+    return layout.detection_method in _AUTO_DIRECT_LAYOUT_METHODS
+
 def _inflate_prefix(payload: bytes, *, limit: int = 512 * 1024) -> bytes | None:
     decoder = zlib.decompressobj(16 + zlib.MAX_WBITS)
     try:
