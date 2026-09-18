@@ -9,6 +9,7 @@ from creeper.sources.format_binding import (
     format_from_adapter_id,
 )
 from creeper.sources.layout_binding import SourceRecordLayout
+from creeper.sources.layout_detection import layout_from_schema
 from creeper.sources.schema_binding import (
     SourceRecordSchema,
     bind_schema_to_adapter_id,
@@ -131,6 +132,41 @@ class RecordSchemaDetectionTests(unittest.TestCase):
         self.assertFalse(schema.direct_year_eligible)
         with self.assertRaisesRegex(ValueError, "direct-year"):
             schema.direct_contract()
+
+    def test_layout_recovered_from_layout_derived_schema_fails_closed_for_auto_direct(self) -> None:
+        payload = (
+            b'{"endpoint":"https://one.example/a","capture_timestamp":"19980101000000"}\n'
+            b'{"endpoint":"https://two.example/b","capture_timestamp":"19990101000000"}\n'
+            b'{"endpoint":"https://three.example/c","capture_timestamp":"20000101000000"}\n'
+        )
+        fmt = SourceFormatObservation(
+            parser_kind="jsonl",
+            compression="none",
+            detection_method="content_signature",
+            confidence=0.97,
+        )
+        prior_schema = SourceRecordSchema(
+            parser_kind="jsonl",
+            hostname_field="endpoint",
+            timestamp_field="capture_timestamp",
+            delimiter=None,
+            detection_method="stable_json_layout_time_field",
+            confidence=1.0,
+            sample_records=3,
+            matched_records=3,
+            direct_year_eligible=False,
+        )
+        recovered_layout = layout_from_schema(prior_schema)
+
+        schema = detect_record_schema(
+            payload=payload,
+            format_observation=fmt,
+            layout_observation=recovered_layout,
+        )
+
+        self.assertIsNotNone(schema)
+        assert schema is not None
+        self.assertFalse(schema.direct_year_eligible)
 
     def test_layout_custom_json_hostname_with_plain_year_stays_hint_only(self) -> None:
         payload = (
