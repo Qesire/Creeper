@@ -2364,6 +2364,26 @@ class SourceDiscoveryRegistry:
             changed += 1
         return changed
 
+    def set_state_reason(self, source_key: str, reason: str) -> None:
+        """Persist one bounded explanatory state reason without changing state."""
+
+        if not isinstance(reason, str):
+            raise TypeError("source state reason must be a string")
+        normalized = reason.strip()
+        if len(normalized) > 8 * 1024:
+            raise ValueError("source state reason exceeds 8192 characters")
+        with self.connection:
+            changed = self.connection.execute(
+                """
+                UPDATE source_candidates
+                SET state_reason = ?, updated_at = ?
+                WHERE source_key = ?
+                """,
+                (normalized, self._now(), source_key),
+            ).rowcount
+        if changed != 1:
+            raise KeyError(f"unknown source: {source_key}")
+
     def transition(self, source_key: str, target: SourceState) -> SourceCandidate:
         target = SourceState(target)
         now = self._now()
@@ -2810,6 +2830,154 @@ class SourceDiscoveryRegistry:
             direct_year_eligible=bool(row["direct_year_eligible"]),
             policy_version=str(row["policy_version"]),
         )
+
+    def apply_validated_adapter_binding(
+        self,
+        source_key: str,
+        *,
+        format_observation: SourceFormatObservation,
+        schema_observation: SourceRecordSchema,
+        expected_state_reason: str,
+    ) -> SourceCandidate:
+        """Atomically bind a validated discovery-only layout and requeue it.
+
+        This is the commit boundary for LLM-assisted UNKNOWN_FORMAT recovery.
+        Validation happens before entry; this method protects durable state from
+        crash windows and stale proposals.
+        """
+
+        if not isinstance(format_observation, SourceFormatObservation):
+            raise TypeError("format_observation must be SourceFormatObservation")
+        if not isinstance(schema_observation, SourceRecordSchema):
+            raise TypeError("schema_observation must be SourceRecordSchema")
+        if schema_observation.direct_year_eligible:
+            raise ValueError(
+                "LLM-assisted adapter binding cannot grant direct-year authority"
+            )
+        if format_observation.parser_kind != schema_observation.parser_kind:
+            raise ValueError("adapter format/schema parser kinds disagree")
+        if not isinstance(expected_state_reason, str) or not expected_state_reason:
+            raise ValueError("expected unknown-format state reason is required")
+
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            row = self.connection.execute(
+                """
+                SELECT state, state_reason
+                FROM source_candidates
+                WHERE source_key = ?
+                """,
+                (source_key,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"unknown source: {source_key}")
+            if SourceState(str(row["state"])) is not SourceState.HOLD:
+                raise ValueError("adapter-compilation source is no longer in HOLD")
+            if str(row["state_reason"] or "") != expected_state_reason:
+                raise ValueError("adapter-compilation case changed before commit")
+
+            current_format = self.get_format_observation(source_key)
+            if current_format is not None and current_format != format_observation:
+                raise ValueError(
+                    "adapter-compilation conflicts with an existing format binding"
+                )
+            current_schema = self.get_schema_observation(source_key)
+            if current_schema is not None and current_schema != schema_observation:
+                raise ValueError(
+                    "adapter-compilation conflicts with an existing schema binding"
+                )
+
+            now = self._now()
+            self.connection.execute(
+                """
+                INSERT INTO source_format_observations(
+                    source_key, parser_kind, compression, detection_method,
+                    confidence, content_type, delimiter, policy_version, observed_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(source_key) DO UPDATE SET
+                    parser_kind = excluded.parser_kind,
+                    compression = excluded.compression,
+                    detection_method = excluded.detection_method,
+                    confidence = excluded.confidence,
+                    content_type = excluded.content_type,
+                    delimiter = excluded.delimiter,
+                    policy_version = excluded.policy_version,
+                    observed_at = excluded.observed_at
+                """,
+                (
+                    source_key,
+                    format_observation.parser_kind,
+                    format_observation.compression,
+                    format_observation.detection_method,
+                    format_observation.confidence,
+                    format_observation.content_type,
+                    format_observation.delimiter,
+                    format_observation.policy_version,
+                    now,
+                ),
+            )
+            self.connection.execute(
+                """
+                INSERT INTO source_record_schemas(
+                    source_key, parser_kind, hostname_field, timestamp_field,
+                    delimiter, detection_method, confidence,
+                    sample_records, matched_records, direct_year_eligible,
+                    policy_version, observed_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(source_key) DO UPDATE SET
+                    parser_kind = excluded.parser_kind,
+                    hostname_field = excluded.hostname_field,
+                    timestamp_field = excluded.timestamp_field,
+                    delimiter = excluded.delimiter,
+                    detection_method = excluded.detection_method,
+                    confidence = excluded.confidence,
+                    sample_records = excluded.sample_records,
+                    matched_records = excluded.matched_records,
+                    direct_year_eligible = excluded.direct_year_eligible,
+                    policy_version = excluded.policy_version,
+                    observed_at = excluded.observed_at
+                """,
+                (
+                    source_key,
+                    schema_observation.parser_kind,
+                    schema_observation.hostname_field,
+                    schema_observation.timestamp_field,
+                    schema_observation.delimiter,
+                    schema_observation.detection_method,
+                    schema_observation.confidence,
+                    schema_observation.sample_records,
+                    schema_observation.matched_records,
+                    0,
+                    schema_observation.policy_version,
+                    now,
+                ),
+            )
+            changed = self.connection.execute(
+                """
+                UPDATE source_candidates
+                SET state = ?, state_reason = '', updated_at = ?
+                WHERE source_key = ?
+                  AND state = ?
+                  AND state_reason = ?
+                """,
+                (
+                    SourceState.SCOUT_READY.value,
+                    now,
+                    source_key,
+                    SourceState.HOLD.value,
+                    expected_state_reason,
+                ),
+            ).rowcount
+            if changed != 1:
+                raise ValueError("adapter-compilation source changed before requeue")
+            self.connection.commit()
+        except BaseException:
+            self.connection.rollback()
+            raise
+
+        candidate = self.get_candidate(source_key)
+        assert candidate is not None
+        return candidate
 
     def record_scout_measurement(
         self,

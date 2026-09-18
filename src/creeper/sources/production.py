@@ -550,25 +550,36 @@ class StructuredProductionAdapter:
                 return None
             lowered = {str(key).strip().lower(): item for key, item in value.items()}
             selected: str | None = None
-            for key in ("hostname", "host", "domain", "url", "original", "original_url", "uri"):
-                raw = lowered.get(key)
+            if self.schema_binding is not None:
+                raw = lowered.get(self.schema_binding.hostname_field.lower())
                 if isinstance(raw, str) and self._hostname_from_scalar(raw) is not None:
                     selected = raw.strip()
-                    break
+                raw_time = lowered.get(self.schema_binding.timestamp_field.lower())
+                schema_year = self._year_from_scalar(raw_time)
+                if schema_year is not None:
+                    source_year = schema_year
+                    source_time = str(raw_time).strip()
+            if selected is None:
+                for key in ("hostname", "host", "domain", "url", "original", "original_url", "uri"):
+                    raw = lowered.get(key)
+                    if isinstance(raw, str) and self._hostname_from_scalar(raw) is not None:
+                        selected = raw.strip()
+                        break
             if selected is None:
                 return None
             payload = selected
-            for key in (
-                "year", "source_year", "capture_year", "timestamp",
-                "date", "warc_date", "crawl_date",
-            ):
-                if key not in lowered:
-                    continue
-                year = self._year_from_scalar(lowered[key])
-                if year is not None:
-                    source_year = year
-                    source_time = str(lowered[key]).strip()
-                    break
+            if self.schema_binding is None or source_year is None:
+                for key in (
+                    "year", "source_year", "capture_year", "timestamp",
+                    "date", "warc_date", "crawl_date",
+                ):
+                    if key not in lowered:
+                        continue
+                    year = self._year_from_scalar(lowered[key])
+                    if year is not None:
+                        source_year = year
+                        source_time = str(lowered[key]).strip()
+                        break
             record_type = "STRUCTURED_JSONL"
 
             contract = self.evidence_contract
@@ -608,14 +619,30 @@ class StructuredProductionAdapter:
             selected: str | None = None
             explicit_year: int | None = None
             explicit_time: str | None = None
-            for cell in row:
-                if selected is None and self._hostname_from_scalar(cell) is not None:
-                    selected = cell.strip()
-                if explicit_year is None:
-                    year = self._year_from_scalar(cell)
-                    if year is not None:
-                        explicit_year = year
-                        explicit_time = cell.strip()
+            if self.schema_binding is not None:
+                raw_host = self._delimited_contract_cell(
+                    row,
+                    self.schema_binding.hostname_field,
+                )
+                raw_time = self._delimited_contract_cell(
+                    row,
+                    self.schema_binding.timestamp_field,
+                )
+                if raw_host is not None and self._hostname_from_scalar(raw_host) is not None:
+                    selected = raw_host.strip()
+                schema_year = self._year_from_scalar(raw_time)
+                if schema_year is not None:
+                    explicit_year = schema_year
+                    explicit_time = None if raw_time is None else raw_time.strip()
+            if selected is None or explicit_year is None:
+                for cell in row:
+                    if selected is None and self._hostname_from_scalar(cell) is not None:
+                        selected = cell.strip()
+                    if explicit_year is None:
+                        year = self._year_from_scalar(cell)
+                        if year is not None:
+                            explicit_year = year
+                            explicit_time = cell.strip()
             if selected is None:
                 return None
             if explicit_year is not None:

@@ -334,6 +334,54 @@
           "validation"
         ]
       }
+    },
+    "adapter_proposals": {
+      "type": "array",
+      "maxItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "parser_kind": {
+            "type": "string",
+            "enum": [
+              "jsonl",
+              "delimited"
+            ]
+          },
+          "compression": {
+            "type": "string",
+            "enum": [
+              "none",
+              "gzip"
+            ]
+          },
+          "hostname_field": {
+            "type": "string",
+            "minLength": 1
+          },
+          "timestamp_field": {
+            "type": "string",
+            "minLength": 1
+          },
+          "delimiter": {
+            "enum": [
+              ",",
+              "\t",
+              ";",
+              "|",
+              null
+            ]
+          }
+        },
+        "required": [
+          "parser_kind",
+          "compression",
+          "hostname_field",
+          "timestamp_field",
+          "delimiter"
+        ]
+      }
     }
   },
   "required": [

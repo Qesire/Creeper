@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import csv
 from collections import Counter
+from collections.abc import Callable
 import gzip
 import io
 import json
@@ -27,6 +28,7 @@ from creeper.authority.baseline_index import BaselineIndex, YEAR_BITS
 from creeper.authority.normalizer import normalize_official
 from creeper.source_discovery.coordinator import ScoutDisposition, ScoutResult
 from creeper.source_discovery.overlap import build_minhash
+from creeper.source_discovery.unknown_format import make_unknown_format_reason
 from creeper.source_discovery.models import (
     MeasurementMode,
     ScoutMeasurement,
@@ -919,12 +921,16 @@ class MeasuredYieldScoutExecutor:
         english_weights: dict[str, Decimal],
         *,
         policy: MeasuredYieldScoutPolicy | None = None,
+        format_resolver: Callable[[str], SourceFormatObservation | None] | None = None,
+        schema_resolver: Callable[[str], SourceRecordSchema | None] | None = None,
         clock=time.perf_counter,
     ) -> None:
         self.client = client
         self.baseline = baseline
         self.english_weights = dict(english_weights)
         self.policy = policy or MeasuredYieldScoutPolicy()
+        self.format_resolver = format_resolver
+        self.schema_resolver = schema_resolver
         self.clock = clock
 
     @staticmethod
@@ -1225,19 +1231,35 @@ class MeasuredYieldScoutExecutor:
                 ScoutDisposition.HOLD,
                 reason="bulk source returned HTTP 404/410",
             )
-        format_observation = detect_source_format(
-            locator=candidate.canonical_entrypoint,
-            payload=download.payload,
-            content_type=download.content_type,
+        format_observation = (
+            None
+            if self.format_resolver is None
+            else self.format_resolver(candidate.source_key)
         )
+        if format_observation is None:
+            format_observation = detect_source_format(
+                locator=candidate.canonical_entrypoint,
+                payload=download.payload,
+                content_type=download.content_type,
+            )
         schema_observation = (
             None
-            if format_observation is None
-            else detect_record_schema(
+            if self.schema_resolver is None
+            else self.schema_resolver(candidate.source_key)
+        )
+        if schema_observation is None and format_observation is not None:
+            schema_observation = detect_record_schema(
                 payload=download.payload,
                 format_observation=format_observation,
             )
-        )
+        if (
+            format_observation is not None
+            and schema_observation is not None
+            and format_observation.parser_kind != schema_observation.parser_kind
+        ):
+            raise ValueError(
+                "persisted source format and record schema parser kinds disagree"
+            )
         try:
             parsed = _extract_hosts(
                 download.payload,
@@ -1277,11 +1299,19 @@ class MeasuredYieldScoutExecutor:
                 schema_observation=schema_observation,
             )
         if parsed is None:
+            unknown_reason = make_unknown_format_reason(
+                download.payload,
+                content_type=download.content_type,
+                truncated=download.truncated,
+            )
             return ScoutResult(
                 ScoutDisposition.HOLD,
                 reason=(
-                    "unsupported measured source format; requires a "
-                    "format-specific mature parser"
+                    unknown_reason
+                    or (
+                        "unsupported measured source format; requires a "
+                        "format-specific mature parser"
+                    )
                 ),
                 format_observation=format_observation,
                 schema_observation=schema_observation,

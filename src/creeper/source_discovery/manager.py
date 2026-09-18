@@ -16,6 +16,7 @@ from creeper.source_discovery.overlap import MinHashSketch
 from creeper.source_discovery.registry import SourceDiscoveryRegistry
 from creeper.source_discovery.residual_search import QueryPlan, SearchCellScheduler
 from creeper.source_discovery.value import InterpretableSourceValueModel
+from creeper.source_discovery.unknown_format import parse_unknown_format_reason
 
 
 class SearchDirectiveKind(StrEnum):
@@ -24,6 +25,7 @@ class SearchDirectiveKind(StrEnum):
     EXPLOIT_SOURCE_FAMILY = "EXPLOIT_SOURCE_FAMILY"
     DISCOVER_NEW_FAMILY = "DISCOVER_NEW_FAMILY"
     INTERPRET_STRUCTURE = "INTERPRET_STRUCTURE"
+    UNKNOWN_FORMAT = "UNKNOWN_FORMAT"
     RECOVER_STAGNATION = "RECOVER_STAGNATION"
 
 
@@ -33,6 +35,7 @@ class SourceIntelligenceTask(StrEnum):
     DISCOVER_NEW_SOURCE = "DISCOVER_NEW_SOURCE"
     EXPLOIT_SUCCESS_PATTERN = "EXPLOIT_SUCCESS_PATTERN"
     INTERPRET_STRUCTURE = "INTERPRET_STRUCTURE"
+    COMPILE_ADAPTER = "COMPILE_ADAPTER"
     RECOVER_STAGNATION = "RECOVER_STAGNATION"
 
 
@@ -155,6 +158,7 @@ class SourceReservoirManager:
             "EXPLOIT_SUCCESS",
             "EXPLORE_NEW_FAMILY",
             "INTERPRET_STRUCTURE",
+            "COMPILE_ADAPTER",
             "RECOVER_STAGNATION",
         }
     )
@@ -240,6 +244,21 @@ class SourceReservoirManager:
             candidate.state in {SourceState.WARM, SourceState.ACTIVE}
             and candidate.direct_evidence_prior >= 0.5
         )
+
+    def _unknown_format_holds(self) -> list[SourceCandidate]:
+        """Return concrete sources blocked only on an unknown textual layout."""
+
+        holds = [
+            candidate
+            for candidate in self.registry.list_candidates(state=SourceState.HOLD)
+            if (
+                candidate.level is SourceLevel.SOURCE
+                and parse_unknown_format_reason(candidate.state_reason) is not None
+                and self.registry.suppression_reason(candidate) is None
+            )
+        ]
+        holds.sort(key=lambda item: (-item.scout_priority, item.source_key))
+        return holds
 
     def _structural_holds(self) -> list[SourceCandidate]:
         holds = [
@@ -375,6 +394,7 @@ class SourceReservoirManager:
                 reward.episodes > 0
                 and reward.search_cost_seconds > 0
                 and reward.strategy not in self._SPECIALIZED_SEARCH_STRATEGIES
+                and not reward.strategy.startswith("COMPILE_ADAPTER:")
             )
         ]
         if not rewards:
@@ -582,8 +602,9 @@ class SourceReservoirManager:
             and deterministic_refill_managed
             and not deterministic_plans_available
         )
+        unknown_format_holds = self._unknown_format_holds()
         structural_holds = self._structural_holds()
-        if not structural_holds and not managed_stagnation:
+        if not unknown_format_holds and not structural_holds and not managed_stagnation:
             return ()
 
         specs: list[
@@ -609,6 +630,16 @@ class SourceReservoirManager:
                 return
             seen.add(dedup_key)
             specs.append((kind, strategy, subject, reason, task_type))
+
+        if unknown_format_holds:
+            subject_candidate = unknown_format_holds[0]
+            add_spec(
+                SearchDirectiveKind.UNKNOWN_FORMAT,
+                f"COMPILE_ADAPTER:{subject_candidate.source_key}",
+                subject_candidate.canonical_entrypoint,
+                subject_candidate.state_reason,
+                SourceIntelligenceTask.COMPILE_ADAPTER,
+            )
 
         if structural_holds:
             subject_candidate = structural_holds[0]
@@ -642,20 +673,23 @@ class SourceReservoirManager:
         capacity = min(
             len(specs),
             self._adaptive_search_budget(
-                structural_hold=bool(structural_holds)
+                structural_hold=bool(unknown_format_holds or structural_holds)
             ),
         )
         if capacity <= 0:
             return ()
 
-        # Structure blockers take precedence because they unblock already-found
-        # high-value objects. Residual-stagnation recovery uses at most the
-        # remaining single low-frequency slot.
+        # Concrete format blockers take precedence, followed by structural
+        # interpretation. Residual-stagnation recovery is the lowest-frequency
+        # LLM role because ordinary refill belongs to deterministic search.
+        priority = {
+            SearchDirectiveKind.UNKNOWN_FORMAT: 0,
+            SearchDirectiveKind.INTERPRET_STRUCTURE: 1,
+            SearchDirectiveKind.RECOVER_STAGNATION: 2,
+        }
         specs.sort(
             key=lambda spec: (
-                0
-                if spec[0] is SearchDirectiveKind.INTERPRET_STRUCTURE
-                else 1,
+                priority.get(spec[0], 3),
                 spec[1],
                 spec[2] or "",
             )
@@ -768,7 +802,7 @@ class SourceReservoirManager:
             active=background_by_state[SourceState.ACTIVE],
         )[:1]
 
-        structural_hold = bool(self._structural_holds())
+        structural_hold = bool(self._unknown_format_holds() or self._structural_holds())
         zero_new_streak, _recent_new_sources, _episodes = (
             self._recent_search_supply()
         )

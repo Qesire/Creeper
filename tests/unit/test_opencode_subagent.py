@@ -36,6 +36,11 @@ class SystemPolicyTests(unittest.TestCase):
             subagent._SYSTEM_POLICY,
         )
 
+    def test_policy_treats_adapter_sample_as_untrusted_data(self) -> None:
+        self.assertIn("COMPILE_ADAPTER", subagent._SYSTEM_POLICY)
+        self.assertIn("untrusted data", subagent._SYSTEM_POLICY)
+        self.assertIn("never emit executable parser code", subagent._SYSTEM_POLICY)
+
 
 class ExtractFinalTextTests(unittest.TestCase):
     def test_concatenates_text_parts_joined_by_newline(self) -> None:
@@ -83,6 +88,27 @@ class ExtractFinalTextTests(unittest.TestCase):
 
 
 class SelectPayloadTests(unittest.TestCase):
+    def test_prefers_object_with_adapter_proposal(self) -> None:
+        payload = {
+            "query": "compile bounded sample",
+            "hypotheses": [],
+            "adapter_proposals": [
+                {
+                    "parser_kind": "jsonl",
+                    "compression": "none",
+                    "hostname_field": "endpoint",
+                    "timestamp_field": "seen",
+                    "delimiter": None,
+                }
+            ],
+        }
+
+        result = subagent._select_payload(
+            json.dumps(payload), episode_id="ep"
+        )
+
+        self.assertEqual(result, payload)
+
     def test_prefers_object_with_hypotheses_list(self) -> None:
         payload = {
             "query": "ep",
@@ -146,6 +172,53 @@ class SelectPayloadTests(unittest.TestCase):
             with self.subTest(text=text):
                 with self.assertRaises(SystemExit):
                     subagent._select_payload(text, episode_id="ep")
+
+
+class NormalizePayloadTests(unittest.TestCase):
+    def test_preserves_single_adapter_proposal(self) -> None:
+        proposal = {
+            "parser_kind": "jsonl",
+            "compression": "none",
+            "hostname_field": "endpoint",
+            "timestamp_field": "seen",
+            "delimiter": None,
+        }
+        normalized = subagent._normalize_payload(
+            {
+                "query": "compile sample",
+                "hypotheses": [],
+                "adapter_proposals": [proposal],
+            },
+            backend="opencode",
+        )
+        self.assertEqual(normalized["hypotheses"], [])
+        self.assertEqual(normalized["adapter_proposals"], [proposal])
+
+    def test_rejects_multiple_adapter_proposals(self) -> None:
+        with self.assertRaisesRegex(SystemExit, "invalid adapter_proposals"):
+            subagent._normalize_payload(
+                {
+                    "query": "compile sample",
+                    "hypotheses": [],
+                    "adapter_proposals": [{}, {}],
+                },
+                backend="opencode",
+            )
+
+    def test_repository_schema_exposes_bounded_adapter_contract(self) -> None:
+        schema_path = (
+            Path(__file__).resolve().parents[2]
+            / "conf"
+            / "codex-source-intelligence.schema.json"
+        )
+        schema = json.loads(schema_path.read_text(encoding="utf-8"))
+        adapter = schema["properties"]["adapter_proposals"]
+        self.assertEqual(adapter["maxItems"], 1)
+        self.assertEqual(
+            set(adapter["items"]["properties"]["parser_kind"]["enum"]),
+            {"jsonl", "delimited"},
+        )
+        self.assertFalse(adapter["items"]["additionalProperties"])
 
 
 class NormalizeHypothesisTests(unittest.TestCase):

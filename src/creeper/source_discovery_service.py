@@ -713,6 +713,8 @@ async def _open_runtime(config: SourceDiscoveryServiceConfig):
                         baseline,
                         load_english_weights(config.measurement.eed_model),
                         policy=config.measurement.policy,
+                        format_resolver=registry.get_format_observation,
+                        schema_resolver=registry.get_schema_observation,
                     )
                 arquivo_catalog = ArquivoCatalogScoutExecutor()
                 scout = SourceScoutRouter(
@@ -816,6 +818,7 @@ def _report_has_progress(report: dict[str, object]) -> bool:
         "scout_edges_added",
         "search_episodes",
         "search_candidates_registered",
+        "adapter_bindings_applied",
         "background_bulk_steps",
         "background_activated",
     )
@@ -828,6 +831,7 @@ _DISCOVERY_COUNTER_FIELDS = {
     "search_backoff_skipped": "discovery_search_backoff_skipped",
     "search_candidates_registered": "discovery_search_candidates_registered",
     "search_candidates_dropped": "discovery_search_candidates_dropped",
+    "adapter_bindings_applied": "discovery_adapter_bindings_applied",
     "deterministic_search_episodes": "discovery_deterministic_search_episodes",
     "deterministic_search_failures": "discovery_deterministic_search_failures",
     "residual_reward_updates": "discovery_residual_reward_updates",

@@ -28,6 +28,10 @@ from creeper.source_discovery.deterministic_search import (
 from creeper.source_discovery.manager import SearchDirective, SourceReservoirManager
 from creeper.source_discovery.residual_search import QueryPlan
 from creeper.source_discovery.search_identity import SearchIdentityLedger
+from creeper.source_discovery.unknown_format import (
+    parse_unknown_format_reason,
+    validate_adapter_proposal,
+)
 from creeper.sources.format_binding import SourceFormatObservation
 from creeper.sources.schema_binding import SourceRecordSchema
 from creeper.source_discovery.motifs import infer_year_sibling_candidates
@@ -134,6 +138,7 @@ class SearchBatch:
     prompt_version: str | None = None
     hypotheses: tuple[dict[str, object], ...] = ()
     hypothesis_attribution: tuple[tuple[str, str], ...] = ()
+    adapter_proposals: tuple[dict[str, object], ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "candidates", tuple(self.candidates))
@@ -143,6 +148,7 @@ class SearchBatch:
             "hypothesis_attribution",
             tuple(self.hypothesis_attribution),
         )
+        object.__setattr__(self, "adapter_proposals", tuple(self.adapter_proposals))
         if not self.backend.strip() or not self.query.strip() or not self.actor.strip():
             raise ValueError("search batch attribution fields are required")
         if self.search_cost_seconds is not None and (
@@ -172,11 +178,15 @@ class SearchBatch:
         if self.context_hash is not None and not isinstance(self.context_hash, str):
             raise ValueError("context_hash must be a string when provided")
         if self.llm_episode_id is None and (
-            self.hypotheses or self.hypothesis_attribution
+            self.hypotheses or self.hypothesis_attribution or self.adapter_proposals
         ):
             raise ValueError(
-                "LLM hypotheses/attribution require llm_episode_id"
+                "LLM hypotheses/attribution/adapter proposals require llm_episode_id"
             )
+        if len(self.adapter_proposals) > 1:
+            raise ValueError("search batch may contain at most one adapter proposal")
+        if any(not isinstance(item, dict) for item in self.adapter_proposals):
+            raise ValueError("search batch adapter proposals must be objects")
 
         hypothesis_ids: set[str] = set()
         for hypothesis in self.hypotheses:
@@ -277,6 +287,7 @@ class CoordinatorCycleReport:
     search_episodes: int = 0
     search_candidates_registered: int = 0
     search_candidates_dropped: int = 0
+    adapter_bindings_applied: int = 0
     search_failures: int = 0
     search_backoff_skipped: int = 0
     background_bulk_steps: int = 0
@@ -712,17 +723,60 @@ class SourceDiscoveryCoordinator:
                 and not measurement_current
             ):
                 self.registry.transition(candidate.source_key, SourceState.HOLD)
+                self.registry.set_state_reason(
+                    candidate.source_key,
+                    "current-authority scout measurement is unavailable",
+                )
                 counts["scouted_hold"] += 1
             elif result.disposition is ScoutDisposition.WARM:
                 self.registry.transition(candidate.source_key, SourceState.WARM)
+                self.registry.set_state_reason(candidate.source_key, "")
                 self._commit_year_motif_siblings(current, counts)
                 counts["scouted_warm"] += 1
             elif result.disposition is ScoutDisposition.HOLD:
                 self.registry.transition(candidate.source_key, SourceState.HOLD)
+                self.registry.set_state_reason(candidate.source_key, result.reason)
                 counts["scouted_hold"] += 1
             else:
                 self.registry.transition(candidate.source_key, SourceState.REJECTED)
+                self.registry.set_state_reason(candidate.source_key, result.reason)
                 counts["scouted_rejected"] += 1
+
+    def _apply_adapter_proposal(
+        self,
+        directive: SearchDirective,
+        batch: SearchBatch,
+    ) -> bool:
+        """Validate and bind one proposal-only adapter, then requeue its source."""
+
+        if directive.task_type.value != "COMPILE_ADAPTER":
+            return False
+        if directive.subject is None or len(batch.adapter_proposals) != 1:
+            raise ValueError(
+                "COMPILE_ADAPTER requires one subject and one adapter proposal"
+            )
+        candidate_key = source_key(directive.subject)
+        candidate = self.registry.get_candidate(candidate_key)
+        if candidate is None:
+            raise KeyError(f"unknown adapter-compilation source: {candidate_key}")
+        if candidate.state is not SourceState.HOLD:
+            raise ValueError("adapter-compilation source is no longer in HOLD")
+        case = parse_unknown_format_reason(candidate.state_reason)
+        if case is None:
+            raise ValueError(
+                "adapter-compilation source no longer has an unknown-format case"
+            )
+        format_observation, schema_observation = validate_adapter_proposal(
+            batch.adapter_proposals[0],
+            case,
+        )
+        self.registry.apply_validated_adapter_binding(
+            candidate_key,
+            format_observation=format_observation,
+            schema_observation=schema_observation,
+            expected_state_reason=candidate.state_reason,
+        )
+        return True
 
     def _commit_searches(
         self,
@@ -770,6 +824,29 @@ class SourceDiscoveryCoordinator:
                         batch.llm_episode_id,
                         hypothesis,
                     )
+            if directive.task_type.value == "COMPILE_ADAPTER":
+                applied = False
+                try:
+                    applied = self._apply_adapter_proposal(directive, batch)
+                except (KeyError, ValueError):
+                    self._search_retry_deadlines[directive.dedup_key] = (
+                        now + self.failure_retry_seconds
+                    )
+                    counts["search_failures"] += 1
+                self.registry.finish_search_episode(
+                    episode.episode_id,
+                    search_cost_seconds=cost,
+                    accepted_proposals=0,
+                    new_sources=0,
+                )
+                if batch.llm_episode_id is not None:
+                    self.registry.finish_llm_episode(
+                        batch.llm_episode_id,
+                        cost_seconds=cost,
+                    )
+                counts["search_episodes"] += 1
+                counts["adapter_bindings_applied"] += int(applied)
+                continue
             seen: set[str] = set()
             accepted: list[SourceCandidate] = []
             dropped = 0
@@ -1047,6 +1124,7 @@ class SourceDiscoveryCoordinator:
                 "search_episodes": 0,
                 "search_candidates_registered": 0,
                 "search_candidates_dropped": 0,
+                "adapter_bindings_applied": 0,
                 "search_failures": 0,
                 "search_backoff_skipped": search_backoff_skipped,
                 "background_bulk_steps": 0,
