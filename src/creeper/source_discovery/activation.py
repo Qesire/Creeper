@@ -230,12 +230,7 @@ class SourceActivationCompiler:
                 permanent=True,
             )
 
-        parser_locator = (
-            existing.root_locator
-            if existing is not None
-            else stored.canonical_entrypoint
-        )
-        resolved_parser = (
+        trusted_parser = (
             trusted_format.parser_kind
             if trusted_format is not None
             else (
@@ -244,9 +239,23 @@ class SourceActivationCompiler:
                 else (
                     trusted_schema.parser_kind
                     if trusted_schema is not None
-                    else parser_kind_from_locator(parser_locator)
+                    else None
                 )
             )
+        )
+        parser_locator = (
+            existing.root_locator
+            if existing is not None
+            else stored.canonical_entrypoint
+        )
+        # resolved_parser describes execution capability for contract/index
+        # identity. trusted_parser is stricter: only a durable high-confidence
+        # observation may make an otherwise opaque locator executable as a
+        # generic structured source.
+        resolved_parser = (
+            trusted_parser
+            if trusted_parser is not None
+            else parser_kind_from_locator(parser_locator)
         )
 
         if existing is not None:
@@ -255,7 +264,7 @@ class SourceActivationCompiler:
         else:
             adapter_kind, enumeration_kind = _adapter_kind(
                 candidate.canonical_entrypoint,
-                parser_kind=resolved_parser,
+                parser_kind=trusted_parser,
             )
         base_adapter_id = f"{adapter_kind}:{source_key.removeprefix('src:')}"
         year_from = candidate.expected_year_from or 1996
