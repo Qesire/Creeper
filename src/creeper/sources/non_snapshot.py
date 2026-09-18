@@ -78,7 +78,7 @@ def is_mailbox_url_locator(locator: str) -> bool:
     parsed = urlsplit(locator)
     path = parsed.path.lower().rstrip("/")
     if path.endswith(_MAILBOX_SUFFIXES):
-        return mailbox_year_from_locator(locator) is not None
+        return True
     if not any(
         marker in path
         for marker in _MAILBOX_EXTENSIONLESS_PATH_MARKERS
