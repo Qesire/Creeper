@@ -40,6 +40,11 @@ from creeper.sources.format_binding import (
     format_from_adapter_id,
 )
 from creeper.sources.locator import format_path_from_locator
+from creeper.sources.layout_binding import (
+    SourceRecordLayout,
+    bind_layout_to_adapter_id,
+    layout_from_adapter_id,
+)
 from creeper.sources.schema_binding import (
     SourceRecordSchema,
     bind_schema_to_adapter_id,
@@ -171,6 +176,17 @@ class SourceActivationCompiler:
         ):
             trusted_format = format_observation
 
+        layout_observation = self.registry.get_layout_observation(source_key)
+        trusted_layout: SourceRecordLayout | None = None
+        if existing is not None:
+            trusted_layout = layout_from_adapter_id(existing.adapter_id)
+        if (
+            trusted_layout is None
+            and layout_observation is not None
+            and layout_observation.confidence >= 0.90
+        ):
+            trusted_layout = layout_observation
+
         schema_observation = self.registry.get_schema_observation(source_key)
         trusted_schema: SourceRecordSchema | None = None
         if existing is not None:
@@ -182,12 +198,28 @@ class SourceActivationCompiler:
         ):
             trusted_schema = schema_observation
         if (
-            trusted_schema is not None
+            trusted_layout is not None
             and trusted_format is not None
-            and trusted_schema.parser_kind != trusted_format.parser_kind
+            and trusted_layout.parser_kind != trusted_format.parser_kind
         ):
             raise SourceActivationError(
-                "record schema parser_kind disagrees with frozen source format",
+                "record layout parser_kind disagrees with frozen source format",
+                permanent=True,
+            )
+        if (
+            trusted_schema is not None
+            and (
+                trusted_format is not None
+                and trusted_schema.parser_kind != trusted_format.parser_kind
+                or trusted_layout is not None
+                and (
+                    trusted_schema.parser_kind != trusted_layout.parser_kind
+                    or trusted_schema.hostname_field != trusted_layout.hostname_field
+                )
+            )
+        ):
+            raise SourceActivationError(
+                "record schema disagrees with frozen source layout",
                 permanent=True,
             )
 
@@ -201,9 +233,13 @@ class SourceActivationCompiler:
                     trusted_format.parser_kind
                     if trusted_format is not None
                     else (
-                        trusted_schema.parser_kind
-                        if trusted_schema is not None
-                        else None
+                        trusted_layout.parser_kind
+                        if trusted_layout is not None
+                        else (
+                            trusted_schema.parser_kind
+                            if trusted_schema is not None
+                            else None
+                        )
                     )
                 ),
             )
@@ -274,9 +310,13 @@ class SourceActivationCompiler:
                         trusted_format.parser_kind
                         if trusted_format is not None
                         else (
-                            trusted_schema.parser_kind
-                            if trusted_schema is not None
-                            else parser_kind_from_locator(existing.root_locator)
+                            trusted_layout.parser_kind
+                            if trusted_layout is not None
+                            else (
+                                trusted_schema.parser_kind
+                                if trusted_schema is not None
+                                else parser_kind_from_locator(existing.root_locator)
+                            )
                         )
                     ),
                 )
@@ -289,9 +329,13 @@ class SourceActivationCompiler:
                 trusted_format.parser_kind
                 if trusted_format is not None
                 else (
-                    trusted_schema.parser_kind
-                    if trusted_schema is not None
-                    else locator_parser
+                    trusted_layout.parser_kind
+                    if trusted_layout is not None
+                    else (
+                        trusted_schema.parser_kind
+                        if trusted_schema is not None
+                        else locator_parser
+                    )
                 )
             )
             reviewed_binding = self.reviewed_contracts.get_exact(
@@ -322,6 +366,17 @@ class SourceActivationCompiler:
                         raise SourceActivationError(
                             "reviewed contract parser_kind disagrees with "
                             "the frozen source format",
+                            permanent=True,
+                        )
+                    if (
+                        trusted_layout is not None
+                        and reviewed_binding.contract.hostname_field is not None
+                        and reviewed_binding.contract.hostname_field
+                        != trusted_layout.hostname_field
+                    ):
+                        raise SourceActivationError(
+                            "reviewed contract hostname mapping disagrees with "
+                            "the frozen record layout",
                             permanent=True,
                         )
                     if (
@@ -398,6 +453,11 @@ class SourceActivationCompiler:
                     base_adapter_id,
                     trusted_format,
                 )
+            if trusted_layout is not None:
+                base_adapter_id = bind_layout_to_adapter_id(
+                    base_adapter_id,
+                    trusted_layout,
+                )
             if trusted_schema is not None:
                 base_adapter_id = bind_schema_to_adapter_id(
                     base_adapter_id,
@@ -432,9 +492,13 @@ class SourceActivationCompiler:
                 trusted_format.parser_kind
                 if trusted_format is not None
                 else (
-                    trusted_schema.parser_kind
-                    if trusted_schema is not None
-                    else None
+                    trusted_layout.parser_kind
+                    if trusted_layout is not None
+                    else (
+                        trusted_schema.parser_kind
+                        if trusted_schema is not None
+                        else None
+                    )
                 )
             ),
         )
