@@ -143,18 +143,26 @@ proposal containing only:
 - parser kind: `jsonl` or `delimited`;
 - compression;
 - hostname field/column;
-- timestamp field/column;
+- optional timestamp field/column;
 - delimiter when applicable.
 
-The parent process accepts the proposal only when at least three sampled records
-match and at least 90% of the evaluated sample agrees. Generated code,
-replacement URLs, unknown parser kinds and evidence-authority claims are
-rejected.
+Hostname extraction and temporal semantics are separate durable layers.
+`SourceRecordLayout` freezes only parser + hostname extraction and is valid
+without any timestamp. `SourceRecordSchema` remains the timestamp-bearing
+temporal layer and is created only when an independently validated timestamp is
+present.
 
-Validated format/schema bindings and `HOLD -> SCOUT_READY` are committed in one
-SQLite transaction. The source then passes through measured scouting again.
-Only the normal evidence-contract machinery can later grant direct annual
-authority.
+The parent accepts a layout only when at least three sampled records expose a
+valid hostname and at least 90% of the evaluated sample agrees. If a timestamp
+field is proposed, it must independently satisfy the same bounded validation.
+Generated code, replacement URLs, unknown parser kinds and evidence-authority
+claims are rejected.
+
+Validated format/layout/optional-schema bindings and `HOLD -> SCOUT_READY` are
+committed in one SQLite transaction. A hostname-only source is therefore
+eligible for measured discovery and later provider completion instead of being
+stranded in HOLD. Only the normal evidence-contract machinery can grant direct
+annual authority.
 
 Binary/opaque unknown formats, or textual formats that require a genuinely new
 parser implementation, remain `HOLD` for explicit engineering rather than
@@ -186,6 +194,7 @@ The production path now includes:
 - protocol-guarded residual calibration reports;
 - deterministic measured-yield scouting and format/schema bindings; and
 - bounded `UNKNOWN_FORMAT -> COMPILE_ADAPTER -> deterministic validation ->
-  re-scout` recovery for layouts executable by existing mature readers.
+  re-scout` recovery for layouts executable by existing mature readers,
+  including hostname-only records whose year must be completed later.
 
 Routine LLM URL/source enumeration is not part of the production refill path.
