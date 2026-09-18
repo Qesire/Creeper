@@ -112,6 +112,20 @@ class GnuMboxDirectEvidenceTests(unittest.TestCase):
         )
         self.assertEqual(parse_mbox_messages(payload, locator=GNU_LOCATOR), ())
 
+    def test_duplicate_date_headers_fail_closed(self) -> None:
+        payload = (
+            b"From sender@example.org Wed Mar 25 10:38:28 1998\n"
+            b"Date: Wed, 25 Mar 1998 10:38:28 -0600\n"
+            b"Date: Thu, 26 Mar 1998 11:00:00 -0600\n"
+            b"\n"
+            b"https://ambiguous.example/path\n"
+        )
+
+        self.assertEqual(
+            parse_mbox_messages(payload, locator=GNU_LOCATOR),
+            (),
+        )
+
     def test_parser_ignores_attachments_and_non_http_schemes(self) -> None:
         payload = mbox_message(
             "Wed, 25 Mar 1998 10:38:28 -0600",
