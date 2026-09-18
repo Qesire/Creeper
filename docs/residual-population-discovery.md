@@ -131,8 +131,15 @@ switching providers or repositories does not reset novelty memory.
 ## Unknown-format recovery
 
 A concrete SOURCE that cannot be parsed deterministically remains in `HOLD`.
-For textual objects only, the measured scout persists a bounded unknown-format
-case containing a sample SHA-256, content type/compression metadata and at most
+For recognized JSONL/delimited containers, the scout first attempts deterministic
+record-layout inference across arbitrary field names/columns. A layout is
+accepted only when one unambiguous hostname field/column has at least three
+matches and covers at least 90% of the bounded sample; ambiguous equal-strength
+columns fail closed.
+
+Only after deterministic layout/schema inference fails does a textual object
+enter the LLM path. The measured scout persists a bounded unknown-format case
+containing a sample SHA-256, content type/compression metadata and at most
 4 KiB of preview text. The complete downloaded object is not copied into the
 control database.
 
@@ -192,7 +199,9 @@ The production path now includes:
 - provider-diverse result-cap enforcement;
 - atomic deterministic residual commits and versioned restart recovery;
 - protocol-guarded residual calibration reports;
-- deterministic measured-yield scouting and format/schema bindings; and
+- deterministic measured-yield scouting with format/layout/schema bindings;
+- deterministic arbitrary-field/column hostname-layout inference before any
+  LLM call; and
 - bounded `UNKNOWN_FORMAT -> COMPILE_ADAPTER -> deterministic validation ->
   re-scout` recovery for layouts executable by existing mature readers,
   including hostname-only records whose year must be completed later.

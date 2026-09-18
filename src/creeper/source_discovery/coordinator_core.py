@@ -33,6 +33,7 @@ from creeper.source_discovery.unknown_format import (
     validate_adapter_proposal,
 )
 from creeper.sources.format_binding import SourceFormatObservation
+from creeper.sources.layout_binding import SourceRecordLayout
 from creeper.sources.schema_binding import SourceRecordSchema
 from creeper.source_discovery.motifs import infer_year_sibling_candidates
 from creeper.source_discovery.models import (
@@ -89,6 +90,7 @@ class ScoutResult:
     edge_relation: str = "enumerates"
     format_observation: SourceFormatObservation | None = None
     schema_observation: SourceRecordSchema | None = None
+    layout_observation: SourceRecordLayout | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "disposition", ScoutDisposition(self.disposition))
@@ -103,6 +105,13 @@ class ScoutResult:
         ):
             raise TypeError(
                 "format_observation must be SourceFormatObservation when provided"
+            )
+        if (
+            self.layout_observation is not None
+            and not isinstance(self.layout_observation, SourceRecordLayout)
+        ):
+            raise TypeError(
+                "layout_observation must be SourceRecordLayout when provided"
             )
         if (
             self.schema_observation is not None
@@ -668,6 +677,29 @@ class SourceDiscoveryCoordinator:
                 except ValueError as exc:
                     reason = (
                         "source format observation failed closed: "
+                        + str(exc).strip()[:240]
+                    )
+                    self.registry.suppress_candidate(
+                        current,
+                        reason=reason,
+                        ttl_seconds=None,
+                    )
+                    self.registry.transition(
+                        candidate.source_key,
+                        SourceState.HOLD,
+                    )
+                    counts["scout_failures"] += 1
+                    counts["scouted_hold"] += 1
+                    continue
+            if result.layout_observation is not None:
+                try:
+                    self.registry.record_layout_observation(
+                        candidate.source_key,
+                        result.layout_observation,
+                    )
+                except ValueError as exc:
+                    reason = (
+                        "source record layout observation failed closed: "
                         + str(exc).strip()[:240]
                     )
                     self.registry.suppress_candidate(

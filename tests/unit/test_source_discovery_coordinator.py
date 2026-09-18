@@ -34,6 +34,7 @@ from creeper.source_discovery.search_identity import (
     canonicalize_search_result,
 )
 from creeper.sources.format_binding import SourceFormatObservation
+from creeper.sources.layout_binding import SourceRecordLayout
 from creeper.sources.schema_binding import SourceRecordSchema
 from creeper.storage.control_store import ControlStore
 
@@ -347,6 +348,53 @@ class SourceDiscoveryCoordinatorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             self.registry.get_format_observation(candidate.source_key),
             observation,
+        )
+        self.assertEqual(
+            self.registry.get_candidate(candidate.source_key).state,
+            SourceState.WARM,
+        )
+
+    async def test_scout_layout_observation_is_committed_by_coordinator(self) -> None:
+        candidate = self.candidate("opaque-layout")
+        self.to_scout_ready(candidate)
+        layout = SourceRecordLayout(
+            parser_kind="jsonl",
+            hostname_field="endpoint",
+            delimiter=None,
+            detection_method="stable_json_host_field",
+            confidence=1.0,
+            sample_records=8,
+            matched_records=8,
+        )
+
+        async def triage(_candidate: SourceCandidate) -> TriageResult:
+            raise AssertionError("no triage expected")
+
+        async def scout(_candidate: SourceCandidate) -> ScoutResult:
+            return ScoutResult(
+                ScoutDisposition.WARM,
+                measurement=self.measurement(),
+                layout_observation=layout,
+            )
+
+        async def search(_directive) -> SearchBatch:
+            raise AssertionError("no search expected")
+
+        coordinator = SourceDiscoveryCoordinator(
+            self.registry,
+            self.manager(),
+            lock_path=self.lock_path,
+            triage_executor=triage,
+            scout_executor=scout,
+            search_executor=search,
+        )
+
+        report = await coordinator.run_once()
+
+        self.assertEqual(report.scouted_warm, 1)
+        self.assertEqual(
+            self.registry.get_layout_observation(candidate.source_key),
+            layout,
         )
         self.assertEqual(
             self.registry.get_candidate(candidate.source_key).state,
