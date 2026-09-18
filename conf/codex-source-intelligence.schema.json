@@ -361,7 +361,10 @@
             "minLength": 1
           },
           "timestamp_field": {
-            "type": "string",
+            "type": [
+              "string",
+              "null"
+            ],
             "minLength": 1
           },
           "delimiter": {

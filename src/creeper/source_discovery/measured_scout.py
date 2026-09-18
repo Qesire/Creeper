@@ -39,6 +39,7 @@ from creeper.sources.archive.cdx import parse_cdx_line
 from creeper.sources.archive.warc import WarcFormatError, iter_warc_target_records
 from creeper.sources.format_binding import SourceFormatObservation
 from creeper.sources.format_detection import detect_source_format
+from creeper.sources.layout_binding import SourceRecordLayout
 from creeper.sources.schema_binding import SourceRecordSchema
 from creeper.sources.schema_detection import detect_record_schema
 from creeper.sources.locator import format_path_from_locator
@@ -452,6 +453,7 @@ def _extract_hosts(
     policy: MeasuredYieldScoutPolicy,
     truncated: bool = False,
     format_observation: SourceFormatObservation | None = None,
+    layout_observation: SourceRecordLayout | None = None,
     schema_observation: SourceRecordSchema | None = None,
 ) -> ParsedHostSample | None:
     if is_ftp_sitelist_locator(url):
@@ -686,6 +688,21 @@ def _extract_hosts(
                     host_year_pairs.add((hostname, year))
                     observations.append(f"{hostname}\t{year}")
                 continue
+            if layout_observation is not None:
+                if not isinstance(value, dict):
+                    continue
+                lowered = {
+                    str(key).strip().lower(): item
+                    for key, item in value.items()
+                }
+                hostname = _hostname_from_scalar(
+                    lowered.get(layout_observation.hostname_field.lower())
+                )
+                if hostname is not None:
+                    hosts.add(hostname)
+                    saw_undated_host = True
+                    observations.append(hostname)
+                continue
 
             hostname, year = _mapping_host_year(value, policy=policy)
             if hostname is not None:
@@ -723,6 +740,14 @@ def _extract_hosts(
             rows = csv.reader(
                 io.StringIO(text),
                 delimiter=schema_observation.delimiter,
+            )
+        elif (
+            layout_observation is not None
+            and layout_observation.delimiter is not None
+        ):
+            rows = csv.reader(
+                io.StringIO(text),
+                delimiter=layout_observation.delimiter,
             )
         elif (
             format_observation is not None
@@ -781,6 +806,37 @@ def _extract_hosts(
                 hosts=hosts,
                 host_year_pairs=host_year_pairs,
                 measurement_mode=MeasurementMode.HOST_YEAR,
+                observation_keys=tuple(observations),
+            )
+
+        if layout_observation is not None:
+            host_index = int(
+                layout_observation.hostname_field.removeprefix("column:")
+            )
+
+            def consume_layout_row(row: list[str]) -> None:
+                nonlocal saw_undated_host
+                if host_index >= len(row):
+                    return
+                hostname = _hostname_from_scalar(row[host_index])
+                if hostname is None:
+                    return
+                hosts.add(hostname)
+                saw_undated_host = True
+                observations.append(hostname)
+
+            sampled += 1
+            consume_layout_row(first)
+            for row in rows:
+                if sampled >= policy.max_records:
+                    break
+                sampled += 1
+                consume_layout_row(row)
+            return ParsedHostSample(
+                sampled_records=sampled,
+                hosts=hosts,
+                host_year_pairs=set(),
+                measurement_mode=MeasurementMode.HOST_ONLY,
                 observation_keys=tuple(observations),
             )
 
@@ -922,6 +978,7 @@ class MeasuredYieldScoutExecutor:
         *,
         policy: MeasuredYieldScoutPolicy | None = None,
         format_resolver: Callable[[str], SourceFormatObservation | None] | None = None,
+        layout_resolver: Callable[[str], SourceRecordLayout | None] | None = None,
         schema_resolver: Callable[[str], SourceRecordSchema | None] | None = None,
         clock=time.perf_counter,
     ) -> None:
@@ -930,6 +987,7 @@ class MeasuredYieldScoutExecutor:
         self.english_weights = dict(english_weights)
         self.policy = policy or MeasuredYieldScoutPolicy()
         self.format_resolver = format_resolver
+        self.layout_resolver = layout_resolver
         self.schema_resolver = schema_resolver
         self.clock = clock
 
@@ -1242,23 +1300,59 @@ class MeasuredYieldScoutExecutor:
                 payload=download.payload,
                 content_type=download.content_type,
             )
+        layout_observation = (
+            None
+            if self.layout_resolver is None
+            else self.layout_resolver(candidate.source_key)
+        )
         schema_observation = (
             None
             if self.schema_resolver is None
             else self.schema_resolver(candidate.source_key)
         )
         if schema_observation is None and format_observation is not None:
-            schema_observation = detect_record_schema(
+            detected_schema = detect_record_schema(
                 payload=download.payload,
                 format_observation=format_observation,
             )
+            if (
+                detected_schema is not None
+                and (
+                    layout_observation is None
+                    or (
+                        detected_schema.parser_kind == layout_observation.parser_kind
+                        and detected_schema.hostname_field
+                        == layout_observation.hostname_field
+                    )
+                )
+            ):
+                schema_observation = detected_schema
         if (
             format_observation is not None
-            and schema_observation is not None
+            and layout_observation is not None
+            and format_observation.parser_kind != layout_observation.parser_kind
+        ):
+            raise ValueError(
+                "persisted source format and record layout parser kinds disagree"
+            )
+        if (
+            schema_observation is not None
+            and format_observation is not None
             and format_observation.parser_kind != schema_observation.parser_kind
         ):
             raise ValueError(
                 "persisted source format and record schema parser kinds disagree"
+            )
+        if (
+            schema_observation is not None
+            and layout_observation is not None
+            and (
+                layout_observation.parser_kind != schema_observation.parser_kind
+                or layout_observation.hostname_field != schema_observation.hostname_field
+            )
+        ):
+            raise ValueError(
+                "persisted source layout/schema bindings disagree"
             )
         try:
             parsed = _extract_hosts(
@@ -1268,6 +1362,7 @@ class MeasuredYieldScoutExecutor:
                 policy=self.policy,
                 truncated=download.truncated,
                 format_observation=format_observation,
+                layout_observation=layout_observation,
                 schema_observation=schema_observation,
             )
         except (WarcFormatError, ValueError, csv.Error) as exc:

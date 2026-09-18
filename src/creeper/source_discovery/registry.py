@@ -23,6 +23,7 @@ from creeper.source_discovery.models import (
     is_common_crawl_provenance,
 )
 from creeper.sources.format_binding import SourceFormatObservation
+from creeper.sources.layout_binding import SourceRecordLayout
 from creeper.sources.schema_binding import SourceRecordSchema
 from creeper.storage.control_store import ControlStore
 
@@ -334,6 +335,20 @@ class SourceDiscoveryRegistry:
                 confidence REAL NOT NULL,
                 content_type TEXT NOT NULL,
                 delimiter TEXT,
+                policy_version TEXT NOT NULL,
+                observed_at REAL NOT NULL,
+                FOREIGN KEY(source_key) REFERENCES source_candidates(source_key)
+            ) WITHOUT ROWID;
+
+            CREATE TABLE IF NOT EXISTS source_record_layouts (
+                source_key TEXT PRIMARY KEY,
+                parser_kind TEXT NOT NULL,
+                hostname_field TEXT NOT NULL,
+                delimiter TEXT,
+                detection_method TEXT NOT NULL,
+                confidence REAL NOT NULL,
+                sample_records INTEGER NOT NULL,
+                matched_records INTEGER NOT NULL,
                 policy_version TEXT NOT NULL,
                 observed_at REAL NOT NULL,
                 FOREIGN KEY(source_key) REFERENCES source_candidates(source_key)
@@ -2727,6 +2742,97 @@ class SourceDiscoveryRegistry:
             policy_version=str(row["policy_version"]),
         )
 
+    def record_layout_observation(
+        self,
+        source_key: str,
+        observation: SourceRecordLayout,
+    ) -> bool:
+        """Persist hostname-extraction layout without temporal authority."""
+
+        if self.get_candidate(source_key) is None:
+            raise KeyError(f"unknown source: {source_key}")
+        if not isinstance(observation, SourceRecordLayout):
+            raise TypeError("observation must be SourceRecordLayout")
+        current = self.get_layout_observation(source_key)
+        if current is not None:
+            same_layout = (
+                current.parser_kind == observation.parser_kind
+                and current.hostname_field == observation.hostname_field
+                and current.delimiter == observation.delimiter
+            )
+            if (
+                not same_layout
+                and current.confidence >= 0.95
+                and observation.confidence >= 0.95
+            ):
+                raise ValueError(
+                    "conflicting high-confidence record layout observations"
+                )
+            if observation.confidence < current.confidence:
+                return False
+            if observation == current:
+                return False
+        with self.connection:
+            self.connection.execute(
+                """
+                INSERT INTO source_record_layouts(
+                    source_key, parser_kind, hostname_field, delimiter,
+                    detection_method, confidence, sample_records,
+                    matched_records, policy_version, observed_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(source_key) DO UPDATE SET
+                    parser_kind = excluded.parser_kind,
+                    hostname_field = excluded.hostname_field,
+                    delimiter = excluded.delimiter,
+                    detection_method = excluded.detection_method,
+                    confidence = excluded.confidence,
+                    sample_records = excluded.sample_records,
+                    matched_records = excluded.matched_records,
+                    policy_version = excluded.policy_version,
+                    observed_at = excluded.observed_at
+                """,
+                (
+                    source_key,
+                    observation.parser_kind,
+                    observation.hostname_field,
+                    observation.delimiter,
+                    observation.detection_method,
+                    observation.confidence,
+                    observation.sample_records,
+                    observation.matched_records,
+                    observation.policy_version,
+                    self._now(),
+                ),
+            )
+        return True
+
+    def get_layout_observation(
+        self,
+        source_key: str,
+    ) -> SourceRecordLayout | None:
+        row = self.connection.execute(
+            """
+            SELECT parser_kind, hostname_field, delimiter,
+                   detection_method, confidence, sample_records,
+                   matched_records, policy_version
+            FROM source_record_layouts
+            WHERE source_key = ?
+            """,
+            (source_key,),
+        ).fetchone()
+        if row is None:
+            return None
+        return SourceRecordLayout(
+            parser_kind=str(row["parser_kind"]),
+            hostname_field=str(row["hostname_field"]),
+            delimiter=(None if row["delimiter"] is None else str(row["delimiter"])),
+            detection_method=str(row["detection_method"]),
+            confidence=float(row["confidence"]),
+            sample_records=int(row["sample_records"]),
+            matched_records=int(row["matched_records"]),
+            policy_version=str(row["policy_version"]),
+        )
+
     def record_schema_observation(
         self,
         source_key: str,
@@ -2743,10 +2849,7 @@ class SourceDiscoveryRegistry:
                 and current.hostname_field == observation.hostname_field
                 and current.timestamp_field == observation.timestamp_field
                 and current.delimiter == observation.delimiter
-                and (
-                    current.direct_year_eligible
-                    == observation.direct_year_eligible
-                )
+                and current.direct_year_eligible == observation.direct_year_eligible
             )
             if (
                 not same_schema
@@ -2836,7 +2939,8 @@ class SourceDiscoveryRegistry:
         source_key: str,
         *,
         format_observation: SourceFormatObservation,
-        schema_observation: SourceRecordSchema,
+        layout_observation: SourceRecordLayout,
+        schema_observation: SourceRecordSchema | None,
         expected_state_reason: str,
     ) -> SourceCandidate:
         """Atomically bind a validated discovery-only layout and requeue it.
@@ -2848,14 +2952,27 @@ class SourceDiscoveryRegistry:
 
         if not isinstance(format_observation, SourceFormatObservation):
             raise TypeError("format_observation must be SourceFormatObservation")
-        if not isinstance(schema_observation, SourceRecordSchema):
-            raise TypeError("schema_observation must be SourceRecordSchema")
-        if schema_observation.direct_year_eligible:
+        if not isinstance(layout_observation, SourceRecordLayout):
+            raise TypeError("layout_observation must be SourceRecordLayout")
+        if schema_observation is not None and not isinstance(
+            schema_observation,
+            SourceRecordSchema,
+        ):
+            raise TypeError("schema_observation must be SourceRecordSchema when provided")
+        if schema_observation is not None and schema_observation.direct_year_eligible:
             raise ValueError(
                 "LLM-assisted adapter binding cannot grant direct-year authority"
             )
-        if format_observation.parser_kind != schema_observation.parser_kind:
-            raise ValueError("adapter format/schema parser kinds disagree")
+        if format_observation.parser_kind != layout_observation.parser_kind:
+            raise ValueError("adapter format/layout parser kinds disagree")
+        if (
+            schema_observation is not None
+            and (
+                schema_observation.parser_kind != layout_observation.parser_kind
+                or schema_observation.hostname_field != layout_observation.hostname_field
+            )
+        ):
+            raise ValueError("adapter layout/schema bindings disagree")
         if not isinstance(expected_state_reason, str) or not expected_state_reason:
             raise ValueError("expected unknown-format state reason is required")
 
@@ -2881,8 +2998,18 @@ class SourceDiscoveryRegistry:
                 raise ValueError(
                     "adapter-compilation conflicts with an existing format binding"
                 )
+            current_layout = self.get_layout_observation(source_key)
+            if current_layout is not None and current_layout != layout_observation:
+                raise ValueError(
+                    "adapter-compilation conflicts with an existing layout binding"
+                )
             current_schema = self.get_schema_observation(source_key)
-            if current_schema is not None and current_schema != schema_observation:
+            if schema_observation is None:
+                if current_schema is not None:
+                    raise ValueError(
+                        "adapter-compilation omitted an existing temporal schema"
+                    )
+            elif current_schema is not None and current_schema != schema_observation:
                 raise ValueError(
                     "adapter-compilation conflicts with an existing schema binding"
                 )
@@ -2918,40 +3045,72 @@ class SourceDiscoveryRegistry:
             )
             self.connection.execute(
                 """
-                INSERT INTO source_record_schemas(
-                    source_key, parser_kind, hostname_field, timestamp_field,
-                    delimiter, detection_method, confidence,
-                    sample_records, matched_records, direct_year_eligible,
-                    policy_version, observed_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO source_record_layouts(
+                    source_key, parser_kind, hostname_field, delimiter,
+                    detection_method, confidence, sample_records,
+                    matched_records, policy_version, observed_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(source_key) DO UPDATE SET
                     parser_kind = excluded.parser_kind,
                     hostname_field = excluded.hostname_field,
-                    timestamp_field = excluded.timestamp_field,
                     delimiter = excluded.delimiter,
                     detection_method = excluded.detection_method,
                     confidence = excluded.confidence,
                     sample_records = excluded.sample_records,
                     matched_records = excluded.matched_records,
-                    direct_year_eligible = excluded.direct_year_eligible,
                     policy_version = excluded.policy_version,
                     observed_at = excluded.observed_at
                 """,
                 (
                     source_key,
-                    schema_observation.parser_kind,
-                    schema_observation.hostname_field,
-                    schema_observation.timestamp_field,
-                    schema_observation.delimiter,
-                    schema_observation.detection_method,
-                    schema_observation.confidence,
-                    schema_observation.sample_records,
-                    schema_observation.matched_records,
-                    0,
-                    schema_observation.policy_version,
+                    layout_observation.parser_kind,
+                    layout_observation.hostname_field,
+                    layout_observation.delimiter,
+                    layout_observation.detection_method,
+                    layout_observation.confidence,
+                    layout_observation.sample_records,
+                    layout_observation.matched_records,
+                    layout_observation.policy_version,
                     now,
                 ),
             )
+            if schema_observation is not None:
+                self.connection.execute(
+                    """
+                    INSERT INTO source_record_schemas(
+                        source_key, parser_kind, hostname_field, timestamp_field,
+                        delimiter, detection_method, confidence,
+                        sample_records, matched_records, direct_year_eligible,
+                        policy_version, observed_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(source_key) DO UPDATE SET
+                        parser_kind = excluded.parser_kind,
+                        hostname_field = excluded.hostname_field,
+                        timestamp_field = excluded.timestamp_field,
+                        delimiter = excluded.delimiter,
+                        detection_method = excluded.detection_method,
+                        confidence = excluded.confidence,
+                        sample_records = excluded.sample_records,
+                        matched_records = excluded.matched_records,
+                        direct_year_eligible = excluded.direct_year_eligible,
+                        policy_version = excluded.policy_version,
+                        observed_at = excluded.observed_at
+                    """,
+                    (
+                        source_key,
+                        schema_observation.parser_kind,
+                        schema_observation.hostname_field,
+                        schema_observation.timestamp_field,
+                        schema_observation.delimiter,
+                        schema_observation.detection_method,
+                        schema_observation.confidence,
+                        schema_observation.sample_records,
+                        schema_observation.matched_records,
+                        0,
+                        schema_observation.policy_version,
+                        now,
+                    ),
+                )
             changed = self.connection.execute(
                 """
                 UPDATE source_candidates

@@ -219,6 +219,10 @@ class NormalizePayloadTests(unittest.TestCase):
             {"jsonl", "delimited"},
         )
         self.assertFalse(adapter["items"]["additionalProperties"])
+        self.assertEqual(
+            set(adapter["items"]["properties"]["timestamp_field"]["type"]),
+            {"string", "null"},
+        )
 
 
 class NormalizeHypothesisTests(unittest.TestCase):

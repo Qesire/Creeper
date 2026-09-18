@@ -444,6 +444,8 @@ class CommandAgentSearchExecutor:
                 "must_match_sample": True,
                 "minimum_matching_records": 3,
                 "minimum_match_fraction": 0.90,
+                "timestamp_field_optional": True,
+                "hostname_only_layout_is_valid": True,
                 "generated_code_forbidden": True,
                 "direct_year_authority_forbidden": True,
                 "do_not_search_for_other_sources": True,
@@ -456,7 +458,8 @@ class CommandAgentSearchExecutor:
             requested["hypotheses"] = "must be an empty array"
             requested["adapter_proposals"] = (
                 "exactly one object with parser_kind, compression, "
-                "hostname_field, timestamp_field, delimiter; no code"
+                "hostname_field, timestamp_field (string or null), "
+                "delimiter; no code"
             )
 
         if self.admission_policy is not None:

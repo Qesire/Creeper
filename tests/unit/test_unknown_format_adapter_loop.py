@@ -16,6 +16,10 @@ from creeper.source_discovery.manager import (
     SourcePoolTargets,
     SourceReservoirManager,
 )
+from creeper.source_discovery.measured_scout import (
+    MeasuredYieldScoutPolicy,
+    _extract_hosts,
+)
 from creeper.source_discovery.models import (
     ScoutMeasurement,
     SourceCandidate,
@@ -32,6 +36,10 @@ from creeper.source_discovery.unknown_format import (
 from creeper.sources.format_binding import (
     SourceFormatObservation,
     bind_format_to_adapter_id,
+)
+from creeper.sources.layout_binding import (
+    SourceRecordLayout,
+    bind_layout_to_adapter_id,
 )
 from creeper.sources.production import StructuredProductionAdapter
 from creeper.sources.reservoirs import Reservoir
@@ -84,7 +92,7 @@ class UnknownFormatProtocolTests(unittest.TestCase):
         assert reason is not None
         case = parse_unknown_format_reason(reason)
         assert case is not None
-        format_observation, schema = validate_adapter_proposal(
+        format_observation, layout, schema = validate_adapter_proposal(
             {
                 "parser_kind": "jsonl",
                 "compression": "none",
@@ -96,9 +104,82 @@ class UnknownFormatProtocolTests(unittest.TestCase):
         )
         self.assertEqual(format_observation.parser_kind, "jsonl")
         self.assertGreaterEqual(format_observation.confidence, 0.90)
+        self.assertEqual(layout.hostname_field, "endpoint")
+        self.assertEqual(layout.parser_kind, "jsonl")
+        self.assertIsNotNone(schema)
+        assert schema is not None
         self.assertEqual(schema.hostname_field, "endpoint")
         self.assertEqual(schema.timestamp_field, "seen")
         self.assertFalse(schema.direct_year_eligible)
+
+    def test_hostname_only_jsonl_layout_is_valid_without_temporal_schema(self) -> None:
+        sample = (
+            b'{"endpoint":"https://alpha.example.com/a","label":"x"}\n'
+            b'{"endpoint":"https://beta.example.com/b","label":"y"}\n'
+            b'{"endpoint":"https://gamma.example.com/c","label":"z"}\n'
+            b'{"endpoint":"https://delta.example.com/d","label":"q"}\n'
+        )
+        reason = make_unknown_format_reason(
+            sample,
+            content_type="application/octet-stream",
+            truncated=False,
+        )
+        assert reason is not None
+        case = parse_unknown_format_reason(reason)
+        assert case is not None
+        format_observation, layout, schema = validate_adapter_proposal(
+            {
+                "parser_kind": "jsonl",
+                "compression": "none",
+                "hostname_field": "endpoint",
+                "timestamp_field": None,
+                "delimiter": None,
+            },
+            case,
+        )
+        self.assertEqual(format_observation.parser_kind, "jsonl")
+        self.assertEqual(layout.hostname_field, "endpoint")
+        self.assertEqual(layout.matched_records, 4)
+        self.assertIsNone(schema)
+
+    def test_measured_parser_uses_hostname_only_layout_as_host_only(self) -> None:
+        layout = SourceRecordLayout(
+            parser_kind="jsonl",
+            hostname_field="endpoint",
+            delimiter=None,
+            detection_method="llm_declarative_validated",
+            confidence=1.0,
+            sample_records=4,
+            matched_records=4,
+        )
+        parsed = _extract_hosts(
+            (
+                b'{"endpoint":"https://alpha.example.com/a","label":"x"}\n'
+                b'{"endpoint":"https://beta.example.com/b","label":"y"}\n'
+                b'{"endpoint":"https://gamma.example.com/c","label":"z"}\n'
+            ),
+            url="https://data.example/opaque",
+            content_type="application/octet-stream",
+            policy=MeasuredYieldScoutPolicy(
+                min_unique_hosts=1,
+                min_novel_hosts=1,
+            ),
+            format_observation=SourceFormatObservation(
+                parser_kind="jsonl",
+                compression="none",
+                detection_method="llm_declarative_validated",
+                confidence=1.0,
+                content_type="application/octet-stream",
+            ),
+            layout_observation=layout,
+            schema_observation=None,
+        )
+        self.assertIsNotNone(parsed)
+        assert parsed is not None
+        self.assertEqual(parsed.sampled_records, 3)
+        self.assertEqual(len(parsed.hosts), 3)
+        self.assertEqual(parsed.host_year_pairs, set())
+        self.assertEqual(parsed.measurement_mode.value, "HOST_ONLY")
 
     def test_adapter_proposal_cannot_request_new_code_or_authority(self) -> None:
         reason = make_unknown_format_reason(
@@ -238,10 +319,13 @@ class UnknownFormatCoordinatorLoopTests(unittest.IsolatedAsyncioTestCase):
         format_observation = self.registry.get_format_observation(
             self.candidate.source_key
         )
+        layout = self.registry.get_layout_observation(self.candidate.source_key)
         schema = self.registry.get_schema_observation(self.candidate.source_key)
         assert format_observation is not None
+        assert layout is not None
         assert schema is not None
         self.assertEqual(format_observation.parser_kind, "jsonl")
+        self.assertEqual(layout.hostname_field, "endpoint")
         self.assertEqual(schema.hostname_field, "endpoint")
         self.assertFalse(schema.direct_year_eligible)
 
@@ -284,6 +368,65 @@ class UnknownFormatCoordinatorLoopTests(unittest.IsolatedAsyncioTestCase):
         assert final is not None
         self.assertEqual(final.state, SourceState.WARM)
 
+    async def test_hostname_only_adapter_requeues_without_temporal_schema(self) -> None:
+        sample = (
+            b'{"endpoint":"https://a.example.com/","label":"one"}\n'
+            b'{"endpoint":"https://b.example.com/","label":"two"}\n'
+            b'{"endpoint":"https://c.example.com/","label":"three"}\n'
+        )
+        reason = make_unknown_format_reason(
+            sample,
+            content_type="application/octet-stream",
+            truncated=False,
+        )
+        assert reason is not None
+        self.registry.set_state_reason(self.candidate.source_key, reason)
+
+        async def triage(_candidate: SourceCandidate) -> TriageResult:
+            raise AssertionError("no triage expected")
+
+        async def scout(_candidate: SourceCandidate) -> ScoutResult:
+            raise AssertionError("re-scout occurs on the next cycle")
+
+        async def compile_adapter(directive) -> SearchBatch:
+            return SearchBatch(
+                backend="fixture-llm",
+                query="bind hostname field only",
+                actor="agent:fixture",
+                llm_episode_id="llm:host-only",
+                llm_task_type=directive.task_type.value,
+                adapter_proposals=(
+                    {
+                        "parser_kind": "jsonl",
+                        "compression": "none",
+                        "hostname_field": "endpoint",
+                        "timestamp_field": None,
+                        "delimiter": None,
+                    },
+                ),
+            )
+
+        coordinator = SourceDiscoveryCoordinator(
+            self.registry,
+            self.manager(),
+            lock_path=self.root / "coordinator.lock",
+            triage_executor=triage,
+            scout_executor=scout,
+            search_executor=compile_adapter,
+        )
+        report = await coordinator.run_once()
+        self.assertEqual(report.adapter_bindings_applied, 1)
+        layout = self.registry.get_layout_observation(self.candidate.source_key)
+        self.assertIsNotNone(layout)
+        assert layout is not None
+        self.assertEqual(layout.hostname_field, "endpoint")
+        self.assertIsNone(
+            self.registry.get_schema_observation(self.candidate.source_key)
+        )
+        stored = self.registry.get_candidate(self.candidate.source_key)
+        assert stored is not None
+        self.assertEqual(stored.state, SourceState.SCOUT_READY)
+
     async def test_invalid_adapter_proposal_stays_hold_and_backs_off(self) -> None:
         async def triage(_candidate: SourceCandidate) -> TriageResult:
             raise AssertionError("no triage expected")
@@ -325,6 +468,53 @@ class UnknownFormatCoordinatorLoopTests(unittest.IsolatedAsyncioTestCase):
         assert stored is not None
         self.assertEqual(stored.state, SourceState.HOLD)
         self.assertIsNotNone(parse_unknown_format_reason(stored.state_reason))
+
+
+class RecordLayoutBindingTests(unittest.TestCase):
+    def test_hostname_only_layout_survives_adapter_binding_round_trip(self) -> None:
+        format_observation = SourceFormatObservation(
+            parser_kind="jsonl",
+            compression="none",
+            detection_method="llm_declarative_validated",
+            confidence=1.0,
+            content_type="application/octet-stream",
+            policy_version="source-format-llm-layout-v2",
+        )
+        layout = SourceRecordLayout(
+            parser_kind="jsonl",
+            hostname_field="endpoint",
+            delimiter=None,
+            detection_method="llm_declarative_validated",
+            confidence=1.0,
+            sample_records=4,
+            matched_records=4,
+            policy_version="record-layout-llm-v1",
+        )
+        adapter_id = bind_format_to_adapter_id(
+            "structured:hostname-only-fixture",
+            format_observation,
+        )
+        adapter_id = bind_layout_to_adapter_id(adapter_id, layout)
+        reservoir = Reservoir(
+            reservoir_id="reservoir:hostname-only-fixture",
+            domain_id="domain:hostname-only-fixture",
+            adapter_id=adapter_id,
+            root_locator="https://data.example/opaque-hosts",
+            enumeration_kind="structured_records",
+            capacity_lower=0,
+            evidence_mode="discovery_only",
+        )
+        adapter = StructuredProductionAdapter(reservoir)
+        record = adapter._generic_record(
+            '{"endpoint":"https://alpha.example.com/path","label":"x"}',
+            locator="fixture:0",
+        )
+        self.assertIsNotNone(record)
+        assert record is not None
+        self.assertEqual(record.payload, "https://alpha.example.com/path")
+        self.assertIsNone(record.source_year)
+        self.assertEqual(record.direct_year_mask, 0)
+        self.assertEqual(record.year_hint_mask, 0)
 
 
 class UnknownFormatProductionBindingTests(unittest.TestCase):

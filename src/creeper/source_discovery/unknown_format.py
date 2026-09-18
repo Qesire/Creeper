@@ -21,6 +21,7 @@ from urllib.parse import urlsplit
 
 from creeper.authority.normalizer import normalize_official
 from creeper.sources.format_binding import SourceFormatObservation
+from creeper.sources.layout_binding import SourceRecordLayout
 from creeper.sources.schema_binding import SourceRecordSchema
 
 
@@ -231,10 +232,11 @@ def _validate_jsonl(
     text: str,
     *,
     hostname_field: str,
-    timestamp_field: str,
-) -> tuple[int, int]:
+    timestamp_field: str | None,
+) -> tuple[int, int, int]:
     sampled = 0
-    matched = 0
+    host_matched = 0
+    temporal_matched = 0
     for line in text.splitlines():
         if not line.strip():
             continue
@@ -244,14 +246,17 @@ def _validate_jsonl(
             sampled += 1
             continue
         sampled += 1
-        if (
-            _hostname_from_scalar(_field(value, hostname_field)) is not None
-            and _target_year(_field(value, timestamp_field)) is not None
-        ):
-            matched += 1
+        hostname = _hostname_from_scalar(_field(value, hostname_field))
+        if hostname is not None:
+            host_matched += 1
+            if (
+                timestamp_field is not None
+                and _target_year(_field(value, timestamp_field)) is not None
+            ):
+                temporal_matched += 1
         if sampled >= 64:
             break
-    return sampled, matched
+    return sampled, host_matched, temporal_matched
 
 
 def _column_index(field: str) -> int:
@@ -271,10 +276,12 @@ def _validate_delimited(
     *,
     delimiter: str,
     hostname_field: str,
-    timestamp_field: str,
-) -> tuple[int, int]:
+    timestamp_field: str | None,
+) -> tuple[int, int, int]:
     host_index = _column_index(hostname_field)
-    time_index = _column_index(timestamp_field)
+    time_index = (
+        None if timestamp_field is None else _column_index(timestamp_field)
+    )
     try:
         rows = csv.reader(io.StringIO(text), delimiter=delimiter)
         materialized = []
@@ -286,34 +293,45 @@ def _validate_delimited(
     except csv.Error as exc:
         raise UnknownFormatProtocolError("invalid proposed delimited layout") from exc
     if not materialized:
-        return 0, 0
+        return 0, 0, 0
 
-    def row_matches(row: list[str]) -> bool:
+    def host_matches(row: list[str]) -> bool:
         return (
             host_index < len(row)
-            and time_index < len(row)
             and _hostname_from_scalar(row[host_index]) is not None
+        )
+
+    def temporal_matches(row: list[str]) -> bool:
+        return (
+            time_index is not None
+            and time_index < len(row)
+            and host_matches(row)
             and _target_year(row[time_index]) is not None
         )
 
     data = materialized
-    if len(materialized) >= 4 and not row_matches(materialized[0]):
-        if sum(row_matches(row) for row in materialized[1:4]) >= 3:
+    if len(materialized) >= 4 and not host_matches(materialized[0]):
+        if sum(host_matches(row) for row in materialized[1:4]) >= 3:
             data = materialized[1:]
     sampled = len(data)
-    matched = sum(row_matches(row) for row in data)
-    return sampled, matched
+    host_matched = sum(host_matches(row) for row in data)
+    temporal_matched = sum(temporal_matches(row) for row in data)
+    return sampled, host_matched, temporal_matched
 
 
 def validate_adapter_proposal(
     proposal: Mapping[str, Any],
     case: UnknownFormatCase,
-) -> tuple[SourceFormatObservation, SourceRecordSchema]:
-    """Validate an LLM layout proposal against the durable sample.
+) -> tuple[
+    SourceFormatObservation,
+    SourceRecordLayout,
+    SourceRecordSchema | None,
+]:
+    """Validate a proposal into execution layout plus optional temporal schema.
 
-    Only existing line-oriented parser families are accepted. The resulting
-    schema is deliberately discovery-only: direct_year_eligible is forced false
-    regardless of the proposed timestamp field.
+    Hostname extraction is sufficient for discovery. A timestamp field is
+    optional; when present and validated it is retained only as a
+    discovery-only temporal schema and still grants no evidence authority.
     """
 
     if not isinstance(proposal, Mapping):
@@ -341,10 +359,15 @@ def validate_adapter_proposal(
             "adapter proposal compression disagrees with sampled object"
         )
     hostname_field = str(proposal.get("hostname_field", "")).strip()
-    timestamp_field = str(proposal.get("timestamp_field", "")).strip()
-    if not hostname_field or not timestamp_field:
+    timestamp_raw = proposal.get("timestamp_field")
+    timestamp_field = (
+        None
+        if timestamp_raw is None or not str(timestamp_raw).strip()
+        else str(timestamp_raw).strip()
+    )
+    if not hostname_field:
         raise UnknownFormatProtocolError(
-            "adapter proposal requires hostname_field and timestamp_field"
+            "adapter proposal requires hostname_field"
         )
 
     delimiter_raw = proposal.get("delimiter")
@@ -353,7 +376,7 @@ def validate_adapter_proposal(
     if parser_kind == "jsonl":
         if delimiter is not None:
             raise UnknownFormatProtocolError("jsonl adapter must not define delimiter")
-        sampled, matched = _validate_jsonl(
+        sampled, host_matched, temporal_matched = _validate_jsonl(
             text,
             hostname_field=hostname_field,
             timestamp_field=timestamp_field,
@@ -363,42 +386,64 @@ def validate_adapter_proposal(
             raise UnknownFormatProtocolError(
                 "delimited adapter requires one of comma, tab, semicolon, or pipe"
             )
-        sampled, matched = _validate_delimited(
+        sampled, host_matched, temporal_matched = _validate_delimited(
             text,
             delimiter=delimiter,
             hostname_field=hostname_field,
             timestamp_field=timestamp_field,
         )
 
-    if sampled < 3 or matched < 3:
+    if sampled < 3 or host_matched < 3:
         raise UnknownFormatProtocolError(
-            "adapter proposal lacks three deterministic matching sample records"
+            "adapter proposal lacks three deterministic hostname matches"
         )
-    confidence = matched / sampled
-    if not math.isfinite(confidence) or confidence < 0.90:
+    layout_confidence = host_matched / sampled
+    if not math.isfinite(layout_confidence) or layout_confidence < 0.90:
         raise UnknownFormatProtocolError(
-            "adapter proposal matches less than 90% of sampled records"
+            "adapter proposal hostname layout matches less than 90% of sampled records"
         )
 
     format_observation = SourceFormatObservation(
         parser_kind=parser_kind,
         compression=compression,
         detection_method="llm_declarative_validated",
-        confidence=confidence,
+        confidence=layout_confidence,
         content_type=case.content_type,
         delimiter=delimiter,
-        policy_version="source-format-llm-layout-v1",
+        policy_version="source-format-llm-layout-v2",
     )
-    schema = SourceRecordSchema(
+    layout = SourceRecordLayout(
         parser_kind=parser_kind,
         hostname_field=hostname_field,
-        timestamp_field=timestamp_field,
         delimiter=delimiter,
         detection_method="llm_declarative_validated",
-        confidence=confidence,
+        confidence=layout_confidence,
         sample_records=sampled,
-        matched_records=matched,
-        direct_year_eligible=False,
-        policy_version="record-schema-llm-layout-v1",
+        matched_records=host_matched,
+        policy_version="record-layout-llm-v1",
     )
-    return format_observation, schema
+
+    schema = None
+    if timestamp_field is not None:
+        if temporal_matched < 3:
+            raise UnknownFormatProtocolError(
+                "timestamp_field lacks three deterministic target-year matches"
+            )
+        temporal_confidence = temporal_matched / sampled
+        if not math.isfinite(temporal_confidence) or temporal_confidence < 0.90:
+            raise UnknownFormatProtocolError(
+                "timestamp_field matches less than 90% of sampled records"
+            )
+        schema = SourceRecordSchema(
+            parser_kind=parser_kind,
+            hostname_field=hostname_field,
+            timestamp_field=timestamp_field,
+            delimiter=delimiter,
+            detection_method="llm_declarative_validated",
+            confidence=temporal_confidence,
+            sample_records=sampled,
+            matched_records=temporal_matched,
+            direct_year_eligible=False,
+            policy_version="record-schema-llm-layout-v2",
+        )
+    return format_observation, layout, schema

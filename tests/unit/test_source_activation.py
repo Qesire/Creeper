@@ -33,6 +33,10 @@ from creeper.sources.format_binding import (
     SourceFormatObservation,
     format_from_adapter_id,
 )
+from creeper.sources.layout_binding import (
+    SourceRecordLayout,
+    layout_from_adapter_id,
+)
 from creeper.sources.schema_binding import (
     SourceRecordSchema,
     schema_from_adapter_id,
@@ -129,6 +133,63 @@ class SourceActivationCompilerTests(unittest.TestCase):
                 self.assertEqual(reservoir.state.value, "READY")
                 activation = control.get_activation(spec.source_key)
                 self.assertEqual(activation["reservoir_id"], spec.reservoir_id)
+            finally:
+                control.close()
+
+    def test_hostname_only_layout_is_frozen_without_temporal_authority(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            control = ControlStore(Path(tmp) / "control.sqlite3")
+            try:
+                candidate = _candidate(
+                    "https://repo.example/api/download?id=hostname-only"
+                )
+                registry = self._registry(control, candidate)
+                fmt = SourceFormatObservation(
+                    parser_kind="jsonl",
+                    compression="none",
+                    detection_method="llm_declarative_validated",
+                    confidence=1.0,
+                    content_type="application/octet-stream",
+                    policy_version="source-format-llm-layout-v2",
+                )
+                layout = SourceRecordLayout(
+                    parser_kind="jsonl",
+                    hostname_field="endpoint",
+                    delimiter=None,
+                    detection_method="llm_declarative_validated",
+                    confidence=1.0,
+                    sample_records=8,
+                    matched_records=8,
+                    policy_version="record-layout-llm-v1",
+                )
+                registry.record_format_observation(candidate.source_key, fmt)
+                registry.record_layout_observation(candidate.source_key, layout)
+
+                spec = SourceActivationCompiler(
+                    control,
+                    registry=registry,
+                ).compile(candidate)
+
+                self.assertEqual(spec.adapter_kind, "structured")
+                self.assertEqual(spec.evidence_mode, "discovery_only")
+                reservoir = control.get_reservoir(spec.reservoir_id)
+                self.assertIsNotNone(reservoir)
+                assert reservoir is not None
+                self.assertEqual(
+                    format_from_adapter_id(reservoir.adapter_id),
+                    fmt,
+                )
+                self.assertEqual(
+                    layout_from_adapter_id(reservoir.adapter_id),
+                    layout,
+                )
+                self.assertIsNone(
+                    schema_from_adapter_id(reservoir.adapter_id)
+                )
+                contract = contract_from_adapter_id(reservoir.adapter_id)
+                self.assertIsNotNone(contract)
+                assert contract is not None
+                self.assertFalse(contract.grants_direct_web_year)
             finally:
                 control.close()
 
