@@ -123,8 +123,10 @@ require_year_bounds = true
 # Parent -> child contract:
 #   <command...> --request REQUEST.json --response RESPONSE.json
 # The Creeper parent process launches source-intelligence only for exceptional
-# uncertainty/recovery work, currently INTERPRET_STRUCTURE and
-# RECOVER_STAGNATION. Routine source discovery/refill belongs to deterministic
+# uncertainty/recovery work: COMPILE_ADAPTER for one already-found unknown
+# textual layout, INTERPRET_STRUCTURE for an unresolved catalog/metasource, and
+# RECOVER_STAGNATION after the finite residual program is exhausted. Routine
+# source discovery/refill belongs to deterministic
 # residual providers. The child receives only a bounded state snapshot and has
 # proposal-only authority; SQLite, baseline authority and submission stay hidden.
 #
