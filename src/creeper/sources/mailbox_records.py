@@ -45,19 +45,29 @@ def is_audited_gnu_mbox_locator(locator: str) -> bool:
 
 def _message_text_parts(message) -> tuple[str, ...]:
     parts: list[str] = []
-    for part in message.walk():
+
+    def visit(part) -> None:
+        # Attachment authority is subtree-scoped. In particular, a
+        # message/rfc822 attachment may contain ordinary text/* children whose
+        # own Content-Disposition is empty; walking flat would accidentally
+        # promote URLs from the attached/forwarded message.
+        if (
+            part.get_content_disposition() == "attachment"
+            or part.get_filename() is not None
+        ):
+            return
         if part.is_multipart():
-            continue
+            for child in part.iter_parts():
+                visit(child)
+            return
         if part.get_content_maintype() != "text":
-            continue
-        if part.get_content_disposition() == "attachment":
-            continue
+            return
         try:
             value = part.get_content()
         except (LookupError, UnicodeError, ValueError):
             raw = part.get_payload(decode=True)
             if raw is None:
-                continue
+                return
             charset = part.get_content_charset() or "utf-8"
             try:
                 value = raw.decode(charset, errors="replace")
@@ -65,6 +75,8 @@ def _message_text_parts(message) -> tuple[str, ...]:
                 value = raw.decode("utf-8", errors="replace")
         if isinstance(value, str):
             parts.append(value)
+
+    visit(message)
     return tuple(parts)
 
 
