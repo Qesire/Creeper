@@ -122,6 +122,34 @@ class GnuMboxDirectEvidenceTests(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0].urls, ("https://body.example/a",))
 
+    def test_parser_skips_nested_message_attachment_subtree(self) -> None:
+        payload = (
+            b"From sender@example.org Wed Mar 25 10:38:28 1998\n"
+            b"Date: Wed, 25 Mar 1998 10:38:28 -0600\n"
+            b"MIME-Version: 1.0\n"
+            b'Content-Type: multipart/mixed; boundary="OUTER"\n'
+            b"\n"
+            b"--OUTER\n"
+            b"Content-Type: text/plain; charset=utf-8\n"
+            b"\n"
+            b"https://body.example/live\n"
+            b"--OUTER\n"
+            b"Content-Type: message/rfc822\n"
+            b"Content-Disposition: attachment; filename=forwarded.eml\n"
+            b"\n"
+            b"From: Nested <nested@example.org>\n"
+            b"Date: Tue, 24 Mar 1998 10:00:00 -0600\n"
+            b"Content-Type: text/plain\n"
+            b"\n"
+            b"https://attachment.example/hidden\n"
+            b"--OUTER--\n"
+        )
+
+        rows = parse_mbox_messages(payload, locator=GNU_LOCATOR)
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0].urls, ("https://body.example/live",))
+
     def test_parser_caps_each_message_at_64_urls(self) -> None:
         urls = " ".join(f"https://h{i}.example/x" for i in range(80))
         payload = mbox_message("Wed, 25 Mar 1998 10:38:28 -0600", urls)
