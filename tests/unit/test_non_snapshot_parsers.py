@@ -77,6 +77,17 @@ class NonSnapshotParserTests(unittest.TestCase):
             )
         )
 
+        self.assertFalse(
+            is_mailbox_url_locator(
+                "https://example.test/archive/1998-03.mail"
+            )
+        )
+        self.assertFalse(
+            is_mailbox_url_locator(
+                "https://example.test/archive/1998-03.mail.gz"
+            )
+        )
+
     def test_generic_target_month_filename_is_not_a_mailbox(self) -> None:
         self.assertFalse(
             is_mailbox_url_locator("https://data.example/releases/1998-03")
