@@ -14,6 +14,7 @@ from urllib.parse import urlsplit
 from creeper.authority.normalizer import normalize_official
 from creeper.sources.format_binding import SourceFormatObservation
 from creeper.sources.layout_binding import SourceRecordLayout
+from creeper.sources.layout_detection import layout_allows_auto_direct
 from creeper.sources.schema_binding import SourceRecordSchema
 
 
@@ -177,7 +178,13 @@ def _jsonl_schema(
         confidence=confidence,
         sample_records=len(records),
         matched_records=matched,
-        direct_year_eligible=time_field in _AUTO_DIRECT_TIME_KEYS,
+        direct_year_eligible=(
+            time_field in _AUTO_DIRECT_TIME_KEYS
+            and (
+                layout is None
+                or layout_allows_auto_direct(layout)
+            )
+        ),
     )
 
 
@@ -271,6 +278,8 @@ def _delimited_schema(
             or (
                 layout_host_index is not None
                 and host_index == layout_host_index
+                and layout is not None
+                and layout_allows_auto_direct(layout)
             )
         )
     )
