@@ -212,6 +212,26 @@ def curated_non_snapshot_roots() -> tuple[SourceCandidate, ...]:
             confidence=1.0,
             state=SourceState.DISCOVERED,
         ),
+        SourceCandidate(
+            canonical_entrypoint=(
+                "https://www.ietf.org/ietf-ftp/ietf-mail-archive/ietf/"
+            ),
+            source_family="HISTORICAL_MAILBOX_CATALOG",
+            level=SourceLevel.METASOURCE,
+            discovered_by="curated-live-research",
+            discovery_strategy="CURATED_NON_SNAPSHOT_SEARCH",
+            expected_year_from=1996,
+            expected_year_to=2001,
+            expected_volume=None,
+            temporal_semantics_prior=0.90,
+            enumerability_prior=1.0,
+            direct_evidence_prior=0.0,
+            baseline_overlap_prior=0.50,
+            access_cost_prior=0.05,
+            adapter_cost_prior=0.05,
+            confidence=1.0,
+            state=SourceState.DISCOVERED,
+        ),
     )
 
 
