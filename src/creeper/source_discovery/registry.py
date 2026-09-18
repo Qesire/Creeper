@@ -2364,6 +2364,26 @@ class SourceDiscoveryRegistry:
             changed += 1
         return changed
 
+    def set_state_reason(self, source_key: str, reason: str) -> None:
+        """Persist one bounded explanatory state reason without changing state."""
+
+        if not isinstance(reason, str):
+            raise TypeError("source state reason must be a string")
+        normalized = reason.strip()
+        if len(normalized) > 8 * 1024:
+            raise ValueError("source state reason exceeds 8192 characters")
+        with self.connection:
+            changed = self.connection.execute(
+                """
+                UPDATE source_candidates
+                SET state_reason = ?, updated_at = ?
+                WHERE source_key = ?
+                """,
+                (normalized, self._now(), source_key),
+            ).rowcount
+        if changed != 1:
+            raise KeyError(f"unknown source: {source_key}")
+
     def transition(self, source_key: str, target: SourceState) -> SourceCandidate:
         target = SourceState(target)
         now = self._now()
