@@ -95,6 +95,43 @@ class RecordSchemaDetectionTests(unittest.TestCase):
         self.assertEqual(contract.hostname_field, "endpoint")
         self.assertEqual(contract.timestamp_field, "capture_timestamp")
 
+    def test_llm_hostname_layout_cannot_gain_direct_year_indirectly(self) -> None:
+        payload = (
+            b'{"endpoint":"https://one.example/a","capture_timestamp":"19980101000000"}\n'
+            b'{"endpoint":"https://two.example/b","capture_timestamp":"19990101000000"}\n'
+            b'{"endpoint":"https://three.example/c","capture_timestamp":"20000101000000"}\n'
+        )
+        fmt = SourceFormatObservation(
+            parser_kind="jsonl",
+            compression="none",
+            detection_method="content_signature",
+            confidence=0.97,
+        )
+        layout = SourceRecordLayout(
+            parser_kind="jsonl",
+            hostname_field="endpoint",
+            delimiter=None,
+            detection_method="llm_declarative_validated",
+            confidence=1.0,
+            sample_records=3,
+            matched_records=3,
+            policy_version="record-layout-llm-v1",
+        )
+
+        schema = detect_record_schema(
+            payload=payload,
+            format_observation=fmt,
+            layout_observation=layout,
+        )
+
+        self.assertIsNotNone(schema)
+        assert schema is not None
+        self.assertEqual(schema.hostname_field, "endpoint")
+        self.assertEqual(schema.timestamp_field, "capture_timestamp")
+        self.assertFalse(schema.direct_year_eligible)
+        with self.assertRaisesRegex(ValueError, "direct-year"):
+            schema.direct_contract()
+
     def test_layout_custom_json_hostname_with_plain_year_stays_hint_only(self) -> None:
         payload = (
             b'{"endpoint":"https://one.example/a","year":1998}\n'
