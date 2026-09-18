@@ -23,8 +23,6 @@ _AUTO_DIRECT_LAYOUT_METHODS = frozenset(
         "stable_delimited_host_column",
         "schema:stable_json_fields",
         "schema:stable_delimited_columns",
-        "schema:stable_json_layout_time_field",
-        "schema:stable_delimited_layout_time_column",
     }
 )
 
