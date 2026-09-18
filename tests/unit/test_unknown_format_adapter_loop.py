@@ -16,6 +16,10 @@ from creeper.source_discovery.manager import (
     SourcePoolTargets,
     SourceReservoirManager,
 )
+from creeper.source_discovery.measured_scout import (
+    MeasuredYieldScoutPolicy,
+    _extract_hosts,
+)
 from creeper.source_discovery.models import (
     ScoutMeasurement,
     SourceCandidate,
@@ -137,6 +141,45 @@ class UnknownFormatProtocolTests(unittest.TestCase):
         self.assertEqual(layout.hostname_field, "endpoint")
         self.assertEqual(layout.matched_records, 4)
         self.assertIsNone(schema)
+
+    def test_measured_parser_uses_hostname_only_layout_as_host_only(self) -> None:
+        layout = SourceRecordLayout(
+            parser_kind="jsonl",
+            hostname_field="endpoint",
+            delimiter=None,
+            detection_method="llm_declarative_validated",
+            confidence=1.0,
+            sample_records=4,
+            matched_records=4,
+        )
+        parsed = _extract_hosts(
+            (
+                b'{"endpoint":"https://alpha.example.com/a","label":"x"}\n'
+                b'{"endpoint":"https://beta.example.com/b","label":"y"}\n'
+                b'{"endpoint":"https://gamma.example.com/c","label":"z"}\n'
+            ),
+            url="https://data.example/opaque",
+            content_type="application/octet-stream",
+            policy=MeasuredYieldScoutPolicy(
+                min_unique_hosts=1,
+                min_novel_hosts=1,
+            ),
+            format_observation=SourceFormatObservation(
+                parser_kind="jsonl",
+                compression="none",
+                detection_method="llm_declarative_validated",
+                confidence=1.0,
+                content_type="application/octet-stream",
+            ),
+            layout_observation=layout,
+            schema_observation=None,
+        )
+        self.assertIsNotNone(parsed)
+        assert parsed is not None
+        self.assertEqual(parsed.sampled_records, 3)
+        self.assertEqual(len(parsed.hosts), 3)
+        self.assertEqual(parsed.host_year_pairs, set())
+        self.assertEqual(parsed.measurement_mode.value, "HOST_ONLY")
 
     def test_adapter_proposal_cannot_request_new_code_or_authority(self) -> None:
         reason = make_unknown_format_reason(
