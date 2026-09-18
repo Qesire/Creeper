@@ -70,6 +70,16 @@ class _OpenFile:
 class GnuMboxDirectEvidenceTests(unittest.TestCase):
     def test_audited_locator_gets_direct_contract(self) -> None:
         self.assertTrue(is_audited_gnu_mbox_locator(GNU_LOCATOR))
+        self.assertTrue(
+            is_audited_gnu_mbox_locator(
+                "https://lists.gnu.org/archive/mbox/lynx-dev/1998-03.mbox"
+            )
+        )
+        self.assertTrue(
+            is_audited_gnu_mbox_locator(
+                "https://lists.gnu.org/archive/mbox/lynx-dev/1998-03.mbox.gz"
+            )
+        )
         self.assertFalse(
             is_audited_gnu_mbox_locator(
                 "https://example.test/archive/mbox/lynx-dev/1998-03"
