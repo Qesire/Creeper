@@ -1098,7 +1098,10 @@ class MboxMessageProductionAdapter(StructuredProductionAdapter):
                             next_cursor=None,
                         )
                     bytes_read += len(raw)
-                    if raw.startswith(b"From "):
+                    if (
+                        raw.startswith(b"From ")
+                        and raw.endswith((b"\n", b"\r"))
+                    ):
                         boundary_offset, boundary = offset, raw
                         break
                     if start > 0:
@@ -1188,7 +1191,10 @@ class MboxMessageProductionAdapter(StructuredProductionAdapter):
                         break
                     bytes_read += len(raw)
 
-                    if raw.startswith(b"From "):
+                    if (
+                        raw.startswith(b"From ")
+                        and raw.endswith((b"\n", b"\r"))
+                    ):
                         next_boundary = (offset, raw)
                         break
 
