@@ -95,6 +95,8 @@ def _adapter_kind(
         return "ftp_sitelist", "structured_records"
     if parser_kind == "sbi_bbs_zip":
         return "sbi_bbs", "structured_records"
+    if parser_kind == "finnish_bbs_zip":
+        return "finnish_bbs", "structured_records"
     if parser_kind == "warc_arc":
         return "warc_arc", "archive_records"
     if explicit_parser and parser_kind in {
