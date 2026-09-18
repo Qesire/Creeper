@@ -29,6 +29,16 @@ from creeper.source_discovery.unknown_format import (
     parse_unknown_format_reason,
     validate_adapter_proposal,
 )
+from creeper.sources.format_binding import (
+    SourceFormatObservation,
+    bind_format_to_adapter_id,
+)
+from creeper.sources.production import StructuredProductionAdapter
+from creeper.sources.reservoirs import Reservoir
+from creeper.sources.schema_binding import (
+    SourceRecordSchema,
+    bind_schema_to_adapter_id,
+)
 from creeper.storage.control_store import ControlStore
 
 
@@ -315,6 +325,58 @@ class UnknownFormatCoordinatorLoopTests(unittest.IsolatedAsyncioTestCase):
         assert stored is not None
         self.assertEqual(stored.state, SourceState.HOLD)
         self.assertIsNotNone(parse_unknown_format_reason(stored.state_reason))
+
+
+class UnknownFormatProductionBindingTests(unittest.TestCase):
+    def test_discovery_only_reader_honors_nonstandard_bound_fields(self) -> None:
+        format_observation = SourceFormatObservation(
+            parser_kind="jsonl",
+            compression="none",
+            detection_method="llm_declarative_validated",
+            confidence=1.0,
+            content_type="application/octet-stream",
+            policy_version="source-format-llm-layout-v1",
+        )
+        schema = SourceRecordSchema(
+            parser_kind="jsonl",
+            hostname_field="endpoint",
+            timestamp_field="seen",
+            delimiter=None,
+            detection_method="llm_declarative_validated",
+            confidence=1.0,
+            sample_records=4,
+            matched_records=4,
+            direct_year_eligible=False,
+            policy_version="record-schema-llm-layout-v1",
+        )
+        adapter_id = bind_format_to_adapter_id(
+            "structured:unknown-format-fixture",
+            format_observation,
+        )
+        adapter_id = bind_schema_to_adapter_id(adapter_id, schema)
+        reservoir = Reservoir(
+            reservoir_id="reservoir:unknown-format-fixture",
+            domain_id="domain:unknown-format-fixture",
+            adapter_id=adapter_id,
+            root_locator="https://data.example/opaque-resource",
+            enumeration_kind="structured_records",
+            capacity_lower=0,
+            evidence_mode="discovery_only",
+        )
+        adapter = StructuredProductionAdapter(reservoir)
+        record = adapter._generic_record(
+            '{"endpoint":"https://alpha.example.com/path","seen":"1998-01-02"}',
+            locator="fixture:0",
+        )
+        self.assertIsNotNone(record)
+        assert record is not None
+        self.assertEqual(record.payload, "https://alpha.example.com/path")
+        self.assertEqual(record.source_year, 1998)
+        self.assertEqual(record.direct_year_mask, 0)
+        hosts = tuple(adapter.extract_hosts(record))
+        self.assertEqual(len(hosts), 1)
+        self.assertEqual(hosts[0].hostname, "alpha.example.com")
+        self.assertEqual(hosts[0].direct_year_mask, 0)
 
 
 if __name__ == "__main__":
