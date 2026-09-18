@@ -304,9 +304,7 @@ class SourceProducerCliTests(unittest.TestCase):
             try:
                 registry = SourceDiscoveryRegistry(control)
                 candidate = SourceCandidate(
-                    canonical_entrypoint=(
-                        "https://lists.gnu.org/archive/mbox/lynx-dev/1998-03"
-                    ),
+                    canonical_entrypoint="https://mirror.example/1998-03.mbox",
                     source_family="HISTORICAL_MAILBOX_URL_CORPUS",
                     level=SourceLevel.SOURCE,
                     discovered_by="test",
@@ -380,6 +378,93 @@ class SourceProducerCliTests(unittest.TestCase):
                     "minimum safe per-record evidence fanout",
                 ):
                     runtime.refresh_workset()
+
+    def test_activated_gnu_mailbox_direct_source_bypasses_wayback_backlog(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task_root = root / "task"
+            baseline_root = task_root / "merged260909-3"
+            baseline_root.mkdir(parents=True)
+            for year in range(1996, 2002):
+                (baseline_root / f"{year}.txt").write_text("", encoding="utf-8")
+            (baseline_root / "candidate_pool.txt").write_text("", encoding="utf-8")
+            baseline_path = root / "baseline.sqlite3"
+            BaselineIndex.build(task_root, baseline_path).close()
+
+            runtime_root = root / "runtime"
+            runtime_root.mkdir()
+            control = ControlStore(runtime_root / "control.sqlite3")
+            try:
+                registry = SourceDiscoveryRegistry(control)
+                candidate = SourceCandidate(
+                    canonical_entrypoint=(
+                        "https://lists.gnu.org/archive/mbox/lynx-dev/1998-03"
+                    ),
+                    source_family="HISTORICAL_MAILBOX_URL_CORPUS",
+                    level=SourceLevel.SOURCE,
+                    discovered_by="test",
+                    discovery_strategy="fixture",
+                    expected_year_from=1998,
+                    expected_year_to=1998,
+                    expected_volume=1000,
+                    enumerability_prior=1.0,
+                    confidence=1.0,
+                    state=SourceState.ACTIVE,
+                )
+                registry.register_proposal(candidate)
+                registry.record_scout_measurement(
+                    candidate.source_key,
+                    ScoutMeasurement(
+                        sampled_records=100,
+                        unique_hosts=100,
+                        novel_hosts=50,
+                        direct_host_years=0,
+                        requests=1,
+                        bytes_read=1024,
+                        elapsed_seconds=1.0,
+                        novel_eed=50.0,
+                        observed_host_year_pairs=100,
+                        novel_host_year_pairs=50,
+                        measurement_mode=MeasurementMode.HOST_YEAR,
+                    ),
+                )
+            finally:
+                control.close()
+
+            config = {
+                "source_mode": "activated",
+                "baseline_index": str(baseline_path),
+                "runtime_data_root": str(runtime_root),
+            }
+            limits = {
+                "queue_source_records": 10,
+                "queue_observations": 10,
+                "queue_evidence_tasks": 10,
+                "queue_commits": 10,
+                "lease_max_records": 4,
+                "lease_max_requests": 4,
+                "lease_max_bytes": 4096,
+                "lease_max_seconds": 30,
+                "evidence_backlog_capacity": 1,
+            }
+            with ActivatedSourceRuntime(
+                root / "activated.toml",
+                config=config,
+                limits=limits,
+                owner="gnu-mailbox-direct-test",
+            ) as runtime:
+                self.assertEqual(runtime.refresh_workset(), 1)
+                lease_candidate = runtime.producer.candidates[0]
+                lease = lease_candidate.lease
+                assert lease is not None
+                self.assertEqual(lease.max_records, 4)
+                self.assertEqual(lease.expected_evidence_tasks, 0)
+                self.assertEqual(lease_candidate.reservation_evidence_tasks, 0)
+                self.assertEqual(lease_candidate.costs.evidence_network, 0.0)
+                self.assertEqual(
+                    lease_candidate.reservoir.evidence_mode,
+                    "direct_year",
+                )
 
     def test_activated_runtime_delegates_only_optimizer_eligible_direct_indexes(self):
         with tempfile.TemporaryDirectory() as tmp:
