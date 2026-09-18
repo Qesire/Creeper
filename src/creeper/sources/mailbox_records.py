@@ -121,10 +121,10 @@ def parse_mbox_messages(
             message = parser.parsebytes(payload[start:end])
         except (ValueError, TypeError):
             continue
-        raw_date = message.get("Date")
-        if raw_date is None:
+        raw_dates = message.get_all("Date", [])
+        if len(raw_dates) != 1:
             continue
-        date_text = str(raw_date).strip()
+        date_text = str(raw_dates[0]).strip()
         try:
             parsed_date = parsedate_to_datetime(date_text)
         except (TypeError, ValueError, OverflowError):
