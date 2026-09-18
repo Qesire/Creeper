@@ -1474,6 +1474,7 @@ class MeasuredYieldScoutExecutor:
             measurement=measurement,
             reason="bounded deterministic sample met warm-yield thresholds",
             format_observation=format_observation,
+            layout_observation=layout_observation,
             schema_observation=schema_observation,
         )
 
