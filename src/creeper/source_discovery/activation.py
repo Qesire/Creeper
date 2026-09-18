@@ -40,6 +40,7 @@ from creeper.sources.format_binding import (
     format_from_adapter_id,
 )
 from creeper.sources.locator import format_path_from_locator
+from creeper.sources.mailbox_records import is_audited_gnu_mbox_locator
 from creeper.sources.layout_binding import (
     SourceRecordLayout,
     bind_layout_to_adapter_id,
@@ -97,6 +98,11 @@ def _adapter_kind(
         return "sbi_bbs", "structured_records"
     if parser_kind == "finnish_bbs_zip":
         return "finnish_bbs", "structured_records"
+    if (
+        parser_kind == "mbox_urls"
+        and is_audited_gnu_mbox_locator(entrypoint)
+    ):
+        return "mbox_messages", "structured_records"
     if parser_kind == "warc_arc":
         return "warc_arc", "archive_records"
     if explicit_parser and parser_kind in {
@@ -327,9 +333,21 @@ class SourceActivationCompiler:
         if existing is not None:
             contract = contract_from_adapter_id(existing.adapter_id)
             if contract is None:
-                contract = resolve_source_evidence_contract(
+                resolved_contract = resolve_source_evidence_contract(
                     existing.root_locator,
                     parser_kind=resolved_parser,
+                )
+                # Legacy reservoirs predate durable contract tokens. Their
+                # persisted evidence_mode is the authority boundary: a later
+                # code allowlist must never upgrade discovery-only state while
+                # merely backfilling capability/index metadata.
+                contract = (
+                    discovery_only_contract(resolved_parser)
+                    if (
+                        existing.evidence_mode == "discovery_only"
+                        and resolved_contract.grants_direct_web_year
+                    )
+                    else resolved_contract
                 )
             adapter_id = existing.adapter_id
         else:

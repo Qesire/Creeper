@@ -34,6 +34,10 @@ from creeper.sources.finnish_bbs import parse_finnish_bbs_zip
 from creeper.sources.ftp_sitelist import parse_ftp_sitelist_zip
 from creeper.sources.format_binding import format_from_adapter_id
 from creeper.sources.locator import format_path_from_locator
+from creeper.sources.mailbox_records import (
+    is_audited_gnu_mbox_locator,
+    parse_mbox_messages,
+)
 from creeper.sources.layout_binding import layout_from_adapter_id
 from creeper.sources.schema_binding import schema_from_adapter_id
 from creeper.sources.sbi_bbs import parse_sbi_bbs_zip
@@ -984,6 +988,313 @@ class StructuredProductionAdapter:
         return tuple(result)
 
 
+class MboxMessageProductionAdapter(StructuredProductionAdapter):
+    """Streaming message-level reader for audited GNU monthly mbox shards.
+
+    The durable cursor is the decompressed byte offset of an mbox envelope
+    boundary. A lease never commits a partially read message. If byte/time
+    budget expires before the next boundary, the cursor stays at the current
+    message start so recovery is deterministic.
+    """
+
+    def __init__(
+        self,
+        reservoir: Reservoir,
+        *,
+        evidence_contract: SourceEvidenceContract | None = None,
+    ) -> None:
+        if not is_audited_gnu_mbox_locator(reservoir.root_locator):
+            raise ProductionAdapterError(
+                "mbox_messages adapter requires an audited GNU monthly shard"
+            )
+        super().__init__(
+            reservoir,
+            temporal_scope=None,
+            evidence_contract=evidence_contract,
+        )
+        if self.kind != "mbox_urls":
+            raise ProductionAdapterError(
+                "mbox_messages adapter requires mbox_urls parser semantics"
+            )
+
+    def execute_stream(
+        self,
+        lease: WorkLease,
+        emit_record: Callable[[SourceRecord], None],
+    ) -> LeaseResult:
+        if lease.cursor_end is not None:
+            raise ProductionAdapterError(
+                "mbox_messages does not support cursor_end regions"
+            )
+
+        start = self._cursor_value(lease.cursor_start)
+        emitted = 0
+        started = time.monotonic()
+        downstream_wait_seconds = 0.0
+        bytes_read = 0
+        next_cursor: str | None = f"byte:{start}"
+
+        if lease.max_requests <= 0 or lease.max_seconds <= 0:
+            return LeaseResult(lease.lease_id, next_cursor=next_cursor)
+        if lease.max_bytes <= 0 or lease.max_records <= 0:
+            return LeaseResult(lease.lease_id, next_cursor=next_cursor)
+
+        source, opened = self._ensure_stream(start)
+        stream_fallback_used = False
+
+        def read_line(size: int) -> tuple[int, bytes]:
+            nonlocal source, opened, stream_fallback_used
+            if size < 1:
+                return (
+                    self._stream_position
+                    if self._streaming_mode
+                    else int(source.tell()),
+                    b"",
+                )
+            if self._streaming_mode:
+                raw = self._read_streaming_line(size)
+                return self._last_line_offset, raw
+            offset = int(source.tell())
+            try:
+                raw = source.readline(size)
+            except (OSError, ValueError, io.UnsupportedOperation):
+                if stream_fallback_used or urlsplit(self.source).scheme.lower() not in {
+                    "http",
+                    "https",
+                }:
+                    raise
+                self._stream_at(offset)
+                source = self._stream
+                assert source is not None
+                opened += 1
+                stream_fallback_used = True
+                raw = self._read_streaming_line(size)
+                return self._last_line_offset, raw
+            return offset, raw
+
+        try:
+            if self._pending_line is not None and self._pending_line[0] == start:
+                boundary_offset, boundary = self._pending_line
+                self._pending_line = None
+            else:
+                self._pending_line = None
+                boundary_offset = start
+                boundary = b""
+                while bytes_read < lease.max_bytes:
+                    remaining = lease.max_bytes - bytes_read
+                    offset, raw = read_line(remaining)
+                    if not raw:
+                        next_cursor = None
+                        self.close()
+                        return LeaseResult(
+                            lease_id=lease.lease_id,
+                            records=0,
+                            requests=opened,
+                            bytes_read=bytes_read,
+                            elapsed_seconds=max(
+                                0.0,
+                                time.monotonic() - started,
+                            ),
+                            next_cursor=None,
+                        )
+                    bytes_read += len(raw)
+                    if (
+                        raw.startswith(b"From ")
+                        and raw.endswith((b"\n", b"\r"))
+                    ):
+                        boundary_offset, boundary = offset, raw
+                        break
+                    if start > 0:
+                        self.close()
+                        raise ProductionAdapterError(
+                            "mbox durable cursor is not at a message boundary"
+                        )
+                    if (
+                        bytes_read >= lease.max_bytes
+                        and not raw.endswith((b"\n", b"\r"))
+                    ):
+                        self.close()
+                        raise ProductionAdapterError(
+                            "mbox preamble exceeds lease max_bytes"
+                        )
+                if not boundary:
+                    self.close()
+                    raise ProductionAdapterError(
+                        "mbox message boundary exceeds lease max_bytes"
+                    )
+
+            while boundary:
+                message_start = boundary_offset
+                message_parts = [boundary]
+                next_boundary: tuple[int, bytes] | None = None
+                reached_eof = False
+
+                while True:
+                    if (
+                        time.monotonic() - started - downstream_wait_seconds
+                        >= lease.max_seconds
+                    ):
+                        self.close()
+                        if emitted == 0:
+                            return LeaseResult(
+                                lease_id=lease.lease_id,
+                                records=0,
+                                requests=opened,
+                                bytes_read=bytes_read,
+                                elapsed_seconds=max(
+                                    0.0,
+                                    time.monotonic()
+                                    - started
+                                    - downstream_wait_seconds,
+                                ),
+                                next_cursor=f"byte:{message_start}",
+                            )
+                        next_cursor = f"byte:{message_start}"
+                        return LeaseResult(
+                            lease_id=lease.lease_id,
+                            records=emitted,
+                            requests=opened,
+                            bytes_read=bytes_read,
+                            elapsed_seconds=max(
+                                0.0,
+                                time.monotonic()
+                                - started
+                                - downstream_wait_seconds,
+                            ),
+                            next_cursor=next_cursor,
+                        )
+
+                    remaining = lease.max_bytes - bytes_read
+                    if remaining <= 0:
+                        self.close()
+                        if emitted == 0 and message_start == start:
+                            raise ProductionAdapterError(
+                                "mbox message exceeds lease max_bytes"
+                            )
+                        return LeaseResult(
+                            lease_id=lease.lease_id,
+                            records=emitted,
+                            requests=opened,
+                            bytes_read=bytes_read,
+                            elapsed_seconds=max(
+                                0.0,
+                                time.monotonic()
+                                - started
+                                - downstream_wait_seconds,
+                            ),
+                            next_cursor=f"byte:{message_start}",
+                        )
+
+                    offset, raw = read_line(remaining)
+                    if not raw:
+                        reached_eof = True
+                        break
+                    bytes_read += len(raw)
+
+                    if (
+                        raw.startswith(b"From ")
+                        and raw.endswith((b"\n", b"\r"))
+                    ):
+                        next_boundary = (offset, raw)
+                        break
+
+                    message_parts.append(raw)
+                    if (
+                        bytes_read >= lease.max_bytes
+                        and not raw.endswith((b"\n", b"\r"))
+                    ):
+                        self.close()
+                        if emitted == 0 and message_start == start:
+                            raise ProductionAdapterError(
+                                "mbox message exceeds lease max_bytes"
+                            )
+                        return LeaseResult(
+                            lease_id=lease.lease_id,
+                            records=emitted,
+                            requests=opened,
+                            bytes_read=bytes_read,
+                            elapsed_seconds=max(
+                                0.0,
+                                time.monotonic()
+                                - started
+                                - downstream_wait_seconds,
+                            ),
+                            next_cursor=f"byte:{message_start}",
+                        )
+
+                rows = parse_mbox_messages(
+                    b"".join(message_parts),
+                    locator=self.source,
+                    allow_truncated_tail=False,
+                    max_urls_per_message=_MAILBOX_MAX_URLS_PER_RECORD,
+                )
+                if rows:
+                    item = rows[0]
+                    bit = YEAR_BITS.get(item.year, 0)
+                    if bit:
+                        direct = self.evidence_contract.grants_direct_web_year
+                        record = SourceRecord(
+                            source_id=self.source_id,
+                            locator=f"{self.source}:byte:{message_start}",
+                            payload="\t".join(item.urls),
+                            scope=CandidateSourceScope.LOCAL_DISCOVERY,
+                            source_year=item.year,
+                            source_time=item.source_time,
+                            record_type="MBOX_MESSAGE_URLS",
+                            artifact_ref=self.source,
+                            direct_year_mask=(bit if direct else 0),
+                            year_hint_mask=(0 if direct else bit),
+                            evidence_type=(
+                                self.evidence_contract.evidence_type if direct else ""
+                            ),
+                            temporal_semantics=(
+                                self.evidence_contract.temporal_semantics if direct else ""
+                            ),
+                            evidence_contract_id=(
+                                self.evidence_contract.contract_id if direct else ""
+                            ),
+                            evidence_contract_version=(
+                                self.evidence_contract.policy_version if direct else ""
+                            ),
+                        )
+                        emit_started = time.monotonic()
+                        emit_record(record)
+                        downstream_wait_seconds += time.monotonic() - emit_started
+                        emitted += 1
+
+                if reached_eof:
+                    next_cursor = None
+                    self.close()
+                    break
+
+                assert next_boundary is not None
+                boundary_offset, boundary = next_boundary
+                next_cursor = f"byte:{boundary_offset}"
+
+                if emitted >= lease.max_records:
+                    self._pending_line = next_boundary
+                    break
+                if bytes_read >= lease.max_bytes:
+                    self._pending_line = next_boundary
+                    break
+
+            return LeaseResult(
+                lease_id=lease.lease_id,
+                records=emitted,
+                requests=opened,
+                bytes_read=bytes_read,
+                elapsed_seconds=max(
+                    0.0,
+                    time.monotonic() - started - downstream_wait_seconds,
+                ),
+                next_cursor=next_cursor,
+            )
+        except BaseException:
+            if self._pending_line is None:
+                self.close()
+            raise
+
+
 class FtpSitelistProductionAdapter:
     """Bounded reader for the audited Anonymous FTP Sitelist ZIP artifact."""
 
@@ -1640,6 +1951,11 @@ class ProductionAdapterFactory:
             )
         if reservoir.adapter_id.startswith("finnish_bbs:"):
             return FinnishBbsProductionAdapter(
+                reservoir,
+                evidence_contract=evidence_contract,
+            )
+        if reservoir.adapter_id.startswith("mbox_messages:"):
+            return MboxMessageProductionAdapter(
                 reservoir,
                 evidence_contract=evidence_contract,
             )

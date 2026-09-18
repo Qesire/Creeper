@@ -151,9 +151,10 @@ def curated_research_roots() -> tuple[SourceCandidate, ...]:
 def curated_non_snapshot_roots() -> tuple[SourceCandidate, ...]:
     """Audited contemporaneous URL reservoirs outside generic Web snapshots.
 
-    These roots enumerate monthly raw mailbox shards.  Message timestamps are
-    discovery/year hints only: mailbox URLs still require the normal Creeper
-    evidence path before a hostname-year can become accepted.
+    These are catalog roots only and carry no annual authority themselves.
+    For GNU monthly child shards, the dedicated message parser may later bind
+    a complete message's own Date header to HTTP(S) URLs in that message body;
+    that child-level contract is resolved only at activation.
     """
 
     return (

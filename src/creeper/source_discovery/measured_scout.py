@@ -48,6 +48,10 @@ from creeper.sources.layout_detection import detect_record_layout, layout_from_s
 from creeper.sources.schema_binding import SourceRecordSchema
 from creeper.sources.schema_detection import detect_record_schema
 from creeper.sources.locator import format_path_from_locator
+from creeper.sources.mailbox_records import (
+    is_audited_gnu_mbox_locator,
+    parse_mbox_messages,
+)
 from creeper.sources.ftp_sitelist import (
     is_ftp_sitelist_locator,
     parse_ftp_sitelist_zip,
@@ -626,6 +630,32 @@ def _extract_hosts(
             observation_keys=tuple(observations),
         )
 
+    if is_audited_gnu_mbox_locator(url):
+        records = parse_mbox_messages(
+            payload,
+            locator=url,
+            allow_truncated_tail=truncated,
+            max_urls_per_message=64,
+        )
+        for record in records:
+            if sampled >= policy.max_records:
+                break
+            sampled += 1
+            for observed_url in record.urls:
+                hostname = _hostname_from_scalar(observed_url)
+                if hostname is None:
+                    continue
+                hosts.add(hostname)
+                host_year_pairs.add((hostname, record.year))
+                observations.append(f"{hostname}\t{record.year}")
+        return ParsedHostSample(
+            sampled_records=sampled,
+            hosts=hosts,
+            host_year_pairs=host_year_pairs,
+            measurement_mode=MeasurementMode.HOST_YEAR,
+            observation_keys=tuple(observations),
+        )
+
     if parser_kind == "mbox_urls" or is_mailbox_url_locator(url):
         for line in lines:
             urls = extract_http_urls(line)
@@ -1029,6 +1059,10 @@ class MeasuredYieldScoutExecutor:
     @staticmethod
     def _windowable_line_resource(url: str) -> bool:
         suffix, compressed = _suffix(format_path_from_locator(url))
+        if is_audited_gnu_mbox_locator(url):
+            # Message Date/body authority requires a real mbox envelope.
+            # Arbitrary byte windows can splice neighboring messages.
+            return False
         if (
             is_mailbox_url_locator(url)
             or is_squid_access_locator(url)

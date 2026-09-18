@@ -519,6 +519,174 @@ class SourceActivationCompilerTests(unittest.TestCase):
             finally:
                 control.close()
 
+    def test_audited_gnu_mbox_activates_with_direct_year_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            control = ControlStore(Path(tmp) / "control.sqlite3")
+            try:
+                candidate = _candidate(
+                    "https://lists.gnu.org/archive/mbox/lynx-dev/1998-03"
+                )
+                registry = self._registry(control, candidate)
+                spec = SourceActivationCompiler(
+                    control,
+                    registry=registry,
+                ).compile(candidate)
+
+                self.assertEqual(spec.adapter_kind, "mbox_messages")
+                self.assertEqual(spec.enumeration_kind, "structured_records")
+                self.assertEqual(spec.evidence_mode, "direct_year")
+                reservoir = control.get_reservoir(spec.reservoir_id)
+                self.assertIsNotNone(reservoir)
+                assert reservoir is not None
+                contract = contract_from_adapter_id(reservoir.adapter_id)
+                self.assertIsNotNone(contract)
+                assert contract is not None
+                self.assertEqual(contract.parser_kind, "mbox_urls")
+                self.assertTrue(contract.grants_direct_web_year)
+
+                index_row = control.connection.execute(
+                    """
+                    SELECT source_format, timestamp_bearing,
+                           direct_evidence_authority
+                    FROM source_indexes_v1
+                    WHERE source_key = ?
+                    """,
+                    (candidate.source_key,),
+                ).fetchone()
+                self.assertIsNotNone(index_row)
+                self.assertEqual(index_row["source_format"], "MBOX")
+                self.assertEqual(index_row["timestamp_bearing"], 1)
+                self.assertEqual(index_row["direct_evidence_authority"], 1)
+            finally:
+                control.close()
+
+    def test_legacy_gnu_discovery_reservoir_cannot_gain_index_authority(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            control = ControlStore(Path(tmp) / "control.sqlite3")
+            try:
+                candidate = _candidate(
+                    "https://lists.gnu.org/archive/mbox/lynx-dev/1998-03"
+                )
+                registry = self._registry(control, candidate)
+                compiler = SourceActivationCompiler(
+                    control,
+                    registry=registry,
+                )
+                first = compiler.compile(candidate)
+
+                # Simulate a pre-contract-token reservoir that was durably
+                # activated as discovery-only before this code allowlist
+                # existed, then force capability/index backfill.
+                legacy_adapter = (
+                    "structured:" + first.reservoir_id.removeprefix("reservoir:")
+                )
+                index_row = control.connection.execute(
+                    """
+                    SELECT index_key
+                    FROM source_indexes_v1
+                    WHERE source_key = ?
+                    """,
+                    (candidate.source_key,),
+                ).fetchone()
+                self.assertIsNotNone(index_row)
+                index_key = index_row["index_key"]
+                with control.connection:
+                    control.connection.execute(
+                        """
+                        DELETE FROM source_region_synopses_v1
+                        WHERE region_key IN (
+                            SELECT region_key
+                            FROM source_regions_v1
+                            WHERE index_key = ?
+                        )
+                        """,
+                        (index_key,),
+                    )
+                    control.connection.execute(
+                        "DELETE FROM source_regions_v1 WHERE index_key = ?",
+                        (index_key,),
+                    )
+                    control.connection.execute(
+                        "DELETE FROM source_indexes_v1 WHERE index_key = ?",
+                        (index_key,),
+                    )
+                    control.connection.execute(
+                        """
+                        UPDATE reservoirs
+                        SET adapter_id = ?, evidence_mode = 'discovery_only'
+                        WHERE reservoir_id = ?
+                        """,
+                        (legacy_adapter, first.reservoir_id),
+                    )
+                    control.connection.execute(
+                        """
+                        UPDATE source_activations
+                        SET adapter_id = ?, adapter_kind = 'structured'
+                        WHERE source_key = ?
+                        """,
+                        (legacy_adapter, candidate.source_key),
+                    )
+
+                second = SourceActivationCompiler(
+                    control,
+                    registry=registry,
+                ).compile(candidate)
+
+                self.assertEqual(second.adapter_kind, "structured")
+                self.assertEqual(second.evidence_mode, "discovery_only")
+                rebuilt = control.connection.execute(
+                    """
+                    SELECT source_format, timestamp_bearing,
+                           direct_evidence_authority
+                    FROM source_indexes_v1
+                    WHERE source_key = ?
+                    """,
+                    (candidate.source_key,),
+                ).fetchone()
+                self.assertIsNotNone(rebuilt)
+                self.assertEqual(rebuilt["source_format"], "MBOX")
+                self.assertEqual(rebuilt["timestamp_bearing"], 1)
+                self.assertEqual(rebuilt["direct_evidence_authority"], 0)
+            finally:
+                control.close()
+
+    def test_third_party_monthly_mbox_stays_discovery_only_structured(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            control = ControlStore(Path(tmp) / "control.sqlite3")
+            try:
+                candidate = _candidate("https://mirror.example/1998-03.mbox")
+                registry = self._registry(control, candidate)
+                spec = SourceActivationCompiler(
+                    control,
+                    registry=registry,
+                ).compile(candidate)
+
+                self.assertEqual(spec.adapter_kind, "structured")
+                self.assertEqual(spec.evidence_mode, "discovery_only")
+                reservoir = control.get_reservoir(spec.reservoir_id)
+                self.assertIsNotNone(reservoir)
+                assert reservoir is not None
+                contract = contract_from_adapter_id(reservoir.adapter_id)
+                self.assertIsNotNone(contract)
+                assert contract is not None
+                self.assertFalse(contract.grants_direct_web_year)
+
+                index_row = control.connection.execute(
+                    """
+                    SELECT source_format, timestamp_bearing,
+                           direct_evidence_authority
+                    FROM source_indexes_v1
+                    WHERE source_key = ?
+                    """,
+                    (candidate.source_key,),
+                ).fetchone()
+                self.assertIsNotNone(index_row)
+                self.assertEqual(index_row["source_format"], "MAILBOX")
+                self.assertEqual(index_row["timestamp_bearing"], 0)
+                self.assertEqual(index_row["direct_evidence_authority"], 0)
+            finally:
+                control.close()
+
     def test_audited_ftp_sitelist_activates_with_direct_year_mode(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             control = ControlStore(Path(tmp) / "control.sqlite3")

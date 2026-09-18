@@ -21,6 +21,8 @@ from urllib.parse import urlsplit
 
 from creeper.sources.locator import format_path_from_locator
 from creeper.source_discovery.coordinator import TriageResult
+from creeper.sources.mailbox_records import is_audited_gnu_mbox_locator
+from creeper.sources.non_snapshot import is_mailbox_url_locator
 from creeper.source_discovery.models import (
     MeasurementMode,
     SourceCandidate,
@@ -333,7 +335,11 @@ def _source_format(
             "jsonl": ("JSONL", False, False),
             "delimited": ("TABULAR", False, False),
             "lines": ("TEXT", False, False),
-            "mbox_urls": ("MAILBOX", False, False),
+            "mbox_urls": (
+                ("MBOX", True, False)
+                if is_audited_gnu_mbox_locator(entrypoint)
+                else ("MAILBOX", False, False)
+            ),
             "squid_access": ("SQUID_ACCESS", True, False),
             "dmoz_rdf_urls": ("DMOZ", False, False),
         }
@@ -341,6 +347,10 @@ def _source_format(
             return mapped[parser]
 
     name = PurePosixPath(format_path_from_locator(entrypoint)).name
+    if is_audited_gnu_mbox_locator(entrypoint):
+        return "MBOX", True, False
+    if is_mailbox_url_locator(entrypoint):
+        return "MAILBOX", False, False
     if name == "ftp-list.zip":
         return "FTP_SITELIST", True, False
     if name.endswith(".cdxj.gz") or name.endswith(".cdxj"):
