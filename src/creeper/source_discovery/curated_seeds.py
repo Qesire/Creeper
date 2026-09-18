@@ -214,7 +214,7 @@ def curated_non_snapshot_roots() -> tuple[SourceCandidate, ...]:
         ),
         SourceCandidate(
             canonical_entrypoint=(
-                "https://www.ietf.org/ietf-ftp/ietf-mail-archive/ietf/"
+                "https://www.ietf.org/ietf-ftp/ietf-mail-archive/"
             ),
             source_family="HISTORICAL_MAILBOX_CATALOG",
             level=SourceLevel.METASOURCE,
