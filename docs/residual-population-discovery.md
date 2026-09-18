@@ -82,14 +82,14 @@ mechanism-phrase/shape pairs have been consumed.
 
 A QueryPlan advances its durable cursor only when all of the following are true:
 
-[
-complete =
-all\_providers\_succeeded
-\land schemas\_recognized
-\land bounded\_subrequests\_complete
-\land provider\_coverage\_preserved
-\land atomic\_commit
-]
+\[
+\mathrm{complete} =
+\mathrm{all\ providers\ succeeded}
+\land \mathrm{schemas\ recognized}
+\land \mathrm{bounded\ subrequests\ complete}
+\land \mathrm{provider\ coverage\ preserved}
+\land \mathrm{atomic\ commit}
+\]
 
 HTTP 2xx alone is not success. A WAF document, missing provider envelope or
 partially completed Internet Archive metadata expansion fails the whole finite
