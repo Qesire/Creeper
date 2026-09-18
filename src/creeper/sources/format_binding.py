@@ -11,6 +11,8 @@ from dataclasses import asdict, dataclass
 
 
 _FORMAT_MARKER = ":fmt1:"
+_LAYOUT_MARKER = ":lay1:"
+_SCHEMA_MARKER = ":sch1:"
 _EVIDENCE_MARKER = ":evc1:"
 _SUPPORTED_PARSER_KINDS = frozenset(
     {
@@ -131,15 +133,21 @@ def bind_format_to_adapter_id(
             raise ValueError("adapter_id is already bound to another source format")
         return adapter_id
     head, sep, evidence_tail = adapter_id.partition(_EVIDENCE_MARKER)
-    before_schema, schema_sep, schema_tail = head.partition(":sch1:")
-    bound = f"{before_schema}{_FORMAT_MARKER}{observation.binding_token}"
-    if schema_sep:
-        bound = f"{bound}:sch1:{schema_tail}"
+    marker_positions = [
+        position
+        for marker in (_LAYOUT_MARKER, _SCHEMA_MARKER)
+        if (position := head.find(marker)) >= 0
+    ]
+    split_at = min(marker_positions) if marker_positions else len(head)
+    prefix, suffix = head[:split_at], head[split_at:]
+    bound = f"{prefix}{_FORMAT_MARKER}{observation.binding_token}{suffix}"
     return bound if not sep else f"{bound}{_EVIDENCE_MARKER}{evidence_tail}"
 
 
 def format_from_adapter_id(adapter_id: str) -> SourceFormatObservation | None:
-    head = adapter_id.split(_EVIDENCE_MARKER, 1)[0].split(":sch1:", 1)[0]
+    head = adapter_id.split(_EVIDENCE_MARKER, 1)[0]
+    for marker in (_LAYOUT_MARKER, _SCHEMA_MARKER):
+        head = head.split(marker, 1)[0]
     if _FORMAT_MARKER not in head:
         return None
     _prefix, token = head.rsplit(_FORMAT_MARKER, 1)
