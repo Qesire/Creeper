@@ -356,6 +356,43 @@ def _read_codex_output(output: Path) -> dict[str, Any]:
     )
 
 
+def _normalize_payload(
+    payload: dict[str, Any],
+    *,
+    backend: str,
+) -> dict[str, Any]:
+    hypotheses = payload.get("hypotheses")
+    if not isinstance(hypotheses, list):
+        raise SystemExit(f"{backend} response hypotheses must be an array")
+    adapter_proposals = payload.get("adapter_proposals", [])
+    if not isinstance(adapter_proposals, list):
+        raise SystemExit(
+            f"{backend} response adapter_proposals must be an array"
+        )
+    if len(adapter_proposals) > 1 or any(
+        not isinstance(item, dict) for item in adapter_proposals
+    ):
+        raise SystemExit(
+            f"{backend} response contains invalid adapter_proposals"
+        )
+    query = payload.get("query")
+    if not isinstance(query, str) or not query.strip():
+        query = "source-intelligence episode"
+    normalized: dict[str, Any] = {
+        "query": query,
+        "hypotheses": [
+            _normalize_hypothesis(item)
+            for item in hypotheses
+            if isinstance(item, dict)
+        ],
+    }
+    if adapter_proposals:
+        normalized["adapter_proposals"] = [
+            dict(item) for item in adapter_proposals
+        ]
+    return normalized
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--request", required=True, type=Path)
@@ -472,35 +509,7 @@ def main(argv: list[str] | None = None) -> int:
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
 
-    hypotheses = payload.get("hypotheses")
-    if not isinstance(hypotheses, list):
-        raise SystemExit(f"{args.backend} response hypotheses must be an array")
-    adapter_proposals = payload.get("adapter_proposals", [])
-    if not isinstance(adapter_proposals, list):
-        raise SystemExit(
-            f"{args.backend} response adapter_proposals must be an array"
-        )
-    if len(adapter_proposals) > 1 or any(
-        not isinstance(item, dict) for item in adapter_proposals
-    ):
-        raise SystemExit(
-            f"{args.backend} response contains invalid adapter_proposals"
-        )
-    query = payload.get("query")
-    if not isinstance(query, str) or not query.strip():
-        query = "source-intelligence episode"
-    normalized = {
-        "query": query,
-        "hypotheses": [
-            _normalize_hypothesis(item)
-            for item in hypotheses
-            if isinstance(item, dict)
-        ],
-    }
-    if adapter_proposals:
-        normalized["adapter_proposals"] = [
-            dict(item) for item in adapter_proposals
-        ]
+    normalized = _normalize_payload(payload, backend=args.backend)
 
     temporary = response_path.with_suffix(response_path.suffix + ".tmp")
     temporary.write_text(
