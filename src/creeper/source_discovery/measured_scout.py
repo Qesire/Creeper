@@ -1310,11 +1310,23 @@ class MeasuredYieldScoutExecutor:
             if self.schema_resolver is None
             else self.schema_resolver(candidate.source_key)
         )
-        if schema_observation is None and layout_observation is None and format_observation is not None:
-            schema_observation = detect_record_schema(
+        if schema_observation is None and format_observation is not None:
+            detected_schema = detect_record_schema(
                 payload=download.payload,
                 format_observation=format_observation,
             )
+            if (
+                detected_schema is not None
+                and (
+                    layout_observation is None
+                    or (
+                        detected_schema.parser_kind == layout_observation.parser_kind
+                        and detected_schema.hostname_field
+                        == layout_observation.hostname_field
+                    )
+                )
+            ):
+                schema_observation = detected_schema
         if (
             format_observation is not None
             and layout_observation is not None
