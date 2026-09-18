@@ -333,9 +333,21 @@ class SourceActivationCompiler:
         if existing is not None:
             contract = contract_from_adapter_id(existing.adapter_id)
             if contract is None:
-                contract = resolve_source_evidence_contract(
+                resolved_contract = resolve_source_evidence_contract(
                     existing.root_locator,
                     parser_kind=resolved_parser,
+                )
+                # Legacy reservoirs predate durable contract tokens. Their
+                # persisted evidence_mode is the authority boundary: a later
+                # code allowlist must never upgrade discovery-only state while
+                # merely backfilling capability/index metadata.
+                contract = (
+                    discovery_only_contract(resolved_parser)
+                    if (
+                        existing.evidence_mode == "discovery_only"
+                        and resolved_contract.grants_direct_web_year
+                    )
+                    else resolved_contract
                 )
             adapter_id = existing.adapter_id
         else:
