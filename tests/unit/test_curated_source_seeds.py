@@ -67,7 +67,7 @@ class CuratedSourceSeedTests(unittest.TestCase):
         self.assertTrue(
             any(
                 item.canonical_entrypoint
-                == "https://www.ietf.org/ietf-ftp/ietf-mail-archive/ietf/"
+                == "https://www.ietf.org/ietf-ftp/ietf-mail-archive/"
                 for item in roots
             )
         )
