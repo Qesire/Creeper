@@ -7,6 +7,7 @@ from creeper.sources.non_snapshot import (
     is_dmoz_content_locator,
     is_mailbox_url_locator,
     is_squid_access_locator,
+    is_target_mailbox_shard,
     mailbox_year_from_locator,
     parse_dmoz_external_page_line,
     parse_squid_access_line,
@@ -46,6 +47,57 @@ class NonSnapshotParserTests(unittest.TestCase):
         self.assertFalse(
             is_mailbox_url_locator(
                 "https://lists.gnu.org/archive/mbox/lynx-dev/2002-03"
+            )
+        )
+
+    def test_ietf_mail_archive_months_are_recognized_without_false_variants(self) -> None:
+        extensionless = (
+            "https://www.ietf.org/ietf-ftp/ietf-mail-archive/ietf/1996-01"
+        )
+        mail_suffix = (
+            "https://www.ietf.org/ietf-ftp/ietf-mail-archive/ietf/2001-07.mail"
+        )
+        compressed = mail_suffix + ".gz"
+
+        self.assertTrue(is_mailbox_url_locator(extensionless))
+        self.assertEqual(mailbox_year_from_locator(extensionless), 1996)
+        self.assertTrue(is_mailbox_url_locator(mail_suffix))
+        self.assertEqual(mailbox_year_from_locator(mail_suffix), 2001)
+        self.assertTrue(is_mailbox_url_locator(compressed))
+        self.assertEqual(mailbox_year_from_locator(compressed), 2001)
+        self.assertFalse(
+            is_target_mailbox_shard(
+                "https://www.ietf.org/ietf-ftp/ietf-mail-archive/ietf/"
+                "2001-07.mail.1"
+            )
+        )
+        self.assertFalse(
+            is_target_mailbox_shard(
+                "https://www.ietf.org/ietf-ftp/ietf-mail-archive/ietf/2002-01"
+            )
+        )
+
+        self.assertFalse(
+            is_mailbox_url_locator(
+                "https://example.test/archive/1998-03.mail"
+            )
+        )
+        self.assertFalse(
+            is_mailbox_url_locator(
+                "https://example.test/archive/1998-03.mail.gz"
+            )
+        )
+
+        self.assertFalse(
+            is_mailbox_url_locator(
+                "https://example.test/ietf-ftp/ietf-mail-archive/ietf/"
+                "1998-03.mail"
+            )
+        )
+        self.assertFalse(
+            is_mailbox_url_locator(
+                "https://example.test/ietf-ftp/ietf-mail-archive/ietf/"
+                "1998-03"
             )
         )
 

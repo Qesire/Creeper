@@ -70,6 +70,16 @@ class _OpenFile:
 class GnuMboxDirectEvidenceTests(unittest.TestCase):
     def test_audited_locator_gets_direct_contract(self) -> None:
         self.assertTrue(is_audited_gnu_mbox_locator(GNU_LOCATOR))
+        self.assertTrue(
+            is_audited_gnu_mbox_locator(
+                "https://lists.gnu.org/archive/mbox/lynx-dev/1998-03.mbox"
+            )
+        )
+        self.assertTrue(
+            is_audited_gnu_mbox_locator(
+                "https://lists.gnu.org/archive/mbox/lynx-dev/1998-03.mbox.gz"
+            )
+        )
         self.assertFalse(
             is_audited_gnu_mbox_locator(
                 "https://example.test/archive/mbox/lynx-dev/1998-03"
@@ -78,6 +88,22 @@ class GnuMboxDirectEvidenceTests(unittest.TestCase):
         self.assertFalse(
             is_audited_gnu_mbox_locator(GNU_LOCATOR + "?download=1")
         )
+        self.assertFalse(
+            is_audited_gnu_mbox_locator(
+                "https://lists.gnu.org/archive/mbox/lynx-dev/1998-03.mail"
+            )
+        )
+        self.assertFalse(
+            is_audited_gnu_mbox_locator(
+                "https://lists.gnu.org/archive/mbox/lynx-dev/1998-03.mail.gz"
+            )
+        )
+        ietf = (
+            "https://www.ietf.org/ietf-ftp/ietf-mail-archive/ietf/"
+            "1998-03.mail"
+        )
+        ietf_contract = resolve_source_evidence_contract(ietf)
+        self.assertFalse(ietf_contract.grants_direct_web_year)
         contract = resolve_source_evidence_contract(GNU_LOCATOR)
         self.assertEqual(contract, GNU_MBOX_DIRECT_CONTRACT)
         self.assertEqual(contract.authority, EvidenceAuthority.DIRECT_WEB_YEAR)

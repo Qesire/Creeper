@@ -21,6 +21,25 @@ _HTTP_URL_RE = re.compile(
     """
 )
 _TRAILING_URL_PUNCTUATION = ".,;:!?)]}>"
+_MAILBOX_SUFFIXES = (
+    ".mbox.gz",
+    ".mbox",
+    ".mail.gz",
+    ".mail",
+)
+_GENERIC_MAILBOX_SUFFIXES = (
+    ".mbox.gz",
+    ".mbox",
+)
+_IETF_MAILBOX_SUFFIXES = (
+    ".mail.gz",
+    ".mail",
+)
+_IETF_MAILBOX_HOSTS = frozenset({"www.ietf.org", "ftp.ietf.org"})
+_IETF_MAILBOX_PATH_MARKERS = (
+    "/ietf-ftp/ietf-mail-archive/",
+    "/pub/ietf/ietf-mail-archive/",
+)
 _SQUID_PATH_MARKERS = (
     "/cache/squid/rawlogs/",
     "/squid/rawlogs/",
@@ -52,7 +71,7 @@ def mailbox_year_from_locator(locator: str) -> int | None:
     """Return target year for an exact monthly mailbox shard, if encoded."""
     path = urlsplit(locator).path.rstrip("/")
     name = path.rsplit("/", 1)[-1].lower()
-    for suffix in (".mbox.gz", ".mbox"):
+    for suffix in _MAILBOX_SUFFIXES:
         if name.endswith(suffix):
             name = name[: -len(suffix)]
             break
@@ -63,10 +82,21 @@ def mailbox_year_from_locator(locator: str) -> int | None:
 
 
 def is_mailbox_url_locator(locator: str) -> bool:
-    """Recognize mailbox files and GNU-style extensionless monthly shards."""
-    path = urlsplit(locator).path.lower().rstrip("/")
-    if path.endswith((".mbox", ".mbox.gz")):
+    """Recognize generic mbox files plus audited institutional mail archives."""
+    parsed = urlsplit(locator)
+    path = parsed.path.lower().rstrip("/")
+    hostname = (parsed.hostname or "").lower()
+    if path.endswith(_GENERIC_MAILBOX_SUFFIXES):
         return True
+    ietf_path = any(marker in path for marker in _IETF_MAILBOX_PATH_MARKERS)
+    if path.endswith(_IETF_MAILBOX_SUFFIXES):
+        if hostname not in _IETF_MAILBOX_HOSTS or not ietf_path:
+            return False
+        return mailbox_year_from_locator(locator) is not None
+    if ietf_path:
+        if hostname not in _IETF_MAILBOX_HOSTS:
+            return False
+        return mailbox_year_from_locator(locator) is not None
     if "/archive/mbox/" not in path:
         return False
     return mailbox_year_from_locator(locator) is not None

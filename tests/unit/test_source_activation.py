@@ -650,6 +650,48 @@ class SourceActivationCompilerTests(unittest.TestCase):
             finally:
                 control.close()
 
+    def test_ietf_mail_shard_activates_discovery_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            control = ControlStore(Path(tmp) / "control.sqlite3")
+            try:
+                candidate = _candidate(
+                    "https://www.ietf.org/ietf-ftp/ietf-mail-archive/ietf/"
+                    "1998-03.mail"
+                )
+                registry = self._registry(control, candidate)
+                spec = SourceActivationCompiler(
+                    control,
+                    registry=registry,
+                ).compile(candidate)
+
+                self.assertEqual(spec.adapter_kind, "structured")
+                self.assertEqual(spec.enumeration_kind, "structured_records")
+                self.assertEqual(spec.evidence_mode, "discovery_only")
+                reservoir = control.get_reservoir(spec.reservoir_id)
+                self.assertIsNotNone(reservoir)
+                assert reservoir is not None
+                contract = contract_from_adapter_id(reservoir.adapter_id)
+                self.assertIsNotNone(contract)
+                assert contract is not None
+                self.assertEqual(contract.parser_kind, "mbox_urls")
+                self.assertFalse(contract.grants_direct_web_year)
+
+                index_row = control.connection.execute(
+                    """
+                    SELECT source_format, timestamp_bearing,
+                           direct_evidence_authority
+                    FROM source_indexes_v1
+                    WHERE source_key = ?
+                    """,
+                    (candidate.source_key,),
+                ).fetchone()
+                self.assertIsNotNone(index_row)
+                self.assertEqual(index_row["source_format"], "MAILBOX")
+                self.assertEqual(index_row["timestamp_bearing"], 0)
+                self.assertEqual(index_row["direct_evidence_authority"], 0)
+            finally:
+                control.close()
+
     def test_third_party_monthly_mbox_stays_discovery_only_structured(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             control = ControlStore(Path(tmp) / "control.sqlite3")
