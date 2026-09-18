@@ -40,10 +40,6 @@ _IETF_MAILBOX_PATH_MARKERS = (
     "/ietf-ftp/ietf-mail-archive/",
     "/pub/ietf/ietf-mail-archive/",
 )
-_MAILBOX_EXTENSIONLESS_PATH_MARKERS = (
-    "/archive/mbox/",
-    *_IETF_MAILBOX_PATH_MARKERS,
-)
 _SQUID_PATH_MARKERS = (
     "/cache/squid/rawlogs/",
     "/squid/rawlogs/",
