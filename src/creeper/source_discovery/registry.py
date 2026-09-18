@@ -2849,10 +2849,7 @@ class SourceDiscoveryRegistry:
                 and current.hostname_field == observation.hostname_field
                 and current.timestamp_field == observation.timestamp_field
                 and current.delimiter == observation.delimiter
-                and (
-                    current.direct_year_eligible
-                    == observation.direct_year_eligible
-                )
+                and current.direct_year_eligible == observation.direct_year_eligible
             )
             if (
                 not same_schema
@@ -2868,37 +2865,6 @@ class SourceDiscoveryRegistry:
                 return False
 
         with self.connection:
-            self.connection.execute(
-                """
-                INSERT INTO source_record_layouts(
-                    source_key, parser_kind, hostname_field, delimiter,
-                    detection_method, confidence, sample_records,
-                    matched_records, policy_version, observed_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(source_key) DO UPDATE SET
-                    parser_kind = excluded.parser_kind,
-                    hostname_field = excluded.hostname_field,
-                    delimiter = excluded.delimiter,
-                    detection_method = excluded.detection_method,
-                    confidence = excluded.confidence,
-                    sample_records = excluded.sample_records,
-                    matched_records = excluded.matched_records,
-                    policy_version = excluded.policy_version,
-                    observed_at = excluded.observed_at
-                """,
-                (
-                    source_key,
-                    layout_observation.parser_kind,
-                    layout_observation.hostname_field,
-                    layout_observation.delimiter,
-                    layout_observation.detection_method,
-                    layout_observation.confidence,
-                    layout_observation.sample_records,
-                    layout_observation.matched_records,
-                    layout_observation.policy_version,
-                    now,
-                ),
-            )
             self.connection.execute(
                 """
                 INSERT INTO source_record_schemas(
@@ -3074,6 +3040,37 @@ class SourceDiscoveryRegistry:
                     format_observation.content_type,
                     format_observation.delimiter,
                     format_observation.policy_version,
+                    now,
+                ),
+            )
+            self.connection.execute(
+                """
+                INSERT INTO source_record_layouts(
+                    source_key, parser_kind, hostname_field, delimiter,
+                    detection_method, confidence, sample_records,
+                    matched_records, policy_version, observed_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(source_key) DO UPDATE SET
+                    parser_kind = excluded.parser_kind,
+                    hostname_field = excluded.hostname_field,
+                    delimiter = excluded.delimiter,
+                    detection_method = excluded.detection_method,
+                    confidence = excluded.confidence,
+                    sample_records = excluded.sample_records,
+                    matched_records = excluded.matched_records,
+                    policy_version = excluded.policy_version,
+                    observed_at = excluded.observed_at
+                """,
+                (
+                    source_key,
+                    layout_observation.parser_kind,
+                    layout_observation.hostname_field,
+                    layout_observation.delimiter,
+                    layout_observation.detection_method,
+                    layout_observation.confidence,
+                    layout_observation.sample_records,
+                    layout_observation.matched_records,
+                    layout_observation.policy_version,
                     now,
                 ),
             )
