@@ -38,6 +38,10 @@ from creeper.sources.archive.cdxj import parse_cdxj_line
 from creeper.sources.archive.cdx import parse_cdx_line
 from creeper.sources.archive.warc import WarcFormatError, iter_warc_target_records
 from creeper.sources.format_binding import SourceFormatObservation
+from creeper.sources.finnish_bbs import (
+    is_finnish_bbs_locator,
+    parse_finnish_bbs_zip,
+)
 from creeper.sources.format_detection import detect_source_format
 from creeper.sources.layout_binding import SourceRecordLayout
 from creeper.sources.layout_detection import detect_record_layout, layout_from_schema
@@ -492,6 +496,36 @@ def _extract_hosts(
 
     if is_sbi_bbs_locator(url):
         records = parse_sbi_bbs_zip(
+            payload,
+            max_decompressed_bytes=policy.max_decompressed_bytes,
+        )
+        hosts: set[str] = set()
+        host_year_pairs: set[tuple[str, int]] = set()
+        observations: list[str] = []
+        sampled = 0
+        for record in records:
+            if sampled >= policy.max_records:
+                break
+            if not (
+                policy.target_year_from
+                <= record.year
+                <= policy.target_year_to
+            ):
+                continue
+            sampled += 1
+            hosts.add(record.hostname)
+            host_year_pairs.add((record.hostname, record.year))
+            observations.append(f"{record.hostname}\t{record.year}")
+        return ParsedHostSample(
+            sampled_records=sampled,
+            hosts=hosts,
+            host_year_pairs=host_year_pairs,
+            measurement_mode=MeasurementMode.HOST_YEAR,
+            observation_keys=tuple(observations),
+        )
+
+    if is_finnish_bbs_locator(url):
+        records = parse_finnish_bbs_zip(
             payload,
             max_decompressed_bytes=policy.max_decompressed_bytes,
         )
