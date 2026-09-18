@@ -571,6 +571,17 @@ class SourceActivationCompilerTests(unittest.TestCase):
                 assert contract is not None
                 self.assertEqual(contract.parser_kind, "sbi_bbs_zip")
                 self.assertTrue(contract.grants_direct_web_year)
+                index_row = control.connection.execute(
+                    """
+                    SELECT source_format, direct_evidence_authority
+                    FROM source_indexes_v1
+                    WHERE source_key = ?
+                    """,
+                    (candidate.source_key,),
+                ).fetchone()
+                self.assertIsNotNone(index_row)
+                self.assertEqual(index_row["source_format"], "SBI_BBS")
+                self.assertEqual(index_row["direct_evidence_authority"], 1)
             finally:
                 control.close()
 
@@ -598,6 +609,17 @@ class SourceActivationCompilerTests(unittest.TestCase):
                 assert contract is not None
                 self.assertEqual(contract.parser_kind, "finnish_bbs_zip")
                 self.assertTrue(contract.grants_direct_web_year)
+                index_row = control.connection.execute(
+                    """
+                    SELECT source_format, direct_evidence_authority
+                    FROM source_indexes_v1
+                    WHERE source_key = ?
+                    """,
+                    (candidate.source_key,),
+                ).fetchone()
+                self.assertIsNotNone(index_row)
+                self.assertEqual(index_row["source_format"], "FINNISH_BBS")
+                self.assertEqual(index_row["direct_evidence_authority"], 1)
             finally:
                 control.close()
 
