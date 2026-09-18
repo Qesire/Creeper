@@ -583,7 +583,7 @@ class SourceReservoirManager:
         projected_warm: int,
         candidates: list[SourceCandidate],
         deterministic_refill_managed: bool = False,
-        deterministic_plans_available: bool = false,
+        deterministic_plans_available: bool = False,
     ) -> tuple[SearchDirective, ...]:
         """Request automatic LLM work only to compile unsupported formats.
 
