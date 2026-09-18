@@ -13,6 +13,7 @@ from urllib.parse import urlsplit
 
 from creeper.authority.normalizer import normalize_official
 from creeper.sources.format_binding import SourceFormatObservation
+from creeper.sources.layout_binding import SourceRecordLayout
 from creeper.sources.schema_binding import SourceRecordSchema
 
 
@@ -115,6 +116,7 @@ def _jsonl_schema(
     *,
     min_records: int,
     min_fraction: float,
+    layout: SourceRecordLayout | None = None,
 ) -> SourceRecordSchema | None:
     records: list[dict[str, object]] = []
     for line in text.splitlines():
@@ -134,11 +136,19 @@ def _jsonl_schema(
 
     pair_counts: Counter[tuple[str, str]] = Counter()
     for record in records:
-        host_fields = [
-            key
-            for key in _HOST_KEYS
-            if key in record and _hostname_from_scalar(record[key]) is not None
-        ]
+        if layout is None:
+            host_fields = [
+                key
+                for key in _HOST_KEYS
+                if key in record and _hostname_from_scalar(record[key]) is not None
+            ]
+        else:
+            field = layout.hostname_field.strip().lower()
+            host_fields = (
+                [field]
+                if field in record and _hostname_from_scalar(record[field]) is not None
+                else []
+            )
         time_fields = [
             key
             for key in _TIME_KEYS
@@ -159,7 +169,11 @@ def _jsonl_schema(
         hostname_field=host_field,
         timestamp_field=time_field,
         delimiter=None,
-        detection_method="stable_json_fields",
+        detection_method=(
+            "stable_json_fields"
+            if layout is None
+            else "stable_json_layout_time_field"
+        ),
         confidence=confidence,
         sample_records=len(records),
         matched_records=matched,
@@ -191,6 +205,7 @@ def _delimited_schema(
     *,
     min_records: int,
     min_fraction: float,
+    layout: SourceRecordLayout | None = None,
 ) -> SourceRecordSchema | None:
     try:
         dialect = csv.Sniffer().sniff(text[:16 * 1024], delimiters=",\t;|")
@@ -218,9 +233,18 @@ def _delimited_schema(
     if len(rows) < min_records:
         return None
 
+    layout_host_index: int | None = None
+    if layout is not None:
+        raw = layout.hostname_field.strip().lower().removeprefix("column:")
+        if not raw.isdigit():
+            return None
+        layout_host_index = int(raw)
+
     pair_counts: Counter[tuple[int, int]] = Counter()
     for row in rows:
         for pair in _row_candidate_pairs(row):
+            if layout_host_index is not None and pair[0] != layout_host_index:
+                continue
             pair_counts[pair] += 1
     if not pair_counts:
         return None
@@ -241,15 +265,25 @@ def _delimited_schema(
         else None
     )
     direct_year_eligible = (
-        header_host in _HOST_KEYS
-        and header_time in _AUTO_DIRECT_TIME_KEYS
+        header_time in _AUTO_DIRECT_TIME_KEYS
+        and (
+            header_host in _HOST_KEYS
+            or (
+                layout_host_index is not None
+                and host_index == layout_host_index
+            )
+        )
     )
     return SourceRecordSchema(
         parser_kind="delimited",
         hostname_field=f"column:{host_index}",
         timestamp_field=f"column:{time_index}",
         delimiter=delimiter,
-        detection_method="stable_delimited_columns",
+        detection_method=(
+            "stable_delimited_columns"
+            if layout is None
+            else "stable_delimited_layout_time_column"
+        ),
         confidence=confidence,
         sample_records=len(rows),
         matched_records=matched,
@@ -261,6 +295,7 @@ def detect_record_schema(
     *,
     payload: bytes,
     format_observation: SourceFormatObservation,
+    layout_observation: SourceRecordLayout | None = None,
     min_records: int = 3,
     min_fraction: float = 0.90,
 ) -> SourceRecordSchema | None:
@@ -284,6 +319,13 @@ def detect_record_schema(
     parser = format_observation.parser_kind
     if parser not in {"jsonl", "delimited"}:
         return None
+    if (
+        layout_observation is not None
+        and layout_observation.parser_kind != parser
+    ):
+        raise ValueError(
+            "record layout parser_kind disagrees with source format"
+        )
 
     sample = payload
     if format_observation.compression == "gzip":
@@ -298,9 +340,11 @@ def detect_record_schema(
             text,
             min_records=min_records,
             min_fraction=float(min_fraction),
+            layout=layout_observation,
         )
     return _delimited_schema(
         text,
         min_records=min_records,
         min_fraction=float(min_fraction),
+        layout=layout_observation,
     )
