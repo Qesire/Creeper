@@ -714,6 +714,7 @@ async def _open_runtime(config: SourceDiscoveryServiceConfig):
                         load_english_weights(config.measurement.eed_model),
                         policy=config.measurement.policy,
                         format_resolver=registry.get_format_observation,
+                        layout_resolver=registry.get_layout_observation,
                         schema_resolver=registry.get_schema_observation,
                     )
                 arquivo_catalog = ArquivoCatalogScoutExecutor()
