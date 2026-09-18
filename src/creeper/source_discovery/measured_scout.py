@@ -1337,14 +1337,18 @@ class MeasuredYieldScoutExecutor:
             )
         if (
             schema_observation is not None
+            and format_observation is not None
+            and format_observation.parser_kind != schema_observation.parser_kind
+        ):
+            raise ValueError(
+                "persisted source format and record schema parser kinds disagree"
+            )
+        if (
+            schema_observation is not None
+            and layout_observation is not None
             and (
-                format_observation is not None
-                and format_observation.parser_kind != schema_observation.parser_kind
-                or layout_observation is not None
-                and (
-                    layout_observation.parser_kind != schema_observation.parser_kind
-                    or layout_observation.hostname_field != schema_observation.hostname_field
-                )
+                layout_observation.parser_kind != schema_observation.parser_kind
+                or layout_observation.hostname_field != schema_observation.hostname_field
             )
         ):
             raise ValueError(
