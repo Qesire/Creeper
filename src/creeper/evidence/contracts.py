@@ -22,6 +22,10 @@ from typing import Mapping
 from urllib.parse import urlsplit
 
 from creeper.sources.locator import format_path_from_locator
+from creeper.sources.finnish_bbs import (
+    is_audited_finnish_bbs_locator,
+    is_finnish_bbs_locator,
+)
 from creeper.sources.ftp_sitelist import (
     is_audited_ftp_sitelist_locator,
     is_ftp_sitelist_locator,
@@ -51,6 +55,7 @@ _PARSER_KINDS = frozenset(
         "dmoz_rdf_urls",
         "ftp_sitelist_zip",
         "sbi_bbs_zip",
+        "finnish_bbs_zip",
         "warc_arc",
     }
 )
@@ -227,6 +232,18 @@ SBI_BBS_DIRECT_CONTRACT = SourceEvidenceContract(
 )
 
 
+FINNISH_BBS_DIRECT_CONTRACT = SourceEvidenceContract(
+    contract_id="finnish-maintained-bbs-list-v1",
+    authority=EvidenceAuthority.DIRECT_WEB_YEAR,
+    parser_kind="finnish_bbs_zip",
+    temporal_semantics="maintained_bbs_directory_internal_edition_date",
+    evidence_type="dated_internet_bbs_directory_record",
+    hostname_field="internet_service_hostname",
+    timestamp_field="tilanne_date",
+    policy_version="finnish-bbs-contract-v1",
+)
+
+
 def parser_kind_from_locator(locator: str) -> str:
     path = format_path_from_locator(locator)
     if is_mailbox_url_locator(locator):
@@ -239,6 +256,8 @@ def parser_kind_from_locator(locator: str) -> str:
         return "ftp_sitelist_zip"
     if is_sbi_bbs_locator(locator):
         return "sbi_bbs_zip"
+    if is_finnish_bbs_locator(locator):
+        return "finnish_bbs_zip"
     if path.endswith((".warc.gz", ".arc.gz", ".warc", ".arc")):
         return "warc_arc"
     if path.endswith((".cdxj", ".cdxj.gz")):
@@ -332,6 +351,11 @@ def resolve_source_evidence_contract(
         and is_audited_sbi_bbs_locator(locator)
     ):
         return SBI_BBS_DIRECT_CONTRACT
+    if (
+        actual_parser == "finnish_bbs_zip"
+        and is_audited_finnish_bbs_locator(locator)
+    ):
+        return FINNISH_BBS_DIRECT_CONTRACT
     return discovery_only_contract(actual_parser)
 
 
