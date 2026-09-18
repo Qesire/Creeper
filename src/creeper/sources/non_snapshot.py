@@ -35,6 +35,7 @@ _IETF_MAILBOX_SUFFIXES = (
     ".mail.gz",
     ".mail",
 )
+_IETF_MAILBOX_HOSTS = frozenset({"www.ietf.org", "ftp.ietf.org"})
 _IETF_MAILBOX_PATH_MARKERS = (
     "/ietf-ftp/ietf-mail-archive/",
     "/pub/ietf/ietf-mail-archive/",
@@ -88,16 +89,19 @@ def is_mailbox_url_locator(locator: str) -> bool:
     """Recognize generic mbox files plus audited institutional mail archives."""
     parsed = urlsplit(locator)
     path = parsed.path.lower().rstrip("/")
+    hostname = (parsed.hostname or "").lower()
     if path.endswith(_GENERIC_MAILBOX_SUFFIXES):
         return True
+    ietf_path = any(marker in path for marker in _IETF_MAILBOX_PATH_MARKERS)
     if path.endswith(_IETF_MAILBOX_SUFFIXES):
-        if not any(marker in path for marker in _IETF_MAILBOX_PATH_MARKERS):
+        if hostname not in _IETF_MAILBOX_HOSTS or not ietf_path:
             return False
         return mailbox_year_from_locator(locator) is not None
-    if not any(
-        marker in path
-        for marker in _MAILBOX_EXTENSIONLESS_PATH_MARKERS
-    ):
+    if ietf_path:
+        if hostname not in _IETF_MAILBOX_HOSTS:
+            return False
+        return mailbox_year_from_locator(locator) is not None
+    if "/archive/mbox/" not in path:
         return False
     return mailbox_year_from_locator(locator) is not None
 
