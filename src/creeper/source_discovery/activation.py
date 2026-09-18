@@ -567,6 +567,11 @@ class SourceActivationCompiler:
                     ),
                     (
                         ""
+                        if trusted_layout is None
+                        else trusted_layout.binding_digest
+                    ),
+                    (
+                        ""
                         if trusted_schema is None
                         else trusted_schema.binding_digest
                     ),
