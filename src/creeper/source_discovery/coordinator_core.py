@@ -770,19 +770,12 @@ class SourceDiscoveryCoordinator:
             batch.adapter_proposals[0],
             case,
         )
-        self.registry.record_format_observation(
+        self.registry.apply_validated_adapter_binding(
             candidate_key,
-            format_observation,
+            format_observation=format_observation,
+            schema_observation=schema_observation,
+            expected_state_reason=candidate.state_reason,
         )
-        self.registry.record_schema_observation(
-            candidate_key,
-            schema_observation,
-        )
-        # Requeue before clearing the marker. If the process dies between these
-        # writes, the source is already schedulable and the stale marker is
-        # harmless; the inverse ordering could strand a HOLD forever.
-        self.registry.transition(candidate_key, SourceState.SCOUT_READY)
-        self.registry.set_state_reason(candidate_key, "")
         return True
 
     def _commit_searches(
