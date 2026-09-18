@@ -766,13 +766,18 @@ class SourceDiscoveryCoordinator:
             raise ValueError(
                 "adapter-compilation source no longer has an unknown-format case"
             )
-        format_observation, schema_observation = validate_adapter_proposal(
+        (
+            format_observation,
+            layout_observation,
+            schema_observation,
+        ) = validate_adapter_proposal(
             batch.adapter_proposals[0],
             case,
         )
         self.registry.apply_validated_adapter_binding(
             candidate_key,
             format_observation=format_observation,
+            layout_observation=layout_observation,
             schema_observation=schema_observation,
             expected_state_reason=candidate.state_reason,
         )
