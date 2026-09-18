@@ -20,7 +20,7 @@ from creeper.storage.control_store import ControlStore
 class CuratedSourceSeedTests(unittest.TestCase):
     def test_research_roots_are_target_period_discovery_only(self):
         roots = curated_research_roots()
-        self.assertEqual(len(roots), 4)
+        self.assertEqual(len(roots), 8)
         self.assertTrue(
             any(item.canonical_entrypoint == "https://archive95.net/sources" for item in roots)
         )
@@ -83,6 +83,7 @@ class CuratedSourceSeedTests(unittest.TestCase):
             {
                 "HISTORICAL_FTP_SITELIST",
                 "HISTORICAL_SBI_BBS_DIRECTORY",
+                "HISTORICAL_FINNISH_BBS_DIRECTORY",
             },
         )
         self.assertEqual(
@@ -101,13 +102,29 @@ class CuratedSourceSeedTests(unittest.TestCase):
                     "https://ftp.zx.net.nz/pub/mirror/files.mpoli.fi/pub/software/"
                     "TEXTS/MISC/SBI0197.ZIP"
                 ),
+                "https://files.mpoli.fi/software/TEXTS/MISC/FI980225.ZIP",
+                "https://files.mpoli.fi/software/TEXTS/MISC/030698.ZIP",
+                "https://files.mpoli.fi/software/TEXTS/COMPUTER/FI980701.ZIP",
+                "https://files.mpoli.fi/software/TEXTS/COMPUTER/FI980916.ZIP",
             },
         )
         self.assertTrue(
             all(
                 root.expected_year_from >= 1996
-                and root.expected_year_to <= 1997
+                and root.expected_year_to <= 2001
                 for root in roots
+            )
+        )
+        finnish = [
+            root
+            for root in roots
+            if root.source_family == "HISTORICAL_FINNISH_BBS_DIRECTORY"
+        ]
+        self.assertEqual(len(finnish), 4)
+        self.assertTrue(
+            all(
+                (root.expected_year_from, root.expected_year_to) == (1998, 1998)
+                for root in finnish
             )
         )
         self.assertTrue(all(root.direct_evidence_prior == 1.0 for root in roots))
@@ -122,14 +139,14 @@ class CuratedSourceSeedTests(unittest.TestCase):
 
     def test_all_curated_seeds_are_idempotent(self):
         seeds = curated_source_seeds()
-        self.assertEqual(len(seeds), 12)
+        self.assertEqual(len(seeds), 16)
         with tempfile.TemporaryDirectory() as tmp:
             control = ControlStore(Path(tmp) / "control.sqlite3")
             registry = SourceDiscoveryRegistry(control)
             try:
-                self.assertEqual(ensure_curated_source_seeds(registry), 12)
+                self.assertEqual(ensure_curated_source_seeds(registry), 16)
                 self.assertEqual(ensure_curated_source_seeds(registry), 0)
-                self.assertEqual(len(registry.list_candidates()), 12)
+                self.assertEqual(len(registry.list_candidates()), 16)
             finally:
                 control.close()
 
