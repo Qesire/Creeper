@@ -220,6 +220,160 @@ class FabricV2StoreTests(unittest.TestCase):
         self.assertEqual(self.store.unpublished_events(), ())
         self.assertEqual(self.store.task_row(task_id)["state"], "READY")
 
+    def test_dag_reducer_is_blocked_until_all_parents_succeed(self) -> None:
+        first = self.work(coverage={"period": "1998", "variant": 10})
+        second = self.work(coverage={"period": "1998", "variant": 11})
+        self.store.submit_work(first)
+        self.store.submit_work(second)
+
+        reducer = WorkSpec(
+            work_class=FabricWorkClass.REDUCE_COMMIT,
+            producer="residual-reducer",
+            algorithm_version="v1",
+            partition_key="cell:abc",
+            input_identity="reduce:abc",
+            coverage={"cell_key": "abc"},
+            required_capabilities=(FabricCapability.AUTHORITY_REDUCE,),
+            priority=100.0,
+            dependency_work_keys=(first.work_key, second.work_key),
+        )
+        reducer_task_id = self.store.submit_work(reducer)
+
+        reducer_worker = WorkerDescriptor(
+            worker_id="authority-reducer",
+            region="authority",
+            runtime_class="authority",
+            architecture="x86_64",
+            network_class="private",
+            cpu_count=2,
+            memory_bytes=4 * 1024**3,
+            capabilities=(FabricCapability.AUTHORITY_REDUCE,),
+            allowed_providers=(),
+            max_concurrency=1,
+            edition="test",
+        )
+        self.store.register_worker(reducer_worker)
+        self.assertIsNone(
+            self.store.claim(reducer_worker.worker_id, lease_seconds=60)
+        )
+
+        one = self.store.claim(self.worker.worker_id, lease_seconds=60)
+        assert one is not None
+        self.store.complete(one)
+        self.assertIsNone(
+            self.store.claim(reducer_worker.worker_id, lease_seconds=60)
+        )
+
+        two = self.store.claim(self.worker.worker_id, lease_seconds=60)
+        assert two is not None
+        self.store.complete(two)
+
+        reduced = self.store.claim(
+            reducer_worker.worker_id,
+            lease_seconds=60,
+        )
+        self.assertIsNotNone(reduced)
+        assert reduced is not None
+        self.assertEqual(reduced.task_id, reducer_task_id)
+        self.assertEqual(
+            set(reduced.work.dependency_work_keys),
+            {first.work_key, second.work_key},
+        )
+
+    def test_unknown_dependency_rolls_back_work_admission(self) -> None:
+        work = WorkSpec(
+            work_class=FabricWorkClass.REDUCE_COMMIT,
+            producer="reduce",
+            algorithm_version="v1",
+            partition_key="x",
+            input_identity="x",
+            coverage={},
+            required_capabilities=(FabricCapability.AUTHORITY_REDUCE,),
+            dependency_work_keys=("work:missing",),
+        )
+        with self.assertRaises(KeyError):
+            self.store.submit_work(work)
+        row = self.store.connection.execute(
+            "SELECT 1 FROM fabric_tasks_v2 WHERE work_key=?",
+            (work.work_key,),
+        ).fetchone()
+        self.assertIsNone(row)
+
+    def test_provider_permits_are_global_rate_and_region_gated(self) -> None:
+        self.store.configure_provider(
+            "datacite",
+            requests_per_second=2.0,
+            max_global_inflight=1,
+            require_qualified_region=True,
+        )
+        self.store.set_provider_region(
+            "datacite",
+            "sg",
+            qualified=False,
+        )
+        self.store.submit_work(self.work())
+        lease = self.store.claim(self.worker.worker_id, lease_seconds=60)
+        assert lease is not None
+
+        self.assertIsNone(
+            self.store.acquire_provider_permit(lease, "datacite")
+        )
+
+        self.store.set_provider_region(
+            "datacite",
+            "sg",
+            qualified=True,
+        )
+        permit = self.store.acquire_provider_permit(lease, "datacite")
+        self.assertIsNotNone(permit)
+        assert permit is not None
+
+        # Max inflight and the global RPS clock both prevent an immediate
+        # second request.
+        self.assertIsNone(
+            self.store.acquire_provider_permit(lease, "datacite")
+        )
+        self.store.report_provider_permit(
+            permit,
+            status_code=200,
+            response_bytes=1234,
+        )
+        self.assertIsNone(
+            self.store.acquire_provider_permit(lease, "datacite")
+        )
+
+        self.now += 0.51
+        second = self.store.acquire_provider_permit(lease, "datacite")
+        self.assertIsNotNone(second)
+
+    def test_throttle_report_applies_global_provider_cooldown(self) -> None:
+        self.store.configure_provider(
+            "datacite",
+            requests_per_second=10.0,
+            max_global_inflight=2,
+            require_qualified_region=False,
+        )
+        self.store.submit_work(self.work())
+        lease = self.store.claim(self.worker.worker_id, lease_seconds=60)
+        assert lease is not None
+        permit = self.store.acquire_provider_permit(lease, "datacite")
+        assert permit is not None
+        self.store.report_provider_permit(
+            permit,
+            status_code=429,
+            throttled=True,
+            cooldown_seconds=5,
+        )
+
+        self.now += 1
+        self.assertIsNone(
+            self.store.acquire_provider_permit(lease, "datacite")
+        )
+        self.now += 5
+        self.assertIsNotNone(
+            self.store.acquire_provider_permit(lease, "datacite")
+        )
+
     def test_postgres_claim_uses_skip_locked_and_capability_filters(self) -> None:
         sql = " ".join(POSTGRES_CLAIM_SQL.split()).upper()
         self.assertIn("FOR UPDATE SKIP LOCKED", sql)
