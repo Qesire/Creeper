@@ -15,6 +15,7 @@ retry of the same finite query variant.
 
 from __future__ import annotations
 
+import json
 import math
 import sqlite3
 import uuid
@@ -308,6 +309,7 @@ def commit_deterministic_residual_batch(
     batch: DeterministicSearchBatch,
     search_cost_seconds: float,
     candidate_cap: int,
+    idempotency_key: str | None = None,
     fault_injector: FaultInjector | None = None,
 ) -> AtomicResidualCommitResult:
     """Commit one completed QueryPlan all-or-nothing.
@@ -325,6 +327,10 @@ def commit_deterministic_residual_batch(
         raise ValueError("search_cost_seconds must be finite and non-negative")
     if isinstance(candidate_cap, bool) or not isinstance(candidate_cap, int) or candidate_cap < 1:
         raise ValueError("candidate_cap must be a positive integer")
+    if idempotency_key is not None and (
+        not isinstance(idempotency_key, str) or not idempotency_key.strip()
+    ):
+        raise ValueError("idempotency_key must be a non-empty string when provided")
 
     connection = _same_connection(registry, coverage, identities)
     if connection.in_transaction:
@@ -334,12 +340,47 @@ def commit_deterministic_residual_batch(
         if fault_injector is not None:
             fault_injector(name)
 
+    if idempotency_key is not None:
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS fabric_domain_commits(
+                idempotency_key TEXT PRIMARY KEY,
+                commit_kind TEXT NOT NULL,
+                result_json TEXT NOT NULL,
+                committed_at REAL NOT NULL
+            ) WITHOUT ROWID
+            """
+        )
+
     episode_id = f"search:{uuid.uuid4().hex}"
     registered_count = 0
     new_source_count = 0
     dropped = 0
     connection.execute("BEGIN IMMEDIATE")
     try:
+        if idempotency_key is not None:
+            prior = connection.execute(
+                """
+                SELECT commit_kind, result_json
+                FROM fabric_domain_commits
+                WHERE idempotency_key=?
+                """,
+                (idempotency_key,),
+            ).fetchone()
+            if prior is not None:
+                if str(prior["commit_kind"]) != "residual-search":
+                    raise RuntimeError(
+                        "Fabric idempotency key is already owned by another domain commit"
+                    )
+                payload = json.loads(str(prior["result_json"]))
+                result = AtomicResidualCommitResult(
+                    episode_id=str(payload["episode_id"]),
+                    registered_count=int(payload["registered_count"]),
+                    new_source_count=int(payload["new_source_count"]),
+                    dropped_count=int(payload["dropped_count"]),
+                )
+                connection.rollback()
+                return result
         started_at = registry._now()
         connection.execute(
             """
@@ -516,6 +557,25 @@ def commit_deterministic_residual_batch(
         ).rowcount
         if changed != 1:
             raise RuntimeError("residual search episode closure failed during atomic commit")
+        if idempotency_key is not None:
+            result_payload = json.dumps(
+                {
+                    "episode_id": episode_id,
+                    "registered_count": registered_count,
+                    "new_source_count": new_source_count,
+                    "dropped_count": dropped,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            connection.execute(
+                """
+                INSERT INTO fabric_domain_commits(
+                    idempotency_key, commit_kind, result_json, committed_at
+                ) VALUES (?, 'residual-search', ?, ?)
+                """,
+                (idempotency_key, result_payload, registry._now()),
+            )
         checkpoint("before_commit")
         connection.commit()
     except BaseException:

@@ -25,6 +25,8 @@ from creeper.authority.identity import (
     baseline_authority_signature,
     eed_model_authority_signature,
 )
+from creeper.distributed.residual_query import DistributedResidualBridge
+from creeper.distributed.store_factory import open_authority_store
 from creeper.source_discovery.admission import SearchAdmissionPolicy
 from creeper.source_discovery.agent_search import (
     CommandAgentSearchExecutor,
@@ -120,6 +122,12 @@ class ResidualSearchConfig:
 
 
 @dataclass(frozen=True)
+class FabricResidualConfig:
+    enabled: bool = False
+    database: str = ""
+
+
+@dataclass(frozen=True)
 class SourceDiscoveryServiceConfig:
     runtime_data_root: Path
     scrapy_project_dir: Path
@@ -129,6 +137,7 @@ class SourceDiscoveryServiceConfig:
     scrapy: ScrapyStructuralScoutPolicy
     agent: AgentConfig
     residual_search: ResidualSearchConfig = ResidualSearchConfig()
+    fabric: FabricResidualConfig = FabricResidualConfig()
     saturation: SaturationPolicy = SaturationPolicy()
     measurement: MeasurementConfig | None = None
 
@@ -344,6 +353,33 @@ def load_source_discovery_config(config_path: Path) -> SourceDiscoveryServiceCon
         ),
     )
 
+    fabric_raw = _table(root, "fabric")
+    fabric_enabled = _strict_bool(
+        fabric_raw.get("enabled", False),
+        name="fabric.enabled",
+    )
+    raw_fabric_database = str(fabric_raw.get("database", "")).strip()
+    if fabric_enabled and not raw_fabric_database:
+        raise ValueError(
+            "fabric.database is required when fabric.enabled=true"
+        )
+    if (
+        raw_fabric_database
+        and "://" not in raw_fabric_database
+        and not Path(raw_fabric_database).is_absolute()
+    ):
+        raw_fabric_database = str(
+            (config_path.parent / raw_fabric_database).resolve()
+        )
+    fabric = FabricResidualConfig(
+        enabled=fabric_enabled,
+        database=raw_fabric_database,
+    )
+    if fabric.enabled and not residual_search.enabled:
+        raise ValueError(
+            "fabric residual execution requires residual_search.enabled=true"
+        )
+
     saturation_raw = _table(root, "saturation")
     saturation_defaults = SaturationPolicy()
     saturation = SaturationPolicy(
@@ -555,6 +591,7 @@ def load_source_discovery_config(config_path: Path) -> SourceDiscoveryServiceCon
         scrapy=scrapy,
         agent=agent,
         residual_search=residual_search,
+        fabric=fabric,
         saturation=saturation,
         measurement=measurement,
     )
@@ -622,6 +659,11 @@ async def _open_runtime(config: SourceDiscoveryServiceConfig):
 
     with _service_lock(discovery_root / "service.lock"):
         control = ControlStore(root / "control.sqlite3")
+        fabric_store = (
+            open_authority_store(config.fabric.database)
+            if config.fabric.enabled
+            else None
+        )
         baseline: BaselineIndex | None = None
         scout_authority: tuple[str, str] | None = None
         try:
@@ -736,7 +778,26 @@ async def _open_runtime(config: SourceDiscoveryServiceConfig):
                 )
 
                 deterministic_search = None
-                if config.residual_search.enabled:
+                distributed_residual_bridge = None
+                if config.residual_search.enabled and config.fabric.enabled:
+                    if (
+                        residual_ledger is None
+                        or search_identity is None
+                        or fabric_store is None
+                    ):
+                        raise RuntimeError(
+                            "distributed residual composition is incomplete"
+                        )
+                    distributed_residual_bridge = DistributedResidualBridge(
+                        fabric_store,
+                        registry,
+                        residual_ledger,
+                        search_identity,
+                        policy=config.residual_search.policy,
+                        providers=config.residual_search.providers,
+                        candidate_cap=max(1, config.pool.triage_batch * 2),
+                    )
+                elif config.residual_search.enabled:
                     deterministic_providers = []
                     for provider_name in config.residual_search.providers:
                         if provider_name == "datacite":
@@ -788,6 +849,7 @@ async def _open_runtime(config: SourceDiscoveryServiceConfig):
                     scout_executor=scout,
                     search_executor=search,
                     deterministic_search_executor=deterministic_search,
+                    distributed_residual_bridge=distributed_residual_bridge,
                     search_identity_ledger=search_identity,
                     scout_authority=scout_authority,
                     saturation_controller=saturation,
@@ -800,6 +862,8 @@ async def _open_runtime(config: SourceDiscoveryServiceConfig):
         finally:
             if baseline is not None:
                 baseline.close()
+            if fabric_store is not None:
+                fabric_store.close()
             control.close()
 
 
@@ -820,6 +884,8 @@ def _report_has_progress(report: dict[str, object]) -> bool:
         "search_episodes",
         "search_candidates_registered",
         "adapter_bindings_applied",
+        "distributed_residual_submitted",
+        "distributed_residual_committed",
         "background_bulk_steps",
         "background_activated",
     )
@@ -835,6 +901,10 @@ _DISCOVERY_COUNTER_FIELDS = {
     "adapter_bindings_applied": "discovery_adapter_bindings_applied",
     "deterministic_search_episodes": "discovery_deterministic_search_episodes",
     "deterministic_search_failures": "discovery_deterministic_search_failures",
+    "distributed_residual_submitted": "discovery_distributed_residual_submitted",
+    "distributed_residual_committed": "discovery_distributed_residual_committed",
+    "distributed_residual_consume_failures": "discovery_distributed_residual_consume_failures",
+    "distributed_residual_quarantined": "discovery_distributed_residual_quarantined",
     "residual_reward_updates": "discovery_residual_reward_updates",
     "triaged_to_scout": "discovery_triaged_to_scout",
     "triaged_hold": "discovery_triaged_hold",

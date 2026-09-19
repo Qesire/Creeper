@@ -292,6 +292,10 @@ class CoordinatorCycleReport:
     deterministic_search_plans_planned: int = 0
     deterministic_search_episodes: int = 0
     deterministic_search_failures: int = 0
+    distributed_residual_submitted: int = 0
+    distributed_residual_committed: int = 0
+    distributed_residual_consume_failures: int = 0
+    distributed_residual_quarantined: int = 0
     residual_reward_updates: int = 0
     residual_reward_eed_delta: float = 0.0
     search_zero_new_streak: int = 0
@@ -377,6 +381,7 @@ class SourceDiscoveryCoordinator:
         scout_executor: ScoutExecutor,
         search_executor: SearchExecutor,
         deterministic_search_executor: DeterministicSearchExecutor | None = None,
+        distributed_residual_bridge=None,
         search_identity_ledger: SearchIdentityLedger | None = None,
         scout_authority: tuple[str, str] | None = None,
         saturation_controller: SourceSaturationController | None = None,
@@ -416,10 +421,22 @@ class SourceDiscoveryCoordinator:
         self.scout_executor = scout_executor
         self.search_executor = search_executor
         self.deterministic_search_executor = deterministic_search_executor
+        self.distributed_residual_bridge = distributed_residual_bridge
         self.search_identity_ledger = search_identity_ledger
-        if deterministic_search_executor is not None and search_identity_ledger is None:
+        if (
+            deterministic_search_executor is not None
+            and distributed_residual_bridge is not None
+        ):
             raise ValueError(
-                "deterministic search requires a SearchIdentityLedger"
+                "local and distributed deterministic residual execution "
+                "cannot be enabled together"
+            )
+        if (
+            deterministic_search_executor is not None
+            or distributed_residual_bridge is not None
+        ) and search_identity_ledger is None:
+            raise ValueError(
+                "deterministic residual execution requires a SearchIdentityLedger"
             )
         if scout_authority is not None and (
             not isinstance(scout_authority, tuple)
@@ -1117,6 +1134,22 @@ class SourceDiscoveryCoordinator:
                     for decision in saturation_decisions
                 )
 
+            distributed_commits = ()
+            distributed_consume_failures = 0
+            distributed_quarantined = 0
+            distributed_bridge_failures = 0
+            if self.distributed_residual_bridge is not None:
+                try:
+                    drain_report = self.distributed_residual_bridge.drain()
+                except Exception:
+                    # Fabric unavailability must not stop local triage/scout/
+                    # activation. Work remains durable in the Fabric authority.
+                    distributed_bridge_failures = 1
+                else:
+                    distributed_commits = drain_report.committed
+                    distributed_consume_failures = drain_report.failed
+                    distributed_quarantined = drain_report.quarantined
+
             residual_reward_updates = 0
             residual_reward_eed_delta = 0.0
             if self.manager.residual_search_scheduler is not None:
@@ -1154,7 +1187,11 @@ class SourceDiscoveryCoordinator:
                     plan.deterministic_search_plans
                 ),
                 "deterministic_search_episodes": 0,
-                "deterministic_search_failures": 0,
+                "deterministic_search_failures": distributed_bridge_failures,
+                "distributed_residual_submitted": 0,
+                "distributed_residual_committed": len(distributed_commits),
+                "distributed_residual_consume_failures": distributed_consume_failures,
+                "distributed_residual_quarantined": distributed_quarantined,
                 "residual_reward_updates": residual_reward_updates,
                 "residual_reward_eed_delta": residual_reward_eed_delta,
                 "search_zero_new_streak": plan.search_zero_new_streak,
@@ -1184,6 +1221,38 @@ class SourceDiscoveryCoordinator:
                 "background_bulk_deferred": 0,
                 "background_activated": 0,
             }
+
+            for committed in distributed_commits:
+                counts["search_episodes"] += 1
+                counts["deterministic_search_episodes"] += 1
+                counts["search_candidates_registered"] += (
+                    committed.registered_count
+                )
+                counts["search_candidates_dropped"] += (
+                    committed.dropped_count
+                )
+
+            local_deterministic_plans = deterministic_plans
+            if self.distributed_residual_bridge is not None:
+                local_deterministic_plans = ()
+                now = self._retry_now()
+                for residual_plan in deterministic_plans:
+                    retry_key = f"residual:{residual_plan.cell.key}"
+                    try:
+                        _task_id, inserted = (
+                            self.distributed_residual_bridge.submit(
+                                residual_plan
+                            )
+                        )
+                    except Exception:
+                        self._search_retry_deadlines[retry_key] = (
+                            now + self.failure_retry_seconds
+                        )
+                        counts["search_failures"] += 1
+                        counts["deterministic_search_failures"] += 1
+                        continue
+                    self._search_retry_deadlines.pop(retry_key, None)
+                    counts["distributed_residual_submitted"] += int(inserted)
 
             for source_key in plan.activate_source_keys:
                 candidate = self.registry.get_candidate(source_key)
@@ -1215,7 +1284,7 @@ class SourceDiscoveryCoordinator:
                 or triage_candidates
                 or scout_candidates
                 or search_directives
-                or deterministic_plans
+                or local_deterministic_plans
             )
             if has_background and foreground_busy:
                 counts["background_bulk_deferred"] += 1
@@ -1283,7 +1352,7 @@ class SourceDiscoveryCoordinator:
                 or missing_deterministic_executor
             )
             deterministic_search_task = self._bounded_batch(
-                deterministic_plans,
+                local_deterministic_plans,
                 deterministic_executor,
                 self.search_parallelism,
             )
@@ -1305,7 +1374,7 @@ class SourceDiscoveryCoordinator:
             self._commit_scouts(all_scout_candidates, scout_outcomes, counts)
             self._commit_searches(search_directives, search_outcomes, counts)
             self._commit_deterministic_searches(
-                deterministic_plans,
+                local_deterministic_plans,
                 deterministic_search_outcomes,
                 counts,
             )
