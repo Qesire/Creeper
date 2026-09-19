@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
+import time
 from typing import Callable
 
 from creeper.evidence.policies import (
@@ -14,6 +16,55 @@ from creeper.evidence.policies import (
 from creeper.storage.commit_writer import CommitWriter
 from creeper.storage.control_store import ControlStore, EvidenceTask
 from creeper.storage.evidence_store import EvidenceStore, EvidenceTaskProvenance
+
+
+def evidence_retry_at(
+    attempt: int,
+    *,
+    base_seconds: float,
+    max_seconds: float,
+    clock: Callable[[], float] = time.time,
+) -> float:
+    """Return the common durable retry deadline for local or Fabric execution."""
+
+    if isinstance(attempt, bool) or not isinstance(attempt, int) or attempt < 0:
+        raise ValueError("attempt must be a non-negative integer")
+    for name, value in (
+        ("base_seconds", base_seconds),
+        ("max_seconds", max_seconds),
+    ):
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(float(value))
+            or value < 0
+        ):
+            raise ValueError(f"{name} must be finite and non-negative")
+    if max_seconds < base_seconds:
+        raise ValueError("max_seconds must not be below base_seconds")
+    if base_seconds <= 0.0 or max_seconds <= 0.0:
+        delay = 0.0
+    elif base_seconds >= max_seconds:
+        delay = float(max_seconds)
+    else:
+        cap_exponent = max(
+            0,
+            math.ceil(math.log2(float(max_seconds) / float(base_seconds))),
+        )
+        delay = min(
+            float(max_seconds),
+            float(base_seconds)
+            * (2.0 ** min(max(0, attempt - 1), cap_exponent)),
+        )
+    now = clock()
+    if (
+        isinstance(now, bool)
+        or not isinstance(now, (int, float))
+        or not math.isfinite(float(now))
+        or now < 0
+    ):
+        raise ValueError("retry clock must be finite and non-negative")
+    return float(now) + delay
 
 
 @dataclass(frozen=True, slots=True)
