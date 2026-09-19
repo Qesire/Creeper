@@ -352,6 +352,7 @@ class SourceReservoirManagerTests(unittest.TestCase):
         self.assertEqual(plan.cold_count, 15)
         self.assertEqual(plan.effective_cold_count, 15)
         self.assertEqual(plan.search_directives, ())
+        self.assertEqual(plan.search_call_budget, 0)
         self.assertFalse(plan.needs_search)
 
     def test_healthy_diverse_cold_pool_above_target_does_not_oversearch(self) -> None:
@@ -769,6 +770,7 @@ class SourceReservoirManagerTests(unittest.TestCase):
         self.assertEqual(directive.task_type, SourceIntelligenceTask.COMPILE_ADAPTER)
         self.assertTrue(directive.strategy.startswith("COMPILE_ADAPTER:"))
         self.assertEqual(directive.subject, candidate.canonical_entrypoint)
+        self.assertEqual(plan.search_call_budget, 1)
 
     def test_exhausted_residual_program_does_not_trigger_recovery_llm(self) -> None:
         coverage = ResidualSearchLedger(self.registry.connection)
@@ -798,6 +800,7 @@ class SourceReservoirManagerTests(unittest.TestCase):
 
         self.assertEqual(plan.deterministic_search_plans, ())
         self.assertEqual(plan.search_directives, ())
+        self.assertEqual(plan.search_call_budget, 0)
         self.assertFalse(plan.needs_search)
 
     def test_zero_credit_tail_alone_does_not_trigger_recovery_llm(self) -> None:
