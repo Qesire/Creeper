@@ -452,24 +452,16 @@ class SourceReservoirManager:
         )
 
     def _adaptive_search_budget(self, *, adapter_hold: bool) -> int:
-        """Bound automatic LLM calls; only unknown-format adapter work qualifies."""
-        if not self._global_search_available():
+        """Return the automatic LLM budget for validated adapter blockers only."""
+        if not adapter_hold:
             return 0
-        zero_streak, new_sources, episodes = self._recent_search_supply()
-        configured = self.targets.max_search_directives
-        if configured < 1:
+        if self.targets.max_search_directives < 1:
             return 0
-        if adapter_hold:
-            # One adapter-specific call is enough; ordinary discovery never
-            # consumes this budget.
-            return 1
-        if episodes < 1:
-            return min(configured, 2)
-        if zero_streak:
-            return 1
-        if new_sources > 0:
-            return min(configured, 2)
+        # Adapter compilation is per-source and already protected by the
+        # strategy cooldown. Deterministic search yield/stagnation must not
+        # suppress or inflate this non-search engineering action.
         return 1
+
 
     def _is_stagnating(self) -> bool:
         rows = self.registry.connection.execute(
