@@ -36,6 +36,12 @@ class WorkerResultSpool:
     def close(self) -> None:
         self.connection.close()
 
+    def clear(self) -> int:
+        with self.connection:
+            return self.connection.execute(
+                "DELETE FROM pending_result_batches"
+            ).rowcount
+
     @staticmethod
     def _payload(batch: ResultBatch) -> str:
         return json.dumps(
