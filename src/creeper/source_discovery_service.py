@@ -982,6 +982,23 @@ def _publish_discovery_telemetry(
                 for state, count in residual_states.items()
             }
         )
+    if _table_exists(registry, "source_research_leads_v1"):
+        rows = registry.connection.execute(
+            """
+            SELECT kind, COUNT(*) AS n, COALESCE(SUM(matched_count), 0) AS matches
+            FROM source_research_leads_v1
+            GROUP BY kind
+            """
+        ).fetchall()
+        source_gauges["research_lead_total"] = sum(int(row["n"]) for row in rows)
+        source_gauges["research_lead_match_total"] = sum(
+            int(row["matches"]) for row in rows
+        )
+        for row in rows:
+            kind = str(row["kind"]).lower()
+            source_gauges[f"research_lead_{kind}"] = int(row["n"])
+            source_gauges[f"research_lead_{kind}_matches"] = int(row["matches"])
+
     for table, gauge in (
         ("residual_search_urls", "residual_search_unique_urls"),
         ("residual_search_artifacts", "residual_search_unique_artifacts"),
