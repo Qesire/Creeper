@@ -40,6 +40,8 @@ secret_env = "CREEPER_TEST_SECRET"
                 first.descriptor.worker_instance_id,
                 second.descriptor.worker_instance_id,
             )
+            self.assertTrue(first.worker_instance_auto)
+            self.assertTrue(second.worker_instance_auto)
             self.assertEqual(
                 first.spool_database,
                 (root/"spool.sqlite3").resolve(),
@@ -73,6 +75,7 @@ spool_database = "spool.sqlite3"
                 loaded.descriptor.worker_instance_id,
                 "fixture-instance",
             )
+            self.assertFalse(loaded.worker_instance_auto)
 
 
 if __name__=="__main__":
