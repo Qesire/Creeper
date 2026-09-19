@@ -481,18 +481,15 @@ class ResidualSearchManagerIntegrationTests(unittest.TestCase):
         self.assertEqual(plan.search_directives, ())
         self.assertTrue(plan.needs_search)
 
-    def test_exhausted_cell_requests_mechanism_recovery_not_generic_refill(self) -> None:
+    def test_exhausted_cell_stays_saturated_without_llm_recovery(self) -> None:
         self.ledger.mark_exhausted(self.cell)
 
         plan = self.manager().plan()
 
         self.assertEqual(plan.deterministic_search_plans, ())
-        self.assertEqual(len(plan.search_directives), 1)
-        self.assertEqual(
-            plan.search_directives[0].kind,
-            SearchDirectiveKind.RECOVER_STAGNATION,
-        )
-        self.assertIn("data-generating mechanism", plan.search_directives[0].reason)
+        self.assertEqual(plan.search_directives, ())
+        self.assertEqual(plan.search_call_budget, 0)
+        self.assertFalse(plan.needs_search)
 
 
 if __name__ == "__main__":
