@@ -51,6 +51,17 @@ MECHANISM_QUERY_TERMS: dict[str, tuple[str, ...]] = {
     "nic_registry": ("nic", "registry", "host list"),
     "isp_inventory": ("isp", "host inventory", "network inventory"),
     "software_mirror": ("mirror sites", "software mirror", "mirror list"),
+    # Curated exact-recovery programs. These are not added to the generic
+    # Cartesian-like seed space; ResearchLeadLedger creates only the five
+    # concrete SearchCells whose identities were established by prior research.
+    "recover_nlanr_uc": ("uc.sanitized-access.20000714",),
+    "recover_canetii": (
+        "access.1999-09-19.gz",
+        "access.1999-09-20.gz",
+    ),
+    "recover_bu98": ("bu98flt",),
+    "recover_dmoz_2001": ("content.rdf.u8.gz",),
+    "recover_ripe_hostcount": ("RIPE hostcount", "ISC hostcount"),
 }
 
 INSTITUTION_QUERY_TERMS: dict[str, str] = {
@@ -611,15 +622,23 @@ class ResidualSearchLedger:
                 )
 
         stats = self.stats(cell)
+        terminal_state: SearchCellState | None = None
         if self._should_saturate(stats):
+            terminal_state = SearchCellState.SATURATED
+        elif stats.variant_cursor >= query_program_length(cell):
+            # Every query program is finite. A cell with some useful/nonzero
+            # results may not satisfy low-yield saturation thresholds, but it
+            # still must not wrap variant_cursor and replay old query shapes.
+            terminal_state = SearchCellState.EXHAUSTED
+        if terminal_state is not None:
             with self.connection:
                 self.connection.execute(
                     """
                     UPDATE residual_search_cells
-                    SET state = 'SATURATED', updated_at = ?
+                    SET state = ?, updated_at = ?
                     WHERE cell_key = ?
                     """,
-                    (now, cell.key),
+                    (terminal_state.value, now, cell.key),
                 )
             stats = self.stats(cell)
         return stats
@@ -675,9 +694,15 @@ class SearchCellScheduler:
         ledger: ResidualSearchLedger,
         *,
         policy: ResidualSearchPolicy | None = None,
+        priority_cell_keys: frozenset[str] | None = None,
+        priority_bonus: float = 4.0,
     ) -> None:
         self.ledger = ledger
         self.policy = policy or ledger.policy
+        self.priority_cell_keys = frozenset(priority_cell_keys or ())
+        if not math.isfinite(float(priority_bonus)) or priority_bonus < 0:
+            raise ValueError("priority_bonus must be finite and non-negative")
+        self.priority_bonus = float(priority_bonus)
 
     def score(self, stats: SearchCellStats) -> float:
         if stats.state in {SearchCellState.SATURATED, SearchCellState.EXHAUSTED}:
@@ -690,11 +715,14 @@ class SearchCellScheduler:
             residual = stats.qualified_roots / stats.result_count
         else:
             residual = 0.5
-        return (
+        score = (
             self.policy.exploration_weight * exploration
             + self.policy.novelty_weight * novelty
             + self.policy.residual_weight * residual
         )
+        if stats.cell.key in self.priority_cell_keys:
+            score += self.priority_bonus
+        return score
 
     def next_plans(self, *, limit: int = 1) -> tuple[QueryPlan, ...]:
         if isinstance(limit, bool) or limit < 1:
@@ -702,6 +730,16 @@ class SearchCellScheduler:
         remaining = self.ledger.list_stats(
             states=(SearchCellState.OPEN, SearchCellState.ACTIVE)
         )
+        # Converge databases produced by older runtimes that could leave an
+        # ACTIVE cell past the end of its finite variant program. Do this before
+        # emitting plans so upgrade cannot replay even one stale query.
+        eligible: list[SearchCellStats] = []
+        for stats in remaining:
+            if stats.variant_cursor >= query_program_length(stats.cell):
+                self.ledger.mark_exhausted(stats.cell)
+                continue
+            eligible.append(stats)
+        remaining = eligible
         selected: list[SearchCellStats] = []
         mechanism_counts: dict[str, int] = {}
         institution_counts: dict[str, int] = {}

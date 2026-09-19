@@ -61,6 +61,7 @@ from creeper.source_discovery.measured_scout import (
 from creeper.source_discovery.models import SourceState
 from creeper.source_discovery.models import is_direct_evidence_entrypoint
 from creeper.source_discovery.registry import SourceDiscoveryRegistry
+from creeper.source_discovery.research_leads import ResearchLeadLedger
 from creeper.source_discovery.search_identity import SearchIdentityLedger
 from creeper.source_discovery.saturation import (
     SaturationPolicy,
@@ -657,6 +658,7 @@ async def _open_runtime(config: SourceDiscoveryServiceConfig):
             residual_ledger = None
             residual_scheduler = None
             search_identity = None
+            research_leads = None
             if config.residual_search.enabled:
                 residual_ledger = ResidualSearchLedger(registry.connection)
                 profile_signature = (
@@ -668,7 +670,12 @@ async def _open_runtime(config: SourceDiscoveryServiceConfig):
                 )
                 residual_ledger.ensure_search_profile(profile_signature)
                 residual_ledger.ensure_cells(default_search_cells())
-                residual_scheduler = SearchCellScheduler(residual_ledger)
+                research_leads = ResearchLeadLedger(registry.connection)
+                research_leads.seed_curated(residual_ledger)
+                residual_scheduler = SearchCellScheduler(
+                    residual_ledger,
+                    priority_cell_keys=research_leads.recovery_cell_keys(),
+                )
                 search_identity = SearchIdentityLedger(registry.connection)
 
             manager = SourceReservoirManager(
@@ -789,6 +796,7 @@ async def _open_runtime(config: SourceDiscoveryServiceConfig):
                     search_executor=search,
                     deterministic_search_executor=deterministic_search,
                     search_identity_ledger=search_identity,
+                    research_lead_ledger=research_leads,
                     scout_authority=scout_authority,
                     saturation_controller=saturation,
                     triage_parallelism=config.coordinator.triage_parallelism,
@@ -964,7 +972,7 @@ def _publish_discovery_telemetry(
         column="state",
         states=("OPEN", "ACTIVE", "SATURATED", "EXHAUSTED"),
     )
-    if residual_states:
+    if _table_exists(registry, "residual_search_cells"):
         source_gauges["residual_search_cell_total"] = sum(
             residual_states.values()
         )
@@ -974,6 +982,39 @@ def _publish_discovery_telemetry(
                 for state, count in residual_states.items()
             }
         )
+        lane_row = registry.connection.execute(
+            """
+            SELECT
+                SUM(CASE WHEN mechanism LIKE 'recover_%' THEN 1 ELSE 0 END)
+                    AS research_recovery,
+                SUM(CASE WHEN mechanism LIKE 'recover_%' THEN 0 ELSE 1 END)
+                    AS residual_population
+            FROM residual_search_cells
+            """
+        ).fetchone()
+        source_gauges["research_recovery_cell_total"] = int(
+            lane_row["research_recovery"] or 0
+        )
+        source_gauges["residual_population_cell_total"] = int(
+            lane_row["residual_population"] or 0
+        )
+    if _table_exists(registry, "source_research_leads_v1"):
+        rows = registry.connection.execute(
+            """
+            SELECT kind, COUNT(*) AS n, COALESCE(SUM(matched_count), 0) AS matches
+            FROM source_research_leads_v1
+            GROUP BY kind
+            """
+        ).fetchall()
+        source_gauges["research_lead_total"] = sum(int(row["n"]) for row in rows)
+        source_gauges["research_lead_match_total"] = sum(
+            int(row["matches"]) for row in rows
+        )
+        for row in rows:
+            kind = str(row["kind"]).lower()
+            source_gauges[f"research_lead_{kind}"] = int(row["n"])
+            source_gauges[f"research_lead_{kind}_matches"] = int(row["matches"])
+
     for table, gauge in (
         ("residual_search_urls", "residual_search_unique_urls"),
         ("residual_search_artifacts", "residual_search_unique_artifacts"),

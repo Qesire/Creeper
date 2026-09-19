@@ -72,6 +72,7 @@ class SourceDiscoveryCoordinator(_core.SourceDiscoveryCoordinator):
                 batch=batch,
                 search_cost_seconds=cost,
                 candidate_cap=candidate_cap,
+                research_leads=self.research_lead_ledger,
             )
             counts["search_episodes"] += 1
             counts["deterministic_search_episodes"] += 1

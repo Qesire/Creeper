@@ -44,6 +44,7 @@ from creeper.source_discovery.models import (
     source_key,
 )
 from creeper.source_discovery.registry import SourceDiscoveryRegistry
+from creeper.source_discovery.research_leads import ResearchLeadLedger
 from creeper.source_discovery.saturation import SourceSaturationController
 
 
@@ -378,6 +379,7 @@ class SourceDiscoveryCoordinator:
         search_executor: SearchExecutor,
         deterministic_search_executor: DeterministicSearchExecutor | None = None,
         search_identity_ledger: SearchIdentityLedger | None = None,
+        research_lead_ledger: ResearchLeadLedger | None = None,
         scout_authority: tuple[str, str] | None = None,
         saturation_controller: SourceSaturationController | None = None,
         triage_parallelism: int = 4,
@@ -417,6 +419,14 @@ class SourceDiscoveryCoordinator:
         self.search_executor = search_executor
         self.deterministic_search_executor = deterministic_search_executor
         self.search_identity_ledger = search_identity_ledger
+        self.research_lead_ledger = research_lead_ledger
+        if (
+            research_lead_ledger is not None
+            and research_lead_ledger.connection is not registry.connection
+        ):
+            raise ValueError(
+                "research-lead ledger and coordinator registry must share one SQLite connection"
+            )
         if deterministic_search_executor is not None and search_identity_ledger is None:
             raise ValueError(
                 "deterministic search requires a SearchIdentityLedger"

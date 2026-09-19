@@ -12,6 +12,7 @@ from creeper.source_discovery.index_space import RegionState, compile_candidate_
 from creeper.source_discovery.manager import SourcePoolTargets
 from creeper.source_discovery.models import SourceCandidate, SourceLevel
 from creeper.source_discovery.registry import SourceDiscoveryRegistry
+from creeper.source_discovery.research_leads import ResearchLeadLedger
 from creeper.source_discovery.residual_search import ResidualSearchLedger, SearchCell
 from creeper.source_discovery.search_identity import (
     RawSearchResult,
@@ -336,6 +337,8 @@ class ResidualDiscoveryTelemetryTests(unittest.TestCase):
                     search_cost_seconds=0.1,
                 )
                 identities = SearchIdentityLedger(registry.connection)
+                leads = ResearchLeadLedger(registry.connection)
+                leads.seed_curated(coverage)
                 result = canonicalize_search_result(
                     RawSearchResult(
                         provider="fixture",
@@ -348,6 +351,10 @@ class ResidualDiscoveryTelemetryTests(unittest.TestCase):
                     qualified=True,
                 )
                 identities.register(cell_key=cell.key, result=result)
+                with registry.connection:
+                    leads.record_match_locked(
+                        "ucb-home-ip-1996-public-trace"
+                    )
 
                 _publish_discovery_telemetry(
                     registry,
@@ -363,11 +370,18 @@ class ResidualDiscoveryTelemetryTests(unittest.TestCase):
                     snapshot.counters["discovery_deterministic_search_episodes"],
                     1,
                 )
-                self.assertEqual(snapshot.gauges["residual_search_cell_total"], 1.0)
+                self.assertEqual(snapshot.gauges["residual_search_cell_total"], 6.0)
+                self.assertEqual(snapshot.gauges["residual_population_cell_total"], 1.0)
+                self.assertEqual(snapshot.gauges["research_recovery_cell_total"], 5.0)
                 self.assertEqual(snapshot.gauges["residual_search_cell_active"], 1.0)
                 self.assertEqual(snapshot.gauges["residual_search_unique_urls"], 1.0)
                 self.assertEqual(snapshot.gauges["residual_search_unique_datasets"], 1.0)
                 self.assertEqual(snapshot.gauges["residual_search_unique_families"], 1.0)
+                self.assertEqual(snapshot.gauges["research_lead_total"], 8.0)
+                self.assertEqual(snapshot.gauges["research_lead_match_total"], 1.0)
+                self.assertEqual(snapshot.gauges["research_lead_exact_recovery"], 5.0)
+                self.assertEqual(snapshot.gauges["research_lead_hard_negative"], 2.0)
+                self.assertEqual(snapshot.gauges["research_lead_provenance_hold"], 1.0)
             finally:
                 control.close()
 
