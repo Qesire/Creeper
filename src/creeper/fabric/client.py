@@ -177,6 +177,10 @@ class FabricClient:
                 if work_raw.get("network_class") is None
                 else str(work_raw["network_class"])
             ),
+            dependency_work_keys=tuple(
+                str(item)
+                for item in work_raw.get("dependency_work_keys", ())
+            ),
         )
         cursor = raw.get("cursor")
         if cursor is not None and not isinstance(cursor, Mapping):
