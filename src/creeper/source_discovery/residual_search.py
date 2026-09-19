@@ -51,6 +51,17 @@ MECHANISM_QUERY_TERMS: dict[str, tuple[str, ...]] = {
     "nic_registry": ("nic", "registry", "host list"),
     "isp_inventory": ("isp", "host inventory", "network inventory"),
     "software_mirror": ("mirror sites", "software mirror", "mirror list"),
+    # Curated exact-recovery programs. These are not added to the generic
+    # Cartesian-like seed space; ResearchLeadLedger creates only the five
+    # concrete SearchCells whose identities were established by prior research.
+    "recover_nlanr_uc": ("uc.sanitized-access.20000714",),
+    "recover_canetii": (
+        "access.1999-09-19.gz",
+        "access.1999-09-20.gz",
+    ),
+    "recover_bu98": ("bu98flt",),
+    "recover_dmoz_2001": ("content.rdf.u8.gz",),
+    "recover_ripe_hostcount": ("RIPE hostcount", "ISC hostcount"),
 }
 
 INSTITUTION_QUERY_TERMS: dict[str, str] = {
