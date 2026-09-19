@@ -370,7 +370,9 @@ class ResidualDiscoveryTelemetryTests(unittest.TestCase):
                     snapshot.counters["discovery_deterministic_search_episodes"],
                     1,
                 )
-                self.assertEqual(snapshot.gauges["residual_search_cell_total"], 1.0)
+                self.assertEqual(snapshot.gauges["residual_search_cell_total"], 6.0)
+                self.assertEqual(snapshot.gauges["residual_population_cell_total"], 1.0)
+                self.assertEqual(snapshot.gauges["research_recovery_cell_total"], 5.0)
                 self.assertEqual(snapshot.gauges["residual_search_cell_active"], 1.0)
                 self.assertEqual(snapshot.gauges["residual_search_unique_urls"], 1.0)
                 self.assertEqual(snapshot.gauges["residual_search_unique_datasets"], 1.0)
