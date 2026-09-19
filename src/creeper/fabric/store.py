@@ -16,6 +16,7 @@ from .models import (
     FabricTaskState,
     FabricWorkClass,
     LeaseToken,
+    ProviderPermit,
     ResultBatch,
     WorkerDescriptor,
     WorkSpec,
@@ -738,6 +739,287 @@ class SQLiteFabricStore:
                 },
                 now=now,
             )
+            self.connection.commit()
+        except BaseException:
+            self.connection.rollback()
+            raise
+
+    def configure_provider(
+        self,
+        provider: str,
+        *,
+        requests_per_second: float,
+        max_global_inflight: int,
+        require_qualified_region: bool = True,
+    ) -> None:
+        if not provider.strip():
+            raise ValueError("provider must be non-empty")
+        if (
+            not math.isfinite(float(requests_per_second))
+            or requests_per_second <= 0
+        ):
+            raise ValueError("requests_per_second must be finite and positive")
+        if (
+            isinstance(max_global_inflight, bool)
+            or not isinstance(max_global_inflight, int)
+            or max_global_inflight < 1
+        ):
+            raise ValueError("max_global_inflight must be positive")
+        now = self._now()
+        with self.connection:
+            self.connection.execute(
+                """
+                INSERT INTO fabric_provider_budgets_v2(
+                    provider, requests_per_second, max_global_inflight,
+                    require_qualified_region, next_request_at,
+                    cooldown_until, updated_at
+                ) VALUES (?, ?, ?, ?, 0, 0, ?)
+                ON CONFLICT(provider) DO UPDATE SET
+                    requests_per_second=excluded.requests_per_second,
+                    max_global_inflight=excluded.max_global_inflight,
+                    require_qualified_region=excluded.require_qualified_region,
+                    updated_at=excluded.updated_at
+                """,
+                (
+                    provider.strip(),
+                    float(requests_per_second),
+                    max_global_inflight,
+                    int(bool(require_qualified_region)),
+                    now,
+                ),
+            )
+
+    def set_provider_region(
+        self,
+        provider: str,
+        region: str,
+        *,
+        qualified: bool,
+    ) -> None:
+        if not provider.strip() or not region.strip():
+            raise ValueError("provider and region must be non-empty")
+        now = self._now()
+        with self.connection:
+            if (
+                self.connection.execute(
+                    "SELECT 1 FROM fabric_provider_budgets_v2 WHERE provider=?",
+                    (provider,),
+                ).fetchone()
+                is None
+            ):
+                raise KeyError(provider)
+            self.connection.execute(
+                """
+                INSERT INTO fabric_provider_regions_v2(
+                    provider, region, qualified, updated_at
+                ) VALUES (?, ?, ?, ?)
+                ON CONFLICT(provider, region) DO UPDATE SET
+                    qualified=excluded.qualified,
+                    updated_at=excluded.updated_at
+                """,
+                (provider, region, int(bool(qualified)), now),
+            )
+
+    def acquire_provider_permit(
+        self,
+        lease: LeaseToken,
+        provider: str,
+        *,
+        allowed_requests: int = 1,
+        ttl_seconds: float = 30.0,
+    ) -> ProviderPermit | None:
+        if not provider.strip():
+            raise ValueError("provider must be non-empty")
+        if (
+            isinstance(allowed_requests, bool)
+            or not isinstance(allowed_requests, int)
+            or allowed_requests < 1
+        ):
+            raise ValueError("allowed_requests must be positive")
+        if not math.isfinite(float(ttl_seconds)) or ttl_seconds <= 0:
+            raise ValueError("ttl_seconds must be finite and positive")
+        now = self._now()
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            self._assert_lease_locked(lease, now=now)
+            worker = self._worker_locked(lease.worker_id)
+            if provider not in worker.allowed_providers:
+                raise WorkerRejectedError(
+                    f"worker is not allowed to access provider: {provider}"
+                )
+            budget = self.connection.execute(
+                """
+                SELECT *
+                FROM fabric_provider_budgets_v2
+                WHERE provider=?
+                """,
+                (provider,),
+            ).fetchone()
+            if budget is None:
+                raise KeyError(f"unknown provider budget: {provider}")
+            if int(budget["require_qualified_region"]):
+                region = self.connection.execute(
+                    """
+                    SELECT qualified
+                    FROM fabric_provider_regions_v2
+                    WHERE provider=? AND region=?
+                    """,
+                    (provider, worker.region),
+                ).fetchone()
+                if region is None or int(region["qualified"]) != 1:
+                    self.connection.commit()
+                    return None
+            self.connection.execute(
+                """
+                UPDATE fabric_provider_permits_v2
+                SET active=0
+                WHERE provider=? AND active=1 AND expires_at <= ?
+                """,
+                (provider, now),
+            )
+            active = int(
+                self.connection.execute(
+                    """
+                    SELECT COUNT(*) AS n
+                    FROM fabric_provider_permits_v2
+                    WHERE provider=? AND active=1 AND expires_at > ?
+                    """,
+                    (provider, now),
+                ).fetchone()["n"]
+            )
+            if (
+                active >= int(budget["max_global_inflight"])
+                or now < float(budget["next_request_at"])
+                or now < float(budget["cooldown_until"])
+            ):
+                self.connection.commit()
+                return None
+            permit_id = str(uuid.uuid4())
+            expires = now + float(ttl_seconds)
+            next_request = now + (
+                float(allowed_requests) / float(budget["requests_per_second"])
+            )
+            self.connection.execute(
+                """
+                UPDATE fabric_provider_budgets_v2
+                SET next_request_at=?, updated_at=?
+                WHERE provider=?
+                """,
+                (next_request, now, provider),
+            )
+            self.connection.execute(
+                """
+                INSERT INTO fabric_provider_permits_v2(
+                    permit_id, provider, worker_id, task_id, lease_epoch,
+                    allowed_requests, expires_at, issued_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    permit_id,
+                    provider,
+                    lease.worker_id,
+                    lease.task_id,
+                    lease.lease_epoch,
+                    allowed_requests,
+                    expires,
+                    now,
+                ),
+            )
+            self.connection.commit()
+            return ProviderPermit(
+                permit_id=permit_id,
+                provider=provider,
+                worker_id=lease.worker_id,
+                task_id=lease.task_id,
+                lease_epoch=lease.lease_epoch,
+                allowed_requests=allowed_requests,
+                expires_at=expires,
+            )
+        except BaseException:
+            self.connection.rollback()
+            raise
+
+    def report_provider_permit(
+        self,
+        permit: ProviderPermit,
+        *,
+        status_code: int | None,
+        response_bytes: int = 0,
+        throttled: bool = False,
+        cooldown_seconds: float = 0.0,
+    ) -> None:
+        if (
+            isinstance(response_bytes, bool)
+            or not isinstance(response_bytes, int)
+            or response_bytes < 0
+        ):
+            raise ValueError("response_bytes must be non-negative")
+        if not math.isfinite(float(cooldown_seconds)) or cooldown_seconds < 0:
+            raise ValueError("cooldown_seconds must be finite and non-negative")
+        now = self._now()
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            row = self.connection.execute(
+                """
+                SELECT p.*, w.descriptor_json
+                FROM fabric_provider_permits_v2 AS p
+                JOIN fabric_workers_v2 AS w ON w.worker_id=p.worker_id
+                WHERE p.permit_id=?
+                """,
+                (permit.permit_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(permit.permit_id)
+            if (
+                str(row["worker_id"]) != permit.worker_id
+                or str(row["task_id"]) != permit.task_id
+                or int(row["lease_epoch"]) != permit.lease_epoch
+            ):
+                raise StaleLeaseError("provider permit identity mismatch")
+            if int(row["active"]) == 0:
+                self.connection.commit()
+                return
+            worker = _worker_from_json(str(row["descriptor_json"]))
+            success = status_code is not None and 200 <= status_code < 400
+            self.connection.execute(
+                """
+                UPDATE fabric_provider_permits_v2
+                SET active=0, status_code=?, response_bytes=?
+                WHERE permit_id=?
+                """,
+                (status_code, response_bytes, permit.permit_id),
+            )
+            self.connection.execute(
+                """
+                INSERT INTO fabric_provider_regions_v2(
+                    provider, region, qualified, samples, successes,
+                    throttles, failures, updated_at
+                ) VALUES (?, ?, 0, 1, ?, ?, ?, ?)
+                ON CONFLICT(provider, region) DO UPDATE SET
+                    samples=samples+1,
+                    successes=successes+excluded.successes,
+                    throttles=throttles+excluded.throttles,
+                    failures=failures+excluded.failures,
+                    updated_at=excluded.updated_at
+                """,
+                (
+                    permit.provider,
+                    worker.region,
+                    int(success),
+                    int(bool(throttled)),
+                    int(not success and not throttled),
+                    now,
+                ),
+            )
+            if throttled and cooldown_seconds > 0:
+                self.connection.execute(
+                    """
+                    UPDATE fabric_provider_budgets_v2
+                    SET cooldown_until=MAX(cooldown_until, ?), updated_at=?
+                    WHERE provider=?
+                    """,
+                    (now + float(cooldown_seconds), now, permit.provider),
+                )
             self.connection.commit()
         except BaseException:
             self.connection.rollback()
