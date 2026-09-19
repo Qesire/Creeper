@@ -22,6 +22,14 @@ class WorkerResultSpool:
         self.connection.execute("PRAGMA busy_timeout=30000")
         self.connection.execute(
             """
+            CREATE TABLE IF NOT EXISTS worker_spool_meta (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            ) WITHOUT ROWID
+            """
+        )
+        self.connection.execute(
+            """
             CREATE TABLE IF NOT EXISTS pending_result_batches (
                 batch_id TEXT PRIMARY KEY,
                 task_id TEXT NOT NULL,
@@ -35,6 +43,64 @@ class WorkerResultSpool:
 
     def close(self) -> None:
         self.connection.close()
+
+    def pending_count(self) -> int:
+        row = self.connection.execute(
+            "SELECT COUNT(*) AS n FROM pending_result_batches"
+        ).fetchone()
+        return int(row["n"])
+
+    def resolve_worker_instance_id(
+        self,
+        proposed_instance_id: str,
+        *,
+        auto: bool,
+    ) -> str:
+        """Resolve one process incarnation against the durable local outbox.
+
+        If an automatically generated process restarts with unacked batches,
+        reuse the prior incarnation so Authority may idempotently ACK those
+        batches while the lease is still valid. If Authority has already
+        fenced/re-leased the task, replay receives STALE_LEASE and the old
+        generation is discarded. With an empty outbox, a new proposed
+        incarnation becomes durable immediately.
+
+        Explicit instance IDs are never rewritten.
+        """
+
+        proposed = str(proposed_instance_id).strip()
+        if not proposed:
+            raise ValueError("proposed_instance_id is required")
+        if not auto:
+            with self.connection:
+                self.connection.execute(
+                    """
+                    INSERT INTO worker_spool_meta(key,value)
+                    VALUES ('worker_instance_id', ?)
+                    ON CONFLICT(key) DO UPDATE SET value=excluded.value
+                    """,
+                    (proposed,),
+                )
+            return proposed
+
+        row = self.connection.execute(
+            "SELECT value FROM worker_spool_meta WHERE key='worker_instance_id'"
+        ).fetchone()
+        if row is not None and self.pending_count() > 0:
+            prior = str(row["value"]).strip()
+            if prior:
+                return prior
+
+        with self.connection:
+            self.connection.execute(
+                """
+                INSERT INTO worker_spool_meta(key,value)
+                VALUES ('worker_instance_id', ?)
+                ON CONFLICT(key) DO UPDATE SET value=excluded.value
+                """,
+                (proposed,),
+            )
+        return proposed
 
     def clear(self) -> int:
         with self.connection:
