@@ -1042,19 +1042,6 @@ class SQLiteFabricStore:
         now = self._now()
         self.connection.execute("BEGIN IMMEDIATE")
         try:
-            if (
-                self.connection.execute(
-                    """
-                    SELECT 1 FROM fabric_workers_v2
-                    WHERE worker_id=? AND revoked=0
-                    """,
-                    (worker_id,),
-                ).fetchone()
-                is None
-            ):
-                raise WorkerRejectedError(
-                    f"unknown or revoked worker: {worker_id}"
-                )
             self.connection.execute(
                 """
                 DELETE FROM fabric_request_nonces_v2
