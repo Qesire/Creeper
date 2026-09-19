@@ -443,13 +443,7 @@ class AsyncEvidenceWorker:
             asyncio.create_task(self._execute(task))
             for task in tasks
         ]
-        writer = CommitWriter(
-            self.evidence_store,
-            self.control_store,
-            owner=self.owner,
-            flush_count=1,
-        )
-        terminal = retryable = range_inserted_capsules = 0
+        terminal = retryable = inserted_capsules = 0
         state_counts = {
             CDXQueryState.PASS: 0,
             CDXQueryState.EMPTY_EXHAUSTIVE: 0,
@@ -468,108 +462,10 @@ class AsyncEvidenceWorker:
                     )
                 state_counts[result.state] += 1
                 task = task_by_key[result.key]
-                self._record_attempt_metric(task, result)
-
-                if isinstance(result, DomainEvidenceQueryResult):
-                    if result.capsules:
-                        range_inserted_capsules += self._persist_positive_capsules(
-                            result.key,
-                            result.capsules,
-                            domain=True,
-                        )
-                    if result.state in {
-                        CDXQueryState.DECOMPOSED,
-                        CDXQueryState.INVALID,
-                    }:
-                        self.control_store.finish_range_task(
-                            result.key,
-                            result.state,
-                            followup_keys=(),
-                            owner=self.owner,
-                        )
-                        terminal += 1
-                    elif result.state is CDXQueryState.TRANSIENT_ERROR:
-                        self.control_store.finish_evidence_task(
-                            result.key,
-                            result.state,
-                            owner=self.owner,
-                            retry_at=self._retry_at(task.attempt),
-                        )
-                        retryable += 1
-                    else:
-                        raise ValueError(
-                            f"unsupported domain provider state: {result.state}"
-                        )
-                elif isinstance(result, RangeEvidenceQueryResult):
-                    if result.capsules:
-                        range_inserted_capsules += self._persist_positive_capsules(
-                            result.key,
-                            result.capsules,
-                        )
-                    capsule_years = {
-                        capsule.year for capsule in result.capsules
-                    }
-                    if result.state in {
-                        CDXQueryState.PASS,
-                        CDXQueryState.EMPTY_EXHAUSTIVE,
-                        CDXQueryState.INVALID,
-                    }:
-                        # Host-range work remains one durable task. Production
-                        # providers resolve missing years internally, so a
-                        # terminal range never fans out backlog children.
-                        self.control_store.finish_range_task(
-                            result.key,
-                            result.state,
-                            followup_keys=(),
-                            owner=self.owner,
-                        )
-                        terminal += 1
-                    elif result.state in {
-                        CDXQueryState.DECOMPOSED,
-                        CDXQueryState.INCOMPLETE,
-                        CDXQueryState.TRANSIENT_ERROR,
-                    }:
-                        # DECOMPOSED is retained for provider compatibility but
-                        # no longer means durable child expansion. Retry the
-                        # same host task after preserving any positive capsules.
-                        retry_state = (
-                            CDXQueryState.INCOMPLETE
-                            if result.state is CDXQueryState.DECOMPOSED
-                            else result.state
-                        )
-                        self.control_store.finish_evidence_task(
-                            result.key,
-                            retry_state,
-                            owner=self.owner,
-                            retry_at=self._retry_at(task.attempt),
-                        )
-                        retryable += 1
-                    else:
-                        raise ValueError(
-                            f"unsupported provider state: {result.state}"
-                        )
-                elif result.state in {
-                    CDXQueryState.PASS,
-                    CDXQueryState.EMPTY_EXHAUSTIVE,
-                    CDXQueryState.INVALID,
-                }:
-                    writer.submit(result.capsule, result)
-                    terminal += 1
-                elif result.state in {
-                    CDXQueryState.INCOMPLETE,
-                    CDXQueryState.TRANSIENT_ERROR,
-                }:
-                    self.control_store.finish_evidence_task(
-                        result.key,
-                        result.state,
-                        owner=self.owner,
-                        retry_at=self._retry_at(task.attempt),
-                    )
-                    retryable += 1
-                else:
-                    raise ValueError(
-                        f"unsupported provider state: {result.state}"
-                    )
+                outcome = self.result_committer.commit(task, result)
+                terminal += outcome.terminal
+                retryable += outcome.retryable
+                inserted_capsules += outcome.inserted_capsules
 
                 active_keys.discard(result.key)
         finally:
@@ -577,7 +473,6 @@ class AsyncEvidenceWorker:
                 if not execution.done():
                     execution.cancel()
             await asyncio.gather(*executions, return_exceptions=True)
-            writer.close()
             stop_heartbeat.set()
             await heartbeat
 
@@ -585,9 +480,7 @@ class AsyncEvidenceWorker:
             claimed=len(tasks),
             terminal=terminal,
             retryable=retryable,
-            inserted_capsules=(
-                writer.inserted_capsules + range_inserted_capsules
-            ),
+            inserted_capsules=inserted_capsules,
             unknown_provider=0,
             pass_count=state_counts[CDXQueryState.PASS],
             empty_exhaustive_count=state_counts[
