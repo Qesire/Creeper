@@ -990,6 +990,62 @@ class PostgresFabricStore:
                 )
                 return cursor.rowcount == 1
 
+    def result_batches(self, task_id: str) -> tuple[dict[str, object], ...]:
+        with self.connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT sequence_no, lease_epoch, payload, payload_digest,
+                       cursor_after, committed_at
+                FROM fabric_result_batches_v2
+                WHERE task_id=%s
+                ORDER BY sequence_no
+                """,
+                (task_id,),
+            )
+            return tuple(
+                {
+                    "sequence_no": int(row["sequence_no"]),
+                    "lease_epoch": int(row["lease_epoch"]),
+                    "payload": dict(row["payload"]),
+                    "payload_digest": str(row["payload_digest"]),
+                    "cursor_after": (
+                        None
+                        if row["cursor_after"] is None
+                        else dict(row["cursor_after"])
+                    ),
+                    "committed_at": _epoch_seconds(row["committed_at"]),
+                }
+                for row in cursor.fetchall()
+            )
+
+    def dependency_results(
+        self,
+        task_id: str,
+    ) -> dict[str, tuple[dict[str, object], ...]]:
+        with self.connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT parent.task_id, parent.work_key, parent.state
+                FROM fabric_task_dependencies_v2 AS dependency
+                JOIN fabric_tasks_v2 AS parent
+                  ON parent.task_id=dependency.depends_on_task_id
+                WHERE dependency.task_id=%s
+                ORDER BY parent.work_key
+                """,
+                (task_id,),
+            )
+            rows = tuple(cursor.fetchall())
+        output: dict[str, tuple[dict[str, object], ...]] = {}
+        for row in rows:
+            if str(row["state"]) != FabricTaskState.SUCCEEDED.value:
+                raise RuntimeError(
+                    "dependency results requested before all parents succeeded"
+                )
+            output[str(row["work_key"])] = self.result_batches(
+                str(row["task_id"])
+            )
+        return output
+
     def unpublished_events(self, *, limit: int = 100) -> tuple[dict[str, object], ...]:
         if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
             raise ValueError("limit must be positive")
