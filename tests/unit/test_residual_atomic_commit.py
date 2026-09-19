@@ -135,6 +135,45 @@ class ResidualAtomicCommitTests(unittest.TestCase):
                     )
                 self._assert_pre_episode_state()
 
+    def test_fabric_idempotency_key_replays_without_new_domain_effects(self) -> None:
+        first = commit_deterministic_residual_batch(
+            self.registry,
+            self.coverage,
+            self.identities,
+            plan=self.plan,
+            batch=self.batch,
+            search_cost_seconds=0.1,
+            candidate_cap=8,
+            idempotency_key="fabric-batch:1",
+        )
+        second = commit_deterministic_residual_batch(
+            self.registry,
+            self.coverage,
+            self.identities,
+            plan=self.plan,
+            batch=self.batch,
+            search_cost_seconds=0.1,
+            candidate_cap=8,
+            idempotency_key="fabric-batch:1",
+        )
+
+        self.assertEqual(second, first)
+        stats = self.coverage.stats(self.cell)
+        self.assertEqual(stats.attempts, 1)
+        self.assertEqual(stats.variant_cursor, 1)
+        self.assertEqual(self._count("source_search_episodes"), 1)
+        self.assertEqual(self._count("source_proposals"), 1)
+        marker = self.registry.connection.execute(
+            """
+            SELECT commit_kind
+            FROM fabric_domain_commits
+            WHERE idempotency_key=?
+            """,
+            ("fabric-batch:1",),
+        ).fetchone()
+        self.assertIsNotNone(marker)
+        self.assertEqual(marker["commit_kind"], "residual-search")
+
     def test_success_commits_episode_identity_candidate_and_cursor_together(self) -> None:
         result = commit_deterministic_residual_batch(
             self.registry,
