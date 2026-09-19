@@ -196,6 +196,22 @@ class SearchBatch:
             raise ValueError("search batch may contain at most one adapter proposal")
         if any(not isinstance(item, dict) for item in self.adapter_proposals):
             raise ValueError("search batch adapter proposals must be objects")
+        compiling_adapter = self.llm_task_type == "COMPILE_ADAPTER"
+        if compiling_adapter:
+            if (
+                len(self.adapter_proposals) != 1
+                or self.candidates
+                or self.hypotheses
+                or self.hypothesis_attribution
+            ):
+                raise ValueError(
+                    "COMPILE_ADAPTER batch must contain exactly one adapter "
+                    "proposal and no candidates/hypotheses"
+                )
+        elif self.adapter_proposals:
+            raise ValueError(
+                "adapter proposals are valid only for COMPILE_ADAPTER"
+            )
 
         hypothesis_ids: set[str] = set()
         for hypothesis in self.hypotheses:
