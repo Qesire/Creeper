@@ -278,21 +278,22 @@ class SourceDiscoveryCoordinatorTests(unittest.IsolatedAsyncioTestCase):
 
         async def search_executor(directive) -> SearchBatch:
             await gate("search")
-            found = SourceCandidate(
-                canonical_entrypoint=f"https://search.example/{directive.strategy.lower()}/",
-                source_family="SEARCHED",
-                level=SourceLevel.COLLECTION,
-                discovered_by="untrusted-agent-label",
-                discovery_strategy="UNTRUSTED",
-                expected_volume=5000,
-                confidence=0.6,
-            )
             return SearchBatch(
                 backend="test-search",
                 query=f"query:{directive.strategy}",
                 actor="agent:test",
-                candidates=(found,),
                 search_cost_seconds=0.25,
+                llm_episode_id="llm:overlap-adapter",
+                llm_task_type="COMPILE_ADAPTER",
+                adapter_proposals=(
+                    {
+                        "parser_kind": "jsonl",
+                        "compression": "none",
+                        "hostname_field": "host",
+                        "timestamp_field": None,
+                        "delimiter": None,
+                    },
+                ),
             )
 
         coordinator = SourceDiscoveryCoordinator(
@@ -314,14 +315,9 @@ class SourceDiscoveryCoordinatorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.registry.get_candidate(scout.source_key).state, SourceState.WARM)
         self.assertEqual(report.triaged_to_scout, 1)
         self.assertEqual(report.scouted_warm, 1)
-        self.assertGreaterEqual(report.search_episodes, 1)
-        searched = [
-            item
-            for item in self.registry.list_candidates(state=SourceState.DISCOVERED)
-            if item.canonical_entrypoint.startswith("https://search.example/")
-        ]
-        self.assertGreaterEqual(len(searched), 1)
-        self.assertEqual(searched[0].discovered_by, "agent:test")
+        self.assertEqual(report.search_episodes, 1)
+        self.assertEqual(report.adapter_bindings_applied, 1)
+        self.assertEqual(report.search_candidates_registered, 0)
 
     async def test_scout_format_observation_is_committed_by_coordinator(self) -> None:
         candidate = self.candidate("opaque-format")
@@ -702,7 +698,22 @@ class SourceDiscoveryCoordinatorTests(unittest.IsolatedAsyncioTestCase):
         async def search(_directive) -> SearchBatch:
             nonlocal search_calls
             search_calls += 1
-            return SearchBatch(backend="test", query="foreground", actor="test")
+            return SearchBatch(
+                backend="test",
+                query="compile adapter",
+                actor="agent:test",
+                llm_episode_id="llm:background-adapter",
+                llm_task_type="COMPILE_ADAPTER",
+                adapter_proposals=(
+                    {
+                        "parser_kind": "jsonl",
+                        "compression": "none",
+                        "hostname_field": "host",
+                        "timestamp_field": None,
+                        "delimiter": None,
+                    },
+                ),
+            )
 
         coordinator = SourceDiscoveryCoordinator(
             self.registry,
@@ -919,39 +930,28 @@ class SourceDiscoveryCoordinatorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(report.scout_edges_added, 1)
         self.assertEqual(report.scout_children_dropped, 2)
 
-    async def test_search_executor_cannot_overfill_directive_budget(self) -> None:
-        self.hold_unknown_format_source("budget-cap")
-
-        async def triage(_candidate: SourceCandidate) -> TriageResult:
-            return TriageResult(TriageDisposition.SCOUT)
-
-        async def scout(_candidate: SourceCandidate) -> ScoutResult:
-            return ScoutResult(ScoutDisposition.HOLD)
-
-        async def search(directive) -> SearchBatch:
-            candidates = tuple(self.candidate(f"found-{index}") for index in range(4))
-            return SearchBatch(
+    async def test_compile_adapter_batch_cannot_smuggle_candidates(self) -> None:
+        with self.assertRaisesRegex(
+            ValueError,
+            "COMPILE_ADAPTER batch must contain exactly one adapter proposal",
+        ):
+            SearchBatch(
                 backend="test-search",
-                query=f"query:{directive.strategy}",
+                query="compile adapter",
                 actor="agent:test",
-                candidates=candidates,
-                search_cost_seconds=1.0,
+                candidates=(self.candidate("smuggled"),),
+                llm_episode_id="llm:smuggle",
+                llm_task_type="COMPILE_ADAPTER",
+                adapter_proposals=(
+                    {
+                        "parser_kind": "jsonl",
+                        "compression": "none",
+                        "hostname_field": "host",
+                        "timestamp_field": None,
+                        "delimiter": None,
+                    },
+                ),
             )
-
-        coordinator = SourceDiscoveryCoordinator(
-            self.registry,
-            self.manager(cold_min=1, cold_target=1),
-            lock_path=self.lock_path,
-            triage_executor=triage,
-            scout_executor=scout,
-            search_executor=search,
-        )
-
-        report = await coordinator.run_once()
-
-        self.assertEqual(report.search_candidates_registered, 1)
-        self.assertEqual(report.search_candidates_dropped, 3)
-        self.assertEqual(len(self.registry.list_candidates(state=SourceState.DISCOVERED)), 1)
 
 
 if __name__ == "__main__":
