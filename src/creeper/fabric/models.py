@@ -57,6 +57,7 @@ def deterministic_work_key(
     partition_key: str,
     input_identity: str,
     coverage: Mapping[str, Any],
+    dependency_work_keys: tuple[str, ...] = (),
 ) -> str:
     payload = canonical_json(
         {
@@ -66,6 +67,7 @@ def deterministic_work_key(
             "partition_key": partition_key.strip(),
             "input_identity": input_identity.strip(),
             "coverage": dict(coverage),
+            "dependency_work_keys": sorted(set(dependency_work_keys)),
         }
     )
     return "work:" + hashlib.sha256(payload.encode("utf-8")).hexdigest()
@@ -86,6 +88,7 @@ class WorkSpec:
     provider: str | None = None
     min_memory_bytes: int = 0
     network_class: str | None = None
+    dependency_work_keys: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "work_class", FabricWorkClass(self.work_class))
@@ -95,6 +98,11 @@ class WorkSpec:
             tuple(FabricCapability(item) for item in self.required_capabilities),
         )
         object.__setattr__(self, "coverage", dict(self.coverage))
+        object.__setattr__(
+            self,
+            "dependency_work_keys",
+            tuple(sorted(set(self.dependency_work_keys))),
+        )
         for name in (
             "producer",
             "algorithm_version",
@@ -139,6 +147,7 @@ class WorkSpec:
             partition_key=self.partition_key,
             input_identity=self.input_identity,
             coverage=self.coverage,
+            dependency_work_keys=self.dependency_work_keys,
         )
 
 
