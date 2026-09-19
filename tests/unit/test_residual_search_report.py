@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 
 from creeper.source_discovery.registry import SourceDiscoveryRegistry
+from creeper.source_discovery.research_leads import ResearchLeadLedger
 from creeper.source_discovery.residual_recovery import (
     RESIDUAL_PROTOCOL_REVISION,
     recover_residual_protocol_state,
@@ -236,6 +237,27 @@ class ResidualSearchReportTests(unittest.TestCase):
         )
         self.assertFalse(
             report["limitations"]["provider_final_eed_attribution_available"]
+        )
+
+    def test_targeted_recovery_is_separate_from_residual_population(self) -> None:
+        leads = ResearchLeadLedger(self.registry.connection)
+        leads.seed_curated(self.ledger)
+
+        report = build_residual_search_report(self.registry.connection)
+
+        self.assertEqual(report["summary"]["cells"], 6)
+        self.assertEqual(report["residual_population_summary"]["cells"], 1)
+        self.assertEqual(report["research_recovery_summary"]["cells"], 5)
+        lanes = {
+            item["lane"]: item
+            for item in report["dimensions"]["lane"]
+        }
+        self.assertEqual(lanes["residual_population"]["cells"], 1)
+        self.assertEqual(lanes["research_recovery"]["cells"], 5)
+        self.assertTrue(
+            report["limitations"][
+                "targeted_recovery_is_reported_separately_from_residual_population"
+            ]
         )
 
     def test_load_report_uses_initialized_file_read_only(self) -> None:
