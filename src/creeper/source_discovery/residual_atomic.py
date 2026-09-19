@@ -18,15 +18,20 @@ from __future__ import annotations
 import math
 import sqlite3
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Callable
 
 from creeper.source_discovery.deterministic_search import (
     DeterministicSearchBatch,
     candidate_from_result,
 )
-from creeper.source_discovery.models import SourceCandidate, is_common_crawl_provenance
+from creeper.source_discovery.models import (
+    SourceCandidate,
+    SourceState,
+    is_common_crawl_provenance,
+)
 from creeper.source_discovery.registry import SourceDiscoveryRegistry
+from creeper.source_discovery.research_leads import ResearchLeadLedger
 from creeper.source_discovery.residual_search import (
     QueryPlan,
     ResidualSearchLedger,
@@ -54,12 +59,17 @@ def _same_connection(
     registry: SourceDiscoveryRegistry,
     coverage: ResidualSearchLedger,
     identities: SearchIdentityLedger,
+    research_leads: ResearchLeadLedger | None = None,
 ) -> sqlite3.Connection:
     connection = registry.connection
     if coverage.connection is not connection or identities.connection is not connection:
         raise RuntimeError(
             "atomic residual commit requires registry, coverage and identity ledgers "
             "to share one SQLite connection"
+        )
+    if research_leads is not None and research_leads.connection is not connection:
+        raise RuntimeError(
+            "research-lead ledger must share the atomic residual SQLite connection"
         )
     return connection
 
@@ -308,6 +318,7 @@ def commit_deterministic_residual_batch(
     batch: DeterministicSearchBatch,
     search_cost_seconds: float,
     candidate_cap: int,
+    research_leads: ResearchLeadLedger | None = None,
     fault_injector: FaultInjector | None = None,
 ) -> AtomicResidualCommitResult:
     """Commit one completed QueryPlan all-or-nothing.
@@ -326,7 +337,7 @@ def commit_deterministic_residual_batch(
     if isinstance(candidate_cap, bool) or not isinstance(candidate_cap, int) or candidate_cap < 1:
         raise ValueError("candidate_cap must be a positive integer")
 
-    connection = _same_connection(registry, coverage, identities)
+    connection = _same_connection(registry, coverage, identities, research_leads)
     if connection.in_transaction:
         raise RuntimeError("atomic residual commit requires a clean SQLite transaction boundary")
 
@@ -406,6 +417,13 @@ def commit_deterministic_residual_batch(
             unique_roots += int(registration.new_dataset)
             new_families += int(registration.new_family)
 
+            if research_leads is not None:
+                hard_negative = research_leads.hard_negative_match(result)
+                if hard_negative is not None:
+                    research_leads.record_match_locked(hard_negative.lead_id)
+                    dropped += 1
+                    continue
+
             if not result.qualified or not registration.new_dataset:
                 dropped += 1
                 continue
@@ -415,6 +433,30 @@ def commit_deterministic_residual_batch(
                 continue
 
             candidate = candidate_from_result(plan, result)
+            if research_leads is not None:
+                recovery = research_leads.exact_recovery_match(
+                    plan.cell.key,
+                    result,
+                )
+                if recovery is not None:
+                    candidate = replace(
+                        candidate,
+                        source_family=f"RESEARCH_RECOVERY:{recovery.lead_id}",
+                        discovery_strategy="RESEARCH_LEAD_RECOVERY",
+                    )
+                provenance = research_leads.provenance_hold_match(result)
+                if provenance is not None:
+                    candidate = replace(
+                        candidate,
+                        expected_year_from=None,
+                        expected_year_to=None,
+                        temporal_semantics_prior=0.0,
+                        direct_evidence_prior=0.0,
+                        state=SourceState.HOLD,
+                        state_reason=(
+                            "RESEARCH_PROVENANCE_HOLD:" + provenance.lead_id
+                        ),
+                    )
             if candidate.source_key in seen_sources:
                 dropped += 1
                 continue
@@ -436,6 +478,17 @@ def commit_deterministic_residual_batch(
                 candidate=candidate,
                 episode_id=episode_id,
             )
+            if research_leads is not None:
+                if recovery is not None:
+                    research_leads.record_match_locked(
+                        recovery.lead_id,
+                        source_key=candidate.source_key,
+                    )
+                if provenance is not None:
+                    research_leads.record_match_locked(
+                        provenance.lead_id,
+                        source_key=candidate.source_key,
+                    )
             registered_count += 1
             new_source_count += int(inserted)
 
