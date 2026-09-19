@@ -11,6 +11,7 @@ from typing import Any, Mapping
 from uuid import uuid4
 
 from creeper.distributed.models import WorkerDescriptor
+from creeper.evidence.providers.multi_cdx import CDXProviderConfig
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,6 +46,37 @@ class AuthorityRuntimeConfig:
             raise ValueError("invalid authority listen address")
         if self.max_clock_skew_seconds <= 0:
             raise ValueError("max_clock_skew_seconds must be positive")
+
+
+@dataclass(frozen=True, slots=True)
+class EvidenceBridgeRuntimeConfig:
+    runtime_data_root: Path
+    owner: str = "fabric:evidence"
+    dispatch_limit: int = 32
+    drain_limit: int = 64
+    lease_seconds: float = 900.0
+    poll_seconds: float = 1.0
+    retry_base_seconds: float = 30.0
+    retry_max_seconds: float = 3600.0
+    rdap_endpoint: str = "https://rdap.org/domain"
+    rdap_timeout: float = 20.0
+    cdx_provider_configs: tuple[CDXProviderConfig, ...] = ()
+
+    def __post_init__(self) -> None:
+        if not self.owner.strip() or not self.rdap_endpoint.strip():
+            raise ValueError("evidence bridge owner and RDAP endpoint are required")
+        for name in ("dispatch_limit", "drain_limit"):
+            value=getattr(self,name)
+            if isinstance(value,bool) or not isinstance(value,int) or value < 1:
+                raise ValueError(f"{name} must be a positive integer")
+        if (
+            self.lease_seconds <= 0
+            or self.poll_seconds <= 0
+            or self.retry_base_seconds < 0
+            or self.retry_max_seconds < self.retry_base_seconds
+            or self.rdap_timeout <= 0
+        ):
+            raise ValueError("invalid evidence bridge timing configuration")
 
 
 @dataclass(frozen=True, slots=True)
@@ -166,6 +198,42 @@ def load_authority_config(path: Path) -> AuthorityRuntimeConfig:
             section.get("max_clock_skew_seconds",300.0)
         ),
         provider_budgets=tuple(budgets),
+    )
+
+
+def load_evidence_bridge_config(path: Path) -> EvidenceBridgeRuntimeConfig:
+    raw=_load_toml(path)
+    section=raw.get("evidence_bridge")
+    if not isinstance(section,Mapping):
+        raise ValueError("[evidence_bridge] table is required")
+    providers_raw=section.get("cdx_providers",())
+    if not isinstance(providers_raw,list):
+        raise ValueError("evidence_bridge.cdx_providers must be an array of tables")
+    provider_configs=tuple(
+        CDXProviderConfig.from_mapping(item)
+        for item in providers_raw
+        if isinstance(item,Mapping)
+    )
+    if len(provider_configs) != len(providers_raw):
+        raise ValueError("every evidence_bridge.cdx_providers item must be a table")
+    return EvidenceBridgeRuntimeConfig(
+        runtime_data_root=_resolve_local_path(
+            section["runtime_data_root"],
+            config_path=Path(path).resolve(),
+            name="evidence_bridge.runtime_data_root",
+        ),
+        owner=str(section.get("owner","fabric:evidence")),
+        dispatch_limit=int(section.get("dispatch_limit",32)),
+        drain_limit=int(section.get("drain_limit",64)),
+        lease_seconds=float(section.get("lease_seconds",900.0)),
+        poll_seconds=float(section.get("poll_seconds",1.0)),
+        retry_base_seconds=float(section.get("retry_base_seconds",30.0)),
+        retry_max_seconds=float(section.get("retry_max_seconds",3600.0)),
+        rdap_endpoint=str(
+            section.get("rdap_endpoint","https://rdap.org/domain")
+        ),
+        rdap_timeout=float(section.get("rdap_timeout",20.0)),
+        cdx_provider_configs=provider_configs,
     )
 
 
