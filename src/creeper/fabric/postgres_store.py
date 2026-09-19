@@ -381,6 +381,46 @@ class PostgresFabricStore:
             )
         return row
 
+    def current_lease(
+        self,
+        task_id: str,
+        *,
+        worker_id: str,
+        lease_epoch: int,
+    ) -> LeaseToken:
+        with self.connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT *
+                FROM fabric_tasks_v2
+                WHERE task_id=%s
+                """,
+                (task_id,),
+            )
+            row = cursor.fetchone()
+        if (
+            row is None
+            or str(row["state"]) != FabricTaskState.LEASED.value
+            or str(row["lease_owner"]) != worker_id
+            or int(row["lease_epoch"]) != int(lease_epoch)
+            or row["lease_deadline"] is None
+            or row["lease_deadline"] <= datetime.now(timezone.utc)
+        ):
+            raise StaleLeaseError(
+                f"worker no longer owns task epoch: {task_id}"
+            )
+        return LeaseToken(
+            task_id=str(row["task_id"]),
+            work_key=str(row["work_key"]),
+            worker_id=worker_id,
+            lease_epoch=int(row["lease_epoch"]),
+            lease_deadline=_epoch_seconds(row["lease_deadline"]),
+            attempt=int(row["attempt"]),
+            work=_work_from_row(row),
+            cursor=(None if row["cursor"] is None else dict(row["cursor"])),
+            next_sequence_no=int(row["next_sequence_no"]),
+        )
+
     def renew(
         self,
         lease: LeaseToken,
