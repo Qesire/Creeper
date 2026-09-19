@@ -15,6 +15,7 @@ from creeper.source_discovery.coordinator import (
 from creeper.source_discovery.manager import SourcePoolTargets, SourceReservoirManager
 from creeper.source_discovery.models import SourceCandidate, SourceLevel, SourceState
 from creeper.source_discovery.registry import SourceDiscoveryRegistry
+from creeper.source_discovery.unknown_format import make_unknown_format_reason
 from creeper.storage.control_store import ControlStore
 
 
@@ -31,18 +32,29 @@ class SourceSearchBackoffTests(unittest.IsolatedAsyncioTestCase):
         self.tmp.cleanup()
 
     def coordinator(self, search_executor) -> SourceDiscoveryCoordinator:
+        reason = make_unknown_format_reason(
+            (
+                b'{"host":"a.example"}\n'
+                b'{"host":"b.example"}\n'
+                b'{"host":"c.example"}\n'
+            ),
+            content_type="application/octet-stream",
+            truncated=False,
+        )
+        assert reason is not None
         blocker = SourceCandidate(
-            canonical_entrypoint="https://catalog.example/resources/",
-            source_family="RESOURCE_CATALOG",
-            level=SourceLevel.METASOURCE,
+            canonical_entrypoint="https://data.example/opaque-records",
+            source_family="BULK_ARTIFACT",
+            level=SourceLevel.SOURCE,
             discovered_by="test",
-            discovery_strategy="DETERMINISTIC_LINK_EXPANSION",
+            discovery_strategy="DETERMINISTIC_FIXTURE",
             expected_volume=100_000,
             enumerability_prior=0.9,
             confidence=0.8,
+            state=SourceState.HOLD,
+            state_reason=reason,
         )
         self.registry.register_proposal(blocker)
-        self.registry.transition(blocker.source_key, SourceState.HOLD)
 
         manager = SourceReservoirManager(
             self.registry,
@@ -113,10 +125,22 @@ class SourceSearchBackoffTests(unittest.IsolatedAsyncioTestCase):
                 raise RuntimeError("temporary failure")
             return SearchBatch(
                 backend="test",
-                query="successful retry",
-                actor="test",
-                candidates=(),
+                query="successful adapter retry",
+                actor="agent:test",
                 search_cost_seconds=0.1,
+                llm_episode_id="llm:backoff-adapter",
+                llm_task_type=_directive.task_type.value,
+                context_hash="fixture-context",
+                prompt_version="source-intelligence-v2",
+                adapter_proposals=(
+                    {
+                        "parser_kind": "jsonl",
+                        "compression": "none",
+                        "hostname_field": "host",
+                        "timestamp_field": None,
+                        "delimiter": None,
+                    },
+                ),
             )
 
         coordinator = self.coordinator(flaky_search)
@@ -126,10 +150,12 @@ class SourceSearchBackoffTests(unittest.IsolatedAsyncioTestCase):
         immediate = await coordinator.run_once()
 
         self.assertEqual(recovered.search_episodes, 1)
-        # Manager cooldown is disabled in this focused test, so a successful
-        # invocation clearing transient state permits the next directive again.
+        self.assertEqual(recovered.adapter_bindings_applied, 1)
+        self.assertEqual(coordinator._search_retry_deadlines, {})
+        # A successful adapter binding resolves the blocker, so the next cycle
+        # has no directive to retry and no transient backoff entry to skip.
         self.assertEqual(immediate.search_backoff_skipped, 0)
-        self.assertEqual(calls, 3)
+        self.assertEqual(calls, 2)
 
 
 if __name__ == "__main__":
