@@ -1172,6 +1172,62 @@ class SQLiteFabricStore:
             self.connection.rollback()
             raise
 
+    def result_batches(self, task_id: str) -> tuple[dict[str, object], ...]:
+        rows = self.connection.execute(
+            """
+            SELECT sequence_no, lease_epoch, payload_json, payload_digest,
+                   cursor_after_json, committed_at
+            FROM fabric_result_batches_v2
+            WHERE task_id=?
+            ORDER BY sequence_no
+            """,
+            (task_id,),
+        ).fetchall()
+        result: list[dict[str, object]] = []
+        for row in rows:
+            payload = json.loads(str(row["payload_json"]))
+            result.append(
+                {
+                    "sequence_no": int(row["sequence_no"]),
+                    "lease_epoch": int(row["lease_epoch"]),
+                    "payload": payload,
+                    "payload_digest": str(row["payload_digest"]),
+                    "cursor_after": (
+                        None
+                        if row["cursor_after_json"] is None
+                        else json.loads(str(row["cursor_after_json"]))
+                    ),
+                    "committed_at": float(row["committed_at"]),
+                }
+            )
+        return tuple(result)
+
+    def dependency_results(
+        self,
+        task_id: str,
+    ) -> dict[str, tuple[dict[str, object], ...]]:
+        rows = self.connection.execute(
+            """
+            SELECT parent.task_id, parent.work_key, parent.state
+            FROM fabric_task_dependencies_v2 AS dependency
+            JOIN fabric_tasks_v2 AS parent
+              ON parent.task_id=dependency.depends_on_task_id
+            WHERE dependency.task_id=?
+            ORDER BY parent.work_key
+            """,
+            (task_id,),
+        ).fetchall()
+        output: dict[str, tuple[dict[str, object], ...]] = {}
+        for row in rows:
+            if str(row["state"]) != FabricTaskState.SUCCEEDED.value:
+                raise RuntimeError(
+                    "dependency results requested before all parents succeeded"
+                )
+            output[str(row["work_key"])] = self.result_batches(
+                str(row["task_id"])
+            )
+        return output
+
     def task_row(self, task_id: str) -> sqlite3.Row | None:
         return self.connection.execute(
             "SELECT * FROM fabric_tasks_v2 WHERE task_id=?",
