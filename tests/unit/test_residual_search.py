@@ -178,6 +178,67 @@ class ResidualSearchLedgerTests(unittest.TestCase):
         self.assertEqual(len(set(seen)), expected_steps)
         self.assertEqual(SearchCellScheduler(self.ledger).next_plans(limit=1), ())
 
+    def test_positive_results_still_exhaust_finite_query_program(self) -> None:
+        cell = SearchCell(
+            mechanism="recover_nlanr_uc",
+            institution="research_lab",
+            period="2000",
+            artifact="log",
+        )
+        self.ledger.ensure_cell(cell)
+        scheduler = SearchCellScheduler(self.ledger)
+        steps = query_program_length(cell)
+        self.assertEqual(steps, 2)
+
+        seen: list[tuple[str, bool]] = []
+        for index in range(steps):
+            plan = scheduler.next_plans(limit=1)[0]
+            seen.append((plan.mechanism_phrase, plan.include_institution))
+            stats = self.ledger.record_episode(
+                cell,
+                result_count=1,
+                duplicate_results=0,
+                unique_roots=1,
+                new_families=1,
+                qualified_roots=1,
+            )
+            expected = (
+                SearchCellState.EXHAUSTED
+                if index == steps - 1
+                else SearchCellState.ACTIVE
+            )
+            self.assertEqual(stats.state, expected)
+
+        self.assertEqual(len(seen), steps)
+        self.assertEqual(len(set(seen)), steps)
+        self.assertEqual(scheduler.next_plans(limit=1), ())
+
+    def test_scheduler_converges_legacy_cursor_past_program_end(self) -> None:
+        self.ledger.ensure_cell(self.cell)
+        with self.connection:
+            self.connection.execute(
+                """
+                UPDATE residual_search_cells
+                SET state='ACTIVE', attempts=?, variant_cursor=?,
+                    result_count=1, unique_roots=1, new_families=1,
+                    qualified_roots=1
+                WHERE cell_key=?
+                """,
+                (
+                    query_program_length(self.cell),
+                    query_program_length(self.cell),
+                    self.cell.key,
+                ),
+            )
+
+        scheduler = SearchCellScheduler(self.ledger)
+
+        self.assertEqual(scheduler.next_plans(limit=1), ())
+        self.assertEqual(
+            self.ledger.stats(self.cell).state,
+            SearchCellState.EXHAUSTED,
+        )
+
     def test_search_profile_change_reopens_cells_and_resets_local_metrics(self) -> None:
         self.assertFalse(self.ledger.ensure_search_profile("providers=datacite"))
         self.ledger.record_episode(
