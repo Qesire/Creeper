@@ -1025,6 +1025,60 @@ class SQLiteFabricStore:
             self.connection.rollback()
             raise
 
+    def consume_request_nonce(
+        self,
+        worker_id: str,
+        nonce: str,
+        *,
+        retention_seconds: float = 900.0,
+    ) -> bool:
+        if not worker_id.strip() or not nonce.strip():
+            raise ValueError("worker_id and nonce are required")
+        if (
+            not math.isfinite(float(retention_seconds))
+            or retention_seconds <= 0
+        ):
+            raise ValueError("retention_seconds must be finite and positive")
+        now = self._now()
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            if (
+                self.connection.execute(
+                    """
+                    SELECT 1 FROM fabric_workers_v2
+                    WHERE worker_id=? AND revoked=0
+                    """,
+                    (worker_id,),
+                ).fetchone()
+                is None
+            ):
+                raise WorkerRejectedError(
+                    f"unknown or revoked worker: {worker_id}"
+                )
+            self.connection.execute(
+                """
+                DELETE FROM fabric_request_nonces_v2
+                WHERE seen_at < ?
+                """,
+                (now - float(retention_seconds),),
+            )
+            inserted = (
+                self.connection.execute(
+                    """
+                    INSERT OR IGNORE INTO fabric_request_nonces_v2(
+                        worker_id, nonce, seen_at
+                    ) VALUES (?, ?, ?)
+                    """,
+                    (worker_id, nonce, now),
+                ).rowcount
+                == 1
+            )
+            self.connection.commit()
+            return inserted
+        except BaseException:
+            self.connection.rollback()
+            raise
+
     def task_row(self, task_id: str) -> sqlite3.Row | None:
         return self.connection.execute(
             "SELECT * FROM fabric_tasks_v2 WHERE task_id=?",
