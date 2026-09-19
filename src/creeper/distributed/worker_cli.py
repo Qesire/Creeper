@@ -9,7 +9,14 @@ from pathlib import Path
 
 from creeper.distributed.config import load_worker_config
 from creeper.distributed.coordinator_client import CoordinatorClient
-from creeper.distributed.residual_query import PRODUCER_NAME, ResidualQueryProducer
+from creeper.distributed.evidence_query import (
+    PRODUCER_NAME as EVIDENCE_PRODUCER_NAME,
+    EvidenceQueryProducer,
+)
+from creeper.distributed.residual_query import (
+    PRODUCER_NAME as RESIDUAL_PRODUCER_NAME,
+    ResidualQueryProducer,
+)
 from creeper.distributed.worker import DistributedWorker
 from creeper.distributed.worker_spool import WorkerResultSpool
 
@@ -28,8 +35,10 @@ async def _run(config_path: Path) -> None:
             worker_instance_id=worker_instance_id,
         )
         producers={}
-        if PRODUCER_NAME in descriptor.producers:
-            producers[PRODUCER_NAME]=ResidualQueryProducer()
+        if RESIDUAL_PRODUCER_NAME in descriptor.producers:
+            producers[RESIDUAL_PRODUCER_NAME]=ResidualQueryProducer()
+        if EVIDENCE_PRODUCER_NAME in descriptor.producers:
+            producers[EVIDENCE_PRODUCER_NAME]=EvidenceQueryProducer()
         unknown=set(descriptor.producers)-set(producers)
         if unknown:
             raise RuntimeError(
