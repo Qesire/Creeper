@@ -8,6 +8,7 @@ import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
+from uuid import uuid4
 
 from creeper.distributed.models import WorkerDescriptor
 
@@ -147,9 +148,15 @@ def load_worker_config(path: Path) -> WorkerRuntimeConfig:
     section=raw.get("worker")
     if not isinstance(section,Mapping):
         raise ValueError("[worker] table is required")
+    raw_instance=str(section.get("worker_instance_id","auto")).strip()
+    worker_instance_id=(
+        uuid4().hex
+        if not raw_instance or raw_instance.lower()=="auto"
+        else raw_instance
+    )
     descriptor=WorkerDescriptor(
         worker_id=str(section["worker_id"]),
-        worker_instance_id=str(section["worker_instance_id"]),
+        worker_instance_id=worker_instance_id,
         runtime_class=str(section["runtime_class"]),
         region=str(section["region"]),
         architecture=str(section["architecture"]),
