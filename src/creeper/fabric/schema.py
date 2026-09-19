@@ -84,6 +84,25 @@ CREATE TABLE IF NOT EXISTS fabric_inbox_v2 (
     PRIMARY KEY(consumer_id, event_id)
 );
 
+CREATE TABLE IF NOT EXISTS fabric_request_nonces_v2 (
+    worker_id TEXT NOT NULL,
+    nonce TEXT NOT NULL,
+    seen_at REAL NOT NULL,
+    PRIMARY KEY(worker_id, nonce),
+    FOREIGN KEY(worker_id) REFERENCES fabric_workers_v2(worker_id)
+);
+CREATE INDEX IF NOT EXISTS idx_fabric_request_nonces_seen_v2
+    ON fabric_request_nonces_v2(seen_at);
+
+CREATE TABLE IF NOT EXISTS fabric_request_nonces_v2 (
+    worker_id TEXT NOT NULL REFERENCES fabric_workers_v2(worker_id),
+    nonce TEXT NOT NULL,
+    seen_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    PRIMARY KEY(worker_id, nonce)
+);
+CREATE INDEX IF NOT EXISTS idx_fabric_request_nonces_seen_v2
+    ON fabric_request_nonces_v2(seen_at);
+
 CREATE TABLE IF NOT EXISTS fabric_provider_budgets_v2 (
     provider TEXT PRIMARY KEY,
     requests_per_second REAL NOT NULL CHECK(requests_per_second > 0),
