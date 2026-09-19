@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import math
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime
 
 from .models import (
     FABRIC_PROTOCOL_VERSION,
@@ -363,19 +363,16 @@ class PostgresFabricStore:
             SELECT *
             FROM fabric_tasks_v2
             WHERE task_id=%s
+              AND state='LEASED'
+              AND lease_owner=%s
+              AND lease_epoch=%s
+              AND lease_deadline > clock_timestamp()
             FOR UPDATE
             """,
-            (lease.task_id,),
+            (lease.task_id, lease.worker_id, lease.lease_epoch),
         )
         row = cursor.fetchone()
-        if (
-            row is None
-            or str(row["state"]) != FabricTaskState.LEASED.value
-            or str(row["lease_owner"]) != lease.worker_id
-            or int(row["lease_epoch"]) != lease.lease_epoch
-            or row["lease_deadline"] is None
-            or row["lease_deadline"] <= datetime.now(timezone.utc)
-        ):
+        if row is None:
             raise StaleLeaseError(
                 f"worker no longer owns task epoch: {lease.task_id}"
             )
@@ -394,18 +391,15 @@ class PostgresFabricStore:
                 SELECT *
                 FROM fabric_tasks_v2
                 WHERE task_id=%s
+                  AND state='LEASED'
+                  AND lease_owner=%s
+                  AND lease_epoch=%s
+                  AND lease_deadline > clock_timestamp()
                 """,
-                (task_id,),
+                (task_id, worker_id, int(lease_epoch)),
             )
             row = cursor.fetchone()
-        if (
-            row is None
-            or str(row["state"]) != FabricTaskState.LEASED.value
-            or str(row["lease_owner"]) != worker_id
-            or int(row["lease_epoch"]) != int(lease_epoch)
-            or row["lease_deadline"] is None
-            or row["lease_deadline"] <= datetime.now(timezone.utc)
-        ):
+        if row is None:
             raise StaleLeaseError(
                 f"worker no longer owns task epoch: {task_id}"
             )
