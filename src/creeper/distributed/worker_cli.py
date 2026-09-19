@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+from dataclasses import replace
 from pathlib import Path
 
 from creeper.distributed.config import load_worker_config
@@ -16,26 +17,34 @@ from creeper.distributed.worker_spool import WorkerResultSpool
 async def _run(config_path: Path) -> None:
     config=load_worker_config(config_path)
     secret=config.load_secret()
-    producers={}
-    if PRODUCER_NAME in config.descriptor.producers:
-        producers[PRODUCER_NAME]=ResidualQueryProducer()
-    unknown=set(config.descriptor.producers)-set(producers)
-    if unknown:
-        raise RuntimeError(
-            "no installed Fabric producer for: "+",".join(sorted(unknown))
-        )
-
     spool=WorkerResultSpool(config.spool_database)
     try:
+        worker_instance_id=spool.resolve_worker_instance_id(
+            config.descriptor.worker_instance_id,
+            auto=config.worker_instance_auto,
+        )
+        descriptor=replace(
+            config.descriptor,
+            worker_instance_id=worker_instance_id,
+        )
+        producers={}
+        if PRODUCER_NAME in descriptor.producers:
+            producers[PRODUCER_NAME]=ResidualQueryProducer()
+        unknown=set(descriptor.producers)-set(producers)
+        if unknown:
+            raise RuntimeError(
+                "no installed Fabric producer for: "+",".join(sorted(unknown))
+            )
+
         async with CoordinatorClient(
             config.coordinator_url,
-            worker_id=config.descriptor.worker_id,
-            worker_instance_id=config.descriptor.worker_instance_id,
+            worker_id=descriptor.worker_id,
+            worker_instance_id=descriptor.worker_instance_id,
             secret=secret,
         ) as client:
             worker=DistributedWorker(
                 client,
-                config.descriptor,
+                descriptor,
                 producers,
                 spool,
                 poll_seconds=config.poll_seconds,
