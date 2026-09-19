@@ -112,6 +112,9 @@ class PostgresAuthorityStore:
             final BOOLEAN NOT NULL DEFAULT FALSE,
             committed_at DOUBLE PRECISION NOT NULL,
             consumed_at DOUBLE PRECISION,
+            consume_attempts INTEGER NOT NULL DEFAULT 0,
+            consume_error TEXT,
+            quarantined BOOLEAN NOT NULL DEFAULT FALSE,
             UNIQUE(task_id, sequence_no)
         );
         CREATE INDEX IF NOT EXISTS idx_fabric_result_unconsumed
@@ -729,7 +732,7 @@ class PostgresAuthorityStore:
             cur.execute(
                 """
                 SELECT * FROM fabric_result_batches
-                WHERE consumed_at IS NULL
+                WHERE consumed_at IS NULL AND quarantined=FALSE
                 ORDER BY committed_at,task_id,sequence_no
                 LIMIT %s
                 """,
@@ -749,6 +752,40 @@ class PostgresAuthorityStore:
                     (float(self.clock()),batch_id),
                 )
                 return cur.rowcount==1
+
+    def mark_batch_consume_failed(
+        self,
+        batch_id:str,
+        error:str,
+        *,
+        max_attempts:int=20,
+    )->bool:
+        if max_attempts<1:
+            raise ValueError("max_attempts must be positive")
+        with self.connection.transaction():
+            with self.connection.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT consume_attempts FROM fabric_result_batches
+                    WHERE batch_id=%s AND consumed_at IS NULL
+                    FOR UPDATE
+                    """,
+                    (batch_id,),
+                )
+                row=cur.fetchone()
+                if row is None:
+                    return False
+                attempts=int(row["consume_attempts"])+1
+                quarantined=attempts>=max_attempts
+                cur.execute(
+                    """
+                    UPDATE fabric_result_batches
+                    SET consume_attempts=%s,consume_error=%s,quarantined=%s
+                    WHERE batch_id=%s
+                    """,
+                    (attempts,error[:2000],quarantined,batch_id),
+                )
+                return quarantined
 
     def pending_outbox(self,*,limit:int=100):
         with self.connection.cursor() as cur:
