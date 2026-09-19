@@ -886,20 +886,6 @@ class PostgresFabricStore:
             with self.connection.cursor() as cursor:
                 cursor.execute(
                     """
-                    SELECT revoked
-                    FROM fabric_workers_v2
-                    WHERE worker_id=%s
-                    FOR SHARE
-                    """,
-                    (worker_id,),
-                )
-                worker = cursor.fetchone()
-                if worker is None or bool(worker["revoked"]):
-                    raise WorkerRejectedError(
-                        f"unknown or revoked worker: {worker_id}"
-                    )
-                cursor.execute(
-                    """
                     DELETE FROM fabric_request_nonces_v2
                     WHERE seen_at < clock_timestamp()
                         - (%s * interval '1 second')
