@@ -686,9 +686,15 @@ class SearchCellScheduler:
         ledger: ResidualSearchLedger,
         *,
         policy: ResidualSearchPolicy | None = None,
+        priority_cell_keys: frozenset[str] | None = None,
+        priority_bonus: float = 4.0,
     ) -> None:
         self.ledger = ledger
         self.policy = policy or ledger.policy
+        self.priority_cell_keys = frozenset(priority_cell_keys or ())
+        if not math.isfinite(float(priority_bonus)) or priority_bonus < 0:
+            raise ValueError("priority_bonus must be finite and non-negative")
+        self.priority_bonus = float(priority_bonus)
 
     def score(self, stats: SearchCellStats) -> float:
         if stats.state in {SearchCellState.SATURATED, SearchCellState.EXHAUSTED}:
@@ -701,11 +707,14 @@ class SearchCellScheduler:
             residual = stats.qualified_roots / stats.result_count
         else:
             residual = 0.5
-        return (
+        score = (
             self.policy.exploration_weight * exploration
             + self.policy.novelty_weight * novelty
             + self.policy.residual_weight * residual
         )
+        if stats.cell.key in self.priority_cell_keys:
+            score += self.priority_bonus
+        return score
 
     def next_plans(self, *, limit: int = 1) -> tuple[QueryPlan, ...]:
         if isinstance(limit, bool) or limit < 1:
