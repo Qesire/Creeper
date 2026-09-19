@@ -292,6 +292,7 @@ class CoordinatorCycleReport:
     search_directives_planned: int = 0
     deterministic_search_plans_planned: int = 0
     deterministic_search_episodes: int = 0
+    deterministic_search_dispatched: int = 0
     deterministic_search_failures: int = 0
     residual_reward_updates: int = 0
     residual_reward_eed_delta: float = 0.0
@@ -335,6 +336,7 @@ TriageExecutor = Callable[[SourceCandidate], Awaitable[TriageResult]]
 ScoutExecutor = Callable[[SourceCandidate], Awaitable[ScoutResult]]
 SearchExecutor = Callable[[SearchDirective], Awaitable[SearchBatch]]
 DeterministicSearchExecutor = Callable[[QueryPlan], Awaitable[DeterministicSearchBatch]]
+DeterministicSearchDispatcher = Callable[[QueryPlan], Awaitable[str]]
 
 
 @contextmanager
@@ -378,6 +380,7 @@ class SourceDiscoveryCoordinator:
         scout_executor: ScoutExecutor,
         search_executor: SearchExecutor,
         deterministic_search_executor: DeterministicSearchExecutor | None = None,
+        deterministic_search_dispatcher: DeterministicSearchDispatcher | None = None,
         search_identity_ledger: SearchIdentityLedger | None = None,
         research_lead_ledger: ResearchLeadLedger | None = None,
         scout_authority: tuple[str, str] | None = None,
@@ -418,6 +421,7 @@ class SourceDiscoveryCoordinator:
         self.scout_executor = scout_executor
         self.search_executor = search_executor
         self.deterministic_search_executor = deterministic_search_executor
+        self.deterministic_search_dispatcher = deterministic_search_dispatcher
         self.search_identity_ledger = search_identity_ledger
         self.research_lead_ledger = research_lead_ledger
         if (
@@ -430,6 +434,20 @@ class SourceDiscoveryCoordinator:
         if deterministic_search_executor is not None and search_identity_ledger is None:
             raise ValueError(
                 "deterministic search requires a SearchIdentityLedger"
+            )
+        if (
+            deterministic_search_executor is not None
+            and deterministic_search_dispatcher is not None
+        ):
+            raise ValueError(
+                "deterministic search executor and fabric dispatcher are mutually exclusive"
+            )
+        if (
+            deterministic_search_dispatcher is not None
+            and manager.residual_search_scheduler is None
+        ):
+            raise ValueError(
+                "fabric residual dispatcher requires a residual search scheduler"
             )
         if scout_authority is not None and (
             not isinstance(scout_authority, tuple)
@@ -1164,6 +1182,7 @@ class SourceDiscoveryCoordinator:
                     plan.deterministic_search_plans
                 ),
                 "deterministic_search_episodes": 0,
+                "deterministic_search_dispatched": 0,
                 "deterministic_search_failures": 0,
                 "residual_reward_updates": residual_reward_updates,
                 "residual_reward_eed_delta": residual_reward_eed_delta,
@@ -1288,13 +1307,18 @@ class SourceDiscoveryCoordinator:
                     "deterministic search plan has no configured executor"
                 )
 
-            deterministic_executor = (
-                self.deterministic_search_executor
-                or missing_deterministic_executor
+            distributed_residual = self.deterministic_search_dispatcher is not None
+            deterministic_runner = (
+                self.deterministic_search_dispatcher
+                if distributed_residual
+                else (
+                    self.deterministic_search_executor
+                    or missing_deterministic_executor
+                )
             )
             deterministic_search_task = self._bounded_batch(
                 deterministic_plans,
-                deterministic_executor,
+                deterministic_runner,
                 self.search_parallelism,
             )
             (
@@ -1314,10 +1338,18 @@ class SourceDiscoveryCoordinator:
             self._commit_triage(all_triage_candidates, triage_outcomes, counts)
             self._commit_scouts(all_scout_candidates, scout_outcomes, counts)
             self._commit_searches(search_directives, search_outcomes, counts)
-            self._commit_deterministic_searches(
-                deterministic_plans,
-                deterministic_search_outcomes,
-                counts,
-            )
+            if distributed_residual:
+                for outcome in deterministic_search_outcomes:
+                    if outcome.error is None:
+                        counts["deterministic_search_dispatched"] += 1
+                    else:
+                        counts["search_failures"] += 1
+                        counts["deterministic_search_failures"] += 1
+            else:
+                self._commit_deterministic_searches(
+                    deterministic_plans,
+                    deterministic_search_outcomes,
+                    counts,
+                )
 
             return CoordinatorCycleReport(**counts)
