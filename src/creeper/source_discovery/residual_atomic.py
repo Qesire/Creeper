@@ -319,6 +319,7 @@ def commit_deterministic_residual_batch(
     search_cost_seconds: float,
     candidate_cap: int,
     research_leads: ResearchLeadLedger | None = None,
+    external_commit_key: str | None = None,
     fault_injector: FaultInjector | None = None,
 ) -> AtomicResidualCommitResult:
     """Commit one completed QueryPlan all-or-nothing.
@@ -337,6 +338,11 @@ def commit_deterministic_residual_batch(
     if isinstance(candidate_cap, bool) or not isinstance(candidate_cap, int) or candidate_cap < 1:
         raise ValueError("candidate_cap must be a positive integer")
 
+    if external_commit_key is not None:
+        if not isinstance(external_commit_key, str) or not external_commit_key.strip():
+            raise ValueError("external_commit_key must be a non-empty string")
+        external_commit_key = external_commit_key.strip()
+
     connection = _same_connection(registry, coverage, identities, research_leads)
     if connection.in_transaction:
         raise RuntimeError("atomic residual commit requires a clean SQLite transaction boundary")
@@ -351,6 +357,24 @@ def commit_deterministic_residual_batch(
     dropped = 0
     connection.execute("BEGIN IMMEDIATE")
     try:
+        if external_commit_key is not None:
+            existing = connection.execute(
+                """
+                SELECT episode_id, registered_count, new_source_count,
+                       dropped_count
+                FROM residual_search_external_commits
+                WHERE commit_key=?
+                """,
+                (external_commit_key,),
+            ).fetchone()
+            if existing is not None:
+                connection.commit()
+                return AtomicResidualCommitResult(
+                    episode_id=str(existing["episode_id"]),
+                    registered_count=int(existing["registered_count"]),
+                    new_source_count=int(existing["new_source_count"]),
+                    dropped_count=int(existing["dropped_count"]),
+                )
         started_at = registry._now()
         connection.execute(
             """
@@ -602,6 +626,23 @@ def commit_deterministic_residual_batch(
         ).rowcount
         if changed != 1:
             raise RuntimeError("residual search episode closure failed during atomic commit")
+        if external_commit_key is not None:
+            connection.execute(
+                """
+                INSERT INTO residual_search_external_commits(
+                    commit_key, episode_id, registered_count,
+                    new_source_count, dropped_count, committed_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    external_commit_key,
+                    episode_id,
+                    registered_count,
+                    new_source_count,
+                    dropped,
+                    finished_at,
+                ),
+            )
         checkpoint("before_commit")
         connection.commit()
     except BaseException:
