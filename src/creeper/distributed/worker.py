@@ -70,10 +70,32 @@ class DistributedWorker:
 
     async def initialize(self) -> None:
         await self.client.register(self.descriptor)
-        # Registration establishes a new process incarnation and fences leases
-        # owned by the previous incarnation. Its unacked local batches cannot
-        # be authoritative anymore; task cursor/sequence state decides replay.
-        self.spool.clear()
+        await self._replay_spool()
+
+    async def _replay_spool(self) -> None:
+        """Replay durable batches before claiming new work.
+
+        The spool may survive a worker crash after provider I/O or after an
+        Authority commit whose ACK was lost. Replaying the same BatchID is
+        idempotent. If the task lease was fenced or expired, Authority returns
+        STALE_LEASE and only that obsolete generation is discarded.
+        """
+
+        discarded: set[tuple[str, int]] = set()
+        for batch in self.spool.pending():
+            generation_key=(batch.task_id,batch.generation)
+            if generation_key in discarded:
+                continue
+            try:
+                await self.client.commit_batch(batch)
+            except StaleLeaseCoordinatorError:
+                self.spool.discard_generation(
+                    batch.task_id,
+                    batch.generation,
+                )
+                discarded.add(generation_key)
+                continue
+            self.spool.ack(batch.batch_id)
 
     async def _deliver(
         self,
