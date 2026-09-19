@@ -33,6 +33,7 @@ from creeper.source_discovery.search_identity import (
     SearchIdentityLedger,
     canonicalize_search_result,
 )
+from creeper.source_discovery.unknown_format import make_unknown_format_reason
 from creeper.sources.format_binding import SourceFormatObservation
 from creeper.sources.layout_binding import SourceRecordLayout
 from creeper.sources.schema_binding import SourceRecordSchema
@@ -63,22 +64,35 @@ class SourceDiscoveryCoordinatorTests(unittest.IsolatedAsyncioTestCase):
             confidence=0.7,
         )
 
-    def hold_structural_metasource(
+    def hold_unknown_format_source(
         self,
-        name: str = "structure-blocker",
+        name: str = "format-blocker",
     ) -> SourceCandidate:
-        candidate = SourceCandidate(
-            canonical_entrypoint=f"https://catalog.example/{name}/",
-            source_family="RESOURCE_CATALOG",
-            level=SourceLevel.METASOURCE,
-            discovered_by="test",
-            discovery_strategy="DETERMINISTIC_LINK_EXPANSION",
-            expected_volume=100_000,
-            enumerability_prior=0.9,
-            confidence=0.8,
+        reason = make_unknown_format_reason(
+            (
+                b'{"host":"a.example"}\n'
+                b'{"host":"b.example"}\n'
+                b'{"host":"c.example"}\n'
+            ),
+            content_type="application/octet-stream",
+            truncated=False,
         )
-        self.registry.register_proposal(candidate)
-        return self.registry.transition(candidate.source_key, SourceState.HOLD)
+        assert reason is not None
+        candidate = SourceCandidate(
+            canonical_entrypoint=f"https://opaque.example/{name}.data",
+            source_family="BULK_ARTIFACT",
+            level=SourceLevel.SOURCE,
+            discovered_by="deterministic:test",
+            discovery_strategy="FIXTURE",
+            expected_volume=100_000,
+            enumerability_prior=1.0,
+            confidence=0.8,
+            state=SourceState.HOLD,
+            state_reason=reason,
+        )
+        stored, _inserted = self.registry.register_proposal(candidate)
+        return stored
+
 
     def to_scout_ready(self, candidate: SourceCandidate) -> None:
         self.registry.register_proposal(candidate)
@@ -243,7 +257,7 @@ class SourceDiscoveryCoordinatorTests(unittest.IsolatedAsyncioTestCase):
         self.registry.register_proposal(discovered)
         scout = self.candidate("scout")
         self.to_scout_ready(scout)
-        self.hold_structural_metasource("overlap")
+        self.hold_unknown_format_source("overlap")
 
         labels: set[str] = set()
         all_stages_entered = asyncio.Event()
@@ -264,21 +278,22 @@ class SourceDiscoveryCoordinatorTests(unittest.IsolatedAsyncioTestCase):
 
         async def search_executor(directive) -> SearchBatch:
             await gate("search")
-            found = SourceCandidate(
-                canonical_entrypoint=f"https://search.example/{directive.strategy.lower()}/",
-                source_family="SEARCHED",
-                level=SourceLevel.COLLECTION,
-                discovered_by="untrusted-agent-label",
-                discovery_strategy="UNTRUSTED",
-                expected_volume=5000,
-                confidence=0.6,
-            )
             return SearchBatch(
                 backend="test-search",
                 query=f"query:{directive.strategy}",
                 actor="agent:test",
-                candidates=(found,),
                 search_cost_seconds=0.25,
+                llm_episode_id="llm:overlap-adapter",
+                llm_task_type="COMPILE_ADAPTER",
+                adapter_proposals=(
+                    {
+                        "parser_kind": "jsonl",
+                        "compression": "none",
+                        "hostname_field": "host",
+                        "timestamp_field": None,
+                        "delimiter": None,
+                    },
+                ),
             )
 
         coordinator = SourceDiscoveryCoordinator(
@@ -300,14 +315,9 @@ class SourceDiscoveryCoordinatorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.registry.get_candidate(scout.source_key).state, SourceState.WARM)
         self.assertEqual(report.triaged_to_scout, 1)
         self.assertEqual(report.scouted_warm, 1)
-        self.assertGreaterEqual(report.search_episodes, 1)
-        searched = [
-            item
-            for item in self.registry.list_candidates(state=SourceState.DISCOVERED)
-            if item.canonical_entrypoint.startswith("https://search.example/")
-        ]
-        self.assertGreaterEqual(len(searched), 1)
-        self.assertEqual(searched[0].discovered_by, "agent:test")
+        self.assertEqual(report.search_episodes, 1)
+        self.assertEqual(report.adapter_bindings_applied, 1)
+        self.assertEqual(report.search_candidates_registered, 0)
 
     async def test_scout_format_observation_is_committed_by_coordinator(self) -> None:
         candidate = self.candidate("opaque-format")
@@ -673,7 +683,7 @@ class SourceDiscoveryCoordinatorTests(unittest.IsolatedAsyncioTestCase):
             confidence=1.0,
         )
         self.to_scout_ready(bulk)
-        self.hold_structural_metasource("foreground-structure")
+        self.hold_unknown_format_source("foreground-format")
         scout_calls = 0
         search_calls = 0
 
@@ -688,7 +698,22 @@ class SourceDiscoveryCoordinatorTests(unittest.IsolatedAsyncioTestCase):
         async def search(_directive) -> SearchBatch:
             nonlocal search_calls
             search_calls += 1
-            return SearchBatch(backend="test", query="foreground", actor="test")
+            return SearchBatch(
+                backend="test",
+                query="compile adapter",
+                actor="agent:test",
+                llm_episode_id="llm:background-adapter",
+                llm_task_type="COMPILE_ADAPTER",
+                adapter_proposals=(
+                    {
+                        "parser_kind": "jsonl",
+                        "compression": "none",
+                        "hostname_field": "host",
+                        "timestamp_field": None,
+                        "delimiter": None,
+                    },
+                ),
+            )
 
         coordinator = SourceDiscoveryCoordinator(
             self.registry,
@@ -905,39 +930,28 @@ class SourceDiscoveryCoordinatorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(report.scout_edges_added, 1)
         self.assertEqual(report.scout_children_dropped, 2)
 
-    async def test_search_executor_cannot_overfill_directive_budget(self) -> None:
-        self.hold_structural_metasource("budget-cap")
-
-        async def triage(_candidate: SourceCandidate) -> TriageResult:
-            return TriageResult(TriageDisposition.SCOUT)
-
-        async def scout(_candidate: SourceCandidate) -> ScoutResult:
-            return ScoutResult(ScoutDisposition.HOLD)
-
-        async def search(directive) -> SearchBatch:
-            candidates = tuple(self.candidate(f"found-{index}") for index in range(4))
-            return SearchBatch(
+    async def test_compile_adapter_batch_cannot_smuggle_candidates(self) -> None:
+        with self.assertRaisesRegex(
+            ValueError,
+            "COMPILE_ADAPTER batch must contain exactly one adapter proposal",
+        ):
+            SearchBatch(
                 backend="test-search",
-                query=f"query:{directive.strategy}",
+                query="compile adapter",
                 actor="agent:test",
-                candidates=candidates,
-                search_cost_seconds=1.0,
+                candidates=(self.candidate("smuggled"),),
+                llm_episode_id="llm:smuggle",
+                llm_task_type="COMPILE_ADAPTER",
+                adapter_proposals=(
+                    {
+                        "parser_kind": "jsonl",
+                        "compression": "none",
+                        "hostname_field": "host",
+                        "timestamp_field": None,
+                        "delimiter": None,
+                    },
+                ),
             )
-
-        coordinator = SourceDiscoveryCoordinator(
-            self.registry,
-            self.manager(cold_min=1, cold_target=1),
-            lock_path=self.lock_path,
-            triage_executor=triage,
-            scout_executor=scout,
-            search_executor=search,
-        )
-
-        report = await coordinator.run_once()
-
-        self.assertEqual(report.search_candidates_registered, 1)
-        self.assertEqual(report.search_candidates_dropped, 3)
-        self.assertEqual(len(self.registry.list_candidates(state=SourceState.DISCOVERED)), 1)
 
 
 if __name__ == "__main__":

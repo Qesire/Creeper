@@ -260,25 +260,6 @@ class SourceReservoirManager:
         holds.sort(key=lambda item: (-item.scout_priority, item.source_key))
         return holds
 
-    def _structural_holds(self) -> list[SourceCandidate]:
-        holds = [
-            candidate
-            for candidate in self.registry.list_candidates(
-                state=SourceState.HOLD
-            )
-            if (
-                (
-                    candidate.source_family
-                    in {"RESOURCE_CATALOG", "RESOURCE_DIRECTORY"}
-                    or candidate.level
-                    in {SourceLevel.COLLECTION, SourceLevel.METASOURCE}
-                )
-                and not is_background_bulk_candidate(candidate)
-            )
-            and self.registry.suppression_reason(candidate) is None
-        ]
-        holds.sort(key=lambda item: (-item.scout_priority, item.source_key))
-        return holds
 
     def _overlap_penalty(
         self,
@@ -470,25 +451,17 @@ class SourceReservoirManager:
             >= cooldown
         )
 
-    def _adaptive_search_budget(self, *, structural_hold: bool) -> int:
-        """Bound simultaneous agent calls from immediate observed search supply."""
-        if not self._global_search_available():
+    def _adaptive_search_budget(self, *, adapter_hold: bool) -> int:
+        """Return the automatic LLM budget for validated adapter blockers only."""
+        if not adapter_hold:
             return 0
-        zero_streak, new_sources, episodes = self._recent_search_supply()
-        configured = self.targets.max_search_directives
-        if configured < 1:
+        if self.targets.max_search_directives < 1:
             return 0
-        if structural_hold:
-            # One structure-specific call is usually higher information density
-            # than launching several broad searches against the same blockage.
-            return 1
-        if episodes < 1:
-            return min(configured, 2)
-        if zero_streak:
-            return 1
-        if new_sources > 0:
-            return min(configured, 2)
+        # Adapter compilation is per-source and already protected by the
+        # strategy cooldown. Deterministic search yield/stagnation must not
+        # suppress or inflate this non-search engineering action.
         return 1
+
 
     def _is_stagnating(self) -> bool:
         rows = self.registry.connection.execute(
@@ -585,125 +558,48 @@ class SourceReservoirManager:
         deterministic_refill_managed: bool = False,
         deterministic_plans_available: bool = False,
     ) -> tuple[SearchDirective, ...]:
-        """Request LLM work only for unresolved structure or exhausted search space.
+        """Request automatic LLM work only to compile unsupported formats.
 
-        Ordinary source-reservoir refill is owned by deterministic residual
-        search. A cold deficit by itself is never sufficient reason to ask the
-        LLM for URLs, source families, or success-pattern siblings.
+        Source discovery and refill belong to deterministic residual search and
+        bounded structural crawling. Exhausting the finite residual program is
+        an observable saturation condition, not permission to ask an LLM for a
+        new mechanism, root, query family, or URL. Likewise, a structural HOLD
+        remains deterministic/manual work rather than an automatic LLM search
+        opportunity.
 
-        The legacy arguments remain for API/test compatibility while the
-        executor is still available for explicit operator-driven workflows.
+        Legacy arguments remain for API/test compatibility and explicit
+        operator-driven workflows.
         """
 
-        del projected_warm, candidates
-        needs_refill = effective_cold_count < self.targets.cold_min
-        managed_stagnation = (
-            needs_refill
-            and deterministic_refill_managed
-            and not deterministic_plans_available
+        del (
+            effective_cold_count,
+            projected_warm,
+            candidates,
+            deterministic_refill_managed,
+            deterministic_plans_available,
         )
         unknown_format_holds = self._unknown_format_holds()
-        structural_holds = self._structural_holds()
-        if not unknown_format_holds and not structural_holds and not managed_stagnation:
+        if not unknown_format_holds:
             return ()
 
-        specs: list[
-            tuple[
-                SearchDirectiveKind,
-                str,
-                str | None,
-                str,
-                SourceIntelligenceTask,
-            ]
-        ] = []
-        seen: set[str] = set()
-
-        def add_spec(
-            kind: SearchDirectiveKind,
-            strategy: str,
-            subject: str | None,
-            reason: str,
-            task_type: SourceIntelligenceTask,
-        ) -> None:
-            dedup_key = f"{strategy}:{subject or '*'}"
-            if dedup_key in seen or not self._strategy_available(strategy):
-                return
-            seen.add(dedup_key)
-            specs.append((kind, strategy, subject, reason, task_type))
-
-        if unknown_format_holds:
-            subject_candidate = unknown_format_holds[0]
-            add_spec(
-                SearchDirectiveKind.UNKNOWN_FORMAT,
-                f"COMPILE_ADAPTER:{subject_candidate.source_key}",
-                subject_candidate.canonical_entrypoint,
-                subject_candidate.state_reason,
-                SourceIntelligenceTask.COMPILE_ADAPTER,
-            )
-
-        if structural_holds:
-            subject_candidate = structural_holds[0]
-            add_spec(
-                SearchDirectiveKind.INTERPRET_STRUCTURE,
-                "INTERPRET_STRUCTURE",
-                subject_candidate.canonical_entrypoint,
-                (
-                    "deterministic structural scouting left a catalog/metasource "
-                    "in HOLD; compile a reusable bounded enumerator/pivot rule"
-                ),
-                SourceIntelligenceTask.INTERPRET_STRUCTURE,
-            )
-
-        if managed_stagnation:
-            add_spec(
-                SearchDirectiveKind.RECOVER_STAGNATION,
-                "RECOVER_STAGNATION",
-                None,
-                (
-                    "deterministic residual-search space has no OPEN/ACTIVE cells; "
-                    "propose a new data-generating mechanism/root/query family, "
-                    "not individual URLs"
-                ),
-                SourceIntelligenceTask.RECOVER_STAGNATION,
-            )
-
-        if not specs:
+        subject_candidate = unknown_format_holds[0]
+        strategy = f"COMPILE_ADAPTER:{subject_candidate.source_key}"
+        if not self._strategy_available(strategy):
             return ()
 
-        capacity = min(
-            len(specs),
-            self._adaptive_search_budget(
-                structural_hold=bool(unknown_format_holds or structural_holds)
-            ),
-        )
+        capacity = self._adaptive_search_budget(adapter_hold=True)
         if capacity <= 0:
             return ()
 
-        # Concrete format blockers take precedence, followed by structural
-        # interpretation. Residual-stagnation recovery is the lowest-frequency
-        # LLM role because ordinary refill belongs to deterministic search.
-        priority = {
-            SearchDirectiveKind.UNKNOWN_FORMAT: 0,
-            SearchDirectiveKind.INTERPRET_STRUCTURE: 1,
-            SearchDirectiveKind.RECOVER_STAGNATION: 2,
-        }
-        specs.sort(
-            key=lambda spec: (
-                priority.get(spec[0], 3),
-                spec[1],
-                spec[2] or "",
-            )
-        )
-        return tuple(
+        return (
             SearchDirective(
-                kind=kind,
+                kind=SearchDirectiveKind.UNKNOWN_FORMAT,
                 strategy=strategy,
                 desired_candidates=1,
-                subject=subject,
-                reason=reason,
-                task_type=task_type,
-            )
-            for kind, strategy, subject, reason, task_type in specs[:capacity]
+                subject=subject_candidate.canonical_entrypoint,
+                reason=subject_candidate.state_reason,
+                task_type=SourceIntelligenceTask.COMPILE_ADAPTER,
+            ),
         )
 
     def plan(self) -> ReservoirPlan:
@@ -802,7 +698,7 @@ class SourceReservoirManager:
             active=background_by_state[SourceState.ACTIVE],
         )[:1]
 
-        structural_hold = bool(self._unknown_format_holds() or self._structural_holds())
+        adapter_hold = bool(self._unknown_format_holds())
         zero_new_streak, _recent_new_sources, _episodes = (
             self._recent_search_supply()
         )
@@ -828,7 +724,7 @@ class SourceReservoirManager:
             search_zero_new_streak=zero_new_streak,
             search_adaptive_cooldown_seconds=self._adaptive_search_cooldown(),
             search_call_budget=self._adaptive_search_budget(
-                structural_hold=structural_hold
+                adapter_hold=adapter_hold
             ),
         )
 

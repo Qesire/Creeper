@@ -32,23 +32,23 @@ and Internet Archive. Provider membership is part of the durable search profile:
 changing the provider/query-policy profile reopens coverage rather than
 inheriting stale saturation.
 
-LLMs are removed from routine source enumeration. They remain permitted only
-for three bounded exception classes:
+LLMs are removed from automatic source enumeration. The production planner
+permits exactly one bounded automatic exception:
 
 - **`COMPILE_ADAPTER` / unknown format**: inspect one bounded textual sample and
   propose a declarative binding for an already-mature `jsonl` or `delimited`
-  reader;
-- **`INTERPRET_STRUCTURE`**: interpret an already-found bounded
-  catalog/metasource whose deterministic structural scout cannot expose its
-  reusable child structure;
-- **`RECOVER_STAGNATION`**: after the deterministic residual program is
-  exhausted, propose a new data-generating mechanism/root/query family rather
-  than individual URLs.
+  reader.
+
+A structural catalog/metasource left in `HOLD` remains deterministic/manual
+engineering work; it does not trigger an LLM interpretation call. Exhausting the
+finite residual query program is an observable saturation condition; it does not
+trigger an LLM request for a new mechanism, root, query family, or URL.
 
 LLM-generated executable parser code is not admitted to the runtime.
 LLM-derived record schemas are forced to `direct_year_eligible=False`.
-Consequently an LLM can help Creeper understand *how to read* a source but can
-never grant annual-evidence authority.
+Consequently an LLM can help Creeper understand *how to read* an already-found
+source but can never discover replacement sources automatically or grant
+annual-evidence authority.
 
 ## Search cell and finite query program
 

@@ -19,6 +19,12 @@ from creeper.source_discovery.manager import (
     SourcePoolTargets,
     SourceReservoirManager,
 )
+from creeper.source_discovery.residual_search import (
+    ResidualSearchLedger,
+    SearchCell,
+    SearchCellScheduler,
+)
+from creeper.source_discovery.unknown_format import make_unknown_format_reason
 from creeper.storage.control_store import ControlStore
 
 
@@ -345,15 +351,9 @@ class SourceReservoirManagerTests(unittest.TestCase):
 
         self.assertEqual(plan.cold_count, 15)
         self.assertEqual(plan.effective_cold_count, 15)
-        self.assertEqual(len(plan.search_directives), 1)
-        self.assertEqual(
-            plan.search_directives[0].kind,
-            SearchDirectiveKind.INTERPRET_STRUCTURE,
-        )
-        self.assertEqual(
-            plan.search_directives[0].subject,
-            catalog.canonical_entrypoint,
-        )
+        self.assertEqual(plan.search_directives, ())
+        self.assertEqual(plan.search_call_budget, 0)
+        self.assertFalse(plan.needs_search)
 
     def test_healthy_diverse_cold_pool_above_target_does_not_oversearch(self) -> None:
         direct = self.candidate(
@@ -429,7 +429,7 @@ class SourceReservoirManagerTests(unittest.TestCase):
         )
         self.assertFalse(plan.needs_search)
 
-    def test_search_recovery_still_respects_max_search_directives(self) -> None:
+    def test_structural_hold_does_not_consume_automatic_llm_budget(self) -> None:
         catalog = self.candidate(
             "catalog",
             family="RESOURCE_CATALOG",
@@ -453,13 +453,8 @@ class SourceReservoirManagerTests(unittest.TestCase):
 
         plan = manager.plan()
 
-        self.assertLessEqual(len(plan.search_directives), 2)
-        self.assertFalse(
-            any(
-                item.strategy in {"DIRECT_EVIDENCE_BULK", "EXPLOIT_DIRECT_ORIGIN"}
-                for item in plan.search_directives
-            )
-        )
+        self.assertEqual(plan.search_directives, ())
+        self.assertFalse(plan.needs_search)
 
     def test_suppressed_candidate_receives_no_effective_cold_credit(self) -> None:
         kept = self.candidate(
@@ -699,7 +694,7 @@ class SourceReservoirManagerTests(unittest.TestCase):
 
         self.assertEqual(plan.search_directives, ())
 
-    def test_hold_metasource_allocates_interpret_structure_opportunity(self) -> None:
+    def test_hold_metasource_never_allocates_automatic_llm_work(self) -> None:
         catalog = SourceCandidate(
             canonical_entrypoint="https://archive.example/catalog/",
             source_family="RESOURCE_CATALOG",
@@ -729,19 +724,84 @@ class SourceReservoirManagerTests(unittest.TestCase):
 
         plan = manager.plan()
 
-        interpret = next(
-            item
-            for item in plan.search_directives
-            if item.task_type is SourceIntelligenceTask.INTERPRET_STRUCTURE
+        self.assertEqual(plan.search_directives, ())
+        self.assertFalse(plan.needs_search)
+
+    def test_unknown_format_hold_allocates_only_compile_adapter(self) -> None:
+        reason = make_unknown_format_reason(
+            b'{"host":"a.example"}\n{"host":"b.example"}\n{"host":"c.example"}\n',
+            content_type="application/octet-stream",
+            truncated=False,
         )
-        self.assertEqual(
-            interpret.kind,
-            SearchDirectiveKind.INTERPRET_STRUCTURE,
+        self.assertIsNotNone(reason)
+        candidate = SourceCandidate(
+            canonical_entrypoint="https://repo.example/opaque-download",
+            source_family="BULK_ARTIFACT",
+            level=SourceLevel.SOURCE,
+            discovered_by="deterministic:test",
+            discovery_strategy="FIXTURE",
+            expected_year_from=1996,
+            expected_year_to=2001,
+            expected_volume=1000,
+            enumerability_prior=1.0,
+            confidence=0.8,
+            state=SourceState.HOLD,
+            state_reason=str(reason),
         )
-        self.assertEqual(
-            interpret.subject,
-            catalog.canonical_entrypoint,
+        self.registry.register_proposal(candidate)
+        manager = SourceReservoirManager(
+            self.registry,
+            targets=SourcePoolTargets(
+                active_min=0,
+                active_target=0,
+                warm_min=0,
+                warm_target=0,
+                cold_min=3,
+                cold_target=6,
+                max_search_directives=3,
+            ),
         )
+
+        plan = manager.plan()
+
+        self.assertEqual(len(plan.search_directives), 1)
+        directive = plan.search_directives[0]
+        self.assertEqual(directive.kind, SearchDirectiveKind.UNKNOWN_FORMAT)
+        self.assertEqual(directive.task_type, SourceIntelligenceTask.COMPILE_ADAPTER)
+        self.assertTrue(directive.strategy.startswith("COMPILE_ADAPTER:"))
+        self.assertEqual(directive.subject, candidate.canonical_entrypoint)
+        self.assertEqual(plan.search_call_budget, 1)
+
+    def test_exhausted_residual_program_does_not_trigger_recovery_llm(self) -> None:
+        coverage = ResidualSearchLedger(self.registry.connection)
+        cell = SearchCell(
+            mechanism="proxy_access",
+            institution="university",
+            period="1998",
+            artifact="trace",
+        )
+        coverage.ensure_cell(cell)
+        coverage.mark_exhausted(cell)
+        manager = SourceReservoirManager(
+            self.registry,
+            targets=SourcePoolTargets(
+                active_min=0,
+                active_target=0,
+                warm_min=0,
+                warm_target=0,
+                cold_min=3,
+                cold_target=6,
+                max_search_directives=3,
+            ),
+            residual_search_scheduler=SearchCellScheduler(coverage),
+        )
+
+        plan = manager.plan()
+
+        self.assertEqual(plan.deterministic_search_plans, ())
+        self.assertEqual(plan.search_directives, ())
+        self.assertEqual(plan.search_call_budget, 0)
+        self.assertFalse(plan.needs_search)
 
     def test_zero_credit_tail_alone_does_not_trigger_recovery_llm(self) -> None:
         for index in range(6):
