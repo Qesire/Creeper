@@ -11,8 +11,23 @@ jobs:
   test:
     name: Python 3.12
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: creeper_test
+          POSTGRES_USER: creeper
+          POSTGRES_PASSWORD: creeper
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U creeper -d creeper_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
     env:
       CREEPER_NETWORK_TESTS: "0"
+      CREEPER_POSTGRES_TEST_DSN: "postgresql://creeper:creeper@127.0.0.1:5432/creeper_test"
 
     steps:
       - name: Check out repository
@@ -30,6 +45,9 @@ jobs:
 
       - name: Sync locked environment
         run: uv sync --all-groups --locked
+
+      - name: Install PostgreSQL Fabric test dependency
+        run: uv pip install "psycopg[binary]>=3.2,<4"
 
       - name: Run offline test suite
         run: uv run python -m unittest discover -s tests -v
