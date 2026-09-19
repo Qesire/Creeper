@@ -6,7 +6,7 @@ import asyncio
 import json
 import time
 from contextlib import AsyncExitStack
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from typing import Any, Mapping
 
 import httpx
@@ -331,6 +331,13 @@ def _json_object(value: Any) -> dict[str, Any]:
     raise ValueError("expected JSON object")
 
 
+@dataclass(frozen=True, slots=True)
+class ResidualDrainReport:
+    committed: tuple[AtomicResidualCommitResult, ...] = ()
+    failed: int = 0
+    quarantined: int = 0
+
+
 class DistributedResidualBridge:
     """Trusted central admission/consume bridge for residual search."""
 
@@ -383,64 +390,93 @@ class DistributedResidualBridge:
             timeout_seconds=float(raw["timeout_seconds"]),
         )
 
-    def drain(self, *, limit: int = 64) -> tuple[AtomicResidualCommitResult, ...]:
+    def drain(self, *, limit: int = 64) -> ResidualDrainReport:
         committed: list[AtomicResidualCommitResult] = []
+        failed = 0
+        quarantined = 0
         for row in self.fabric_store.unconsumed_batches(limit=limit):
             task = self.fabric_store.task_row(str(row["task_id"]))
             if str(task["producer"]) != PRODUCER_NAME:
                 continue
-            payload = _json_object(row["payload_json"])
-            raw_results = payload.get("results")
-            if not isinstance(raw_results, list):
-                raise ValueError("Fabric residual batch results must be an array")
-
-            summary: Mapping[str, Any] | None = None
-            provider_rows: list[Mapping[str, Any]] = []
-            for item in raw_results:
-                if not isinstance(item, Mapping):
-                    raise ValueError("Fabric residual result must be an object")
-                kind = str(item.get("kind", ""))
-                if kind == "RESIDUAL_SUMMARY":
-                    if summary is not None:
-                        raise ValueError("Fabric residual batch has duplicate summary")
-                    summary = item
-                elif kind == "RESIDUAL_RAW_RESULT":
-                    provider_rows.append(item)
-                else:
+            batch_id = str(row["batch_id"])
+            try:
+                payload = _json_object(row["payload_json"])
+                raw_results = payload.get("results")
+                if not isinstance(raw_results, list):
                     raise ValueError(
-                        f"unexpected Fabric residual result kind: {kind}"
+                        "Fabric residual batch results must be an array"
                     )
-            if summary is None:
-                raise ValueError("Fabric residual batch is missing summary")
 
-            plan = self._plan_for_task(task)
-            policy = self._policy_for_task(task)
-            canonical = []
-            for item in provider_rows:
-                raw = deserialize_raw_result(item)
-                classified = classify_result(plan, raw, policy=policy)
-                if classified is not None:
-                    canonical.append(classified)
-            batch = DeterministicSearchBatch(
-                backend=str(summary["backend"]),
-                query=str(summary["query"]),
-                actor="deterministic:fabric-residual",
-                results=tuple(canonical),
-                search_cost_seconds=float(summary["search_cost_seconds"]),
-            )
-            result = commit_deterministic_residual_batch(
-                self.registry,
-                self.coverage,
-                self.identities,
-                plan=plan,
-                batch=batch,
-                search_cost_seconds=float(summary["search_cost_seconds"]),
-                candidate_cap=self.candidate_cap,
-                idempotency_key=str(row["batch_id"]),
-            )
-            # Marking consumed is intentionally after domain commit. A crash
-            # between these writes replays the batch, but the ControlStore
-            # idempotency marker makes the domain effect exactly-once.
-            self.fabric_store.mark_batch_consumed(str(row["batch_id"]))
-            committed.append(result)
-        return tuple(committed)
+                summary: Mapping[str, Any] | None = None
+                provider_rows: list[Mapping[str, Any]] = []
+                for item in raw_results:
+                    if not isinstance(item, Mapping):
+                        raise ValueError(
+                            "Fabric residual result must be an object"
+                        )
+                    kind = str(item.get("kind", ""))
+                    if kind == "RESIDUAL_SUMMARY":
+                        if summary is not None:
+                            raise ValueError(
+                                "Fabric residual batch has duplicate summary"
+                            )
+                        summary = item
+                    elif kind == "RESIDUAL_RAW_RESULT":
+                        provider_rows.append(item)
+                    else:
+                        raise ValueError(
+                            f"unexpected Fabric residual result kind: {kind}"
+                        )
+                if summary is None:
+                    raise ValueError(
+                        "Fabric residual batch is missing summary"
+                    )
+
+                plan = self._plan_for_task(task)
+                policy = self._policy_for_task(task)
+                canonical = []
+                for item in provider_rows:
+                    raw = deserialize_raw_result(item)
+                    classified = classify_result(plan, raw, policy=policy)
+                    if classified is not None:
+                        canonical.append(classified)
+                batch = DeterministicSearchBatch(
+                    backend=str(summary["backend"]),
+                    query=str(summary["query"]),
+                    actor="deterministic:fabric-residual",
+                    results=tuple(canonical),
+                    search_cost_seconds=float(
+                        summary["search_cost_seconds"]
+                    ),
+                )
+                result = commit_deterministic_residual_batch(
+                    self.registry,
+                    self.coverage,
+                    self.identities,
+                    plan=plan,
+                    batch=batch,
+                    search_cost_seconds=float(
+                        summary["search_cost_seconds"]
+                    ),
+                    candidate_cap=self.candidate_cap,
+                    idempotency_key=batch_id,
+                )
+                # Marking consumed is intentionally after domain commit. A
+                # crash between these writes replays the batch, while the
+                # ControlStore idempotency marker makes its domain effect
+                # exactly-once.
+                self.fabric_store.mark_batch_consumed(batch_id)
+                committed.append(result)
+            except Exception as exc:
+                failed += 1
+                is_quarantined = self.fabric_store.mark_batch_consume_failed(
+                    batch_id,
+                    f"{type(exc).__name__}: {exc}",
+                )
+                quarantined += int(is_quarantined)
+        return ResidualDrainReport(
+            committed=tuple(committed),
+            failed=failed,
+            quarantined=quarantined,
+        )
+
