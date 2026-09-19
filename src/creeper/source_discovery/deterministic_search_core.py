@@ -148,13 +148,22 @@ def _result_text(result: RawSearchResult) -> str:
 
 def relevance_score(cell: SearchCell, result: RawSearchResult) -> float:
     text = _result_text(result)
+    url_text = result.url.lower()
     years = _period_years(cell.period)
+    exact_recovery = cell.mechanism.startswith("recover_")
     year_hit = (
         result.publication_year in years
         or any(re.search(rf"\b{year}\b", text) for year in years)
+        or (
+            exact_recovery
+            and any(str(year) in url_text for year in years)
+        )
     )
     terms = MECHANISM_QUERY_TERMS[cell.mechanism]
-    mechanism_hit = any(term in text for term in terms)
+    mechanism_hit = any(term.lower() in text for term in terms) or (
+        exact_recovery
+        and any(term.lower() in url_text for term in terms)
+    )
     artifact_hit = (
         result.resource_type.lower()
         in {"dataset", "collection", "software", "file", "datafile"}
