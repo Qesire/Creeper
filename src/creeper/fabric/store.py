@@ -532,6 +532,46 @@ class SQLiteFabricStore:
             )
         return row
 
+    def current_lease(
+        self,
+        task_id: str,
+        *,
+        worker_id: str,
+        lease_epoch: int,
+    ) -> LeaseToken:
+        now = self._now()
+        row = self.connection.execute(
+            "SELECT * FROM fabric_tasks_v2 WHERE task_id=?",
+            (task_id,),
+        ).fetchone()
+        if (
+            row is None
+            or str(row["state"]) != FabricTaskState.LEASED.value
+            or str(row["lease_owner"]) != worker_id
+            or int(row["lease_epoch"]) != int(lease_epoch)
+            or row["lease_deadline"] is None
+            or float(row["lease_deadline"]) <= now
+        ):
+            raise StaleLeaseError(
+                f"worker no longer owns task epoch: {task_id}"
+            )
+        cursor = (
+            None
+            if row["cursor_json"] is None
+            else json.loads(str(row["cursor_json"]))
+        )
+        return LeaseToken(
+            task_id=str(row["task_id"]),
+            work_key=str(row["work_key"]),
+            worker_id=worker_id,
+            lease_epoch=int(row["lease_epoch"]),
+            lease_deadline=float(row["lease_deadline"]),
+            attempt=int(row["attempt"]),
+            work=_work_from_row(row),
+            cursor=cursor,
+            next_sequence_no=int(row["next_sequence_no"]),
+        )
+
     def renew(
         self,
         lease: LeaseToken,
