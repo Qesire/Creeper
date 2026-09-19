@@ -432,12 +432,23 @@ def commit_deterministic_residual_batch(
                 dropped += 1
                 continue
 
-            candidate = candidate_from_result(plan, result)
+            recovery = None
+            provenance = None
             if research_leads is not None:
+                recovery_target = research_leads.lead_for_cell(plan.cell.key)
                 recovery = research_leads.exact_recovery_match(
                     plan.cell.key,
                     result,
                 )
+                if recovery_target is not None and recovery is None:
+                    # Targeted-recovery cells are exact finite programs, not a
+                    # side door back into broad source discovery. Non-matching
+                    # results remain in four-level identity memory only.
+                    dropped += 1
+                    continue
+
+            candidate = candidate_from_result(plan, result)
+            if research_leads is not None:
                 if recovery is not None:
                     candidate = replace(
                         candidate,
