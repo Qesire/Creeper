@@ -18,7 +18,7 @@ from collections.abc import AsyncIterator, Callable, Iterable, Mapping
 from dataclasses import dataclass
 from typing import Protocol
 
-from creeper.evidence.result_commit import EvidenceResultCommitter
+from creeper.evidence.result_commit import EvidenceResultCommitter, evidence_retry_at
 from creeper.evidence.policies import (
     CDXQueryState,
     DomainEvidenceQueryResult,
@@ -237,33 +237,12 @@ class AsyncEvidenceWorker:
         return claimed
 
     def _retry_at(self, attempt: int) -> float:
-        if isinstance(attempt, bool) or not isinstance(attempt, int) or attempt < 0:
-            raise ValueError("attempt must be a non-negative integer")
-        exponent = max(0, attempt - 1)
-        base = self.retry_base_seconds
-        maximum = self.retry_max_seconds
-        if base <= 0.0 or maximum <= 0.0:
-            delay = 0.0
-        elif base >= maximum:
-            delay = maximum
-        else:
-            # Clamp before exponentiation. Durable attempts are unbounded, and
-            # computing 2**attempt first can overflow float conversion long
-            # after the configured retry ceiling should already have applied.
-            cap_exponent = max(0, math.ceil(math.log2(maximum / base)))
-            delay = min(
-                maximum,
-                base * (2.0 ** min(exponent, cap_exponent)),
-            )
-        now = self.clock()
-        if (
-            isinstance(now, bool)
-            or not isinstance(now, (int, float))
-            or not math.isfinite(float(now))
-            or now < 0
-        ):
-            raise ValueError("retry clock must be finite and non-negative")
-        return float(now) + delay
+        return evidence_retry_at(
+            attempt,
+            base_seconds=self.retry_base_seconds,
+            max_seconds=self.retry_max_seconds,
+            clock=self.clock,
+        )
 
     @staticmethod
     def _transient_for(
