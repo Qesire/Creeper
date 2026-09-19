@@ -278,6 +278,15 @@ class ResidualSearchLedger:
                     ON DELETE CASCADE
             );
 
+            CREATE TABLE IF NOT EXISTS residual_search_external_commits (
+                commit_key TEXT PRIMARY KEY,
+                episode_id TEXT NOT NULL,
+                registered_count INTEGER NOT NULL CHECK(registered_count >= 0),
+                new_source_count INTEGER NOT NULL CHECK(new_source_count >= 0),
+                dropped_count INTEGER NOT NULL CHECK(dropped_count >= 0),
+                committed_at REAL NOT NULL
+            ) WITHOUT ROWID;
+
             CREATE TABLE IF NOT EXISTS residual_search_cell_families (
                 cell_key TEXT NOT NULL,
                 family_key TEXT NOT NULL,
