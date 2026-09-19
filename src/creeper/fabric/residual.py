@@ -378,6 +378,7 @@ class ResidualAuthorityReducer:
             search_cost_seconds=total_cost,
             candidate_cap=self.candidate_cap,
             research_leads=self.research_leads,
+            external_commit_key=lease.work_key,
         )
 
     def run_once(
