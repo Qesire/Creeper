@@ -371,8 +371,9 @@ class ResearchLeadLedger:
                         lead.lead_id,
                     ),
                 )
-                if lead.recovery_cell is not None:
-                    residual.ensure_cell(lead.recovery_cell)
+        for lead in CURATED_RESEARCH_LEADS:
+            if lead.recovery_cell is not None:
+                residual.ensure_cell(lead.recovery_cell)
         return inserted
 
     def recovery_cell_keys(self) -> frozenset[str]:
