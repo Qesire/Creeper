@@ -11,7 +11,14 @@ from creeper.source_discovery.research_leads import (
     ResearchLeadLedger,
 )
 from creeper.source_discovery.residual_atomic import commit_deterministic_residual_batch
-from creeper.source_discovery.residual_search import QueryPlan, ResidualSearchLedger, SearchCell
+from creeper.source_discovery.residual_search import (
+    QueryPlan,
+    ResidualSearchLedger,
+    SearchCell,
+    SearchCellScheduler,
+    SearchCellState,
+    query_program_length,
+)
 from creeper.source_discovery.search_identity import (
     RawSearchResult,
     SearchIdentityLedger,
@@ -302,6 +309,65 @@ class ResidualAtomicCommitTests(unittest.TestCase):
         ).fetchone()
         self.assertEqual(row["matched_count"], 1)
         self.assertEqual(row["last_source_key"], candidate.source_key)
+
+    def test_atomic_positive_results_exhaust_recovery_program_without_wrap(self) -> None:
+        leads = ResearchLeadLedger(self.registry.connection)
+        leads.seed_curated(self.coverage)
+        lead = next(
+            item
+            for item in CURATED_RESEARCH_LEADS
+            if item.lead_id == "nlanr-uc-20000714"
+        )
+        assert lead.recovery_cell is not None
+        self.assertEqual(query_program_length(lead.recovery_cell), 2)
+        scheduler = SearchCellScheduler(
+            self.coverage,
+            priority_cell_keys=leads.recovery_cell_keys(),
+        )
+
+        for index in range(2):
+            plan = scheduler.next_plans(limit=1)[0]
+            self.assertEqual(plan.cell, lead.recovery_cell)
+            result = canonicalize_search_result(
+                RawSearchResult(
+                    provider="fixture",
+                    provider_result_id=f"nlanr-{index}",
+                    url=(
+                        f"https://mirror-{index}.example/nlanr/"
+                        "uc.sanitized-access.20000714.gz"
+                    ),
+                    title=f"historical proxy file mirror {index}",
+                    resource_type="file",
+                    identifiers=(f"10.1234/nlanr-{index}",),
+                ),
+                relevance_score=1.0,
+                qualified=True,
+            )
+            batch = DeterministicSearchBatch(
+                backend="fixture",
+                query=plan.query,
+                actor="deterministic:test",
+                results=(result,),
+                search_cost_seconds=0.1,
+            )
+            commit_deterministic_residual_batch(
+                self.registry,
+                self.coverage,
+                self.identities,
+                plan=plan,
+                batch=batch,
+                search_cost_seconds=0.1,
+                candidate_cap=8,
+                research_leads=leads,
+            )
+
+        stats = self.coverage.stats(lead.recovery_cell)
+        self.assertEqual(stats.variant_cursor, 2)
+        self.assertEqual(stats.state, SearchCellState.EXHAUSTED)
+        remaining = scheduler.next_plans(limit=1)
+        self.assertTrue(
+            not remaining or remaining[0].cell != lead.recovery_cell
+        )
 
     def test_success_commits_episode_identity_candidate_and_cursor_together(self) -> None:
         result = commit_deterministic_residual_batch(
