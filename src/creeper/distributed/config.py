@@ -52,6 +52,7 @@ class WorkerRuntimeConfig:
     coordinator_url: str
     descriptor: WorkerDescriptor
     spool_database: Path
+    worker_instance_auto: bool = False
     secret_env: str = "CREEPER_WORKER_SECRET"
     poll_seconds: float = 1.0
     claim_wait_seconds: float = 10.0
@@ -174,10 +175,11 @@ def load_worker_config(path: Path) -> WorkerRuntimeConfig:
     if not isinstance(section,Mapping):
         raise ValueError("[worker] table is required")
     raw_instance=str(section.get("worker_instance_id","auto")).strip()
+    worker_instance_auto=(
+        not raw_instance or raw_instance.lower()=="auto"
+    )
     worker_instance_id=(
-        uuid4().hex
-        if not raw_instance or raw_instance.lower()=="auto"
-        else raw_instance
+        uuid4().hex if worker_instance_auto else raw_instance
     )
     descriptor=WorkerDescriptor(
         worker_id=str(section["worker_id"]),
@@ -205,6 +207,7 @@ def load_worker_config(path: Path) -> WorkerRuntimeConfig:
             config_path=Path(path).resolve(),
             name="worker.spool_database",
         ),
+        worker_instance_auto=worker_instance_auto,
         secret_env=str(section.get("secret_env","CREEPER_WORKER_SECRET")),
         poll_seconds=float(section.get("poll_seconds",1.0)),
         claim_wait_seconds=float(section.get("claim_wait_seconds",10.0)),
