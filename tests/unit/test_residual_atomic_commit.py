@@ -6,6 +6,10 @@ from pathlib import Path
 
 from creeper.source_discovery.deterministic_search import DeterministicSearchBatch
 from creeper.source_discovery.registry import SourceDiscoveryRegistry
+from creeper.source_discovery.research_leads import (
+    CURATED_RESEARCH_LEADS,
+    ResearchLeadLedger,
+)
 from creeper.source_discovery.residual_atomic import commit_deterministic_residual_batch
 from creeper.source_discovery.residual_search import QueryPlan, ResidualSearchLedger, SearchCell
 from creeper.source_discovery.search_identity import (
