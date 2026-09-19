@@ -812,7 +812,7 @@ class DistributedEvidenceBridge:
                 continue
             self._release_dead_mapping(
                 row,
-                reason=str(task.get("last_error") or "Fabric work exhausted"),
+                reason=str(task["last_error"] or "Fabric work exhausted"),
             )
             changed += 1
         return changed
