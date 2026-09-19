@@ -121,6 +121,41 @@ class ResidualAtomicCommitTests(unittest.TestCase):
         ):
             self.assertEqual(self._count(table), 0, table)
 
+    def test_external_commit_key_makes_cross_store_replay_idempotent(self) -> None:
+        first = commit_deterministic_residual_batch(
+            self.registry,
+            self.coverage,
+            self.identities,
+            plan=self.plan,
+            batch=self.batch,
+            search_cost_seconds=0.1,
+            candidate_cap=8,
+            external_commit_key="work:distributed-reducer-1",
+        )
+        first_stats = self.coverage.stats(self.cell)
+        first_candidates = self._count("source_candidates")
+
+        replay = commit_deterministic_residual_batch(
+            self.registry,
+            self.coverage,
+            self.identities,
+            plan=self.plan,
+            batch=self.batch,
+            search_cost_seconds=0.1,
+            candidate_cap=8,
+            external_commit_key="work:distributed-reducer-1",
+        )
+        second_stats = self.coverage.stats(self.cell)
+
+        self.assertEqual(replay, first)
+        self.assertEqual(second_stats.attempts, first_stats.attempts)
+        self.assertEqual(second_stats.variant_cursor, first_stats.variant_cursor)
+        self.assertEqual(self._count("source_candidates"), first_candidates)
+        self.assertEqual(
+            self._count("residual_search_external_commits"),
+            1,
+        )
+
     def test_every_crash_window_rolls_back_to_exact_pre_episode_state(self) -> None:
         for target in (
             "after_episode",
