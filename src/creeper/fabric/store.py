@@ -94,10 +94,14 @@ def _work_payload(work: WorkSpec) -> dict[str, object]:
         "provider": work.provider,
         "min_memory_bytes": work.min_memory_bytes,
         "network_class": work.network_class,
+        "dependency_work_keys": list(work.dependency_work_keys),
     }
 
 
-def _work_from_row(row: sqlite3.Row) -> WorkSpec:
+def _work_from_row(
+    row: sqlite3.Row,
+    dependency_work_keys: tuple[str, ...] = (),
+) -> WorkSpec:
     return WorkSpec(
         work_class=FabricWorkClass(str(row["work_class"])),
         producer=str(row["producer"]),
@@ -117,6 +121,7 @@ def _work_from_row(row: sqlite3.Row) -> WorkSpec:
         network_class=(
             None if row["network_class"] is None else str(row["network_class"])
         ),
+        dependency_work_keys=dependency_work_keys,
     )
 
 
@@ -336,10 +341,32 @@ class SQLiteFabricStore:
                 "SELECT task_id FROM fabric_tasks_v2 WHERE work_key=?",
                 (work.work_key,),
             ).fetchone()
+            is_new = False
             if row is None:
                 raise RuntimeError("fabric work disappeared after admission")
             durable_task_id = str(row["task_id"])
             if durable_task_id == task_id:
+                is_new = True
+                for dependency_key in work.dependency_work_keys:
+                    dependency = self.connection.execute(
+                        "SELECT task_id FROM fabric_tasks_v2 WHERE work_key=?",
+                        (dependency_key,),
+                    ).fetchone()
+                    if dependency is None:
+                        raise KeyError(
+                            f"unknown dependency work_key: {dependency_key}"
+                        )
+                    dependency_task_id = str(dependency["task_id"])
+                    if dependency_task_id == durable_task_id:
+                        raise ValueError("fabric task cannot depend on itself")
+                    self.connection.execute(
+                        """
+                        INSERT INTO fabric_task_dependencies_v2(
+                            task_id, depends_on_task_id
+                        ) VALUES (?, ?)
+                        """,
+                        (durable_task_id, dependency_task_id),
+                    )
                 capability = (
                     work.required_capabilities[0].value.lower()
                     if work.required_capabilities
@@ -444,13 +471,22 @@ class SQLiteFabricStore:
             self._reclaim_expired_locked(now)
             rows = self.connection.execute(
                 """
-                SELECT *
-                FROM fabric_tasks_v2
-                WHERE state='READY'
-                  AND queue_name=?
-                  AND available_at <= ?
-                  AND attempt < max_attempts
-                ORDER BY priority DESC, available_at, created_at, task_id
+                SELECT task.*
+                FROM fabric_tasks_v2 AS task
+                WHERE task.state='READY'
+                  AND task.queue_name=?
+                  AND task.available_at <= ?
+                  AND task.attempt < task.max_attempts
+                  AND NOT EXISTS (
+                        SELECT 1
+                        FROM fabric_task_dependencies_v2 AS dependency
+                        JOIN fabric_tasks_v2 AS parent
+                          ON parent.task_id=dependency.depends_on_task_id
+                        WHERE dependency.task_id=task.task_id
+                          AND parent.state <> 'SUCCEEDED'
+                  )
+                ORDER BY task.priority DESC, task.available_at,
+                         task.created_at, task.task_id
                 LIMIT 256
                 """,
                 (queue, now),
@@ -491,7 +527,21 @@ class SQLiteFabricStore:
         except BaseException:
             self.connection.rollback()
             raise
-        work = _work_from_row(row)
+        dependency_keys = tuple(
+            str(item["work_key"])
+            for item in self.connection.execute(
+                """
+                SELECT parent.work_key
+                FROM fabric_task_dependencies_v2 AS dependency
+                JOIN fabric_tasks_v2 AS parent
+                  ON parent.task_id=dependency.depends_on_task_id
+                WHERE dependency.task_id=?
+                ORDER BY parent.work_key
+                """,
+                (task_id,),
+            ).fetchall()
+        )
+        work = _work_from_row(row, dependency_keys)
         cursor = (
             None
             if row["cursor_json"] is None
@@ -567,7 +617,23 @@ class SQLiteFabricStore:
             lease_epoch=int(row["lease_epoch"]),
             lease_deadline=float(row["lease_deadline"]),
             attempt=int(row["attempt"]),
-            work=_work_from_row(row),
+            work=_work_from_row(
+                row,
+                tuple(
+                    str(item["work_key"])
+                    for item in self.connection.execute(
+                        """
+                        SELECT parent.work_key
+                        FROM fabric_task_dependencies_v2 AS dependency
+                        JOIN fabric_tasks_v2 AS parent
+                          ON parent.task_id=dependency.depends_on_task_id
+                        WHERE dependency.task_id=?
+                        ORDER BY parent.work_key
+                        """,
+                        (task_id,),
+                    ).fetchall()
+                ),
+            ),
             cursor=cursor,
             next_sequence_no=int(row["next_sequence_no"]),
         )
