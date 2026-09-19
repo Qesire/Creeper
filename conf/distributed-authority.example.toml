@@ -1,0 +1,44 @@
+[authority]
+# Keep the Authority loopback-only. Expose it through an outbound-only tunnel.
+database = "/var/lib/creeper/distributed-authority.sqlite3"
+baseline_index = "/var/lib/creeper/baseline-index.sqlite3"
+credentials_file = "/etc/creeper/worker-credentials.json"
+host = "127.0.0.1"
+port = 8088
+max_clock_skew_seconds = 300
+reconcile_interval_seconds = 5
+promotion_batch_size = 64
+# Keep generic page recursion off by default; CDX/CDXJ bulk artifacts can still
+# be promoted automatically by the local deterministic reconciler.
+auto_promote_source_pages = false
+host_promotion_batch_size = 256
+
+# Every discovered hostname can enter the historical resolver. Search/discovery
+# does not need to know the target year.
+[host_resolution]
+providers = ["internet_archive", "arquivo_pt"]
+coverage_provider = "cdx-pool:internet_archive+arquivo_pt"
+resolver_version = "fabric-host-v1"
+
+[provider_budgets.internet_archive]
+requests_per_second = 0.5
+max_global_inflight = 4
+require_qualified_region = true
+
+[provider_budgets.arquivo_pt]
+requests_per_second = 1.0
+max_global_inflight = 4
+require_qualified_region = true
+
+# Generic bounded discovery requests. This is intentionally much lower volume
+# than bulk-index processing and remains separate from evidence providers.
+[provider_budgets.web_discovery]
+requests_per_second = 2.0
+max_global_inflight = 4
+require_qualified_region = false
+
+# Seeded keyword search has a separate budget from page expansion.
+[provider_budgets.web_search]
+requests_per_second = 1.0
+max_global_inflight = 2
+require_qualified_region = false

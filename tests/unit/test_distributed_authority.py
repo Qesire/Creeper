@@ -1,0 +1,1158 @@
+from __future__ import annotations
+
+import tempfile
+import unittest
+from pathlib import Path
+
+from creeper.distributed.authority_store import (
+    BatchConflictError,
+    BatchSequenceError,
+    DistributedAuthorityStore,
+    ProviderAccessDeniedError,
+    ProviderRegionNotQualifiedError,
+    StaleLeaseError,
+    WorkerEgressBudgetExceededError,
+)
+from creeper.distributed.identity import (
+    batch_id,
+    host_id,
+    host_year_id,
+    resolution_key,
+)
+from creeper.distributed.models import (
+    Capability,
+    ResultBatch,
+    TaskClass,
+    WorkDefinition,
+    WorkerDescriptor,
+)
+
+
+class MutableClock:
+    def __init__(self, value: float = 1000.0) -> None:
+        self.value = float(value)
+
+    def __call__(self) -> float:
+        return self.value
+
+    def advance(self, seconds: float) -> None:
+        self.value += float(seconds)
+
+
+class DistributedAuthorityTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.clock = MutableClock()
+        self.store = DistributedAuthorityStore(
+            Path(self.tmp.name) / "distributed.sqlite3",
+            clock=self.clock,
+        )
+        self.worker_a = WorkerDescriptor(
+            worker_id="worker-us",
+            runtime_class="vm",
+            region="us-east",
+            architecture="x86_64",
+            memory_bytes=2 * 1024**3,
+            cpu_count=2,
+            network_class="public",
+            capabilities=(
+                Capability.ONLINE_QUERY.value,
+                Capability.RDAP.value,
+            ),
+            allowed_providers=("internet_archive", "arquivo_pt"),
+        )
+        self.worker_b = WorkerDescriptor(
+            worker_id="worker-eu",
+            runtime_class="vm",
+            region="eu-central",
+            architecture="x86_64",
+            memory_bytes=2 * 1024**3,
+            cpu_count=2,
+            network_class="public",
+            capabilities=(Capability.ONLINE_QUERY.value,),
+            allowed_providers=("internet_archive", "arquivo_pt"),
+        )
+        self.store.register_worker(self.worker_a)
+        self.store.register_worker(self.worker_b)
+
+    def tearDown(self) -> None:
+        self.store.close()
+        self.tmp.cleanup()
+
+    @staticmethod
+    def work(hostname: str = "example.com", *, partition: str = "0") -> WorkDefinition:
+        return WorkDefinition(
+            producer="HistoricalQueryProducer",
+            task_class=TaskClass.HOST_BATCH,
+            input_identity=hostname,
+            coverage={"scope": "HOST", "year_from": 1996, "year_to": 2001},
+            partition=partition,
+            algorithm_version="resolver-v1",
+            required_capabilities=(Capability.ONLINE_QUERY.value,),
+            priority=1.0,
+        )
+
+    def test_identity_layer_is_deterministic_and_namespace_separated(self) -> None:
+        self.assertEqual(host_id("Example.COM"), host_id("example.com"))
+        self.assertNotEqual(host_id("example.com"), host_year_id("example.com", 1997))
+        self.assertEqual(batch_id("task-a", 3), batch_id("task-a", 3))
+        self.assertEqual(
+            resolution_key(
+                hostname="Example.com",
+                provider="internet_archive",
+                scope="HOST",
+                coverage={"year_from": 1996, "year_to": 2001},
+                resolver_version="v1",
+            ),
+            resolution_key(
+                hostname="example.com",
+                provider="internet_archive",
+                scope="HOST",
+                coverage={"year_to": 2001, "year_from": 1996},
+                resolver_version="v1",
+            ),
+        )
+
+    def test_work_key_is_exactly_once_admission_key(self) -> None:
+        work = self.work()
+        first = self.store.admit_work(work)
+        second = self.store.admit_work(work)
+
+        self.assertEqual(first, second)
+        count = self.store.connection.execute(
+            "SELECT COUNT(*) FROM distributed_work"
+        ).fetchone()[0]
+        self.assertEqual(count, 1)
+
+    def test_two_workers_cannot_hold_same_active_work(self) -> None:
+        task_id = self.store.admit_work(self.work())
+        first = self.store.claim_work(self.worker_a.worker_id, lease_seconds=30)
+        second = self.store.claim_work(self.worker_b.worker_id, lease_seconds=30)
+
+        self.assertIsNotNone(first)
+        assert first is not None
+        self.assertEqual(first.task_id, task_id)
+        self.assertEqual(first.generation, 1)
+        self.assertIsNone(second)
+
+    def test_reclaim_increments_generation_and_fences_old_owner(self) -> None:
+        self.store.admit_work(self.work())
+        first = self.store.claim_work(self.worker_a.worker_id, lease_seconds=10)
+        assert first is not None
+        self.clock.advance(11)
+        second = self.store.claim_work(self.worker_b.worker_id, lease_seconds=30)
+        assert second is not None
+
+        self.assertEqual(second.task_id, first.task_id)
+        self.assertEqual(second.generation, first.generation + 1)
+
+        stale_batch = ResultBatch(
+            task_id=first.task_id,
+            generation=first.generation,
+            sequence_no=0,
+            results=({"hostname": "example.com", "year": 1997},),
+            cursor_after="page:1",
+        )
+        with self.assertRaises(StaleLeaseError):
+            self.store.commit_result_batch(
+                stale_batch,
+                worker_id=self.worker_a.worker_id,
+            )
+
+        fresh_batch = ResultBatch(
+            task_id=second.task_id,
+            generation=second.generation,
+            sequence_no=0,
+            results=({"hostname": "example.com", "year": 1997},),
+            cursor_after="page:1",
+        )
+        self.assertTrue(
+            self.store.commit_result_batch(
+                fresh_batch,
+                worker_id=self.worker_b.worker_id,
+            )
+        )
+        self.assertEqual(self.store.batch_count(second.task_id), 1)
+
+    def test_authority_restart_preserves_generation_and_batch_idempotence(self) -> None:
+        task_id = self.store.admit_work(self.work("restart.example"))
+        first = self.store.claim_work(self.worker_a.worker_id, lease_seconds=5)
+        assert first is not None
+        batch = ResultBatch(
+            task_id=task_id,
+            generation=first.generation,
+            sequence_no=0,
+            results=({"kind": "H", "hostname": "restart.example"},),
+            cursor_after="cursor:1",
+        )
+        self.assertTrue(
+            self.store.commit_result_batch(batch, worker_id=first.worker_id)
+        )
+
+        path = Path(self.tmp.name) / "distributed.sqlite3"
+        self.store.close()
+        self.clock.advance(6)
+        self.store = DistributedAuthorityStore(path, clock=self.clock)
+
+        second = self.store.claim_work(self.worker_b.worker_id, lease_seconds=30)
+        assert second is not None
+        self.assertEqual(second.task_id, task_id)
+        self.assertEqual(second.generation, first.generation + 1)
+        replay = ResultBatch(
+            task_id=task_id,
+            generation=second.generation,
+            sequence_no=0,
+            results=({"kind": "H", "hostname": "restart.example"},),
+            cursor_after="cursor:1",
+        )
+        self.assertFalse(
+            self.store.commit_result_batch(replay, worker_id=second.worker_id)
+        )
+        self.assertEqual(self.store.batch_count(task_id), 1)
+
+    def test_result_batch_replay_has_exactly_once_logical_effect(self) -> None:
+        self.store.admit_work(self.work())
+        lease = self.store.claim_work(self.worker_a.worker_id, lease_seconds=30)
+        assert lease is not None
+        batch = ResultBatch(
+            task_id=lease.task_id,
+            generation=lease.generation,
+            sequence_no=0,
+            results=(
+                {"kind": "HY", "hostname": "example.com", "year": 1996},
+                {"kind": "H", "hostname": "other.example"},
+            ),
+            cursor_after="offset:4096",
+        )
+
+        self.assertTrue(
+            self.store.commit_result_batch(batch, worker_id=lease.worker_id)
+        )
+        self.assertFalse(
+            self.store.commit_result_batch(batch, worker_id=lease.worker_id)
+        )
+        self.assertEqual(self.store.batch_count(lease.task_id), 1)
+        self.assertEqual(
+            self.store.task_row(lease.task_id)["cursor"],
+            "offset:4096",
+        )
+
+        conflicting = ResultBatch(
+            task_id=lease.task_id,
+            generation=lease.generation,
+            sequence_no=0,
+            results=({"kind": "HY", "hostname": "evil.example", "year": 1996},),
+            cursor_after="offset:4096",
+        )
+        with self.assertRaises(BatchConflictError):
+            self.store.commit_result_batch(
+                conflicting,
+                worker_id=lease.worker_id,
+            )
+
+    def test_evidence_only_exploration_rejects_raw_candidate_export(self) -> None:
+        worker = WorkerDescriptor(
+            worker_id="crawler-worker",
+            runtime_class="vm",
+            region="test-region",
+            architecture="x86_64",
+            memory_bytes=1024**3,
+            cpu_count=2,
+            network_class="public",
+            capabilities=(
+                Capability.WEB_DISCOVERY.value,
+                Capability.ONLINE_QUERY.value,
+            ),
+            producers=("HistoricalCrawlerProducer",),
+            allowed_providers=("web_discovery", "internet_archive"),
+        )
+        self.store.register_worker(worker)
+        self.store.configure_provider_budget(
+            "web_discovery",
+            requests_per_second=1000.0,
+            max_global_inflight=1,
+            require_qualified_region=False,
+        )
+        self.store.configure_provider_budget(
+            "internet_archive",
+            requests_per_second=1000.0,
+            max_global_inflight=1,
+            require_qualified_region=False,
+        )
+        task_id = self.store.admit_historical_exploration_work(
+            url="https://root.example/",
+            archive_providers=("internet_archive",),
+        )
+        lease = self.store.claim_work(worker.worker_id)
+        assert lease is not None
+        self.assertEqual(lease.task_id, task_id)
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "may not export raw results",
+        ):
+            self.store.commit_result_batch(
+                ResultBatch(
+                    task_id=lease.task_id,
+                    generation=lease.generation,
+                    sequence_no=lease.next_sequence_no,
+                    results=(
+                        {
+                            "kind": "HOST_CANDIDATE",
+                            "hostname": "raw.example",
+                            "source": "crawler",
+                            "locator": "https://raw.example/",
+                        },
+                    ),
+                    cursor_after="EOF",
+                ),
+                worker_id=lease.worker_id,
+            )
+        self.assertEqual(self.store.batch_count(task_id), 0)
+        self.assertEqual(self.store.host_candidate_count(), 0)
+
+    def test_new_result_batches_must_follow_authority_sequence(self) -> None:
+        self.store.admit_work(self.work("sequence.example"))
+        lease = self.store.claim_work(self.worker_a.worker_id, lease_seconds=30)
+        assert lease is not None
+        self.assertEqual(lease.next_sequence_no, 0)
+
+        with self.assertRaises(BatchSequenceError):
+            self.store.commit_result_batch(
+                ResultBatch(
+                    task_id=lease.task_id,
+                    generation=lease.generation,
+                    sequence_no=1,
+                    results=({"kind": "H", "hostname": "sequence.example"},),
+                    cursor_after="cursor:bad",
+                ),
+                worker_id=lease.worker_id,
+            )
+        self.assertEqual(self.store.batch_count(lease.task_id), 0)
+        self.assertEqual(
+            self.store.task_row(lease.task_id)["next_sequence_no"],
+            0,
+        )
+
+        self.assertTrue(
+            self.store.commit_result_batch(
+                ResultBatch(
+                    task_id=lease.task_id,
+                    generation=lease.generation,
+                    sequence_no=0,
+                    results=({"kind": "H", "hostname": "sequence.example"},),
+                    cursor_after="cursor:1",
+                ),
+                worker_id=lease.worker_id,
+            )
+        )
+        row = self.store.task_row(lease.task_id)
+        self.assertEqual(row["next_sequence_no"], 1)
+        self.assertEqual(row["cursor"], "cursor:1")
+
+    def test_committed_batch_replay_survives_lease_generation_change(self) -> None:
+        self.store.admit_work(self.work())
+        first = self.store.claim_work(self.worker_a.worker_id, lease_seconds=5)
+        assert first is not None
+        batch = ResultBatch(
+            task_id=first.task_id,
+            generation=first.generation,
+            sequence_no=0,
+            results=({"kind": "HY", "hostname": "example.com", "year": 1999},),
+            cursor_after="page:1",
+        )
+        self.assertTrue(
+            self.store.commit_result_batch(batch, worker_id=first.worker_id)
+        )
+
+        self.clock.advance(6)
+        second = self.store.claim_work(self.worker_b.worker_id, lease_seconds=30)
+        assert second is not None
+        replay = ResultBatch(
+            task_id=second.task_id,
+            generation=second.generation,
+            sequence_no=0,
+            results=({"kind": "HY", "hostname": "example.com", "year": 1999},),
+            cursor_after="page:1",
+        )
+        self.assertFalse(
+            self.store.commit_result_batch(replay, worker_id=second.worker_id)
+        )
+        self.assertEqual(self.store.batch_count(second.task_id), 1)
+
+    def test_revoked_worker_cannot_mutate_current_lease(self) -> None:
+        self.store.admit_work(self.work())
+        lease = self.store.claim_work(self.worker_a.worker_id, lease_seconds=30)
+        assert lease is not None
+        self.store.revoke_worker(lease.worker_id)
+
+        with self.assertRaises(RuntimeError):
+            self.store.renew_task(
+                lease.task_id,
+                worker_id=lease.worker_id,
+                generation=lease.generation,
+            )
+
+    def test_exact_replay_remains_acknowledgeable_after_task_finish(self) -> None:
+        self.store.admit_work(self.work())
+        lease = self.store.claim_work(self.worker_a.worker_id, lease_seconds=30)
+        assert lease is not None
+        batch = ResultBatch(
+            task_id=lease.task_id,
+            generation=lease.generation,
+            sequence_no=0,
+            results=({"kind": "HY", "hostname": "example.com", "year": 2001},),
+        )
+        self.assertTrue(
+            self.store.commit_result_batch(batch, worker_id=lease.worker_id)
+        )
+        self.store.finish_task(
+            lease.task_id,
+            worker_id=lease.worker_id,
+            generation=lease.generation,
+        )
+        self.assertFalse(
+            self.store.commit_result_batch(batch, worker_id=lease.worker_id)
+        )
+
+    def test_capabilities_gate_claims(self) -> None:
+        bulk = WorkDefinition(
+            producer="BulkHistoricalIndexProducer",
+            task_class=TaskClass.SOURCE_SHARD,
+            input_identity="arquivo:shard:1",
+            coverage={"year_from": 1996, "year_to": 2001},
+            partition="shard-1",
+            algorithm_version="bulk-v1",
+            required_capabilities=(Capability.STREAMING_BULK.value,),
+        )
+        self.store.admit_work(bulk)
+        self.assertIsNone(self.store.claim_work(self.worker_a.worker_id))
+
+        bulk_worker = WorkerDescriptor(
+            worker_id="worker-oci",
+            runtime_class="vm",
+            region="oci-home",
+            architecture="aarch64",
+            memory_bytes=12 * 1024**3,
+            cpu_count=2,
+            network_class="public",
+            capabilities=(Capability.STREAMING_BULK.value,),
+        )
+        self.store.register_worker(bulk_worker)
+        claimed = self.store.claim_work(bulk_worker.worker_id)
+        self.assertIsNotNone(claimed)
+        assert claimed is not None
+        self.assertEqual(claimed.work.task_class, TaskClass.SOURCE_SHARD)
+
+    def test_cloudflare_worker_claims_only_thin_contract_work(self) -> None:
+        edge = WorkerDescriptor(
+            worker_id="edge-cf",
+            runtime_class="cloudflare_worker",
+            region="cf-global",
+            architecture="wasm",
+            memory_bytes=128 * 1024**2,
+            cpu_count=1,
+            network_class="edge",
+            capabilities=(Capability.THIN_QUERY.value,),
+            producers=("ThinHistoricalQueryProducer",),
+            allowed_providers=("internet_archive",),
+        )
+        self.store.register_worker(edge)
+        self.store.configure_provider_budget(
+            "internet_archive",
+            requests_per_second=100.0,
+            max_global_inflight=2,
+            require_qualified_region=True,
+        )
+
+        malformed = WorkDefinition(
+            producer="ThinHistoricalQueryProducer",
+            task_class=TaskClass.HOST_BATCH,
+            input_identity="large.example",
+            coverage={
+                "provider": "internet_archive",
+                "year_from": 1997,
+                "year_to": 1997,
+                "thin_eligible": False,
+                "max_provider_requests": 1,
+                "estimated_response_bytes": 1024,
+            },
+            partition="bad",
+            algorithm_version="thin-v1",
+            required_capabilities=(Capability.THIN_QUERY.value,),
+            priority=10.0,
+        )
+        malformed_id = self.store.admit_work(malformed)
+        thin_id = self.store.admit_thin_host_probe(
+            hostname="thin.example",
+            provider="internet_archive",
+            year=1997,
+            priority=1.0,
+        )
+
+        lease = self.store.claim_work(edge.worker_id)
+
+        self.assertIsNotNone(lease)
+        assert lease is not None
+        self.assertEqual(lease.task_id, thin_id)
+        self.assertNotEqual(lease.task_id, malformed_id)
+        self.assertEqual(
+            lease.work.coverage["max_provider_requests"],
+            1,
+        )
+        self.assertTrue(lease.work.coverage["thin_eligible"])
+        permit = self.store.issue_provider_permit(
+            "internet_archive",
+            worker_id=lease.worker_id,
+            task_id=lease.task_id,
+            generation=lease.generation,
+            request_id="cf-thin-request-1",
+        )
+        self.assertIsNotNone(permit)
+        assert permit is not None
+        self.assertEqual(permit.request_id, "cf-thin-request-1")
+
+    def test_worker_provider_allowlist_blocks_claim_and_permit(self) -> None:
+        restricted = WorkerDescriptor(
+            worker_id="worker-restricted-provider",
+            runtime_class="vm",
+            region="restricted-region",
+            architecture="x86_64",
+            memory_bytes=1024**3,
+            cpu_count=2,
+            network_class="public",
+            capabilities=(Capability.ONLINE_QUERY.value,),
+            producers=("HistoricalQueryProducer",),
+            allowed_providers=("arquivo_pt",),
+        )
+        self.store.register_worker(restricted)
+        self.store.configure_provider_budget(
+            "internet_archive",
+            requests_per_second=10.0,
+            max_global_inflight=1,
+            require_qualified_region=False,
+        )
+        task_id = self.store.admit_host_resolution_work(
+            hostname="restricted.example",
+            physical_providers=("internet_archive",),
+            coverage_provider="cdx-pool:restricted",
+            resolver_version="resolver-v1",
+            year_from=1997,
+            year_to=1997,
+        )
+        self.assertEqual(len(task_id), 1)
+        self.assertIsNone(self.store.claim_work(restricted.worker_id))
+
+        manual = self.store.admit_work(
+            WorkDefinition(
+                producer="HistoricalQueryProducer",
+                task_class=TaskClass.HOST_BATCH,
+                input_identity="manual.example",
+                coverage={"year_from": 1997, "year_to": 1997},
+                partition="0",
+                algorithm_version="resolver-v1",
+                required_capabilities=(Capability.ONLINE_QUERY.value,),
+            )
+        )
+        lease = self.store.claim_work(restricted.worker_id)
+        assert lease is not None
+        self.assertEqual(lease.task_id, manual)
+        with self.assertRaises(ProviderAccessDeniedError):
+            self.store.issue_provider_permit(
+                "internet_archive",
+                worker_id=lease.worker_id,
+                task_id=lease.task_id,
+                generation=lease.generation,
+            )
+
+    def test_daily_worker_egress_budget_is_idempotent_and_resets_next_day(self) -> None:
+        worker = WorkerDescriptor(
+            worker_id="worker-egress-limited",
+            runtime_class="vm",
+            region="gcp-free",
+            architecture="x86_64",
+            memory_bytes=1024**3,
+            cpu_count=1,
+            network_class="public",
+            capabilities=(Capability.ONLINE_QUERY.value,),
+            producers=("HistoricalQueryProducer",),
+            allowed_providers=("internet_archive",),
+            daily_egress_budget_bytes=5,
+        )
+        self.store.register_worker(worker)
+        self.store.configure_provider_budget(
+            "internet_archive",
+            requests_per_second=1_000_000.0,
+            max_global_inflight=1,
+            require_qualified_region=False,
+        )
+        first_id = self.store.admit_work(
+            WorkDefinition(
+                producer="HistoricalQueryProducer",
+                task_class=TaskClass.HOST_BATCH,
+                input_identity="egress-a.example",
+                coverage={
+                    "provider": "internet_archive",
+                    "year_from": 1997,
+                    "year_to": 1997,
+                },
+                partition="0",
+                algorithm_version="resolver-v1",
+                required_capabilities=(Capability.ONLINE_QUERY.value,),
+            )
+        )
+        lease = self.store.claim_work(worker.worker_id)
+        assert lease is not None
+        self.assertEqual(lease.task_id, first_id)
+        permit = self.store.issue_provider_permit(
+            "internet_archive",
+            worker_id=lease.worker_id,
+            task_id=lease.task_id,
+            generation=lease.generation,
+        )
+        assert permit is not None
+        self.store.report_provider_permit(
+            permit.permit_id,
+            worker_id=lease.worker_id,
+            status_code=200,
+            response_bytes=5,
+        )
+        self.assertEqual(
+            self.store.worker_egress_snapshot(worker.worker_id)["used_bytes"],
+            5,
+        )
+
+        # Provider reports are idempotent, including byte accounting.
+        self.store.report_provider_permit(
+            permit.permit_id,
+            worker_id=lease.worker_id,
+            status_code=200,
+            response_bytes=5,
+        )
+        self.assertEqual(
+            self.store.worker_egress_snapshot(worker.worker_id)["used_bytes"],
+            5,
+        )
+        with self.assertRaises(WorkerEgressBudgetExceededError):
+            self.store.issue_provider_permit(
+                "internet_archive",
+                worker_id=lease.worker_id,
+                task_id=lease.task_id,
+                generation=lease.generation,
+            )
+        self.store.finish_task(
+            lease.task_id,
+            worker_id=lease.worker_id,
+            generation=lease.generation,
+        )
+
+        second_id = self.store.admit_work(
+            WorkDefinition(
+                producer="HistoricalQueryProducer",
+                task_class=TaskClass.HOST_BATCH,
+                input_identity="egress-b.example",
+                coverage={
+                    "provider": "internet_archive",
+                    "year_from": 1998,
+                    "year_to": 1998,
+                },
+                partition="0",
+                algorithm_version="resolver-v1",
+                required_capabilities=(Capability.ONLINE_QUERY.value,),
+            )
+        )
+        self.assertIsNone(self.store.claim_work(worker.worker_id))
+
+        self.clock.advance(86_400)
+        snapshot = self.store.worker_egress_snapshot(worker.worker_id)
+        self.assertEqual(snapshot["used_bytes"], 0)
+        recovered = self.store.claim_work(worker.worker_id)
+        assert recovered is not None
+        self.assertEqual(recovered.task_id, second_id)
+
+    def test_provider_permit_request_replay_returns_same_slot(self) -> None:
+        self.store.configure_provider_budget(
+            "internet_archive",
+            requests_per_second=1_000_000.0,
+            max_global_inflight=2,
+            require_qualified_region=False,
+        )
+        self.store.admit_work(self.work("idempotent.example"))
+        lease = self.store.claim_work(self.worker_a.worker_id)
+        assert lease is not None
+
+        first = self.store.issue_provider_permit(
+            "internet_archive",
+            worker_id=lease.worker_id,
+            task_id=lease.task_id,
+            generation=lease.generation,
+            request_id="logical-request-1",
+        )
+        assert first is not None
+        snapshot_after_first = self.store.provider_budget_snapshot(
+            "internet_archive"
+        )
+
+        replay = self.store.issue_provider_permit(
+            "internet_archive",
+            worker_id=lease.worker_id,
+            task_id=lease.task_id,
+            generation=lease.generation,
+            request_id="logical-request-1",
+        )
+        assert replay is not None
+        snapshot_after_replay = self.store.provider_budget_snapshot(
+            "internet_archive"
+        )
+
+        self.assertEqual(replay.permit_id, first.permit_id)
+        self.assertEqual(replay.request_id, first.request_id)
+        self.assertEqual(snapshot_after_first["active_inflight"], 1)
+        self.assertEqual(snapshot_after_replay["active_inflight"], 1)
+        self.assertEqual(
+            snapshot_after_replay["next_request_at"],
+            snapshot_after_first["next_request_at"],
+        )
+
+    def test_provider_inflight_budget_is_global_across_regions(self) -> None:
+        self.store.configure_provider_budget(
+            "internet_archive",
+            requests_per_second=1_000_000.0,
+            max_global_inflight=1,
+            require_qualified_region=False,
+        )
+        self.store.admit_work(self.work("a.example"))
+        self.store.admit_work(self.work("b.example"))
+        lease_a = self.store.claim_work(self.worker_a.worker_id)
+        lease_b = self.store.claim_work(self.worker_b.worker_id)
+        assert lease_a is not None and lease_b is not None
+
+        permit_a = self.store.issue_provider_permit(
+            "internet_archive",
+            worker_id=lease_a.worker_id,
+            task_id=lease_a.task_id,
+            generation=lease_a.generation,
+        )
+        self.assertIsNotNone(permit_a)
+        self.clock.advance(0.001)
+        permit_b = self.store.issue_provider_permit(
+            "internet_archive",
+            worker_id=lease_b.worker_id,
+            task_id=lease_b.task_id,
+            generation=lease_b.generation,
+        )
+        self.assertIsNone(permit_b)
+
+        assert permit_a is not None
+        self.store.report_provider_permit(
+            permit_a.permit_id,
+            worker_id=lease_a.worker_id,
+            status_code=200,
+        )
+        permit_b = self.store.issue_provider_permit(
+            "internet_archive",
+            worker_id=lease_b.worker_id,
+            task_id=lease_b.task_id,
+            generation=lease_b.generation,
+        )
+        self.assertIsNotNone(permit_b)
+
+    def test_claim_gate_respects_worker_producer_registry(self) -> None:
+        restricted = WorkerDescriptor(
+            worker_id="worker-restricted",
+            runtime_class="vm",
+            region="test-region",
+            architecture="x86_64",
+            memory_bytes=1024**3,
+            cpu_count=2,
+            network_class="public",
+            capabilities=(Capability.ONLINE_QUERY.value,),
+            producers=("HistoricalQueryProducer",),
+        )
+        self.store.register_worker(restricted)
+        unsupported = WorkDefinition(
+            producer="RDAPProducer",
+            task_class=TaskClass.HOST_BATCH,
+            input_identity="rdap.example",
+            coverage={"year_from": 1996, "year_to": 2001},
+            partition="0",
+            algorithm_version="rdap-v1",
+            required_capabilities=(Capability.ONLINE_QUERY.value,),
+        )
+        supported = WorkDefinition(
+            producer="HistoricalQueryProducer",
+            task_class=TaskClass.HOST_BATCH,
+            input_identity="cdx.example",
+            coverage={"year_from": 1996, "year_to": 2001},
+            partition="0",
+            algorithm_version="cdx-v1",
+            required_capabilities=(Capability.ONLINE_QUERY.value,),
+            priority=-1.0,
+        )
+        self.store.admit_work(unsupported)
+        supported_id = self.store.admit_work(supported)
+
+        claimed = self.store.claim_work(restricted.worker_id)
+
+        self.assertIsNotNone(claimed)
+        assert claimed is not None
+        self.assertEqual(claimed.task_id, supported_id)
+        self.assertEqual(claimed.work.producer, "HistoricalQueryProducer")
+
+    def test_region_probe_claim_is_targeted_to_declared_region(self) -> None:
+        self.store.configure_provider_budget(
+            "internet_archive",
+            requests_per_second=10.0,
+            max_global_inflight=1,
+            require_qualified_region=True,
+        )
+        task_id = self.store.admit_region_probe_work(
+            provider="internet_archive",
+            probe_hostname="example.com",
+            target_region="eu-central",
+            year=2001,
+            samples=3,
+        )
+
+        self.assertIsNone(self.store.claim_work(self.worker_a.worker_id))
+        lease = self.store.claim_work(self.worker_b.worker_id)
+        assert lease is not None
+        self.assertEqual(lease.task_id, task_id)
+        self.assertEqual(
+            lease.work.coverage["target_region"],
+            "eu-central",
+        )
+
+    def test_claim_gate_requires_provider_region_qualification(self) -> None:
+        self.store.configure_provider_budget(
+            "internet_archive",
+            requests_per_second=10.0,
+            max_global_inflight=1,
+        )
+        formal = WorkDefinition(
+            producer="HistoricalQueryProducer",
+            task_class=TaskClass.HOST_BATCH,
+            input_identity="qualified.example",
+            coverage={
+                "provider": "internet_archive",
+                "year_from": 1996,
+                "year_to": 2001,
+            },
+            partition="0",
+            algorithm_version="resolver-v1",
+            required_capabilities=(Capability.ONLINE_QUERY.value,),
+        )
+        self.store.admit_work(formal)
+        self.assertIsNone(self.store.claim_work(self.worker_a.worker_id))
+
+        probe = WorkDefinition(
+            producer="RegionProbeProducer",
+            task_class=TaskClass.PROBE,
+            input_identity="internet_archive",
+            coverage={"provider": "internet_archive"},
+            partition="qualification",
+            algorithm_version="probe-v1",
+            required_capabilities=(Capability.ONLINE_QUERY.value,),
+            priority=2.0,
+        )
+        probe_task = self.store.admit_work(probe)
+        probe_lease = self.store.claim_work(self.worker_a.worker_id)
+        assert probe_lease is not None
+        self.assertEqual(probe_lease.task_id, probe_task)
+        for _ in range(3):
+            self.store.record_provider_region_observation(
+                "internet_archive",
+                worker_id=probe_lease.worker_id,
+                task_id=probe_lease.task_id,
+                generation=probe_lease.generation,
+                connect_success=True,
+                status_code=200,
+                latency_ms=50.0,
+                response_bytes=64,
+            )
+        self.store.finish_task(
+            probe_lease.task_id,
+            worker_id=probe_lease.worker_id,
+            generation=probe_lease.generation,
+        )
+
+        formal_lease = self.store.claim_work(self.worker_a.worker_id)
+        self.assertIsNotNone(formal_lease)
+        assert formal_lease is not None
+        self.assertEqual(formal_lease.work.producer, "HistoricalQueryProducer")
+
+    def test_formal_provider_permit_requires_qualified_region(self) -> None:
+        self.store.configure_provider_budget(
+            "internet_archive",
+            requests_per_second=10.0,
+            max_global_inflight=1,
+        )
+        self.store.admit_work(self.work("formal.example"))
+        lease = self.store.claim_work(self.worker_a.worker_id)
+        assert lease is not None
+
+        with self.assertRaises(ProviderRegionNotQualifiedError):
+            self.store.issue_provider_permit(
+                "internet_archive",
+                worker_id=lease.worker_id,
+                task_id=lease.task_id,
+                generation=lease.generation,
+            )
+
+    def test_probe_task_can_access_provider_before_region_is_qualified(self) -> None:
+        self.store.configure_provider_budget(
+            "internet_archive",
+            requests_per_second=10.0,
+            max_global_inflight=1,
+        )
+        probe = WorkDefinition(
+            producer="RegionProbeProducer",
+            task_class=TaskClass.PROBE,
+            input_identity="internet_archive",
+            coverage={"provider": "internet_archive"},
+            partition="qualification",
+            algorithm_version="probe-v1",
+            required_capabilities=(Capability.ONLINE_QUERY.value,),
+        )
+        self.store.admit_work(probe)
+        lease = self.store.claim_work(self.worker_a.worker_id)
+        assert lease is not None
+        permit = self.store.issue_provider_permit(
+            "internet_archive",
+            worker_id=lease.worker_id,
+            task_id=lease.task_id,
+            generation=lease.generation,
+        )
+        self.assertIsNotNone(permit)
+
+    def test_resolution_coverage_subtracts_overlapping_intervals(self) -> None:
+        self.store.admit_work(self.work("coverage.example"))
+        lease = self.store.claim_work(self.worker_a.worker_id)
+        assert lease is not None
+
+        self.assertEqual(
+            self.store.uncovered_resolution_intervals(
+                hostname="coverage.example",
+                provider="cdx-pool:test",
+                scope="HOST",
+                resolver_version="resolver-v1",
+                year_from=1998,
+                year_to=2001,
+            ),
+            ((1998, 2001),),
+        )
+        self.store.record_complete_resolution_coverage(
+            lease.task_id,
+            worker_id=lease.worker_id,
+            generation=lease.generation,
+            hostname="coverage.example",
+            provider="cdx-pool:test",
+            scope="HOST",
+            resolver_version="resolver-v1",
+            year_from=1996,
+            year_to=1999,
+        )
+        self.assertEqual(
+            self.store.uncovered_resolution_intervals(
+                hostname="coverage.example",
+                provider="cdx-pool:test",
+                scope="HOST",
+                resolver_version="resolver-v1",
+                year_from=1998,
+                year_to=2001,
+            ),
+            ((2000, 2001),),
+        )
+        self.store.record_complete_resolution_coverage(
+            lease.task_id,
+            worker_id=lease.worker_id,
+            generation=lease.generation,
+            hostname="coverage.example",
+            provider="cdx-pool:test",
+            scope="HOST",
+            resolver_version="resolver-v1",
+            year_from=2000,
+            year_to=2001,
+        )
+        self.assertEqual(
+            self.store.uncovered_resolution_intervals(
+                hostname="coverage.example",
+                provider="cdx-pool:test",
+                scope="HOST",
+                resolver_version="resolver-v1",
+                year_from=1998,
+                year_to=2001,
+            ),
+            (),
+        )
+
+    def test_host_work_admission_subtracts_existing_coverage(self) -> None:
+        self.store.admit_work(self.work("admission.example"))
+        lease = self.store.claim_work(self.worker_a.worker_id)
+        assert lease is not None
+        self.store.record_complete_resolution_coverage(
+            lease.task_id,
+            worker_id=lease.worker_id,
+            generation=lease.generation,
+            hostname="admission.example",
+            provider="cdx-pool:set-a",
+            scope="HOST",
+            resolver_version="resolver-v1",
+            year_from=1996,
+            year_to=1999,
+        )
+        self.store.finish_task(
+            lease.task_id,
+            worker_id=lease.worker_id,
+            generation=lease.generation,
+        )
+
+        admitted = self.store.admit_host_resolution_work(
+            hostname="admission.example",
+            physical_providers=("internet_archive", "arquivo_pt"),
+            coverage_provider="cdx-pool:set-a",
+            resolver_version="resolver-v1",
+            year_from=1998,
+            year_to=2001,
+        )
+
+        self.assertEqual(len(admitted), 1)
+        row = self.store.task_row(admitted[0])
+        coverage = __import__("json").loads(str(row["coverage_json"]))
+        self.assertEqual(
+            (coverage["year_from"], coverage["year_to"]),
+            (2000, 2001),
+        )
+        self.assertEqual(
+            coverage["providers"],
+            ["internet_archive", "arquivo_pt"],
+        )
+
+        self.assertEqual(
+            self.store.admit_host_resolution_work(
+                hostname="admission.example",
+                physical_providers=("internet_archive", "arquivo_pt"),
+                coverage_provider="cdx-pool:set-a",
+                resolver_version="resolver-v1",
+                year_from=1996,
+                year_to=1999,
+            ),
+            (),
+        )
+        changed_provider_set = self.store.admit_host_resolution_work(
+            hostname="admission.example",
+            physical_providers=("internet_archive",),
+            coverage_provider="cdx-pool:set-b",
+            resolver_version="resolver-v1:set-b",
+            year_from=1998,
+            year_to=2001,
+        )
+        self.assertEqual(len(changed_provider_set), 1)
+
+    def test_provider_region_qualification_is_derived_from_worker_region(self) -> None:
+        probe_work = WorkDefinition(
+            producer="RegionProbeProducer",
+            task_class=TaskClass.PROBE,
+            input_identity="internet_archive",
+            coverage={"provider": "internet_archive"},
+            partition="qualification",
+            algorithm_version="probe-v1",
+            required_capabilities=(Capability.ONLINE_QUERY.value,),
+        )
+        self.store.admit_work(probe_work)
+        lease = self.store.claim_work(self.worker_a.worker_id)
+        assert lease is not None
+
+        states = []
+        for _ in range(3):
+            states.append(
+                self.store.record_provider_region_observation(
+                    "internet_archive",
+                    worker_id=lease.worker_id,
+                    task_id=lease.task_id,
+                    generation=lease.generation,
+                    connect_success=True,
+                    status_code=200,
+                    latency_ms=100.0,
+                    response_bytes=128,
+                )
+            )
+        self.assertEqual(states, ["UNKNOWN", "UNKNOWN", "QUALIFIED"])
+        snapshot = self.store.provider_region_snapshot(
+            "internet_archive",
+            self.worker_a.region,
+        )
+        assert snapshot is not None
+        self.assertEqual(snapshot["state"], "QUALIFIED")
+        self.assertEqual(snapshot["samples"], 3)
+        self.assertEqual(snapshot["success_rate"], 1.0)
+        self.assertEqual(snapshot["mean_latency_ms"], 100.0)
+
+        status = self.store.fabric_status_snapshot()
+        region_rows = status["provider_regions"]
+        self.assertTrue(
+            any(
+                row["provider"] == "internet_archive"
+                and row["region"] == self.worker_a.region
+                and row["state"] == "QUALIFIED"
+                and row["samples"] == 3
+                for row in region_rows
+            )
+        )
+
+    def test_429_cooldown_is_global_not_per_region(self) -> None:
+        self.store.configure_provider_budget(
+            "internet_archive",
+            requests_per_second=1_000_000.0,
+            max_global_inflight=2,
+            require_qualified_region=False,
+        )
+        self.store.admit_work(self.work("a.example"))
+        self.store.admit_work(self.work("b.example"))
+        lease_a = self.store.claim_work(self.worker_a.worker_id)
+        lease_b = self.store.claim_work(self.worker_b.worker_id)
+        assert lease_a is not None and lease_b is not None
+
+        first = self.store.issue_provider_permit(
+            "internet_archive",
+            worker_id=lease_a.worker_id,
+            task_id=lease_a.task_id,
+            generation=lease_a.generation,
+        )
+        assert first is not None
+        self.store.report_provider_permit(
+            first.permit_id,
+            worker_id=lease_a.worker_id,
+            status_code=429,
+            cooldown_seconds=60,
+        )
+        initial_cooldown = self.store.provider_budget_snapshot(
+            "internet_archive"
+        )["cooldown_until"]
+        self.clock.advance(1)
+        self.store.report_provider_permit(
+            first.permit_id,
+            worker_id=lease_a.worker_id,
+            status_code=429,
+            cooldown_seconds=60,
+        )
+        self.assertEqual(
+            self.store.provider_budget_snapshot("internet_archive")[
+                "cooldown_until"
+            ],
+            initial_cooldown,
+        )
+        blocked = self.store.issue_provider_permit(
+            "internet_archive",
+            worker_id=lease_b.worker_id,
+            task_id=lease_b.task_id,
+            generation=lease_b.generation,
+        )
+        self.assertIsNone(blocked)
+
+        snapshot = self.store.provider_budget_snapshot("internet_archive")
+        self.assertGreater(snapshot["cooldown_until"], self.clock())
+
+
+if __name__ == "__main__":
+    unittest.main()

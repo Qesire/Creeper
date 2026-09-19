@@ -1,0 +1,34 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "creeper-fabric-thin",
+  "main": "src/index.js",
+  "compatibility_date": "2026-09-14",
+  "workers_dev": true,
+  "triggers": {
+    "crons": ["* * * * *"]
+  },
+  "vars": {
+    "COORDINATOR_URL": "https://coord.example",
+    "WORKER_ID": "cf-thin-01",
+    "REGION": "cloudflare-global",
+    "MEMORY_BYTES": "134217728",
+    "DAILY_EGRESS_BUDGET_BYTES": "0",
+    "PROVIDERS": {
+      "internet_archive": {
+        "endpoint": "https://web.archive.org/cdx/search/cdx",
+        "dialect": "wayback"
+      },
+      "arquivo_pt": {
+        "endpoint": "https://arquivo.pt/wayback/cdx",
+        "dialect": "arquivo"
+      }
+    }
+  },
+  "secrets": {
+    "required": ["CREEPER_WORKER_SECRET"]
+  },
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 0.1
+  }
+}
