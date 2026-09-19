@@ -48,7 +48,10 @@ def _epoch_seconds(value: datetime) -> float:
     return value.timestamp()
 
 
-def _work_from_row(row: dict[str, object]) -> WorkSpec:
+def _work_from_row(
+    row: dict[str, object],
+    dependency_work_keys: tuple[str, ...] = (),
+) -> WorkSpec:
     required_raw = row["required_capabilities"]
     required = tuple(FabricCapability(str(item)) for item in required_raw)
     return WorkSpec(
@@ -67,6 +70,7 @@ def _work_from_row(row: dict[str, object]) -> WorkSpec:
         network_class=(
             None if row["network_class"] is None else str(row["network_class"])
         ),
+        dependency_work_keys=dependency_work_keys,
     )
 
 
@@ -226,6 +230,27 @@ class PostgresFabricStore:
                     return str(existing["task_id"])
 
                 durable_id = str(inserted["task_id"])
+                for dependency_key in work.dependency_work_keys:
+                    cursor.execute(
+                        "SELECT task_id FROM fabric_tasks_v2 WHERE work_key=%s",
+                        (dependency_key,),
+                    )
+                    dependency = cursor.fetchone()
+                    if dependency is None:
+                        raise KeyError(
+                            f"unknown dependency work_key: {dependency_key}"
+                        )
+                    dependency_task_id = str(dependency["task_id"])
+                    if dependency_task_id == durable_id:
+                        raise ValueError("fabric task cannot depend on itself")
+                    cursor.execute(
+                        """
+                        INSERT INTO fabric_task_dependencies_v2(
+                            task_id, depends_on_task_id
+                        ) VALUES (%s, %s)
+                        """,
+                        (durable_id, dependency_task_id),
+                    )
                 capability = (
                     work.required_capabilities[0].value.lower()
                     if work.required_capabilities
@@ -340,7 +365,21 @@ class PostgresFabricStore:
                     """,
                     (worker_id,),
                 )
-                work = _work_from_row(row)
+                cursor.execute(
+                    """
+                    SELECT parent.work_key
+                    FROM fabric_task_dependencies_v2 AS dependency
+                    JOIN fabric_tasks_v2 AS parent
+                      ON parent.task_id=dependency.depends_on_task_id
+                    WHERE dependency.task_id=%s
+                    ORDER BY parent.work_key
+                    """,
+                    (row["task_id"],),
+                )
+                dependency_keys = tuple(
+                    str(item["work_key"]) for item in cursor.fetchall()
+                )
+                work = _work_from_row(row, dependency_keys)
                 return LeaseToken(
                     task_id=str(row["task_id"]),
                     work_key=str(row["work_key"]),
@@ -403,6 +442,21 @@ class PostgresFabricStore:
             raise StaleLeaseError(
                 f"worker no longer owns task epoch: {task_id}"
             )
+        with self.connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT parent.work_key
+                FROM fabric_task_dependencies_v2 AS dependency
+                JOIN fabric_tasks_v2 AS parent
+                  ON parent.task_id=dependency.depends_on_task_id
+                WHERE dependency.task_id=%s
+                ORDER BY parent.work_key
+                """,
+                (row["task_id"],),
+            )
+            dependency_keys = tuple(
+                str(item["work_key"]) for item in cursor.fetchall()
+            )
         return LeaseToken(
             task_id=str(row["task_id"]),
             work_key=str(row["work_key"]),
@@ -410,7 +464,7 @@ class PostgresFabricStore:
             lease_epoch=int(row["lease_epoch"]),
             lease_deadline=_epoch_seconds(row["lease_deadline"]),
             attempt=int(row["attempt"]),
-            work=_work_from_row(row),
+            work=_work_from_row(row, dependency_keys),
             cursor=(None if row["cursor"] is None else dict(row["cursor"])),
             next_sequence_no=int(row["next_sequence_no"]),
         )
