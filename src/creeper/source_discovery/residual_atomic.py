@@ -541,13 +541,34 @@ def commit_deterministic_residual_batch(
                 (plan.cell.key, family, cell_now),
             )
         if _should_saturate_locked(connection, coverage, plan):
+            terminal_state = "SATURATED"
+        else:
+            cursor_row = connection.execute(
+                """
+                SELECT variant_cursor
+                FROM residual_search_cells
+                WHERE cell_key=?
+                """,
+                (plan.cell.key,),
+            ).fetchone()
+            if cursor_row is None:
+                raise RuntimeError(
+                    "residual search cell disappeared before terminal-state check"
+                )
+            terminal_state = (
+                "EXHAUSTED"
+                if int(cursor_row["variant_cursor"])
+                >= query_program_length(plan.cell)
+                else None
+            )
+        if terminal_state is not None:
             connection.execute(
                 """
                 UPDATE residual_search_cells
-                SET state='SATURATED', updated_at=?
+                SET state=?, updated_at=?
                 WHERE cell_key=?
                 """,
-                (cell_now, plan.cell.key),
+                (terminal_state, cell_now, plan.cell.key),
             )
         checkpoint("after_cell")
 
