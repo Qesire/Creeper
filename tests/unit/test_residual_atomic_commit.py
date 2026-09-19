@@ -310,6 +310,64 @@ class ResidualAtomicCommitTests(unittest.TestCase):
         self.assertEqual(row["matched_count"], 1)
         self.assertEqual(row["last_source_key"], candidate.source_key)
 
+    def test_recovery_cell_nonmatch_keeps_identity_only(self) -> None:
+        leads = ResearchLeadLedger(self.registry.connection)
+        leads.seed_curated(self.coverage)
+        lead = next(
+            item
+            for item in CURATED_RESEARCH_LEADS
+            if item.lead_id == "nlanr-uc-20000714"
+        )
+        assert lead.recovery_cell is not None
+        plan = QueryPlan(
+            cell=lead.recovery_cell,
+            query='"2000" "uc.sanitized-access.20000714" "research lab" "log"',
+            variant=0,
+            exclusions=(),
+            score=5.0,
+            mechanism_phrase="uc.sanitized-access.20000714",
+            include_institution=True,
+            query_shape="STRICT_4D",
+        )
+        unrelated = canonicalize_search_result(
+            RawSearchResult(
+                provider="fixture",
+                provider_result_id="related-but-not-lead",
+                url="https://repo.example/other-proxy-2000.log.gz",
+                title="2000 research lab proxy log dataset",
+                resource_type="file",
+                identifiers=("10.1234/other-proxy",),
+            ),
+            relevance_score=1.0,
+            qualified=True,
+        )
+        batch = DeterministicSearchBatch(
+            backend="fixture",
+            query=plan.query,
+            actor="deterministic:test",
+            results=(unrelated,),
+            search_cost_seconds=0.1,
+        )
+
+        result = commit_deterministic_residual_batch(
+            self.registry,
+            self.coverage,
+            self.identities,
+            plan=plan,
+            batch=batch,
+            search_cost_seconds=0.1,
+            candidate_cap=8,
+            research_leads=leads,
+        )
+
+        self.assertEqual(result.registered_count, 0)
+        self.assertEqual(result.dropped_count, 1)
+        self.assertEqual(self._count("source_candidates"), 0)
+        self.assertEqual(self._count("residual_search_references"), 1)
+        stats = self.coverage.stats(lead.recovery_cell)
+        self.assertEqual(stats.result_count, 1)
+        self.assertEqual(stats.qualified_roots, 0)
+
     def test_atomic_positive_results_exhaust_recovery_program_without_wrap(self) -> None:
         leads = ResearchLeadLedger(self.registry.connection)
         leads.seed_curated(self.coverage)
