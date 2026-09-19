@@ -150,6 +150,31 @@ def provider_request_reservation(provider_name: str) -> int:
     return 9 if provider_name == "internet_archive" else 1
 
 
+class ResidualFabricDispatcher:
+    """Idempotently submit one QueryPlan as provider slices + reducer barrier."""
+
+    def __init__(
+        self,
+        fabric_store,
+        providers: tuple[str, ...],
+    ) -> None:
+        normalized = tuple(
+            dict.fromkeys(item.strip() for item in providers if item.strip())
+        )
+        if not normalized:
+            raise ValueError("residual fabric dispatcher requires providers")
+        self.fabric_store = fabric_store
+        self.providers = normalized
+
+    async def __call__(self, plan: QueryPlan) -> str:
+        from .bridge import residual_search_dag
+
+        dag = residual_search_dag(plan, self.providers)
+        for work in dag.provider_slices:
+            self.fabric_store.submit_work(work)
+        return self.fabric_store.submit_work(dag.reducer)
+
+
 class ResidualProviderHandler:
     """Remote worker handler for exactly one deterministic provider slice."""
 
