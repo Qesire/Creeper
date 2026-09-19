@@ -972,7 +972,7 @@ def _publish_discovery_telemetry(
         column="state",
         states=("OPEN", "ACTIVE", "SATURATED", "EXHAUSTED"),
     )
-    if residual_states:
+    if _table_exists(registry, "residual_search_cells"):
         source_gauges["residual_search_cell_total"] = sum(
             residual_states.values()
         )
