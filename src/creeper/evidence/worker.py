@@ -563,12 +563,6 @@ class AsyncEvidenceWorker:
             CDXQueryState.TRANSIENT_ERROR: 0,
         }
         completed_since_yield = 0
-        writer = CommitWriter(
-            self.evidence_store,
-            self.control_store,
-            owner=self.owner,
-            flush_count=1,
-        )
         stop_heartbeat = asyncio.Event()
         heartbeat = asyncio.create_task(
             self._heartbeat(active_keys, stop_heartbeat)
