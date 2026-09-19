@@ -18,6 +18,9 @@ dependencies = [
 s3 = [
     "s3fs>=2024.10,<2027",
 ]
+postgres = [
+    "psycopg[binary]>=3.2,<4",
+]
 
 [project.scripts]
 creeper = "creeper.cli:main"
@@ -30,6 +33,9 @@ creeper-readiness-worker = "creeper.readiness_cli:main"
 creeper-submission-export = "creeper.submission_cli:main"
 creeper-historical-index = "creeper.historical_index_service:main"
 creeper-validation = "creeper.validation_cli:main"
+creeper-fabric-authority = "creeper.distributed.authority_cli:main"
+creeper-fabric-worker = "creeper.distributed.worker_cli:main"
+creeper-fabric-control = "creeper.distributed.control_cli:main"
 
 [build-system]
 requires = ["setuptools>=68"]
