@@ -868,6 +868,54 @@ class PostgresFabricStore:
                         (float(cooldown_seconds), permit.provider),
                     )
 
+    def consume_request_nonce(
+        self,
+        worker_id: str,
+        nonce: str,
+        *,
+        retention_seconds: float = 900.0,
+    ) -> bool:
+        if not worker_id.strip() or not nonce.strip():
+            raise ValueError("worker_id and nonce are required")
+        if (
+            not math.isfinite(float(retention_seconds))
+            or retention_seconds <= 0
+        ):
+            raise ValueError("retention_seconds must be finite and positive")
+        with self.connection.transaction():
+            with self.connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT revoked
+                    FROM fabric_workers_v2
+                    WHERE worker_id=%s
+                    FOR SHARE
+                    """,
+                    (worker_id,),
+                )
+                worker = cursor.fetchone()
+                if worker is None or bool(worker["revoked"]):
+                    raise WorkerRejectedError(
+                        f"unknown or revoked worker: {worker_id}"
+                    )
+                cursor.execute(
+                    """
+                    DELETE FROM fabric_request_nonces_v2
+                    WHERE seen_at < clock_timestamp()
+                        - (%s * interval '1 second')
+                    """,
+                    (float(retention_seconds),),
+                )
+                cursor.execute(
+                    """
+                    INSERT INTO fabric_request_nonces_v2(worker_id, nonce)
+                    VALUES (%s, %s)
+                    ON CONFLICT DO NOTHING
+                    """,
+                    (worker_id, nonce),
+                )
+                return cursor.rowcount == 1
+
     def unpublished_events(self, *, limit: int = 100) -> tuple[dict[str, object], ...]:
         if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
             raise ValueError("limit must be positive")
