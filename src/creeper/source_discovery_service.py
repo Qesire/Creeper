@@ -61,6 +61,7 @@ from creeper.source_discovery.measured_scout import (
 from creeper.source_discovery.models import SourceState
 from creeper.source_discovery.models import is_direct_evidence_entrypoint
 from creeper.source_discovery.registry import SourceDiscoveryRegistry
+from creeper.source_discovery.research_leads import ResearchLeadLedger
 from creeper.source_discovery.search_identity import SearchIdentityLedger
 from creeper.source_discovery.saturation import (
     SaturationPolicy,
@@ -657,6 +658,7 @@ async def _open_runtime(config: SourceDiscoveryServiceConfig):
             residual_ledger = None
             residual_scheduler = None
             search_identity = None
+            research_leads = None
             if config.residual_search.enabled:
                 residual_ledger = ResidualSearchLedger(registry.connection)
                 profile_signature = (
@@ -668,7 +670,12 @@ async def _open_runtime(config: SourceDiscoveryServiceConfig):
                 )
                 residual_ledger.ensure_search_profile(profile_signature)
                 residual_ledger.ensure_cells(default_search_cells())
-                residual_scheduler = SearchCellScheduler(residual_ledger)
+                research_leads = ResearchLeadLedger(registry.connection)
+                research_leads.seed_curated(residual_ledger)
+                residual_scheduler = SearchCellScheduler(
+                    residual_ledger,
+                    priority_cell_keys=research_leads.recovery_cell_keys(),
+                )
                 search_identity = SearchIdentityLedger(registry.connection)
 
             manager = SourceReservoirManager(
@@ -789,6 +796,7 @@ async def _open_runtime(config: SourceDiscoveryServiceConfig):
                     search_executor=search,
                     deterministic_search_executor=deterministic_search,
                     search_identity_ledger=search_identity,
+                    research_lead_ledger=research_leads,
                     scout_authority=scout_authority,
                     saturation_controller=saturation,
                     triage_parallelism=config.coordinator.triage_parallelism,
