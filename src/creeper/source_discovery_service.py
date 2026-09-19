@@ -982,6 +982,22 @@ def _publish_discovery_telemetry(
                 for state, count in residual_states.items()
             }
         )
+        lane_row = registry.connection.execute(
+            """
+            SELECT
+                SUM(CASE WHEN mechanism LIKE 'recover_%' THEN 1 ELSE 0 END)
+                    AS research_recovery,
+                SUM(CASE WHEN mechanism LIKE 'recover_%' THEN 0 ELSE 1 END)
+                    AS residual_population
+            FROM residual_search_cells
+            """
+        ).fetchone()
+        source_gauges["research_recovery_cell_total"] = int(
+            lane_row["research_recovery"] or 0
+        )
+        source_gauges["residual_population_cell_total"] = int(
+            lane_row["residual_population"] or 0
+        )
     if _table_exists(registry, "source_research_leads_v1"):
         rows = registry.connection.execute(
             """
