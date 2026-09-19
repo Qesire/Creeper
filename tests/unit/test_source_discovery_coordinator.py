@@ -33,6 +33,7 @@ from creeper.source_discovery.search_identity import (
     SearchIdentityLedger,
     canonicalize_search_result,
 )
+from creeper.source_discovery.unknown_format import make_unknown_format_reason
 from creeper.sources.format_binding import SourceFormatObservation
 from creeper.sources.layout_binding import SourceRecordLayout
 from creeper.sources.schema_binding import SourceRecordSchema
@@ -63,22 +64,35 @@ class SourceDiscoveryCoordinatorTests(unittest.IsolatedAsyncioTestCase):
             confidence=0.7,
         )
 
-    def hold_structural_metasource(
+    def hold_unknown_format_source(
         self,
-        name: str = "structure-blocker",
+        name: str = "format-blocker",
     ) -> SourceCandidate:
-        candidate = SourceCandidate(
-            canonical_entrypoint=f"https://catalog.example/{name}/",
-            source_family="RESOURCE_CATALOG",
-            level=SourceLevel.METASOURCE,
-            discovered_by="test",
-            discovery_strategy="DETERMINISTIC_LINK_EXPANSION",
-            expected_volume=100_000,
-            enumerability_prior=0.9,
-            confidence=0.8,
+        reason = make_unknown_format_reason(
+            (
+                b'{"host":"a.example"}\n'
+                b'{"host":"b.example"}\n'
+                b'{"host":"c.example"}\n'
+            ),
+            content_type="application/octet-stream",
+            truncated=False,
         )
-        self.registry.register_proposal(candidate)
-        return self.registry.transition(candidate.source_key, SourceState.HOLD)
+        assert reason is not None
+        candidate = SourceCandidate(
+            canonical_entrypoint=f"https://opaque.example/{name}.data",
+            source_family="BULK_ARTIFACT",
+            level=SourceLevel.SOURCE,
+            discovered_by="deterministic:test",
+            discovery_strategy="FIXTURE",
+            expected_volume=100_000,
+            enumerability_prior=1.0,
+            confidence=0.8,
+            state=SourceState.HOLD,
+            state_reason=reason,
+        )
+        stored, _inserted = self.registry.register_proposal(candidate)
+        return stored
+
 
     def to_scout_ready(self, candidate: SourceCandidate) -> None:
         self.registry.register_proposal(candidate)
@@ -243,7 +257,7 @@ class SourceDiscoveryCoordinatorTests(unittest.IsolatedAsyncioTestCase):
         self.registry.register_proposal(discovered)
         scout = self.candidate("scout")
         self.to_scout_ready(scout)
-        self.hold_structural_metasource("overlap")
+        self.hold_unknown_format_source("overlap")
 
         labels: set[str] = set()
         all_stages_entered = asyncio.Event()
@@ -673,7 +687,7 @@ class SourceDiscoveryCoordinatorTests(unittest.IsolatedAsyncioTestCase):
             confidence=1.0,
         )
         self.to_scout_ready(bulk)
-        self.hold_structural_metasource("foreground-structure")
+        self.hold_unknown_format_source("foreground-format")
         scout_calls = 0
         search_calls = 0
 
@@ -906,7 +920,7 @@ class SourceDiscoveryCoordinatorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(report.scout_children_dropped, 2)
 
     async def test_search_executor_cannot_overfill_directive_budget(self) -> None:
-        self.hold_structural_metasource("budget-cap")
+        self.hold_unknown_format_source("budget-cap")
 
         async def triage(_candidate: SourceCandidate) -> TriageResult:
             return TriageResult(TriageDisposition.SCOUT)
