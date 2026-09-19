@@ -55,6 +55,7 @@ def _work_payload(lease: LeaseToken) -> dict[str, object]:
         "provider": work.provider,
         "min_memory_bytes": work.min_memory_bytes,
         "network_class": work.network_class,
+        "dependency_work_keys": list(work.dependency_work_keys),
     }
 
 
