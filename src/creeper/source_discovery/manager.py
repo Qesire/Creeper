@@ -260,25 +260,6 @@ class SourceReservoirManager:
         holds.sort(key=lambda item: (-item.scout_priority, item.source_key))
         return holds
 
-    def _structural_holds(self) -> list[SourceCandidate]:
-        holds = [
-            candidate
-            for candidate in self.registry.list_candidates(
-                state=SourceState.HOLD
-            )
-            if (
-                (
-                    candidate.source_family
-                    in {"RESOURCE_CATALOG", "RESOURCE_DIRECTORY"}
-                    or candidate.level
-                    in {SourceLevel.COLLECTION, SourceLevel.METASOURCE}
-                )
-                and not is_background_bulk_candidate(candidate)
-            )
-            and self.registry.suppression_reason(candidate) is None
-        ]
-        holds.sort(key=lambda item: (-item.scout_priority, item.source_key))
-        return holds
 
     def _overlap_penalty(
         self,
@@ -470,17 +451,17 @@ class SourceReservoirManager:
             >= cooldown
         )
 
-    def _adaptive_search_budget(self, *, structural_hold: bool) -> int:
-        """Bound simultaneous agent calls from immediate observed search supply."""
+    def _adaptive_search_budget(self, *, adapter_hold: bool) -> int:
+        """Bound automatic LLM calls; only unknown-format adapter work qualifies."""
         if not self._global_search_available():
             return 0
         zero_streak, new_sources, episodes = self._recent_search_supply()
         configured = self.targets.max_search_directives
         if configured < 1:
             return 0
-        if structural_hold:
-            # One structure-specific call is usually higher information density
-            # than launching several broad searches against the same blockage.
+        if adapter_hold:
+            # One adapter-specific call is enough; ordinary discovery never
+            # consumes this budget.
             return 1
         if episodes < 1:
             return min(configured, 2)
@@ -614,7 +595,7 @@ class SourceReservoirManager:
         if not self._strategy_available(strategy):
             return ()
 
-        capacity = self._adaptive_search_budget(structural_hold=True)
+        capacity = self._adaptive_search_budget(adapter_hold=True)
         if capacity <= 0:
             return ()
 
@@ -725,7 +706,7 @@ class SourceReservoirManager:
             active=background_by_state[SourceState.ACTIVE],
         )[:1]
 
-        structural_hold = bool(self._unknown_format_holds() or self._structural_holds())
+        adapter_hold = bool(self._unknown_format_holds())
         zero_new_streak, _recent_new_sources, _episodes = (
             self._recent_search_supply()
         )
@@ -751,7 +732,7 @@ class SourceReservoirManager:
             search_zero_new_streak=zero_new_streak,
             search_adaptive_cooldown_seconds=self._adaptive_search_cooldown(),
             search_call_budget=self._adaptive_search_budget(
-                structural_hold=structural_hold
+                adapter_hold=adapter_hold
             ),
         )
 
