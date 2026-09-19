@@ -83,6 +83,59 @@ CREATE TABLE IF NOT EXISTS fabric_inbox_v2 (
     consumed_at REAL NOT NULL,
     PRIMARY KEY(consumer_id, event_id)
 );
+
+CREATE TABLE IF NOT EXISTS fabric_provider_budgets_v2 (
+    provider TEXT PRIMARY KEY,
+    requests_per_second REAL NOT NULL CHECK(requests_per_second > 0),
+    max_global_inflight INTEGER NOT NULL CHECK(max_global_inflight >= 1),
+    require_qualified_region INTEGER NOT NULL DEFAULT 1 CHECK(require_qualified_region IN (0,1)),
+    next_request_at REAL NOT NULL DEFAULT 0,
+    cooldown_until REAL NOT NULL DEFAULT 0,
+    updated_at REAL NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS fabric_provider_regions_v2 (
+    provider TEXT NOT NULL,
+    region TEXT NOT NULL,
+    qualified INTEGER NOT NULL DEFAULT 0 CHECK(qualified IN (0,1)),
+    samples INTEGER NOT NULL DEFAULT 0 CHECK(samples >= 0),
+    successes INTEGER NOT NULL DEFAULT 0 CHECK(successes >= 0),
+    throttles INTEGER NOT NULL DEFAULT 0 CHECK(throttles >= 0),
+    failures INTEGER NOT NULL DEFAULT 0 CHECK(failures >= 0),
+    updated_at REAL NOT NULL,
+    PRIMARY KEY(provider, region)
+);
+
+CREATE TABLE IF NOT EXISTS fabric_provider_regions_v2 (
+    provider TEXT NOT NULL REFERENCES fabric_provider_budgets_v2(provider),
+    region TEXT NOT NULL,
+    qualified BOOLEAN NOT NULL DEFAULT FALSE,
+    samples INTEGER NOT NULL DEFAULT 0 CHECK(samples >= 0),
+    successes INTEGER NOT NULL DEFAULT 0 CHECK(successes >= 0),
+    throttles INTEGER NOT NULL DEFAULT 0 CHECK(throttles >= 0),
+    failures INTEGER NOT NULL DEFAULT 0 CHECK(failures >= 0),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    PRIMARY KEY(provider, region)
+);
+
+CREATE TABLE IF NOT EXISTS fabric_provider_permits_v2 (
+    permit_id TEXT PRIMARY KEY,
+    provider TEXT NOT NULL,
+    worker_id TEXT NOT NULL,
+    task_id TEXT NOT NULL,
+    lease_epoch INTEGER NOT NULL CHECK(lease_epoch >= 1),
+    allowed_requests INTEGER NOT NULL CHECK(allowed_requests >= 1),
+    expires_at REAL NOT NULL,
+    active INTEGER NOT NULL DEFAULT 1 CHECK(active IN (0,1)),
+    issued_at REAL NOT NULL,
+    status_code INTEGER,
+    response_bytes INTEGER NOT NULL DEFAULT 0 CHECK(response_bytes >= 0),
+    FOREIGN KEY(provider) REFERENCES fabric_provider_budgets_v2(provider),
+    FOREIGN KEY(worker_id) REFERENCES fabric_workers_v2(worker_id),
+    FOREIGN KEY(task_id) REFERENCES fabric_tasks_v2(task_id)
+);
+CREATE INDEX IF NOT EXISTS idx_fabric_provider_permits_active_v2
+    ON fabric_provider_permits_v2(provider, active, expires_at);
 """
 
 
@@ -172,6 +225,7 @@ CREATE TABLE IF NOT EXISTS fabric_provider_budgets_v2 (
     provider TEXT PRIMARY KEY,
     requests_per_second DOUBLE PRECISION NOT NULL CHECK(requests_per_second > 0),
     max_global_inflight INTEGER NOT NULL CHECK(max_global_inflight >= 1),
+    require_qualified_region BOOLEAN NOT NULL DEFAULT TRUE,
     next_request_at TIMESTAMPTZ NOT NULL DEFAULT '-infinity',
     cooldown_until TIMESTAMPTZ NOT NULL DEFAULT '-infinity',
     updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
