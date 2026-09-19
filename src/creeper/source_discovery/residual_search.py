@@ -622,15 +622,23 @@ class ResidualSearchLedger:
                 )
 
         stats = self.stats(cell)
+        terminal_state: SearchCellState | None = None
         if self._should_saturate(stats):
+            terminal_state = SearchCellState.SATURATED
+        elif stats.variant_cursor >= query_program_length(cell):
+            # Every query program is finite. A cell with some useful/nonzero
+            # results may not satisfy low-yield saturation thresholds, but it
+            # still must not wrap variant_cursor and replay old query shapes.
+            terminal_state = SearchCellState.EXHAUSTED
+        if terminal_state is not None:
             with self.connection:
                 self.connection.execute(
                     """
                     UPDATE residual_search_cells
-                    SET state = 'SATURATED', updated_at = ?
+                    SET state = ?, updated_at = ?
                     WHERE cell_key = ?
                     """,
-                    (now, cell.key),
+                    (terminal_state.value, now, cell.key),
                 )
             stats = self.stats(cell)
         return stats
@@ -722,6 +730,16 @@ class SearchCellScheduler:
         remaining = self.ledger.list_stats(
             states=(SearchCellState.OPEN, SearchCellState.ACTIVE)
         )
+        # Converge databases produced by older runtimes that could leave an
+        # ACTIVE cell past the end of its finite variant program. Do this before
+        # emitting plans so upgrade cannot replay even one stale query.
+        eligible: list[SearchCellStats] = []
+        for stats in remaining:
+            if stats.variant_cursor >= query_program_length(stats.cell):
+                self.ledger.mark_exhausted(stats.cell)
+                continue
+            eligible.append(stats)
+        remaining = eligible
         selected: list[SearchCellStats] = []
         mechanism_counts: dict[str, int] = {}
         institution_counts: dict[str, int] = {}
