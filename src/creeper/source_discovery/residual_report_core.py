@@ -87,6 +87,11 @@ def _cell_payload(row: dict[str, Any]) -> dict[str, Any]:
     cursor = int(row["variant_cursor"])
     return {
         "cell_key": str(row["cell_key"]),
+        "lane": (
+            "research_recovery"
+            if cell.mechanism.startswith("recover_")
+            else "residual_population"
+        ),
         "mechanism": cell.mechanism,
         "institution": cell.institution,
         "period": cell.period,
@@ -386,10 +391,19 @@ def build_residual_search_report(
         item["qualified_fraction"] = _safe_ratio(qualified, references)
         item["mean_relevance_score"] = float(item["mean_relevance_score"] or 0.0)
 
+    residual_cells = [
+        item for item in cells if item["lane"] == "residual_population"
+    ]
+    recovery_cells = [
+        item for item in cells if item["lane"] == "research_recovery"
+    ]
+
     return {
         "report_version": REPORT_VERSION,
         "search_profile": profile,
         "summary": summary,
+        "residual_population_summary": _sum_cells(residual_cells),
+        "research_recovery_summary": _sum_cells(recovery_cells),
         "query_shapes": _group_shape_rows(episodes, ("query_shape",)),
         "query_program_steps": _group_shape_rows(
             episodes,
@@ -398,6 +412,7 @@ def build_residual_search_report(
         "providers": providers,
         "provider_overlap": _provider_overlap(connection),
         "dimensions": {
+            "lane": _group_cells(cells, "lane"),
             "mechanism": _group_cells(cells, "mechanism"),
             "institution": _group_cells(cells, "institution"),
             "artifact": _group_cells(cells, "artifact"),
@@ -409,6 +424,7 @@ def build_residual_search_report(
             "cell_result_metrics_are_cumulative": True,
             "query_shape_result_counts_available": False,
             "query_shape_economics_use_search_episode_attribution": True,
+            "targeted_recovery_is_reported_separately_from_residual_population": True,
         },
     }
 
