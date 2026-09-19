@@ -252,9 +252,7 @@ class CoordinatorClient:
             },
         )
 
-    async def commit_batch(self, lease: TaskLease, batch: ResultBatch) -> str:
-        if batch.task_id != lease.task_id or batch.generation != lease.generation:
-            raise ValueError("batch identity does not match lease")
+    async def commit_batch(self, batch: ResultBatch) -> str:
         value = await self._post(
             "/v2/results/batch",
             {
