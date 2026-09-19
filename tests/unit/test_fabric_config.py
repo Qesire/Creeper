@@ -42,7 +42,7 @@ secret_env = "CREEPER_TEST_SECRET"
             )
             self.assertEqual(
                 first.spool_database,
-                Path("spool.sqlite3"),
+                (root/"spool.sqlite3").resolve(),
             )
 
     def test_explicit_instance_override_is_preserved_for_controlled_tests(self) -> None:
