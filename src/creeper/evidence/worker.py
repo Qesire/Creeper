@@ -27,10 +27,9 @@ from creeper.evidence.policies import (
     RangeEvidenceQueryResult,
     TemporalScope,
 )
-from creeper.storage.commit_writer import CommitWriter
 from creeper.storage.control_store import ControlStore, EvidenceTask
 from creeper.storage.evidence_queue import DurableEvidenceQueue
-from creeper.storage.evidence_store import EvidenceStore, EvidenceTaskProvenance
+from creeper.storage.evidence_store import EvidenceStore
 
 
 class AsyncEvidenceProvider(Protocol):
@@ -284,54 +283,6 @@ class AsyncEvidenceWorker:
             state=CDXQueryState.TRANSIENT_ERROR,
             error=error,
             key=task.key,
-        )
-
-    def _persist_positive_capsules(
-        self,
-        key: EvidenceQueryKey,
-        capsules: Iterable,
-        *,
-        domain: bool = False,
-    ) -> int:
-        capsule_rows = tuple(capsules)
-        if not capsule_rows:
-            return 0
-        origin = self.control_store.primary_evidence_task_origin(key)
-        provenance = EvidenceTaskProvenance(
-            key=key,
-            source_key="" if origin is None else origin[0],
-            reservoir_id="" if origin is None else origin[1],
-            lease_id="" if origin is None else origin[2],
-            committed_at=float(self.control_store.clock()),
-        )
-        inserted = self.evidence_store.put_many_with_task_provenance(
-            (capsule, provenance) for capsule in capsule_rows
-        )
-        if domain:
-            self.control_store.attribute_domain_task_host_years(
-                key,
-                capsule_rows,
-            )
-        else:
-            self.control_store.attribute_task_host_years(
-                key,
-                (capsule.year for capsule in capsule_rows),
-            )
-        return inserted
-
-    def _record_attempt_metric(
-        self,
-        task: EvidenceTask,
-        result: EvidenceQueryResult | RangeEvidenceQueryResult | DomainEvidenceQueryResult,
-    ) -> None:
-        self.control_store.record_evidence_task_attempt_metric(
-            result.key or task.key,
-            attempt=task.attempt,
-            state=result.state,
-            provider_requests=result.provider_requests,
-            provider_elapsed_milliseconds=result.provider_elapsed_milliseconds,
-            pages_seen=result.pages_seen,
-            records_seen=result.records_seen,
         )
 
     async def _execute(self, task: EvidenceTask) -> EvidenceQueryResult:
@@ -648,7 +599,6 @@ class AsyncEvidenceWorker:
                 if not execution.done():
                     execution.cancel()
             await asyncio.gather(*executions, return_exceptions=True)
-            writer.close()
             stop_heartbeat.set()
             await heartbeat
 
