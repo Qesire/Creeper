@@ -67,6 +67,10 @@ class WorkerDescriptor:
             values = tuple(getattr(self, name))
             if len(values) != len(set(values)) or any(not str(v).strip() for v in values):
                 raise ValueError(f"{name} must contain unique non-empty values")
+        if not self.capabilities or not self.producers:
+            raise ValueError(
+                "workers must explicitly declare non-empty capabilities and producers"
+            )
 
 
 @dataclass(frozen=True, slots=True)
