@@ -24,6 +24,7 @@ import re
 import sqlite3
 import time
 from dataclasses import dataclass
+from urllib.parse import urlsplit
 from enum import StrEnum
 from typing import Callable
 
@@ -46,6 +47,7 @@ class ResearchLeadDefinition:
     identity: str
     instruction: str
     match_groups: tuple[tuple[str, ...], ...] = ()
+    required_host_suffix: str | None = None
     recovery_cell: SearchCell | None = None
 
     def __post_init__(self) -> None:
@@ -70,6 +72,11 @@ class ResearchLeadDefinition:
                 not isinstance(term, str) or not term.strip() for term in group
             ):
                 raise ValueError("match_groups must contain non-empty string groups")
+        if self.required_host_suffix is not None:
+            suffix = self.required_host_suffix.strip().lower().lstrip(".")
+            if not suffix or "/" in suffix:
+                raise ValueError("required_host_suffix must be a hostname suffix")
+            object.__setattr__(self, "required_host_suffix", suffix)
         if self.kind is ResearchLeadKind.EXACT_RECOVERY:
             if self.recovery_cell is None:
                 raise ValueError("EXACT_RECOVERY requires a recovery_cell")
@@ -225,6 +232,7 @@ CURATED_RESEARCH_LEADS: tuple[ResearchLeadDefinition, ...] = (
             ("nus", "nlanr"),
             ("national university of singapore", "nlanr"),
         ),
+        required_host_suffix="nus.edu.sg",
     ),
 )
 
@@ -261,6 +269,13 @@ def _result_text(result: CanonicalSearchResult) -> str:
 def _matches(lead: ResearchLeadDefinition, result: CanonicalSearchResult) -> bool:
     if not lead.match_groups:
         return False
+    if lead.required_host_suffix is not None:
+        hostname = (urlsplit(result.canonical_url).hostname or "").lower()
+        if not (
+            hostname == lead.required_host_suffix
+            or hostname.endswith("." + lead.required_host_suffix)
+        ):
+            return False
     text = _result_text(result)
     for group in lead.match_groups:
         if all(_normalize(term) in text for term in group):
@@ -292,6 +307,7 @@ class ResearchLeadLedger:
                 identity_text TEXT NOT NULL,
                 instruction TEXT NOT NULL,
                 match_groups_json TEXT NOT NULL,
+                required_host_suffix TEXT,
                 cell_key TEXT,
                 matched_count INTEGER NOT NULL DEFAULT 0,
                 last_match_at REAL,
@@ -326,8 +342,8 @@ class ResearchLeadLedger:
                         INSERT OR IGNORE INTO source_research_leads_v1(
                             lead_id, kind, mechanism, target_period,
                             identity_text, instruction, match_groups_json,
-                            cell_key, created_at, updated_at
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            required_host_suffix, cell_key, created_at, updated_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
                             lead.lead_id,
@@ -341,6 +357,7 @@ class ResearchLeadLedger:
                                 ensure_ascii=False,
                                 separators=(",", ":"),
                             ),
+                            lead.required_host_suffix,
                             cell_key,
                             now,
                             now,
@@ -352,7 +369,7 @@ class ResearchLeadLedger:
                     UPDATE source_research_leads_v1
                     SET kind=?, mechanism=?, target_period=?,
                         identity_text=?, instruction=?, match_groups_json=?,
-                        cell_key=?, updated_at=?
+                        required_host_suffix=?, cell_key=?, updated_at=?
                     WHERE lead_id=?
                     """,
                     (
@@ -366,6 +383,7 @@ class ResearchLeadLedger:
                             ensure_ascii=False,
                             separators=(",", ":"),
                         ),
+                        lead.required_host_suffix,
                         cell_key,
                         now,
                         lead.lead_id,
