@@ -52,6 +52,16 @@ CREATE INDEX IF NOT EXISTS idx_fabric_tasks_claim_v2
 CREATE INDEX IF NOT EXISTS idx_fabric_tasks_lease_v2
     ON fabric_tasks_v2(state, lease_deadline);
 
+CREATE TABLE IF NOT EXISTS fabric_task_dependencies_v2 (
+    task_id TEXT NOT NULL,
+    depends_on_task_id TEXT NOT NULL,
+    PRIMARY KEY(task_id, depends_on_task_id),
+    FOREIGN KEY(task_id) REFERENCES fabric_tasks_v2(task_id) ON DELETE CASCADE,
+    FOREIGN KEY(depends_on_task_id) REFERENCES fabric_tasks_v2(task_id)
+);
+CREATE INDEX IF NOT EXISTS idx_fabric_task_dependencies_parent_v2
+    ON fabric_task_dependencies_v2(depends_on_task_id, task_id);
+
 CREATE TABLE IF NOT EXISTS fabric_result_batches_v2 (
     task_id TEXT NOT NULL,
     sequence_no INTEGER NOT NULL CHECK(sequence_no >= 0),
@@ -207,6 +217,14 @@ CREATE INDEX IF NOT EXISTS idx_fabric_tasks_claim_v2
 CREATE INDEX IF NOT EXISTS idx_fabric_tasks_lease_v2
     ON fabric_tasks_v2(state, lease_deadline);
 
+CREATE TABLE IF NOT EXISTS fabric_task_dependencies_v2 (
+    task_id UUID NOT NULL REFERENCES fabric_tasks_v2(task_id) ON DELETE CASCADE,
+    depends_on_task_id UUID NOT NULL REFERENCES fabric_tasks_v2(task_id),
+    PRIMARY KEY(task_id, depends_on_task_id)
+);
+CREATE INDEX IF NOT EXISTS idx_fabric_task_dependencies_parent_v2
+    ON fabric_task_dependencies_v2(depends_on_task_id, task_id);
+
 CREATE TABLE IF NOT EXISTS fabric_result_batches_v2 (
     task_id UUID NOT NULL REFERENCES fabric_tasks_v2(task_id),
     sequence_no BIGINT NOT NULL CHECK(sequence_no >= 0),
@@ -282,6 +300,14 @@ WITH candidate AS (
       AND (
             provider IS NULL
             OR provider = ANY(%(allowed_providers)s::text[])
+          )
+      AND NOT EXISTS (
+            SELECT 1
+            FROM fabric_task_dependencies_v2 AS dependency
+            JOIN fabric_tasks_v2 AS parent
+              ON parent.task_id = dependency.depends_on_task_id
+            WHERE dependency.task_id = fabric_tasks_v2.task_id
+              AND parent.state <> 'SUCCEEDED'
           )
     ORDER BY priority DESC, available_at, created_at, task_id
     FOR UPDATE SKIP LOCKED
