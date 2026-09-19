@@ -137,6 +137,9 @@ class DistributedAuthorityStore:
                 final INTEGER NOT NULL DEFAULT 0 CHECK(final IN (0,1)),
                 committed_at REAL NOT NULL,
                 consumed_at REAL,
+                consume_attempts INTEGER NOT NULL DEFAULT 0,
+                consume_error TEXT,
+                quarantined INTEGER NOT NULL DEFAULT 0 CHECK(quarantined IN (0,1)),
                 UNIQUE(task_id, sequence_no),
                 FOREIGN KEY(task_id) REFERENCES fabric_work(task_id)
             ) WITHOUT ROWID;
@@ -857,7 +860,7 @@ class DistributedAuthorityStore:
                 """
                 SELECT *
                 FROM fabric_result_batches
-                WHERE consumed_at IS NULL
+                WHERE consumed_at IS NULL AND quarantined=0
                 ORDER BY committed_at, task_id, sequence_no
                 LIMIT ?
                 """,
@@ -878,6 +881,38 @@ class DistributedAuthorityStore:
                 ).rowcount
                 == 1
             )
+
+    def mark_batch_consume_failed(
+        self,
+        batch_id: str,
+        error: str,
+        *,
+        max_attempts: int = 20,
+    ) -> bool:
+        if max_attempts < 1:
+            raise ValueError("max_attempts must be positive")
+        with self.connection:
+            row = self.connection.execute(
+                """
+                SELECT consume_attempts
+                FROM fabric_result_batches
+                WHERE batch_id=? AND consumed_at IS NULL
+                """,
+                (batch_id,),
+            ).fetchone()
+            if row is None:
+                return False
+            attempts = int(row["consume_attempts"]) + 1
+            quarantined = attempts >= max_attempts
+            self.connection.execute(
+                """
+                UPDATE fabric_result_batches
+                SET consume_attempts=?, consume_error=?, quarantined=?
+                WHERE batch_id=?
+                """,
+                (attempts, error[:2000], int(quarantined), batch_id),
+            )
+            return quarantined
 
     def pending_outbox(self, *, limit: int = 100) -> tuple[sqlite3.Row, ...]:
         if limit < 1:
