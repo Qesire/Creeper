@@ -18,6 +18,7 @@ from collections.abc import AsyncIterator, Callable, Iterable, Mapping
 from dataclasses import dataclass
 from typing import Protocol
 
+from creeper.evidence.result_commit import EvidenceResultCommitter
 from creeper.evidence.policies import (
     CDXQueryState,
     DomainEvidenceQueryResult,
@@ -129,6 +130,12 @@ class AsyncEvidenceWorker:
         self.heartbeat_interval = float(heartbeat_interval)
         self.clock = clock
         self.queue = DurableEvidenceQueue(control_store)
+        self.result_committer = EvidenceResultCommitter(
+            control_store,
+            evidence_store,
+            owner=owner,
+            retry_at=self._retry_at,
+        )
         # Cumulative operational wait-state counters. The service snapshots
         # deltas into RuntimeTelemetryStore; they never affect evidence state.
         self.host_lock_wait_milliseconds = 0
