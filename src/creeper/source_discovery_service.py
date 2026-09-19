@@ -842,6 +842,7 @@ _DISCOVERY_COUNTER_FIELDS = {
     "search_candidates_dropped": "discovery_search_candidates_dropped",
     "adapter_bindings_applied": "discovery_adapter_bindings_applied",
     "deterministic_search_episodes": "discovery_deterministic_search_episodes",
+    "deterministic_search_dispatched": "discovery_deterministic_search_dispatched",
     "deterministic_search_failures": "discovery_deterministic_search_failures",
     "residual_reward_updates": "discovery_residual_reward_updates",
     "triaged_to_scout": "discovery_triaged_to_scout",
