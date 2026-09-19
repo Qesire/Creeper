@@ -139,6 +139,170 @@ class ResidualAtomicCommitTests(unittest.TestCase):
                     )
                 self._assert_pre_episode_state()
 
+    def test_hard_negative_is_identified_but_never_proposed(self) -> None:
+        leads = ResearchLeadLedger(self.registry.connection)
+        leads.seed_curated(self.coverage)
+        negative = canonicalize_search_result(
+            RawSearchResult(
+                provider="fixture",
+                provider_result_id="ucb-hard-negative",
+                url="https://repo.example/ucb-home-ip-trace.dat",
+                title="UCB Home IP trace 1996",
+                description="Berkeley public client trace",
+            ),
+            relevance_score=1.0,
+            qualified=True,
+        )
+        batch = DeterministicSearchBatch(
+            backend="fixture",
+            query=self.plan.query,
+            actor="deterministic:test",
+            results=(negative,),
+            search_cost_seconds=0.1,
+        )
+
+        result = commit_deterministic_residual_batch(
+            self.registry,
+            self.coverage,
+            self.identities,
+            plan=self.plan,
+            batch=batch,
+            search_cost_seconds=0.1,
+            candidate_cap=8,
+            research_leads=leads,
+        )
+
+        self.assertEqual(result.registered_count, 0)
+        self.assertEqual(result.dropped_count, 1)
+        self.assertEqual(self._count("source_candidates"), 0)
+        self.assertEqual(self._count("residual_search_references"), 1)
+        row = self.registry.connection.execute(
+            """
+            SELECT matched_count, last_source_key
+            FROM source_research_leads_v1
+            WHERE lead_id='ucb-home-ip-1996-public-trace'
+            """
+        ).fetchone()
+        self.assertEqual(row["matched_count"], 1)
+        self.assertIsNone(row["last_source_key"])
+
+    def test_provenance_hold_is_retained_without_year_or_direct_prior(self) -> None:
+        leads = ResearchLeadLedger(self.registry.connection)
+        leads.seed_curated(self.coverage)
+        held = canonicalize_search_result(
+            RawSearchResult(
+                provider="fixture",
+                provider_result_id="nus-hold",
+                url="https://www.comp.nus.edu.sg/research/nlanr-sample.zip",
+                title="NUS NLANR teaching sample",
+                resource_type="file",
+            ),
+            relevance_score=1.0,
+            qualified=True,
+        )
+        batch = DeterministicSearchBatch(
+            backend="fixture",
+            query=self.plan.query,
+            actor="deterministic:test",
+            results=(held,),
+            search_cost_seconds=0.1,
+        )
+
+        result = commit_deterministic_residual_batch(
+            self.registry,
+            self.coverage,
+            self.identities,
+            plan=self.plan,
+            batch=batch,
+            search_cost_seconds=0.1,
+            candidate_cap=8,
+            research_leads=leads,
+        )
+
+        self.assertEqual(result.registered_count, 1)
+        candidate = self.registry.list_candidates()[0]
+        self.assertEqual(candidate.state.value, "HOLD")
+        self.assertEqual(
+            candidate.state_reason,
+            "RESEARCH_PROVENANCE_HOLD:nus-nlanr-sample",
+        )
+        self.assertIsNone(candidate.expected_year_from)
+        self.assertIsNone(candidate.expected_year_to)
+        self.assertEqual(candidate.temporal_semantics_prior, 0.0)
+        self.assertEqual(candidate.direct_evidence_prior, 0.0)
+
+    def test_exact_recovery_candidate_keeps_deterministic_lineage(self) -> None:
+        leads = ResearchLeadLedger(self.registry.connection)
+        leads.seed_curated(self.coverage)
+        lead = next(
+            item
+            for item in CURATED_RESEARCH_LEADS
+            if item.lead_id == "nlanr-uc-20000714"
+        )
+        assert lead.recovery_cell is not None
+        plan = QueryPlan(
+            cell=lead.recovery_cell,
+            query='"2000" "uc.sanitized-access.20000714" "research lab" "log"',
+            variant=0,
+            exclusions=(),
+            score=5.0,
+            mechanism_phrase="uc.sanitized-access.20000714",
+            include_institution=True,
+            query_shape="STRICT_4D",
+        )
+        recovered = canonicalize_search_result(
+            RawSearchResult(
+                provider="fixture",
+                provider_result_id="nlanr-recovered",
+                url=(
+                    "https://mirror.example/nlanr/"
+                    "uc.sanitized-access.20000714.gz"
+                ),
+                title="historical proxy file",
+                resource_type="file",
+            ),
+            relevance_score=1.0,
+            qualified=True,
+        )
+        batch = DeterministicSearchBatch(
+            backend="fixture",
+            query=plan.query,
+            actor="deterministic:test",
+            results=(recovered,),
+            search_cost_seconds=0.1,
+        )
+
+        result = commit_deterministic_residual_batch(
+            self.registry,
+            self.coverage,
+            self.identities,
+            plan=plan,
+            batch=batch,
+            search_cost_seconds=0.1,
+            candidate_cap=8,
+            research_leads=leads,
+        )
+
+        self.assertEqual(result.registered_count, 1)
+        candidate = self.registry.list_candidates()[0]
+        self.assertEqual(
+            candidate.discovery_strategy,
+            "RESEARCH_LEAD_RECOVERY",
+        )
+        self.assertEqual(
+            candidate.source_family,
+            "RESEARCH_RECOVERY:nlanr-uc-20000714",
+        )
+        row = self.registry.connection.execute(
+            """
+            SELECT matched_count, last_source_key
+            FROM source_research_leads_v1
+            WHERE lead_id='nlanr-uc-20000714'
+            """
+        ).fetchone()
+        self.assertEqual(row["matched_count"], 1)
+        self.assertEqual(row["last_source_key"], candidate.source_key)
+
     def test_success_commits_episode_identity_candidate_and_cursor_together(self) -> None:
         result = commit_deterministic_residual_batch(
             self.registry,
