@@ -128,6 +128,40 @@ source families become **cell-local exclusions**, not global blacklists.
 Canonical identity is retained at URL, artifact, dataset and family levels, so
 switching providers or repositories does not reset novelty memory.
 
+## Deterministic research-lead ledger
+
+Prior source research that is too specific for the generic SearchCell grid is
+persisted in the same local ControlStore database rather than injected into an
+LLM prompt. The curated ledger currently distinguishes three authority classes:
+
+- **HARD_NEGATIVE**: a known public distribution irreversibly loses hostname or
+  URL identity. Matching search results are written to the normal four-level
+  search-identity ledger, but never become SourceCandidates. This prevents the
+  same artifact from consuming downstream triage/scout work while retaining
+  anti-repetition memory.
+- **EXACT_RECOVERY**: prior research established a concrete historical identity
+  such as an exact filename or trace label. Each lead maps to one bounded
+  high-priority SearchCell and therefore reuses the normal DataCite, Zenodo,
+  Harvard Dataverse and Internet Archive provider set, provider-completeness
+  contract, canonical identity and atomic residual commit. There is no second
+  search backend and no unbounded synonym generation.
+- **PROVENANCE_HOLD**: a live-looking artifact is known but its target-period
+  provenance is unresolved. A deterministic match may be retained only in
+  `HOLD`; target-year bounds, temporal prior and direct-evidence prior are
+  removed until provenance is established independently.
+
+The initial exact-recovery program contains only five previously researched
+leads: NLANR UC 2000-07-14, CA*netII 1999-09-19/20, BU98 filtered trace,
+January 2001 DMOZ `content.rdf.u8.gz`, and historical RIPE/ISC hostcount raw
+output. Their finite query variants are scheduled ahead of generic unseen
+SearchCells, but ordinary saturation/exhaustion semantics still terminate them.
+
+Research-lead matches are committed inside the same SQLite transaction as the
+search episode, search identity, SourceCandidate proposal and SearchCell cursor.
+The calibration report separates `research_recovery` from
+`residual_population` so targeted recovery economics cannot silently distort
+generic residual-search tuning.
+
 ## Unknown-format recovery
 
 A concrete SOURCE that cannot be parsed deterministically remains in `HOLD`.
@@ -199,6 +233,8 @@ The production path now includes:
 - provider-diverse result-cap enforcement;
 - atomic deterministic residual commits and versioned restart recovery;
 - protocol-guarded residual calibration reports;
+- durable hard-negative / exact-recovery / provenance-hold research leads,
+  with targeted recovery reported separately from residual-population search;
 - deterministic measured-yield scouting with format/layout/schema bindings;
 - deterministic arbitrary-field/column hostname-layout inference before any
   LLM call; and
