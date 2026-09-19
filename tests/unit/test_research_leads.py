@@ -100,6 +100,17 @@ class ResearchLeadLedgerTests(unittest.TestCase):
         self.assertIsNotNone(hold)
         self.assertEqual(hold.lead_id, "nus-nlanr-sample")
         self.assertIsNone(self.ledger.hard_negative_match(nus))
+        forged = canonicalize_search_result(
+            RawSearchResult(
+                provider="fixture",
+                provider_result_id="forged-nus",
+                url="https://example.test/paper.pdf",
+                title="NUS NLANR teaching sample",
+            ),
+            relevance_score=1.0,
+            qualified=True,
+        )
+        self.assertIsNone(self.ledger.provenance_hold_match(forged))
 
     def test_exact_recovery_filename_in_url_is_relevance_evidence(self) -> None:
         lead = next(
