@@ -427,10 +427,6 @@ def commit_deterministic_residual_batch(
             if not result.qualified or not registration.new_dataset:
                 dropped += 1
                 continue
-            qualified_roots += 1
-            if registered_count >= candidate_cap:
-                dropped += 1
-                continue
 
             recovery = None
             provenance = None
@@ -446,6 +442,11 @@ def commit_deterministic_residual_batch(
                     # results remain in four-level identity memory only.
                     dropped += 1
                     continue
+
+            qualified_roots += 1
+            if registered_count >= candidate_cap:
+                dropped += 1
+                continue
 
             candidate = candidate_from_result(plan, result)
             if research_leads is not None:
