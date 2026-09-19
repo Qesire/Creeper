@@ -78,6 +78,24 @@ class WorkerRuntimeConfig:
         return value
 
 
+def _resolve_local_path(value: object, *, config_path: Path, name: str) -> Path:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{name} must be a non-empty path")
+    path=Path(value).expanduser()
+    if not path.is_absolute():
+        path=config_path.parent/path
+    return path.resolve()
+
+
+def _resolve_database(value: object, *, config_path: Path) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("authority.database must be non-empty")
+    text=value.strip()
+    if "://" in text:
+        return text
+    return str(_resolve_local_path(text,config_path=config_path,name="authority.database"))
+
+
 def _load_toml(path: Path) -> dict[str,Any]:
     with Path(path).open("rb") as source:
         value=tomllib.load(source)
@@ -132,8 +150,15 @@ def load_authority_config(path: Path) -> AuthorityRuntimeConfig:
             )
         )
     return AuthorityRuntimeConfig(
-        database=str(section["database"]),
-        credentials_file=Path(str(section["credentials_file"])).expanduser(),
+        database=_resolve_database(
+            section["database"],
+            config_path=Path(path).resolve(),
+        ),
+        credentials_file=_resolve_local_path(
+            section["credentials_file"],
+            config_path=Path(path).resolve(),
+            name="authority.credentials_file",
+        ),
         host=str(section.get("host","127.0.0.1")),
         port=int(section.get("port",8088)),
         max_clock_skew_seconds=float(
@@ -175,7 +200,11 @@ def load_worker_config(path: Path) -> WorkerRuntimeConfig:
     return WorkerRuntimeConfig(
         coordinator_url=str(section["coordinator_url"]),
         descriptor=descriptor,
-        spool_database=Path(str(section["spool_database"])).expanduser(),
+        spool_database=_resolve_local_path(
+            section["spool_database"],
+            config_path=Path(path).resolve(),
+            name="worker.spool_database",
+        ),
         secret_env=str(section.get("secret_env","CREEPER_WORKER_SECRET")),
         poll_seconds=float(section.get("poll_seconds",1.0)),
         claim_wait_seconds=float(section.get("claim_wait_seconds",10.0)),
