@@ -1,0 +1,22 @@
+[Unit]
+Description=Creeper Fabric evidence bridge
+After=creeper-fabric-authority.service
+Requires=creeper-fabric-authority.service
+OnFailure=creeper-email-alert@%n.service
+
+[Service]
+Type=simple
+User=creeper
+Group=creeper
+WorkingDirectory=/opt/creeper
+ExecStart=/opt/creeper/.venv/bin/creeper-fabric-evidence-bridge --config /etc/creeper/fabric.toml
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/srv/creeper /var/lib/creeper
+
+[Install]
+WantedBy=multi-user.target
