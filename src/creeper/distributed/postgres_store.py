@@ -168,6 +168,8 @@ class PostgresAuthorityStore:
                 CHECK(max_global_inflight >= 1),
             require_qualified_region BOOLEAN NOT NULL DEFAULT TRUE,
             allow_unknown_region_probe BOOLEAN NOT NULL DEFAULT FALSE,
+            region_reprobe_after_seconds DOUBLE PRECISION NOT NULL DEFAULT 21600
+                CHECK(region_reprobe_after_seconds > 0),
             next_request_at DOUBLE PRECISION NOT NULL DEFAULT 0,
             cooldown_until DOUBLE PRECISION NOT NULL DEFAULT 0,
             updated_at DOUBLE PRECISION NOT NULL
@@ -217,6 +219,9 @@ class PostgresAuthorityStore:
         ALTER TABLE fabric_provider_budgets
             ADD COLUMN IF NOT EXISTS allow_unknown_region_probe
             BOOLEAN NOT NULL DEFAULT FALSE;
+        ALTER TABLE fabric_provider_budgets
+            ADD COLUMN IF NOT EXISTS region_reprobe_after_seconds
+            DOUBLE PRECISION NOT NULL DEFAULT 21600;
         """
         with self.connection.transaction():
             with self.connection.cursor() as cur:
@@ -1060,7 +1065,15 @@ class PostgresAuthorityStore:
         self,provider:str,*,requests_per_second:float,
         max_global_inflight:int,require_qualified_region:bool=True,
         allow_unknown_region_probe:bool=False,
+        region_reprobe_after_seconds:float=21600.0,
     )->None:
+        if (
+            not provider.strip()
+            or requests_per_second<=0
+            or max_global_inflight<1
+            or region_reprobe_after_seconds<=0
+        ):
+            raise ValueError("invalid provider budget")
         now=float(self.clock())
         with self.connection.transaction():
             with self.connection.cursor() as cur:
@@ -1069,19 +1082,20 @@ class PostgresAuthorityStore:
                     INSERT INTO fabric_provider_budgets(
                         provider,requests_per_second,max_global_inflight,
                         require_qualified_region,allow_unknown_region_probe,
-                        updated_at
-                    ) VALUES (%s,%s,%s,%s,%s,%s)
+                        region_reprobe_after_seconds,updated_at
+                    ) VALUES (%s,%s,%s,%s,%s,%s,%s)
                     ON CONFLICT(provider) DO UPDATE SET
                         requests_per_second=EXCLUDED.requests_per_second,
                         max_global_inflight=EXCLUDED.max_global_inflight,
                         require_qualified_region=EXCLUDED.require_qualified_region,
                         allow_unknown_region_probe=EXCLUDED.allow_unknown_region_probe,
+                        region_reprobe_after_seconds=EXCLUDED.region_reprobe_after_seconds,
                         updated_at=EXCLUDED.updated_at
                     """,
                     (
                         provider,requests_per_second,max_global_inflight,
                         require_qualified_region,allow_unknown_region_probe,
-                        now,
+                        region_reprobe_after_seconds,now,
                     ),
                 )
 
@@ -1130,7 +1144,7 @@ class PostgresAuthorityStore:
                 successes=int(row["successes"])
                 blocked=int(row["policy_blocks"])
                 failures=int(row["timeouts"])+int(row["throttles"])+blocked
-                if blocked:
+                if policy_block:
                     state="BLOCKED"
                 elif samples>=3 and successes>=2 and failures<=samples//2:
                     state="QUALIFIED"
