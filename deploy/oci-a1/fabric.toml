@@ -1,0 +1,85 @@
+# Single-host production profile for OCI Always Free Ampere A1.
+# Secrets are deliberately not stored here.
+
+[authority]
+database = "postgresql:///creeper"
+credentials_file = "/etc/creeper/workers.json"
+host = "127.0.0.1"
+port = 8088
+max_clock_skew_seconds = 300
+
+# One host means Region qualification adds no routing value. Provider budgets
+# remain authoritative and shared by all colocated workers.
+[provider_budgets.datacite]
+requests_per_second = 1.0
+max_global_inflight = 2
+require_qualified_region = false
+
+[provider_budgets.zenodo]
+requests_per_second = 1.0
+max_global_inflight = 2
+require_qualified_region = false
+
+[provider_budgets.harvard_dataverse]
+requests_per_second = 1.0
+max_global_inflight = 2
+require_qualified_region = false
+
+[provider_budgets.internet_archive]
+requests_per_second = 0.5
+max_global_inflight = 2
+require_qualified_region = false
+
+[provider_budgets.arquivo_pt]
+requests_per_second = 1.0
+max_global_inflight = 2
+require_qualified_region = false
+
+[provider_budgets.rdap]
+requests_per_second = 1.0
+max_global_inflight = 2
+require_qualified_region = false
+
+[evidence_bridge]
+runtime_data_root = "/srv/creeper/data"
+owner = "fabric:evidence"
+dispatch_limit = 32
+drain_limit = 64
+lease_seconds = 900
+poll_seconds = 1
+retry_base_seconds = 30
+retry_max_seconds = 3600
+rdap_endpoint = "https://rdap.org/domain"
+rdap_timeout = 20
+
+[[evidence_bridge.cdx_providers]]
+name = "internet_archive"
+endpoint = "https://web.archive.org/cdx/search/cdx"
+dialect = "wayback"
+requests_per_second = 0.5
+max_inflight = 2
+max_connections = 4
+max_keepalive_connections = 2
+keepalive_expiry_seconds = 20
+row_limit = 150000
+weight = 0.5
+
+[[evidence_bridge.cdx_providers]]
+name = "arquivo_pt"
+endpoint = "https://arquivo.pt/wayback/cdx"
+dialect = "arquivo"
+requests_per_second = 1.0
+max_inflight = 2
+max_connections = 4
+max_keepalive_connections = 2
+keepalive_expiry_seconds = 20
+row_limit = 100000
+weight = 1.0
+
+[email_report]
+runtime_data_root = "/srv/creeper/data"
+smtp_host = "smtp.gmail.com"
+smtp_port = 587
+starttls = true
+timezone = "Asia/Singapore"
+subject_prefix = "[Creeper]"
