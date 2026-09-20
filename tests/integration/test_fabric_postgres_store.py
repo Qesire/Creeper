@@ -34,6 +34,7 @@ _REQUIRED_SURFACE = {
     "mark_batch_consume_failed",
     "pending_outbox",
     "mark_outbox_published",
+    "gc_transient_state",
     "configure_provider_budget",
     "record_provider_region_observation",
     "issue_provider_permit",
