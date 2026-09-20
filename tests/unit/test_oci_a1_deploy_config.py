@@ -10,6 +10,7 @@ from creeper.distributed.config import (
     load_evidence_bridge_config,
     load_worker_config,
 )
+from creeper.source_discovery_service import load_source_discovery_config
 
 
 class OciA1DeploymentConfigTests(unittest.TestCase):
@@ -26,6 +27,7 @@ class OciA1DeploymentConfigTests(unittest.TestCase):
         self.assertEqual(authority.database,"postgresql:///creeper")
         self.assertEqual(authority.host,"127.0.0.1")
         self.assertEqual(authority.port,8088)
+        self.assertFalse(authority.outbox_enabled)
         self.assertTrue(authority.provider_budgets)
         self.assertTrue(
             all(not item.require_qualified_region for item in authority.provider_budgets)
@@ -36,6 +38,9 @@ class OciA1DeploymentConfigTests(unittest.TestCase):
         )
         self.assertEqual(report.timezone,"Asia/Singapore")
         self.assertTrue(report.starttls)
+        discovery=load_source_discovery_config(self.root/"source-discovery.toml")
+        self.assertTrue(discovery.fabric.enabled)
+        self.assertFalse(discovery.fabric.outbox_enabled)
 
     def test_workers_are_colocated_and_have_disjoint_execution_roles(self) -> None:
         query=load_worker_config(self.root/"worker-query.toml")
