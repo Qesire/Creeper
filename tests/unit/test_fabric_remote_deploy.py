@@ -31,14 +31,22 @@ class FabricRemoteDeploymentTests(unittest.TestCase):
         self.assertIn("daily_egress_budget_bytes = 0",install)
         self.assertIn("heartbeat_seconds = 120",install)
         self.assertIn("claim_wait_seconds = 25",install)
+        self.assertIn("coordinator_timeout_seconds = 45",install)
 
     def test_preflight_requires_ntp_wireguard_and_private_coordinator(self) -> None:
         preflight=(self.root/"preflight.sh").read_text(encoding="utf-8")
         self.assertIn("NTPSynchronized",preflight)
         self.assertIn("/sys/class/net/creeper",preflight)
         self.assertNotIn("wg show creeper",preflight)
+        self.assertIn("ip route get",preflight)
+        self.assertIn("dev[[:space:]]+creeper",preflight)
         self.assertIn("/healthz",preflight)
-        self.assertIn("http://10.*",preflight)
+        self.assertIn("/meta",preflight)
+        self.assertIn("creeper-fabric-v2",preflight)
+        unit=(self.root/"systemd"/"creeper-fabric-remote-worker.service").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("wg-quick@creeper.service",unit)
 
     def test_shell_scripts_pass_bash_syntax_check(self) -> None:
         for path in self.root.glob("*.sh"):
