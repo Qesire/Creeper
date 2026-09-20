@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import time
 from uuid import uuid4
 
@@ -814,6 +815,159 @@ class PostgresAuthorityStore:
                     (float(self.clock()),event_id),
                 )
                 return cur.rowcount==1
+
+    def gc_transient_state(
+        self,
+        *,
+        retention_seconds: float = 86400.0,
+        limit: int = 50000,
+    ) -> dict[str,int]:
+        """Prune replay-safe transient rows while retaining WorkKey tombstones."""
+        if (
+            isinstance(retention_seconds,bool)
+            or not isinstance(retention_seconds,(int,float))
+            or not math.isfinite(float(retention_seconds))
+            or retention_seconds <= 0
+        ):
+            raise ValueError("retention_seconds must be finite and positive")
+        if isinstance(limit,bool) or not isinstance(limit,int) or limit < 1:
+            raise ValueError("limit must be a positive integer")
+        cutoff=float(self.clock())-float(retention_seconds)
+        report={
+            "provider_permits":0,
+            "result_batches":0,
+            "outbox_events":0,
+            "request_nonces":0,
+            "egress_days":0,
+        }
+        with self.connection.transaction():
+            with self.connection.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT permit_id
+                    FROM fabric_provider_permits
+                    WHERE active=FALSE AND expires_at<=%s
+                    ORDER BY expires_at,permit_id
+                    LIMIT %s
+                    """,
+                    (cutoff,limit),
+                )
+                permits=[str(row["permit_id"]) for row in cur.fetchall()]
+                if permits:
+                    cur.execute(
+                        """
+                        DELETE FROM fabric_provider_permits
+                        WHERE permit_id=ANY(%s)
+                        """,
+                        (permits,),
+                    )
+                    report["provider_permits"]=cur.rowcount
+
+                cur.execute(
+                    """
+                    SELECT batch_id
+                    FROM fabric_result_batches
+                    WHERE (
+                        consumed_at IS NOT NULL AND consumed_at<=%s
+                    ) OR (
+                        quarantined=TRUE AND committed_at<=%s
+                    )
+                    ORDER BY committed_at,batch_id
+                    LIMIT %s
+                    """,
+                    (cutoff,cutoff,limit),
+                )
+                batches=[str(row["batch_id"]) for row in cur.fetchall()]
+                if batches:
+                    cur.execute(
+                        """
+                        DELETE FROM fabric_batch_artifacts
+                        WHERE batch_id=ANY(%s)
+                        """,
+                        (batches,),
+                    )
+                    cur.execute(
+                        """
+                        DELETE FROM fabric_result_batches
+                        WHERE batch_id=ANY(%s)
+                        """,
+                        (batches,),
+                    )
+                    report["result_batches"]=cur.rowcount
+
+                cur.execute(
+                    """
+                    SELECT event_id
+                    FROM fabric_outbox
+                    WHERE (
+                        published_at IS NOT NULL AND published_at<=%s
+                    ) OR (
+                        %s AND published_at IS NULL AND created_at<=%s
+                    )
+                    ORDER BY created_at,event_id
+                    LIMIT %s
+                    """,
+                    (cutoff,not self.emit_outbox,cutoff,limit),
+                )
+                outbox=[str(row["event_id"]) for row in cur.fetchall()]
+                if outbox:
+                    cur.execute(
+                        """
+                        DELETE FROM fabric_outbox
+                        WHERE event_id=ANY(%s)
+                        """,
+                        (outbox,),
+                    )
+                    report["outbox_events"]=cur.rowcount
+
+                cur.execute(
+                    """
+                    SELECT worker_id,nonce
+                    FROM fabric_request_nonces
+                    WHERE seen_at<=%s
+                    ORDER BY seen_at,worker_id,nonce
+                    LIMIT %s
+                    """,
+                    (cutoff,limit),
+                )
+                nonces=[
+                    (str(row["worker_id"]),str(row["nonce"]))
+                    for row in cur.fetchall()
+                ]
+                if nonces:
+                    cur.executemany(
+                        """
+                        DELETE FROM fabric_request_nonces
+                        WHERE worker_id=%s AND nonce=%s
+                        """,
+                        nonces,
+                    )
+                    report["request_nonces"]=len(nonces)
+
+                cur.execute(
+                    """
+                    SELECT worker_id,day_key
+                    FROM fabric_worker_egress_daily
+                    WHERE updated_at<=%s
+                    ORDER BY updated_at,worker_id,day_key
+                    LIMIT %s
+                    """,
+                    (cutoff,limit),
+                )
+                egress_days=[
+                    (str(row["worker_id"]),int(row["day_key"]))
+                    for row in cur.fetchall()
+                ]
+                if egress_days:
+                    cur.executemany(
+                        """
+                        DELETE FROM fabric_worker_egress_daily
+                        WHERE worker_id=%s AND day_key=%s
+                        """,
+                        egress_days,
+                    )
+                    report["egress_days"]=len(egress_days)
+        return report
 
     def configure_provider_budget(
         self,provider:str,*,requests_per_second:float,
