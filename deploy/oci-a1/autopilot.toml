@@ -15,7 +15,10 @@ enabled = false
 platform_harvest_enabled = false
 
 [platform_admission]
-enabled = true
+# Fabric v2 does not yet own complete platform-year enumeration. Keep both
+# platform admission and platform harvest off in the single-host profile so
+# no durable queue is created without a consumer.
+enabled = false
 platform_year_budget = 1
 poll_seconds = 2
 
