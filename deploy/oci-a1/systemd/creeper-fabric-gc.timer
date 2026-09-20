@@ -1,0 +1,12 @@
+[Unit]
+Description=Run Creeper Fabric transient-state GC
+
+[Timer]
+OnBootSec=30min
+OnUnitActiveSec=1h
+Persistent=true
+RandomizedDelaySec=300
+Unit=creeper-fabric-gc.service
+
+[Install]
+WantedBy=timers.target
