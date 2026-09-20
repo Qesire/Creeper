@@ -197,6 +197,8 @@ class DistributedAuthorityStore:
                 max_global_inflight INTEGER NOT NULL CHECK(max_global_inflight >= 1),
                 require_qualified_region INTEGER NOT NULL DEFAULT 1
                     CHECK(require_qualified_region IN (0,1)),
+                allow_unknown_region_probe INTEGER NOT NULL DEFAULT 0
+                    CHECK(allow_unknown_region_probe IN (0,1)),
                 next_request_at REAL NOT NULL DEFAULT 0,
                 cooldown_until REAL NOT NULL DEFAULT 0,
                 updated_at REAL NOT NULL
@@ -249,6 +251,19 @@ class DistributedAuthorityStore:
             ) WITHOUT ROWID;
             """
         )
+        budget_columns = {
+            str(row["name"])
+            for row in self.connection.execute(
+                "PRAGMA table_info(fabric_provider_budgets)"
+            )
+        }
+        if "allow_unknown_region_probe" not in budget_columns:
+            with self.connection:
+                self.connection.execute(
+                    "ALTER TABLE fabric_provider_budgets "
+                    "ADD COLUMN allow_unknown_region_probe INTEGER NOT NULL "
+                    "DEFAULT 0 CHECK(allow_unknown_region_probe IN (0,1))"
+                )
 
     def close(self) -> None:
         self.connection.close()
@@ -496,6 +511,30 @@ class DistributedAuthorityStore:
             return False
         return True
 
+    def _region_eligible(self, row: sqlite3.Row, worker: sqlite3.Row) -> bool:
+        required_providers = tuple(
+            str(value)
+            for value in json.loads(str(row["required_providers_json"]))
+        )
+        if not required_providers:
+            return True
+        region = str(worker["region"])
+        for provider in required_providers:
+            observed = self.connection.execute(
+                """
+                SELECT state
+                FROM fabric_provider_regions
+                WHERE provider=? AND region=?
+                """,
+                (provider, region),
+            ).fetchone()
+            if (
+                observed is not None
+                and str(observed["state"]) in {"BLOCKED", "UNQUALIFIED"}
+            ):
+                return False
+        return True
+
     def claim_work(
         self,
         worker_id: str,
@@ -524,7 +563,15 @@ class DistributedAuthorityStore:
                 """,
                 (now, now),
             ).fetchall()
-            chosen = next((row for row in rows if self._eligible(row, worker)), None)
+            chosen = next(
+                (
+                    row
+                    for row in rows
+                    if self._eligible(row, worker)
+                    and self._region_eligible(row, worker)
+                ),
+                None,
+            )
             if chosen is None:
                 self.connection.rollback()
                 return None
@@ -1151,6 +1198,7 @@ class DistributedAuthorityStore:
         requests_per_second: float,
         max_global_inflight: int,
         require_qualified_region: bool = True,
+        allow_unknown_region_probe: bool = False,
     ) -> None:
         if not provider.strip() or requests_per_second <= 0 or max_global_inflight < 1:
             raise ValueError("invalid provider budget")
@@ -1160,12 +1208,14 @@ class DistributedAuthorityStore:
                 """
                 INSERT INTO fabric_provider_budgets(
                     provider, requests_per_second, max_global_inflight,
-                    require_qualified_region, updated_at
-                ) VALUES (?, ?, ?, ?, ?)
+                    require_qualified_region, allow_unknown_region_probe,
+                    updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
                 ON CONFLICT(provider) DO UPDATE SET
                     requests_per_second=excluded.requests_per_second,
                     max_global_inflight=excluded.max_global_inflight,
                     require_qualified_region=excluded.require_qualified_region,
+                    allow_unknown_region_probe=excluded.allow_unknown_region_probe,
                     updated_at=excluded.updated_at
                 """,
                 (
@@ -1173,6 +1223,7 @@ class DistributedAuthorityStore:
                     float(requests_per_second),
                     int(max_global_inflight),
                     int(require_qualified_region),
+                    int(allow_unknown_region_probe),
                     now,
                 ),
             )
@@ -1348,16 +1399,39 @@ class DistributedAuthorityStore:
                 (provider, now),
             )
             if int(budget["require_qualified_region"]):
+                worker_region = str(worker["region"])
                 region = self.connection.execute(
                     """
                     SELECT state FROM fabric_provider_regions
                     WHERE provider=? AND region=?
                     """,
-                    (provider, str(worker["region"])),
+                    (provider, worker_region),
                 ).fetchone()
-                if region is None or str(region["state"]) != "QUALIFIED":
+                region_state = (
+                    "UNKNOWN" if region is None else str(region["state"])
+                )
+                if region_state in {"BLOCKED", "UNQUALIFIED"}:
                     self.connection.rollback()
                     return None
+                if region_state != "QUALIFIED":
+                    if not int(budget["allow_unknown_region_probe"]):
+                        self.connection.rollback()
+                        return None
+                    probe_active = int(
+                        self.connection.execute(
+                            """
+                            SELECT COUNT(*) AS n
+                            FROM fabric_provider_permits AS p
+                            JOIN fabric_workers AS w
+                              ON w.worker_id=p.worker_id
+                            WHERE p.provider=? AND p.active=1 AND w.region=?
+                            """,
+                            (provider, worker_region),
+                        ).fetchone()["n"]
+                    )
+                    if probe_active >= 1:
+                        self.connection.rollback()
+                        return None
             active = int(
                 self.connection.execute(
                     """
@@ -1498,19 +1572,49 @@ class DistributedAuthorityStore:
             raise KeyError(task_id)
         return row
 
-    def status_snapshot(self) -> dict[str, int]:
+    def status_snapshot(
+        self,
+        *,
+        stale_after_seconds: float = 180.0,
+    ) -> dict[str, object]:
+        if stale_after_seconds <= 0:
+            raise ValueError("stale_after_seconds must be positive")
+        now = float(self.clock())
         states = {
             str(row["state"]): int(row["n"])
             for row in self.connection.execute(
                 "SELECT state, COUNT(*) AS n FROM fabric_work GROUP BY state"
             )
         }
+        worker_rows = self.connection.execute(
+            """
+            SELECT worker_id,worker_instance_id,runtime_class,region,
+                   last_heartbeat
+            FROM fabric_workers
+            WHERE revoked=0
+            ORDER BY worker_id
+            """
+        ).fetchall()
+        worker_health = []
+        for row in worker_rows:
+            age = max(0.0, now - float(row["last_heartbeat"]))
+            worker_health.append(
+                {
+                    "worker_id": str(row["worker_id"]),
+                    "worker_instance_id": str(row["worker_instance_id"]),
+                    "runtime_class": str(row["runtime_class"]),
+                    "region": str(row["region"]),
+                    "last_heartbeat": float(row["last_heartbeat"]),
+                    "heartbeat_age_seconds": age,
+                    "stale": age > stale_after_seconds,
+                }
+            )
         return {
-            "workers": int(
-                self.connection.execute(
-                    "SELECT COUNT(*) AS n FROM fabric_workers WHERE revoked=0"
-                ).fetchone()["n"]
+            "workers": len(worker_health),
+            "stale_workers": sum(
+                int(bool(item["stale"])) for item in worker_health
             ),
+            "worker_health": worker_health,
             "pending": states.get("PENDING", 0) + states.get("RETRY", 0),
             "leased": states.get("LEASED", 0),
             "complete": states.get("COMPLETE", 0),
