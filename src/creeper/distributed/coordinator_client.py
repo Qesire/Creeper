@@ -251,6 +251,7 @@ class CoordinatorClient:
                 "task_id": lease.task_id,
                 "generation": lease.generation,
                 "lease_seconds": float(lease_seconds),
+                "expected_lease_deadline": float(lease.lease_deadline),
             },
         )
         raw = value.get("task")
