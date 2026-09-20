@@ -96,6 +96,7 @@ capabilities = ["RESIDUAL_QUERY"]
 producers = ["ResidualQueryProducer"]
 allowed_providers = ["datacite"]
 daily_egress_budget_bytes = 12345
+coordinator_timeout_seconds = 45
 coordinator_upload_budget_bytes_per_month = 700000000
 coordinator_upload_overhead_bytes = 1536
 spool_database = "spool.sqlite3"
@@ -111,6 +112,7 @@ spool_database = "spool.sqlite3"
                 loaded.coordinator_upload_budget_bytes_per_month,
                 700000000,
             )
+            self.assertEqual(loaded.coordinator_timeout_seconds,45)
             self.assertEqual(loaded.coordinator_upload_overhead_bytes,1536)
 
     def test_authority_region_flags_are_strict_and_reprobe_ttl_loads(self) -> None:
@@ -125,6 +127,7 @@ spool_database = "spool.sqlite3"
 database = "fabric.sqlite3"
 credentials_file = "{credentials}"
 outbox_enabled = false
+max_request_body_bytes = 33554432
 
 [provider_budgets.datacite]
 requests_per_second = 1.0
@@ -137,6 +140,7 @@ region_reprobe_after_seconds = 1234
             )
             loaded=load_authority_config(config)
             budget=loaded.provider_budgets[0]
+            self.assertEqual(loaded.max_request_body_bytes,33554432)
             self.assertTrue(budget.require_qualified_region)
             self.assertTrue(budget.allow_unknown_region_probe)
             self.assertEqual(budget.region_reprobe_after_seconds,1234)
