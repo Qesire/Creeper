@@ -61,8 +61,8 @@ class FabricStoreSurfaceTests(unittest.TestCase):
 )
 class FabricPostgresAuthorityTests(unittest.TestCase):
     def setUp(self) -> None:
-        dsn = os.environ["CREEPER_POSTGRES_TEST_DSN"]
-        self.store = PostgresAuthorityStore(dsn)
+        self.dsn = os.environ["CREEPER_POSTGRES_TEST_DSN"]
+        self.store = PostgresAuthorityStore(self.dsn)
         with self.store.connection.transaction():
             with self.store.connection.cursor() as cur:
                 cur.execute(
@@ -162,6 +162,49 @@ class FabricPostgresAuthorityTests(unittest.TestCase):
         row = self.store.task_row(task_id)
         self.assertEqual(row["state"], "COMPLETE")
         self.assertEqual(int(row["next_sequence_no"]), 1)
+
+    def test_brokerless_mode_does_not_append_outbox_rows(self) -> None:
+        before=len(self.store.pending_outbox(limit=1000))
+        quiet=PostgresAuthorityStore(self.dsn,emit_outbox=False)
+        try:
+            suffix=uuid4().hex[:12]
+            worker=WorkerDescriptor(
+                worker_id=f"quiet-worker-{suffix}",
+                worker_instance_id=f"quiet-instance-{suffix}",
+                runtime_class="full",
+                region="sg",
+                architecture="x86_64",
+                memory_bytes=1024,
+                cpu_count=1,
+                network_class="public",
+                capabilities=(Capability.RESIDUAL_QUERY.value,),
+                producers=("ResidualQueryProducer",),
+                allowed_providers=("datacite",),
+            )
+            quiet.register_worker(worker)
+            task_id,_=quiet.admit_work(self.work("quiet-"+suffix))
+            lease=quiet.claim_work(
+                worker.worker_id,
+                worker.worker_instance_id,
+                lease_seconds=60,
+            )
+            self.assertIsNotNone(lease)
+            assert lease is not None
+            quiet.commit_result_batch(
+                ResultBatch(
+                    task_id=task_id,
+                    generation=lease.generation,
+                    sequence_no=0,
+                    results=({"value":1},),
+                    final=True,
+                ),
+                worker_id=worker.worker_id,
+                worker_instance_id=worker.worker_instance_id,
+            )
+        finally:
+            quiet.close()
+        after=len(self.store.pending_outbox(limit=1000))
+        self.assertEqual(after,before)
 
     def test_new_worker_incarnation_fences_old_generation(self) -> None:
         task_id, _ = self.store.admit_work(self.work("fence"))
