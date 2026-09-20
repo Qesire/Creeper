@@ -80,8 +80,6 @@ class SourcePoolTargets:
             raise ValueError("max_cold_credit_per_origin must be positive")
         if self.triage_batch < 1 or self.scout_parallelism < 1:
             raise ValueError("triage and scout capacities must be positive")
-        if self.max_search_directives < 1:
-            raise ValueError("max_search_directives must be positive")
 
 
 @dataclass(frozen=True)
