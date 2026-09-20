@@ -10,6 +10,12 @@ from pathlib import Path
 import httpx
 
 from creeper.authority.baseline_index import BaselineIndex
+from creeper.distributed.authority_store import DistributedAuthorityStore
+from creeper.distributed.bulk_shard import (
+    FabricRegionHarvestExecutor,
+    serialize_witness_group,
+)
+from creeper.distributed.models import ResultBatch, WorkerDescriptor
 from creeper.evidence.policies import EvidenceCapsule
 from creeper.source_discovery.harvest import (
     RegionHarvestError,
@@ -28,6 +34,10 @@ from creeper.source_discovery.index_space import (
     RegionSynopsis,
     child_region,
     compile_candidate_index_space,
+)
+from creeper.sources.archive.host_year import (
+    HostYearWitness,
+    HostYearWitnessGroup,
 )
 from creeper.source_discovery.models import (
     MeasurementMode,
@@ -1173,6 +1183,147 @@ class ExactRegionHarvestTests(unittest.TestCase):
             )
         finally:
             control.close()
+
+    def test_fabric_remote_witnesses_commit_through_central_evidence_authority(self) -> None:
+        compiled=self._compiled_remote(1024)
+        region=self._register_ready(compiled)
+        identity=HistoricalIndexObjectIdentity(
+            kind="remote",
+            content_length=1024,
+            etag='"fabric-fixture"',
+        )
+        self.registry.bind_object_identity(
+            compiled.index.index_key,
+            identity,
+        )
+
+        fabric_path=self.root/"fabric-bulk.sqlite3"
+        central=DistributedAuthorityStore(fabric_path,emit_outbox=False)
+        worker_store=DistributedAuthorityStore(fabric_path,emit_outbox=False)
+        worker=WorkerDescriptor(
+            worker_id="bulk-worker",
+            worker_instance_id="bulk-instance",
+            runtime_class="fixture",
+            region="fixture-region",
+            architecture="x86_64",
+            memory_bytes=1024**3,
+            cpu_count=1,
+            network_class="fixture",
+            capabilities=("STREAMING_BULK","ARTIFACT_FETCH"),
+            producers=("BulkShardProducer",),
+        )
+        worker_store.register_worker(worker)
+        errors: list[BaseException]=[]
+
+        def run_worker() -> None:
+            try:
+                deadline=time.time()+5.0
+                lease=None
+                while lease is None and time.time()<deadline:
+                    lease=worker_store.claim_work(
+                        worker.worker_id,
+                        worker.worker_instance_id,
+                        lease_seconds=60,
+                    )
+                    if lease is None:
+                        time.sleep(0.01)
+                if lease is None:
+                    raise AssertionError("bulk Fabric task was never admitted")
+                groups=(
+                    HostYearWitnessGroup(
+                        hostname="known.com",
+                        witnesses=(
+                            HostYearWitness(
+                                hostname="known.com",
+                                year=1996,
+                                source_id=compiled.index.source_key,
+                                locator=compiled.index.locator+":byte:0",
+                                source_time="19960101000000",
+                                record_type="CDX_CAPTURE",
+                                artifact_ref="",
+                                original_url="http://known.com/",
+                            ),
+                        ),
+                        capture_count=1,
+                    ),
+                    HostYearWitnessGroup(
+                        hostname="novel.com",
+                        witnesses=(
+                            HostYearWitness(
+                                hostname="novel.com",
+                                year=1998,
+                                source_id=compiled.index.source_key,
+                                locator=compiled.index.locator+":byte:100",
+                                source_time="19980102030405",
+                                record_type="CDX_CAPTURE",
+                                artifact_ref="",
+                                original_url="http://novel.com/",
+                            ),
+                        ),
+                        capture_count=1,
+                    ),
+                )
+                worker_store.commit_result_batch(
+                    ResultBatch(
+                        task_id=lease.task_id,
+                        generation=lease.generation,
+                        sequence_no=lease.next_sequence_no,
+                        results=(
+                            *(serialize_witness_group(group) for group in groups),
+                            {
+                                "kind":"BULK_SUMMARY",
+                                "records":2,
+                                "bytes_read":200,
+                                "requests":1,
+                                "elapsed_seconds":0.01,
+                            },
+                        ),
+                        final=True,
+                    ),
+                    worker_id=worker.worker_id,
+                    worker_instance_id=worker.worker_instance_id,
+                )
+            except BaseException as exc:
+                errors.append(exc)
+
+        thread=threading.Thread(target=run_worker,daemon=True)
+        thread.start()
+        try:
+            executor=FabricRegionHarvestExecutor(
+                registry=self.registry,
+                baseline=self.baseline,
+                evidence_store=self.evidence,
+                fabric_store=central,
+                fabric_poll_seconds=0.01,
+                fabric_wait_seconds=5.0,
+                policy=RegionHarvestPolicy(baseline_batch_size=1),
+            )
+            report=executor.harvest(region.region_key)
+            thread.join(timeout=5.0)
+            self.assertFalse(thread.is_alive())
+            self.assertEqual(errors,[])
+            self.assertIsNotNone(report)
+            assert report is not None
+            self.assertTrue(report.completed)
+            self.assertEqual(report.baseline_suppressed_host_years,1)
+            self.assertEqual(report.direct_capsules_inserted,1)
+            self.assertEqual(self.evidence.for_hostname("known.com"),[])
+            novel=self.evidence.for_hostname("novel.com")
+            self.assertEqual(len(novel),1)
+            self.assertEqual(novel[0].year,1998)
+            self.assertEqual(
+                novel[0].evidence_timestamp,
+                "19980102030405",
+            )
+            self.assertEqual(
+                self.registry.get_region(region.region_key).state,
+                RegionState.HARVESTED,
+            )
+            self.assertEqual(central.unconsumed_batches(),())
+        finally:
+            central.close()
+            worker_store.close()
+
 
 
 if __name__ == "__main__":
