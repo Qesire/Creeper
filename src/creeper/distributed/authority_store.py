@@ -1312,7 +1312,12 @@ class DistributedAuthorityStore:
             generation=generation,
         )
         region = str(worker["region"])
-        success = bool(connect_success and status_code is not None and status_code < 500)
+        success = bool(
+            connect_success
+            and status_code is not None
+            and status_code < 500
+            and not policy_block
+        )
         throttle = status_code in {429, 503}
         now = float(self.clock())
         with self.connection:
