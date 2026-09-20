@@ -1248,9 +1248,20 @@ class PostgresAuthorityStore:
             cur.execute("SELECT COUNT(*) AS n FROM fabric_workers WHERE revoked=FALSE")
             workers=int(cur.fetchone()["n"])
             cur.execute(
-                "SELECT COUNT(*) AS n FROM fabric_result_batches WHERE consumed_at IS NULL"
+                "SELECT COUNT(*) AS n FROM fabric_result_batches "
+                "WHERE consumed_at IS NULL AND quarantined=FALSE"
             )
             unconsumed=int(cur.fetchone()["n"])
+            cur.execute(
+                "SELECT COUNT(*) AS n FROM fabric_result_batches WHERE quarantined=TRUE"
+            )
+            quarantined=int(cur.fetchone()["n"])
+            cur.execute("SELECT COUNT(*) AS n FROM fabric_result_batches")
+            retained=int(cur.fetchone()["n"])
+            cur.execute(
+                "SELECT COUNT(*) AS n FROM fabric_provider_permits WHERE active=FALSE"
+            )
+            inactive_permits=int(cur.fetchone()["n"])
             cur.execute(
                 "SELECT COUNT(*) AS n FROM fabric_outbox WHERE published_at IS NULL"
             )
@@ -1262,5 +1273,8 @@ class PostgresAuthorityStore:
             "complete":states.get("COMPLETE",0),
             "dead":states.get("DEAD",0),
             "unconsumed_batches":unconsumed,
+            "quarantined_batches":quarantined,
+            "retained_batches":retained,
+            "inactive_provider_permits":inactive_permits,
             "pending_outbox":outbox,
         }
