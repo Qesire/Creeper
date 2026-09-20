@@ -344,6 +344,31 @@ class FabricPostgresAuthorityTests(unittest.TestCase):
         self.assertEqual(new.generation, old.generation + 1)
         self.assertEqual(new.attempt, old.attempt + 1)
 
+    def test_repeated_claim_returns_existing_active_lease(self) -> None:
+        first_id,_=self.store.admit_work(self.work("claim-replay-1"))
+        second_id,_=self.store.admit_work(self.work("claim-replay-2"))
+        first=self.store.claim_work(
+            self.worker.worker_id,
+            self.worker.worker_instance_id,
+            lease_seconds=60,
+        )
+        self.assertIsNotNone(first)
+        assert first is not None
+        replay=self.store.claim_work(
+            self.worker.worker_id,
+            self.worker.worker_instance_id,
+            lease_seconds=120,
+        )
+        self.assertIsNotNone(replay)
+        assert replay is not None
+        self.assertEqual(replay.task_id,first.task_id)
+        self.assertEqual(replay.generation,first.generation)
+        self.assertEqual(replay.attempt,first.attempt)
+        self.assertGreater(replay.lease_deadline,first.lease_deadline)
+        other=second_id if replay.task_id==first_id else first_id
+        self.assertEqual(str(self.store.task_row(other)["state"]),"PENDING")
+
+
 
 if __name__ == "__main__":
     unittest.main()
