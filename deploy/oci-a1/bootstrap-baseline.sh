@@ -59,6 +59,13 @@ fi
 
 install -d -o "$APP_USER" -g "$APP_GROUP" -m 0750   "$BASE_ROOT" "$INDEX_ROOT" /srv/creeper/reference
 
+# Persist the small model before moving the staging directory, because callers
+# may have placed the model inside that directory. Re-runs with the already
+# installed model remain idempotent.
+if [[ ! -e "$MODEL_TARGET" || "$(readlink -f "$MODEL_SOURCE")" != "$(readlink -f "$MODEL_TARGET")" ]]; then
+  install -o "$APP_USER" -g "$APP_GROUP" -m 0640 "$MODEL_SOURCE" "$MODEL_TARGET"
+fi
+
 if [[ "$SOURCE_DIR" != "$TARGET" ]]; then
   if [[ -e "$TARGET" ]]; then
     echo "target baseline already exists: $TARGET" >&2
