@@ -25,7 +25,7 @@ poll_seconds = 2
 [readiness]
 enabled = true
 eed_model = "/srv/creeper/reference/equivalent_english_domain.json"
-baseline_eed = "46483739.2890"
+authority_manifest = "/srv/creeper/baseline/current/authority-manifest.json"
 batch_size = 25000
 max_batches_per_cycle = 10
 poll_seconds = 30
