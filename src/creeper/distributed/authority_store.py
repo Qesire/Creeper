@@ -949,6 +949,142 @@ class DistributedAuthorityStore:
                 == 1
             )
 
+    def gc_transient_state(
+        self,
+        *,
+        retention_seconds: float = 86400.0,
+        limit: int = 50000,
+    ) -> dict[str, int]:
+        """Prune replay-safe transient rows while preserving WorkKey tombstones.
+
+        Terminal fabric_work rows are intentionally retained because their
+        unique WorkKey is the long-lived idempotency tombstone. Consumed or
+        quarantined ResultBatch payloads, inactive provider permits, published
+        broker events, old nonces and old daily egress counters may be removed
+        after the retention window.
+        """
+        if (
+            isinstance(retention_seconds,bool)
+            or not isinstance(retention_seconds,(int,float))
+            or not math.isfinite(float(retention_seconds))
+            or retention_seconds <= 0
+        ):
+            raise ValueError("retention_seconds must be finite and positive")
+        if isinstance(limit,bool) or not isinstance(limit,int) or limit < 1:
+            raise ValueError("limit must be a positive integer")
+        cutoff=float(self.clock())-float(retention_seconds)
+
+        def placeholders(values: list[str]) -> str:
+            return ",".join("?" for _ in values)
+
+        report={
+            "provider_permits":0,
+            "result_batches":0,
+            "outbox_events":0,
+            "request_nonces":0,
+            "egress_days":0,
+        }
+        with self.connection:
+            permits=[
+                str(row["permit_id"])
+                for row in self.connection.execute(
+                    """
+                    SELECT permit_id
+                    FROM fabric_provider_permits
+                    WHERE active=0 AND expires_at<=?
+                    ORDER BY expires_at,permit_id
+                    LIMIT ?
+                    """,
+                    (cutoff,limit),
+                )
+            ]
+            if permits:
+                report["provider_permits"]=self.connection.execute(
+                    f"DELETE FROM fabric_provider_permits "
+                    f"WHERE permit_id IN ({placeholders(permits)})",
+                    permits,
+                ).rowcount
+
+            batches=[
+                str(row["batch_id"])
+                for row in self.connection.execute(
+                    """
+                    SELECT batch_id
+                    FROM fabric_result_batches
+                    WHERE (
+                        consumed_at IS NOT NULL AND consumed_at<=?
+                    ) OR (
+                        quarantined=1 AND committed_at<=?
+                    )
+                    ORDER BY committed_at,batch_id
+                    LIMIT ?
+                    """,
+                    (cutoff,cutoff,limit),
+                )
+            ]
+            if batches:
+                ph=placeholders(batches)
+                self.connection.execute(
+                    f"DELETE FROM fabric_batch_artifacts "
+                    f"WHERE batch_id IN ({ph})",
+                    batches,
+                )
+                report["result_batches"]=self.connection.execute(
+                    f"DELETE FROM fabric_result_batches "
+                    f"WHERE batch_id IN ({ph})",
+                    batches,
+                ).rowcount
+
+            outbox=[
+                str(row["event_id"])
+                for row in self.connection.execute(
+                    """
+                    SELECT event_id
+                    FROM fabric_outbox
+                    WHERE (
+                        published_at IS NOT NULL AND published_at<=?
+                    ) OR (
+                        ?=1 AND published_at IS NULL AND created_at<=?
+                    )
+                    ORDER BY created_at,event_id
+                    LIMIT ?
+                    """,
+                    (cutoff,int(not self.emit_outbox),cutoff,limit),
+                )
+            ]
+            if outbox:
+                report["outbox_events"]=self.connection.execute(
+                    f"DELETE FROM fabric_outbox "
+                    f"WHERE event_id IN ({placeholders(outbox)})",
+                    outbox,
+                ).rowcount
+
+            report["request_nonces"]=self.connection.execute(
+                """
+                DELETE FROM fabric_request_nonces
+                WHERE rowid IN (
+                    SELECT rowid FROM fabric_request_nonces
+                    WHERE seen_at<=?
+                    ORDER BY seen_at
+                    LIMIT ?
+                )
+                """,
+                (cutoff,limit),
+            ).rowcount
+            report["egress_days"]=self.connection.execute(
+                """
+                DELETE FROM fabric_worker_egress_daily
+                WHERE rowid IN (
+                    SELECT rowid FROM fabric_worker_egress_daily
+                    WHERE updated_at<=?
+                    ORDER BY updated_at
+                    LIMIT ?
+                )
+                """,
+                (cutoff,limit),
+            ).rowcount
+        return report
+
     def configure_provider_budget(
         self,
         provider: str,
