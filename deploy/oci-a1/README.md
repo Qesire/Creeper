@@ -75,13 +75,16 @@ outbox lock, so one queued message is not sent concurrently by two senders.
 
 The summary includes:
 
+- Novel EED, growth rate, five-percent target progress and readiness gates;
 - Fabric pending / leased / complete / dead work;
-- unconsumed ResultBatch and pending outbox counts;
+- runtime counters/gauges, including throughput and yield telemetry already
+  published by the production pipeline;
+- unconsumed ResultBatch and pending Fabric outbox counts;
 - evidence-task, platform-harvest, reservoir and source-lease state counts;
 - proven unique hostname-year count and evidence capsule count;
 - candidate/unparsed counts;
 - disk, memory and load data;
-- numeric deltas since the previous successful summary email.
+- numeric deltas since the previous successfully delivered summary email.
 
 Mail secrets are environment-only. They never appear in TOML or Git.
 
@@ -150,7 +153,8 @@ The installer:
 3. creates a local PostgreSQL database owned by the service account;
 4. generates independent HMAC secrets for the two workers;
 5. installs systemd units and UFW rules;
-6. enables Authority, both Fabric workers, the evidence bridge and email timer;
+6. enables Authority, both Fabric workers, the evidence bridge, daily email
+   timer and 15-minute durable-email replay timer;
 7. enables autopilot only when both authority input files are present;
 8. prints a dry-run email report without transmitting it.
 
@@ -169,7 +173,8 @@ systemctl --no-pager --full status \
   creeper-fabric-worker@evidence.service \
   creeper-fabric-evidence-bridge.service \
   creeper-autopilot.service \
-  creeper-email-report.timer
+  creeper-email-report.timer \
+  creeper-email-outbox.timer
 
 sudo -u creeper /opt/creeper/.venv/bin/creeper-fabric-control \
   --config /etc/creeper/fabric.toml status
