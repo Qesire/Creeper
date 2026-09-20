@@ -984,6 +984,7 @@ class DistributedAuthorityStore:
             "outbox_events":0,
             "request_nonces":0,
             "egress_days":0,
+            "work_payloads_compacted":0,
         }
         with self.connection:
             permits=[
@@ -1105,6 +1106,42 @@ class DistributedAuthorityStore:
                     egress_days,
                 )
                 report["egress_days"]=len(egress_days)
+
+            compactable=[
+                str(row["task_id"])
+                for row in self.connection.execute(
+                    """
+                    SELECT w.task_id
+                    FROM fabric_work AS w
+                    WHERE w.state='COMPLETE'
+                      AND w.updated_at<=?
+                      AND w.payload_json<>'{}'
+                      AND NOT EXISTS (
+                          SELECT 1 FROM fabric_result_batches AS b
+                          WHERE b.task_id=w.task_id
+                            AND b.consumed_at IS NULL
+                            AND b.quarantined=0
+                      )
+                      AND NOT EXISTS (
+                          SELECT 1 FROM fabric_provider_permits AS p
+                          WHERE p.task_id=w.task_id AND p.active=1
+                      )
+                    ORDER BY w.updated_at,w.task_id
+                    LIMIT ?
+                    """,
+                    (cutoff,limit),
+                )
+            ]
+            if compactable:
+                ph=placeholders(compactable)
+                report["work_payloads_compacted"]=self.connection.execute(
+                    f"""
+                    UPDATE fabric_work
+                    SET payload_json='{{}}', cursor=NULL, last_error=NULL
+                    WHERE task_id IN ({ph})
+                    """,
+                    compactable,
+                ).rowcount
         return report
 
     def configure_provider_budget(
