@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -103,6 +104,52 @@ timezone = "Asia/Singapore"
                 0.25,
             )
             self.assertIn("disk_free_bytes",snapshot["host"])
+
+    def test_snapshot_reports_active_baseline_identity_without_scanning_index(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp)
+            manifest=root/"authority.json"
+            manifest.write_text(
+                json.dumps(
+                    {
+                        "baseline_id":"merged-fixture",
+                        "annual_file_hashes":{
+                            f"{year}.txt":"0"*64
+                            for year in range(1996,2002)
+                        },
+                        "candidate_file_hash":"1"*64,
+                        "model_hash":"2"*64,
+                        "baseline_eed":"33.5",
+                        "annual_line_counts":{"1996":10,"1997":20},
+                        "candidate_line_count":7,
+                    }
+                )+"\n",
+                encoding="utf-8",
+            )
+            index=root/"baseline.sqlite3"
+            index.write_bytes(b"fixture-index")
+            config=root/"fabric.toml"
+            config.write_text(
+                f"""
+[authority]
+database = "fabric.sqlite3"
+credentials_file = "workers.json"
+
+[email_report]
+runtime_data_root = "{root.as_posix()}"
+baseline_manifest = "{manifest.as_posix()}"
+baseline_index = "{index.as_posix()}"
+""",
+                encoding="utf-8",
+            )
+
+            snapshot=collect_snapshot(config)
+
+            baseline=snapshot["baseline"]
+            self.assertEqual(baseline["baseline_id"],"merged-fixture")
+            self.assertEqual(baseline["baseline_eed"],"33.5")
+            self.assertEqual(baseline["candidate_line_count"],7)
+            self.assertEqual(baseline["index_bytes"],len(b"fixture-index"))
 
     def test_smtp_failure_keeps_durable_outbox_until_replay(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
