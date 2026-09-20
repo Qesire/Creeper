@@ -20,6 +20,9 @@ rdap_backlog_capacity = 4096
 
 [historical_index]
 enabled = true
+distributed_harvest = true
+fabric_poll_seconds = 0.25
+fabric_wait_seconds = 360
 background_only = true
 max_indexes_per_cycle = 2
 max_probe_actions_per_index = 2
@@ -51,3 +54,7 @@ harvest_policy_version = "historical-region-v1"
 claim_grace_seconds = 60
 busy_poll_seconds = 0.25
 idle_poll_seconds = 5
+
+[fabric]
+database = "postgresql:///creeper"
+outbox_enabled = false
