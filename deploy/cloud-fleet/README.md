@@ -97,6 +97,26 @@ Fabric/WireGuard enrollment is provider-neutral:
 
 See `COMMANDS.md` for the exact order.
 
+## Firewall / security-group contract
+
+Authority public interface:
+
+- allow SSH only from the operator's trusted source ranges;
+- allow UDP/51820 for WireGuard peers;
+- **do not expose TCP/8088 publicly**;
+- PostgreSQL remains loopback-only.
+
+Remote worker:
+
+- allow SSH only from the operator's trusted source ranges;
+- allow outbound TCP/UDP to the Internet and Authority;
+- no inbound TCP/8088 is required;
+- no inbound UDP/51820 is required: the worker initiates the WireGuard session
+  and `PersistentKeepalive=25` maintains the NAT mapping.
+
+Cloud security groups/firewalls should implement the same contract; UFW on the
+guest is an additional layer, not a replacement.
+
 ## Cost-safety rules
 
 1. Never assume a VM labeled free makes its **public IPv4, disk, snapshots,
