@@ -54,7 +54,7 @@ class CloudFleetDeployTests(unittest.TestCase):
         )
         self.assertIn("10.77.0.0/24",prepare)
         self.assertIn("PersistentKeepalive = 25",prepare)
-        self.assertIn("does not start",prepare)
+        self.assertIn("not started",prepare)
         self.assertIn("add-remote-worker.sh",enroll)
         self.assertIn("wg set creeper peer",enroll)
         self.assertIn("AllowedIPs",enroll)
