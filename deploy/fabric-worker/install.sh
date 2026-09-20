@@ -116,7 +116,7 @@ EOF
 sudo chown root:"$APP_GROUP"   "$ETC_DIR/remote-worker.toml" "$ETC_DIR/remote-worker.env"
 sudo chmod 0640 "$ETC_DIR/remote-worker.toml" "$ETC_DIR/remote-worker.env"
 
-sudo install -o root -g root -m 0755   "$APP_DIR/deploy/fabric-worker/preflight.sh"   "$APP_DIR/deploy/fabric-worker/preflight.sh"
+sudo chmod 0755 "$APP_DIR/deploy/fabric-worker/preflight.sh"
 sudo install -o root -g root -m 0644   "$APP_DIR/deploy/fabric-worker/systemd/creeper-fabric-remote-worker.service"   /etc/systemd/system/creeper-fabric-remote-worker.service
 
 sudo timedatectl set-ntp true || true
