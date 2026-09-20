@@ -213,6 +213,28 @@ class BulkShardTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(batches[-1].final)
 
 
+    def test_bulk_result_byte_target_rejects_authority_ceiling_risk(self) -> None:
+        identity=HistoricalIndexObjectIdentity(
+            kind="remote",
+            content_length=1000,
+            etag='"v1"',
+        )
+        with self.assertRaisesRegex(ValueError,"execution policy"):
+            bulk_shard_work_definition(
+                region_key="r",
+                index_key="i",
+                source_key="s",
+                locator="https://example.test/index.cdxj",
+                index_format="CDXJ",
+                byte_start=0,
+                byte_end_exclusive=100,
+                expected_identity=identity,
+                boundary_record_max_bytes=1024,
+                timeout_seconds=10,
+                result_batch_target_bytes=9*1024*1024,
+            )
+
+
 
 if __name__=="__main__":
     unittest.main()
