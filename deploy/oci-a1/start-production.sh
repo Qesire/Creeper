@@ -1,11 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-BASELINE=/srv/creeper/data/indexes/baseline-fast.sqlite3
-EED=/srv/creeper/reference/equivalent_english_domain.json
+APP_DIR=/opt/creeper
 
-[[ -s "$BASELINE" ]] || { echo "missing or empty: $BASELINE" >&2; exit 2; }
-[[ -s "$EED" ]] || { echo "missing or empty: $EED" >&2; exit 2; }
+sudo -u creeper -H bash "$APP_DIR/deploy/oci-a1/verify-baseline.sh"
 
 sudo systemctl enable --now creeper-fabric-authority.service
 sudo systemctl enable --now creeper-fabric-worker@query.service
