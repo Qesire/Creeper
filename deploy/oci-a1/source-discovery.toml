@@ -12,7 +12,7 @@ cold_target = 100
 max_cold_credit_per_origin = 12
 triage_batch = 8
 scout_parallelism = 2
-max_search_directives = 1
+max_search_directives = 0
 
 [residual_search]
 enabled = true
@@ -74,8 +74,8 @@ gateway_min_enumerability_prior = 0.80
 min_confidence = 0.35
 require_year_bounds = true
 
-# Automatic LLM use remains UNKNOWN_FORMAT -> COMPILE_ADAPTER only.
-# Install/configure the existing wrapper if that exceptional lane is desired.
+# Automatic LLM is disabled on the unattended free host by max_search_directives=0.
+# The [agent] contract is retained only so this same file can be opt-in enabled later.
 [agent]
 command = ["python", "/opt/creeper/scripts/creeper_opencode_subagent.py"]
 backend = "opencode-cli-subagent"
