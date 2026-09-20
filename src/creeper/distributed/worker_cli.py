@@ -45,16 +45,23 @@ async def _run(config_path: Path) -> None:
                 "no installed Fabric producer for: "+",".join(sorted(unknown))
             )
 
+        upload_reserver = None
+        if config.coordinator_upload_budget_bytes_per_month > 0:
+            upload_reserver = lambda amount: spool.reserve_coordinator_upload(
+                amount,
+                budget_bytes=config.coordinator_upload_budget_bytes_per_month,
+            )
         async with CoordinatorClient(
             config.coordinator_url,
             worker_id=descriptor.worker_id,
             worker_instance_id=descriptor.worker_instance_id,
             secret=secret,
-            upload_reserver=lambda amount: spool.reserve_coordinator_upload(
-                amount,
-                budget_bytes=config.coordinator_upload_budget_bytes_per_month,
+            upload_reserver=upload_reserver,
+            upload_overhead_bytes=(
+                config.coordinator_upload_overhead_bytes
+                if upload_reserver is not None
+                else 0
             ),
-            upload_overhead_bytes=config.coordinator_upload_overhead_bytes,
         ) as client:
             worker=DistributedWorker(
                 client,
