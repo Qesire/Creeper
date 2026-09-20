@@ -12,6 +12,7 @@ from creeper.distributed.email_reporter import collect_snapshot,render_report
 from creeper.storage.candidate_store import CandidateStore
 from creeper.storage.control_store import ControlStore
 from creeper.storage.evidence_store import EvidenceStore
+from creeper.storage.telemetry_store import RuntimeTelemetryStore
 
 
 class FabricEmailReporterTests(unittest.TestCase):
@@ -69,6 +70,10 @@ timezone = "Asia/Singapore"
             ControlStore(root/"control.sqlite3").close()
             EvidenceStore(root/"evidence.sqlite3").close()
             CandidateStore(root/"candidates.sqlite3").close()
+            telemetry=RuntimeTelemetryStore(root/"telemetry.sqlite3")
+            telemetry.add_counters({"source_records": 11})
+            telemetry.set_gauges({"novel_eed_per_second": 0.25})
+            telemetry.close()
             readiness=root/"readiness"
             readiness.mkdir()
             (readiness/"readiness.json").write_text(
@@ -87,12 +92,18 @@ timezone = "Asia/Singapore"
             self.assertEqual(snapshot["candidates"]["records"],0)
             self.assertEqual(snapshot["readiness"]["novel_eed"],"12.5")
             self.assertEqual(snapshot["readiness"]["novel_host_years"],7)
+            self.assertEqual(snapshot["telemetry"]["counters"]["source_records"],11)
+            self.assertEqual(
+                snapshot["telemetry"]["gauges"]["novel_eed_per_second"],
+                0.25,
+            )
             self.assertIn("disk_free_bytes",snapshot["host"])
 
     def test_render_report_includes_delta_since_previous_summary(self) -> None:
         current={
             "readiness":{"novel_eed":"12.5","growth_rate":"0.001"},
             "fabric":{"complete":8,"dead":0},
+            "telemetry":{"counters":{"requests":14},"gauges":{"yield":0.4}},
             "control":{},
             "evidence":{"host_years":12},
             "candidates":{"records":20},
@@ -101,6 +112,7 @@ timezone = "Asia/Singapore"
         previous={
             "readiness":{"novel_eed":"10.0","growth_rate":"0.0008"},
             "fabric":{"complete":5,"dead":0},
+            "telemetry":{"counters":{"requests":10},"gauges":{"yield":0.3}},
             "control":{},
             "evidence":{"host_years":10},
             "candidates":{"records":18},
@@ -113,6 +125,7 @@ timezone = "Asia/Singapore"
         )
         self.assertIn('"readiness.novel_eed": 2.5',report)
         self.assertIn('"fabric.complete": 3.0',report)
+        self.assertIn('"telemetry.counters.requests": 4.0',report)
         self.assertIn('"evidence.host_years": 2.0',report)
         self.assertIn('"host.disk_free_bytes": -20.0',report)
 
