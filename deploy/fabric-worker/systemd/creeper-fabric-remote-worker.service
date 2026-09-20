@@ -1,7 +1,7 @@
 [Unit]
 Description=Creeper Fabric remote outbound worker
-After=network-online.target
-Wants=network-online.target
+After=network-online.target wg-quick@creeper.service
+Wants=network-online.target wg-quick@creeper.service
 
 [Service]
 Type=simple
