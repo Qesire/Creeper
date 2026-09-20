@@ -496,6 +496,64 @@ class FabricAuthorityStoreTests(unittest.TestCase):
         self.assertEqual(self.store.task_row(other)["state"],"PENDING")
 
 
+    def test_expired_lost_response_permit_is_reissued_not_resurrected(self) -> None:
+        now=[1000.0]
+        store=DistributedAuthorityStore(
+            self.root/"fabric-permit-replay.sqlite3",
+            clock=lambda:now[0],
+        )
+        try:
+            store.register_worker(self.worker)
+            store.configure_provider_budget(
+                "datacite",
+                requests_per_second=10.0,
+                max_global_inflight=4,
+                require_qualified_region=False,
+            )
+            task_id,_=store.admit_work(self.work("permit-replay"))
+            lease=store.claim_work(
+                "worker-a","instance-1",lease_seconds=300
+            )
+            self.assertIsNotNone(lease)
+            assert lease is not None
+            first=store.issue_provider_permit(
+                "datacite",
+                worker_id="worker-a",
+                worker_instance_id="instance-1",
+                task_id=task_id,
+                generation=lease.generation,
+                request_id="lost-response",
+                ttl_seconds=10,
+            )
+            self.assertIsNotNone(first)
+            assert first is not None
+            now[0]+=11.0
+            second=store.issue_provider_permit(
+                "datacite",
+                worker_id="worker-a",
+                worker_instance_id="instance-1",
+                task_id=task_id,
+                generation=lease.generation,
+                request_id="lost-response",
+                ttl_seconds=10,
+            )
+            self.assertIsNotNone(second)
+            assert second is not None
+            self.assertNotEqual(second.permit_id,first.permit_id)
+            self.assertGreater(second.expires_at,first.expires_at)
+            row=store.connection.execute(
+                """
+                SELECT permit_id,active FROM fabric_provider_permits
+                WHERE worker_id=? AND request_id=?
+                """,
+                ("worker-a","lost-response"),
+            ).fetchone()
+            self.assertEqual(str(row["permit_id"]),second.permit_id)
+            self.assertEqual(int(row["active"]),1)
+        finally:
+            store.close()
+
+
 
 if __name__=="__main__":
     unittest.main()
