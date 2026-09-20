@@ -262,6 +262,10 @@ class FabricAuthorityStoreTests(unittest.TestCase):
             )
         )
         self.assertEqual(self.store.unconsumed_batches(),())
+        status=self.store.status_snapshot()
+        self.assertEqual(status["unconsumed_batches"],0)
+        self.assertEqual(status["quarantined_batches"],1)
+        self.assertEqual(status["retained_batches"],1)
 
 
 if __name__=="__main__":
