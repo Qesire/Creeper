@@ -23,4 +23,5 @@ systemctl --no-pager --full status \
   creeper-autopilot.service \
   creeper-email-report.timer \
   creeper-email-outbox.timer \
-  creeper-fabric-gc.timer
+  creeper-fabric-gc.timer \
+  creeper-fabric-worker-health.timer
