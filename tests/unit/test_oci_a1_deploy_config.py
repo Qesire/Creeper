@@ -259,5 +259,28 @@ class OciA1DeploymentConfigTests(unittest.TestCase):
                 self.assertIsInstance(value,dict)
 
 
+    def test_worker_health_is_edge_alerted_and_multihost_is_explicit(self) -> None:
+        service=(self.root/"systemd"/"creeper-fabric-worker-health.service").read_text(
+            encoding="utf-8"
+        )
+        timer=(self.root/"systemd"/"creeper-fabric-worker-health.timer").read_text(
+            encoding="utf-8"
+        )
+        install=(self.root/"install.sh").read_text(encoding="utf-8")
+        enable=(self.root/"enable-multihost-authority.sh").read_text(
+            encoding="utf-8"
+        )
+        provision=(self.root/"add-remote-worker.sh").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("worker-health --stale-seconds 180",service)
+        self.assertIn("OnFailure=creeper-email-alert@%n.service",service)
+        self.assertIn("OnUnitActiveSec=5m",timer)
+        self.assertIn("creeper-fabric-worker-health.timer",install)
+        self.assertIn("allow_unknown_region_probe = true",enable)
+        self.assertIn("ufw allow in on creeper to any port 8088",enable)
+        self.assertIn("worker id already exists",provision)
+
+
 if __name__=="__main__":
     unittest.main()
