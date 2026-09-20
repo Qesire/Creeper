@@ -70,8 +70,6 @@ chown -R "$APP_USER:$APP_GROUP" "$TARGET"
 chmod 0750 "$TARGET"
 find "$TARGET" -type f -exec chmod 0640 {} +
 
-install -o "$APP_USER" -g "$APP_GROUP" -m 0640 "$MODEL_SOURCE" "$MODEL_TARGET"
-
 WAS_ACTIVE=0
 if systemctl is-active --quiet creeper-autopilot.service; then
   WAS_ACTIVE=1
@@ -89,6 +87,7 @@ trap restart_on_error EXIT
 INDEX="$INDEX_ROOT/$BASELINE_ID.sqlite3"
 sudo -u "$APP_USER" -H "$APP_DIR/.venv/bin/python"   "$APP_DIR/scripts/build_baseline.py"   /srv/creeper "$INDEX"   --baseline-dir "$TARGET"   --authority-manifest "$TARGET/authority-manifest.json"   --batch-size 50000
 
+rm -f "$BASE_ROOT/current.next" /srv/creeper/data/indexes/baseline-fast.sqlite3.next
 ln -s "$BASELINE_ID" "$BASE_ROOT/current.next"
 mv -Tf "$BASE_ROOT/current.next" "$CURRENT"
 ln -s "baseline/$BASELINE_ID.sqlite3" /srv/creeper/data/indexes/baseline-fast.sqlite3.next
