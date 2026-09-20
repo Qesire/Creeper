@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 from datetime import datetime
 from email.message import EmailMessage
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -287,6 +289,21 @@ def _outbox_dir(config) -> Path:
     return config.resolved_state_file.parent/"outbox"
 
 
+@contextmanager
+def _outbox_lock(config):
+    lock=config.resolved_state_file.parent/"email-outbox.lock"
+    lock.parent.mkdir(parents=True,exist_ok=True,mode=0o700)
+    fd=os.open(lock,os.O_RDWR|os.O_CREAT,0o600)
+    try:
+        fcntl.flock(fd,fcntl.LOCK_EX)
+        yield
+    finally:
+        try:
+            fcntl.flock(fd,fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
+
+
 def queue_email(
     config,
     *,
@@ -320,36 +337,44 @@ def flush_outbox(config, *, limit: int=100) -> int:
     outbox=_outbox_dir(config)
     if not outbox.exists():
         return 0
-    sent=0
-    for path in sorted(outbox.glob("*.json"))[:limit]:
-        try:
-            raw=json.loads(path.read_text(encoding="utf-8"))
-        except (OSError,json.JSONDecodeError) as exc:
-            raise RuntimeError(f"invalid email outbox entry {path}: {exc}") from exc
-        if not isinstance(raw,dict):
-            raise RuntimeError(f"invalid email outbox entry {path}: not an object")
-        subject=raw.get("subject")
-        body=raw.get("body")
-        kind=raw.get("kind")
-        if (
-            not isinstance(subject,str)
-            or not subject
-            or not isinstance(body,str)
-            or not body
-            or kind not in {"summary","alert"}
-        ):
-            raise RuntimeError(f"invalid email outbox entry {path}: bad fields")
-        send_email(config,subject=subject,body=body)
-        snapshot=raw.get("snapshot")
-        if kind=="summary":
-            if not isinstance(snapshot,dict):
+    with _outbox_lock(config):
+        sent=0
+        for path in sorted(outbox.glob("*.json"))[:limit]:
+            try:
+                raw=json.loads(path.read_text(encoding="utf-8"))
+            except (OSError,json.JSONDecodeError) as exc:
                 raise RuntimeError(
-                    f"invalid email outbox entry {path}: missing summary snapshot"
+                    f"invalid email outbox entry {path}: {exc}"
+                ) from exc
+            if not isinstance(raw,dict):
+                raise RuntimeError(
+                    f"invalid email outbox entry {path}: not an object"
                 )
-            _save(config.resolved_state_file,snapshot)
-        path.unlink()
-        sent+=1
-    return sent
+            subject=raw.get("subject")
+            body=raw.get("body")
+            kind=raw.get("kind")
+            if (
+                not isinstance(subject,str)
+                or not subject
+                or not isinstance(body,str)
+                or not body
+                or kind not in {"summary","alert"}
+            ):
+                raise RuntimeError(
+                    f"invalid email outbox entry {path}: bad fields"
+                )
+            send_email(config,subject=subject,body=body)
+            snapshot=raw.get("snapshot")
+            if kind=="summary":
+                if not isinstance(snapshot,dict):
+                    raise RuntimeError(
+                        f"invalid email outbox entry {path}: "
+                        "missing summary snapshot"
+                    )
+                _save(config.resolved_state_file,snapshot)
+            path.unlink()
+            sent+=1
+        return sent
 
 
 def main(argv:list[str]|None=None)->int:
