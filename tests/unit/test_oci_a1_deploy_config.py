@@ -41,6 +41,7 @@ class OciA1DeploymentConfigTests(unittest.TestCase):
         discovery=load_source_discovery_config(self.root/"source-discovery.toml")
         self.assertTrue(discovery.fabric.enabled)
         self.assertFalse(discovery.fabric.outbox_enabled)
+        self.assertEqual(discovery.pool.max_search_directives,0)
 
     def test_workers_are_colocated_and_have_disjoint_execution_roles(self) -> None:
         query=load_worker_config(self.root/"worker-query.toml")
