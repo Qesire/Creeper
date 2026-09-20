@@ -125,6 +125,7 @@ class ResidualSearchConfig:
 class FabricResidualConfig:
     enabled: bool = False
     database: str = ""
+    outbox_enabled: bool = True
 
 
 @dataclass(frozen=True)
@@ -374,6 +375,10 @@ def load_source_discovery_config(config_path: Path) -> SourceDiscoveryServiceCon
     fabric = FabricResidualConfig(
         enabled=fabric_enabled,
         database=raw_fabric_database,
+        outbox_enabled=_strict_bool(
+            fabric_raw.get("outbox_enabled",True),
+            name="fabric.outbox_enabled",
+        ),
     )
     if fabric.enabled and not residual_search.enabled:
         raise ValueError(
@@ -660,7 +665,10 @@ async def _open_runtime(config: SourceDiscoveryServiceConfig):
     with _service_lock(discovery_root / "service.lock"):
         control = ControlStore(root / "control.sqlite3")
         fabric_store = (
-            open_authority_store(config.fabric.database)
+            open_authority_store(
+                config.fabric.database,
+                emit_outbox=config.fabric.outbox_enabled,
+            )
             if config.fabric.enabled
             else None
         )
