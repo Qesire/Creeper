@@ -8,7 +8,12 @@ from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
 from creeper.distributed.config import load_email_report_config
-from creeper.distributed.email_reporter import collect_snapshot,render_report
+from creeper.distributed.email_reporter import (
+    collect_snapshot,
+    flush_outbox,
+    queue_email,
+    render_report,
+)
 from creeper.storage.candidate_store import CandidateStore
 from creeper.storage.control_store import ControlStore
 from creeper.storage.evidence_store import EvidenceStore
@@ -98,6 +103,41 @@ timezone = "Asia/Singapore"
                 0.25,
             )
             self.assertIn("disk_free_bytes",snapshot["host"])
+
+    def test_smtp_failure_keeps_durable_outbox_until_replay(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp)
+            config=load_email_report_config(self._config(root))
+            snapshot={"readiness":{"novel_eed":"3.5"}}
+            queued=queue_email(
+                config,
+                subject="[Creeper] daily",
+                body="report body",
+                kind="summary",
+                snapshot=snapshot,
+            )
+
+            with patch(
+                "creeper.distributed.email_reporter.send_email",
+                side_effect=OSError("smtp unavailable"),
+            ):
+                with self.assertRaises(OSError):
+                    flush_outbox(config)
+
+            self.assertTrue(queued.is_file())
+            self.assertFalse(config.resolved_state_file.exists())
+
+            with patch(
+                "creeper.distributed.email_reporter.send_email"
+            ) as sender:
+                self.assertEqual(flush_outbox(config),1)
+
+            sender.assert_called_once()
+            self.assertFalse(queued.exists())
+            self.assertEqual(
+                config.resolved_state_file.read_text(encoding="utf-8").strip(),
+                '{\n  "readiness": {\n    "novel_eed": "3.5"\n  }\n}',
+            )
 
     def test_render_report_includes_delta_since_previous_summary(self) -> None:
         current={
