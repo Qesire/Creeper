@@ -108,6 +108,15 @@ CREEPER_APPLY=1 CREEPER_ALLOW_AWS_CREDIT_SPEND=1 \
   bash deploy/cloud-fleet/provision-aws-credit-worker.sh
 ```
 
+### Firewall note
+
+For all remote workers, restrict inbound TCP/22 to your administration source
+range. Do **not** open 8088 or 51820 inbound on the worker. The worker only
+needs outbound Internet plus outbound UDP to the Authority's port 51820.
+
+For custom GCP VPCs, Azure NSGs, OCI security lists, or AWS security groups,
+create the SSH rule explicitly rather than relying on provider defaults.
+
 ## 2. Remote VM: prepare WireGuard identity
 
 Choose a unique /32. Suggested allocation:
