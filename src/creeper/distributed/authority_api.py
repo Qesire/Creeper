@@ -55,6 +55,7 @@ def create_authority_app(
     credentials: Mapping[str, str | bytes],
     *,
     max_clock_skew_seconds: float = 300.0,
+    max_request_body_bytes: int = 32 * 1024 * 1024,
 ) -> web.Application:
     authenticator = HMACRequestAuthenticator(
         store,
@@ -111,7 +112,12 @@ def create_authority_app(
         request["worker_instance_id"] = verified_instance
         return await handler(request)
 
-    app = web.Application(middlewares=[errors, authenticate])
+    if max_request_body_bytes < 1024 * 1024:
+        raise ValueError("max_request_body_bytes must be at least 1 MiB")
+    app = web.Application(
+        middlewares=[errors, authenticate],
+        client_max_size=max_request_body_bytes,
+    )
 
     async def health(_request: web.Request) -> web.Response:
         return web.json_response({"status": "ok"})
