@@ -84,3 +84,5 @@ smtp_port = 587
 starttls = true
 timezone = "Asia/Singapore"
 subject_prefix = "[Creeper]"
+baseline_manifest = "/srv/creeper/baseline/current/authority-manifest.json"
+baseline_index = "/srv/creeper/data/indexes/baseline-fast.sqlite3"
