@@ -145,16 +145,19 @@ class OciA1DeploymentConfigTests(unittest.TestCase):
 
             self.assertIsNotNone(discovery.measurement)
             assert discovery.measurement is not None
+            resolved_manifest=(
+                Path(tmp)/"srv"/"baseline"/"current"/"authority-manifest.json"
+            ).resolve()
             self.assertEqual(
                 discovery.measurement.authority_manifest,
-                Path(tmp)/"srv"/"baseline"/"current"/"authority-manifest.json",
+                resolved_manifest,
             )
             self.assertIsNotNone(autopilot.readiness)
             assert autopilot.readiness is not None
             self.assertEqual(autopilot.readiness.baseline_eed,"0")
             self.assertEqual(
                 autopilot.readiness.authority_manifest,
-                Path(tmp)/"srv"/"baseline"/"current"/"authority-manifest.json",
+                resolved_manifest,
             )
 
     def test_workers_are_colocated_and_have_disjoint_execution_roles(self) -> None:
