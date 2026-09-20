@@ -21,6 +21,10 @@ def _parser()->argparse.ArgumentParser:
     gc.add_argument("--retention-hours",type=float,default=24.0)
     gc.add_argument("--limit",type=int,default=50000)
 
+    health=sub.add_parser("worker-health")
+    health.add_argument("--stale-seconds",type=float,default=180.0)
+    health.add_argument("--state-file",type=Path,required=True)
+
     admit=sub.add_parser("admit")
     admit.add_argument("--producer",required=True)
     admit.add_argument("--task-class",choices=[v.value for v in TaskClass],required=True)
@@ -52,6 +56,51 @@ def main(argv:list[str]|None=None)->int:
         if args.command=="revoke-worker":
             store.revoke_worker(args.worker_id)
             return 0
+        if args.command=="worker-health":
+            snapshot=store.status_snapshot(
+                stale_after_seconds=args.stale_seconds
+            )
+            health=snapshot.get("worker_health",[])
+            stale=sorted(
+                str(item["worker_id"])
+                for item in health
+                if isinstance(item,dict) and bool(item.get("stale"))
+            )
+            prior_stale:list[str]=[]
+            try:
+                prior=json.loads(
+                    args.state_file.read_text(encoding="utf-8")
+                ).get("stale_workers",[])
+                if not isinstance(prior,list) or any(
+                    not isinstance(item,str) for item in prior
+                ):
+                    prior_stale=[]
+                else:
+                    prior_stale=list(prior)
+            except (FileNotFoundError,OSError,json.JSONDecodeError,AttributeError):
+                prior_stale=[]
+            newly_stale=sorted(set(stale)-set(prior_stale))
+            args.state_file.parent.mkdir(parents=True,exist_ok=True)
+            temporary=args.state_file.with_suffix(args.state_file.suffix+".tmp")
+            temporary.write_text(
+                json.dumps(
+                    {"stale_workers":stale},
+                    sort_keys=True,
+                    indent=2,
+                )+"\n",
+                encoding="utf-8",
+            )
+            temporary.replace(args.state_file)
+            print(
+                json.dumps(
+                    {
+                        "stale_workers":stale,
+                        "newly_stale":newly_stale,
+                    },
+                    sort_keys=True,
+                )
+            )
+            return 2 if newly_stale else 0
         if args.command=="gc":
             report=store.gc_transient_state(
                 retention_seconds=args.retention_hours*3600.0,
