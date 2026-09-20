@@ -580,6 +580,50 @@ class DistributedAuthorityStore:
         self.connection.execute("BEGIN IMMEDIATE")
         try:
             worker = self._worker_row(worker_id, worker_instance_id)
+            active = self.connection.execute(
+                """
+                SELECT *
+                FROM fabric_work
+                WHERE state='LEASED'
+                  AND lease_owner=?
+                  AND lease_owner_instance=?
+                  AND lease_deadline > ?
+                ORDER BY updated_at ASC, task_id ASC
+                LIMIT 1
+                """,
+                (worker_id, worker_instance_id, now),
+            ).fetchone()
+            if active is not None:
+                # Claim is idempotent per worker incarnation. If the previous
+                # HTTP response was lost after Authority committed the lease,
+                # return that same generation instead of orphaning it and
+                # leasing a second task to this single-concurrency worker.
+                deadline = now + float(lease_seconds)
+                self.connection.execute(
+                    """
+                    UPDATE fabric_work
+                    SET lease_deadline=?, updated_at=?
+                    WHERE task_id=?
+                    """,
+                    (deadline, now, str(active["task_id"])),
+                )
+                self.connection.commit()
+                return TaskLease(
+                    task_id=str(active["task_id"]),
+                    work_key=str(active["work_key"]),
+                    worker_id=worker_id,
+                    worker_instance_id=worker_instance_id,
+                    generation=int(active["lease_generation"]),
+                    lease_deadline=deadline,
+                    attempt=int(active["attempt"]),
+                    work=self._work_from_row(active),
+                    cursor=(
+                        None
+                        if active["cursor"] is None
+                        else str(active["cursor"])
+                    ),
+                    next_sequence_no=int(active["next_sequence_no"]),
+                )
             rows = self.connection.execute(
                 """
                 SELECT *
