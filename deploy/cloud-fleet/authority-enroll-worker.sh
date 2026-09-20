@@ -47,7 +47,7 @@ if grep -Fq "PublicKey = $WORKER_WG_PUBLIC_KEY" "$WG_CONFIG"; then
   echo "WireGuard public key already exists in Authority config" >&2
   exit 2
 fi
-if grep -Eq "AllowedIPs[[:space:]]*=[[:space:]]*$BARE_IP/32([[:space:]]|$)" "$WG_CONFIG"; then
+if grep -Fq "AllowedIPs = $BARE_IP/32" "$WG_CONFIG"; then
   echo "WireGuard address already exists in Authority config: $BARE_IP" >&2
   exit 2
 fi
