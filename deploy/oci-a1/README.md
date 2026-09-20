@@ -54,8 +54,11 @@ path under `/srv/creeper`.
 
 The source/discovery domain remains local because there is only one machine.
 Residual metadata queries and ordinary CDX/RDAP completion still cross the
-Fabric lease/fencing/outbox boundary. The local legacy evidence worker is
-disabled, so it cannot race the Fabric evidence lane.
+Fabric lease/fencing, worker-spool and authority-inbox boundary. The local
+legacy evidence worker is disabled, so it cannot race the Fabric evidence lane.
+The broker outbox is explicitly disabled in this HTTP-only profile; otherwise
+unused WORK/RESULT events would accumulate forever without a NATS/JetStream
+publisher. Generic Fabric deployments keep that capability enabled by default.
 
 ## Network boundary
 
@@ -79,7 +82,7 @@ The summary includes:
 - Fabric pending / leased / complete / dead work;
 - runtime counters/gauges, including throughput and yield telemetry already
   published by the production pipeline;
-- unconsumed ResultBatch and pending Fabric outbox counts;
+- unconsumed ResultBatch count and the broker-outbox count (expected zero in this profile);
 - evidence-task, platform-harvest, reservoir and source-lease state counts;
 - proven unique hostname-year count and evidence capsule count;
 - candidate/unparsed counts;
@@ -87,6 +90,10 @@ The summary includes:
 - numeric deltas since the previous successfully delivered summary email.
 
 Mail secrets are environment-only. They never appear in TOML or Git.
+Automatic LLM work is also disabled in this profile (`max_search_directives=0`),
+so the free host has no hidden dependency on OpenCode/model credentials. Unknown
+formats remain durable HOLD items until an adapter is supplied or that budget is
+explicitly enabled later.
 
 Required installer environment:
 
