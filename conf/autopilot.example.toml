@@ -25,6 +25,9 @@ stable_reset_seconds = 300.0
 shutdown_grace_seconds = 10.0
 
 [evidence]
+# Set false when an external/Fabric evidence executor owns the durable
+# evidence queue; this prevents duplicate provider work.
+enabled = true
 # Conservative public Wayback fallback profile. Direct-year source production
 # is intentionally independent from this worker's availability/backlog.
 # Increase only after bounded A/B tests.
