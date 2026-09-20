@@ -1,5 +1,6 @@
 [Unit]
 Description=Creeper Fabric remote outbound worker
+ConditionPathExists=/etc/wireguard/creeper.conf
 After=network-online.target wg-quick@creeper.service
 Wants=network-online.target wg-quick@creeper.service
 
