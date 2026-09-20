@@ -35,6 +35,7 @@ def main(argv: list[str]|None=None)->int:
         store,
         credentials,
         max_clock_skew_seconds=config.max_clock_skew_seconds,
+        max_request_body_bytes=config.max_request_body_bytes,
     )
 
     async def close_store(_app):

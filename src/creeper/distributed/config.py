@@ -45,6 +45,7 @@ class AuthorityRuntimeConfig:
     host: str = "127.0.0.1"
     port: int = 8088
     max_clock_skew_seconds: float = 300.0
+    max_request_body_bytes: int = 32 * 1024 * 1024
     outbox_enabled: bool = True
     provider_budgets: tuple[ProviderBudgetConfig, ...] = ()
 
@@ -55,6 +56,14 @@ class AuthorityRuntimeConfig:
             raise ValueError("invalid authority listen address")
         if self.max_clock_skew_seconds <= 0:
             raise ValueError("max_clock_skew_seconds must be positive")
+        if (
+            isinstance(self.max_request_body_bytes,bool)
+            or not isinstance(self.max_request_body_bytes,int)
+            or self.max_request_body_bytes < 1024 * 1024
+        ):
+            raise ValueError(
+                "max_request_body_bytes must be an integer >= 1 MiB"
+            )
         if not isinstance(self.outbox_enabled, bool):
             raise ValueError("outbox_enabled must be a boolean")
 
@@ -101,6 +110,7 @@ class WorkerRuntimeConfig:
     claim_wait_seconds: float = 10.0
     lease_seconds: float = 300.0
     heartbeat_seconds: float = 30.0
+    coordinator_timeout_seconds: float = 45.0
     coordinator_upload_budget_bytes_per_month: int = 0
     coordinator_upload_overhead_bytes: int = 1024
 
@@ -112,8 +122,13 @@ class WorkerRuntimeConfig:
             or not 0 <= self.claim_wait_seconds <= 25
             or self.lease_seconds <= 0
             or self.heartbeat_seconds <= 0
+            or self.coordinator_timeout_seconds
+                <= self.claim_wait_seconds + 2.0
         ):
-            raise ValueError("invalid worker timing configuration")
+            raise ValueError(
+                "invalid worker timing configuration: coordinator timeout "
+                "must exceed claim long-poll by more than 2 seconds"
+            )
         if self.coordinator_upload_budget_bytes_per_month < 0:
             raise ValueError(
                 "coordinator_upload_budget_bytes_per_month must be non-negative"
@@ -289,6 +304,9 @@ def load_authority_config(path: Path) -> AuthorityRuntimeConfig:
         max_clock_skew_seconds=float(
             section.get("max_clock_skew_seconds",300.0)
         ),
+        max_request_body_bytes=int(
+            section.get("max_request_body_bytes",32*1024*1024)
+        ),
         outbox_enabled=raw_outbox_enabled,
         provider_budgets=tuple(budgets),
     )
@@ -374,6 +392,9 @@ def load_worker_config(path: Path) -> WorkerRuntimeConfig:
         claim_wait_seconds=float(section.get("claim_wait_seconds",10.0)),
         lease_seconds=float(section.get("lease_seconds",300.0)),
         heartbeat_seconds=float(section.get("heartbeat_seconds",30.0)),
+        coordinator_timeout_seconds=float(
+            section.get("coordinator_timeout_seconds",45.0)
+        ),
         coordinator_upload_budget_bytes_per_month=int(
             section.get("coordinator_upload_budget_bytes_per_month",0)
         ),

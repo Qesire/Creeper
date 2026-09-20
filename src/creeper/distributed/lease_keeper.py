@@ -8,6 +8,7 @@ import time
 from creeper.distributed.coordinator_client import (
     CoordinatorClient,
     CoordinatorError,
+    CoordinatorTransportError,
     StaleLeaseCoordinatorError,
 )
 from creeper.distributed.models import TaskLease
@@ -84,13 +85,48 @@ class LeaseKeeper:
                 return
             except TimeoutError:
                 pass
-            try:
-                renewed = await self.client.renew(
-                    self.lease,
-                    lease_seconds=self.lease_seconds,
-                )
-            except (StaleLeaseCoordinatorError, CoordinatorError) as exc:
-                self._lost = exc
+            transient_failures = 0
+            while not self._stop.is_set():
+                try:
+                    renewed = await self.client.renew(
+                        self.lease,
+                        lease_seconds=self.lease_seconds,
+                    )
+                    break
+                except StaleLeaseCoordinatorError as exc:
+                    self._lost = exc
+                    return
+                except CoordinatorTransportError as exc:
+                    transient_failures += 1
+                    remaining = float(self.lease.lease_deadline) - float(
+                        self.clock()
+                    )
+                    if remaining <= 0:
+                        self._lost = LeaseLostError(
+                            f"lease expired during transient renewal failure: {exc}"
+                        )
+                        return
+                    retry_delay = min(
+                        5.0,
+                        max(
+                            0.25,
+                            self.min_renew_interval
+                            * (2 ** min(transient_failures - 1, 3)),
+                        ),
+                        max(0.01, remaining),
+                    )
+                    try:
+                        await asyncio.wait_for(
+                            self._stop.wait(),
+                            timeout=retry_delay,
+                        )
+                        return
+                    except TimeoutError:
+                        continue
+                except CoordinatorError as exc:
+                    self._lost = exc
+                    return
+            else:
                 return
             if (
                 renewed.task_id != self.lease.task_id

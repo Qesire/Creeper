@@ -474,6 +474,131 @@ class FabricAuthorityStoreTests(unittest.TestCase):
             store.close()
 
 
+    def test_repeated_claim_returns_existing_active_lease(self) -> None:
+        first_id,_=self.store.admit_work(self.work("claim-replay-1"))
+        second_id,_=self.store.admit_work(self.work("claim-replay-2"))
+        first=self.store.claim_work(
+            "worker-a","instance-1",lease_seconds=60
+        )
+        self.assertIsNotNone(first)
+        assert first is not None
+        replay=self.store.claim_work(
+            "worker-a","instance-1",lease_seconds=120
+        )
+        self.assertIsNotNone(replay)
+        assert replay is not None
+        self.assertEqual(replay.task_id,first.task_id)
+        self.assertEqual(replay.generation,first.generation)
+        self.assertEqual(replay.attempt,first.attempt)
+        self.assertEqual(replay.lease_deadline,first.lease_deadline)
+        self.assertIn(replay.task_id,{first_id,second_id})
+        other=second_id if replay.task_id==first_id else first_id
+        self.assertEqual(self.store.task_row(other)["state"],"PENDING")
+
+
+    def test_expired_lost_response_permit_is_reissued_not_resurrected(self) -> None:
+        now=[1000.0]
+        store=DistributedAuthorityStore(
+            self.root/"fabric-permit-replay.sqlite3",
+            clock=lambda:now[0],
+        )
+        try:
+            store.register_worker(self.worker)
+            store.configure_provider_budget(
+                "datacite",
+                requests_per_second=10.0,
+                max_global_inflight=4,
+                require_qualified_region=False,
+            )
+            task_id,_=store.admit_work(self.work("permit-replay"))
+            lease=store.claim_work(
+                "worker-a","instance-1",lease_seconds=300
+            )
+            self.assertIsNotNone(lease)
+            assert lease is not None
+            first=store.issue_provider_permit(
+                "datacite",
+                worker_id="worker-a",
+                worker_instance_id="instance-1",
+                task_id=task_id,
+                generation=lease.generation,
+                request_id="lost-response",
+                ttl_seconds=10,
+            )
+            self.assertIsNotNone(first)
+            assert first is not None
+            now[0]+=11.0
+            second=store.issue_provider_permit(
+                "datacite",
+                worker_id="worker-a",
+                worker_instance_id="instance-1",
+                task_id=task_id,
+                generation=lease.generation,
+                request_id="lost-response",
+                ttl_seconds=10,
+            )
+            self.assertIsNotNone(second)
+            assert second is not None
+            self.assertNotEqual(second.permit_id,first.permit_id)
+            self.assertGreater(second.expires_at,first.expires_at)
+            row=store.connection.execute(
+                """
+                SELECT permit_id,active FROM fabric_provider_permits
+                WHERE worker_id=? AND request_id=?
+                """,
+                ("worker-a","lost-response"),
+            ).fetchone()
+            self.assertEqual(str(row["permit_id"]),second.permit_id)
+            self.assertEqual(int(row["active"]),1)
+        finally:
+            store.close()
+
+
+    def test_renew_replay_does_not_extend_deadline_twice(self) -> None:
+        now=[1000.0]
+        store=DistributedAuthorityStore(
+            self.root/"fabric-renew-replay.sqlite3",
+            clock=lambda:now[0],
+        )
+        try:
+            store.register_worker(self.worker)
+            store.configure_provider_budget(
+                "datacite",
+                requests_per_second=10.0,
+                max_global_inflight=4,
+                require_qualified_region=False,
+            )
+            task_id,_=store.admit_work(self.work("renew-replay"))
+            lease=store.claim_work(
+                "worker-a","instance-1",lease_seconds=300
+            )
+            self.assertIsNotNone(lease)
+            assert lease is not None
+            expected=lease.lease_deadline
+            now[0]+=150.0
+            first=store.renew_task(
+                task_id,
+                worker_id="worker-a",
+                worker_instance_id="instance-1",
+                generation=lease.generation,
+                lease_seconds=300,
+                expected_lease_deadline=expected,
+            )
+            self.assertEqual(first.lease_deadline,1450.0)
+            now[0]+=40.0
+            replay=store.renew_task(
+                task_id,
+                worker_id="worker-a",
+                worker_instance_id="instance-1",
+                generation=lease.generation,
+                lease_seconds=300,
+                expected_lease_deadline=expected,
+            )
+            self.assertEqual(replay.lease_deadline,first.lease_deadline)
+        finally:
+            store.close()
+
+
 
 if __name__=="__main__":
     unittest.main()

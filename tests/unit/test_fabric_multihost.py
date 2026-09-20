@@ -1,16 +1,28 @@
 from __future__ import annotations
 
+import asyncio
 import tempfile
+import time
 import unittest
+from dataclasses import replace
+from unittest.mock import AsyncMock, patch
 from pathlib import Path
 
 import httpx
 
 from creeper.distributed.coordinator_client import (
     CoordinatorClient,
+    CoordinatorTransportError,
     CoordinatorUploadBudgetExceededError,
 )
-from creeper.distributed.models import ProviderPermit, WorkerDescriptor
+from creeper.distributed.lease_keeper import LeaseKeeper
+from creeper.distributed.models import (
+    ProviderPermit,
+    TaskClass,
+    TaskLease,
+    WorkDefinition,
+    WorkerDescriptor,
+)
 from creeper.distributed.provider_gate import DistributedProviderGate
 from creeper.distributed.worker import DistributedWorker
 
@@ -34,6 +46,60 @@ class _ObservationClient:
     async def provider_observation(self, lease, **kwargs) -> str:
         self.observations.append((lease,kwargs))
         return "QUALIFIED"
+
+
+def _lease(deadline: float) -> TaskLease:
+    work=WorkDefinition(
+        producer="fixture",
+        task_class=TaskClass.RESIDUAL_QUERY,
+        input_identity="fixture-input",
+        payload={},
+        partition="fixture",
+        algorithm_version="fixture-v1",
+        required_capabilities=("TEST",),
+    )
+    return TaskLease(
+        task_id="task-a",
+        work_key=work.work_key,
+        worker_id="worker-a",
+        worker_instance_id="instance-a",
+        generation=1,
+        lease_deadline=deadline,
+        attempt=1,
+        work=work,
+    )
+
+
+class _TransientRenewClient:
+    def __init__(self) -> None:
+        self.calls=0
+
+    async def renew(self, lease, *, lease_seconds):
+        self.calls+=1
+        if self.calls==1:
+            raise CoordinatorTransportError("authority restart")
+        return replace(
+            lease,
+            lease_deadline=time.time()+float(lease_seconds),
+        )
+
+
+class _FailingSettlementClient(_ObservationClient):
+    async def provider_report(self, permit_id, **kwargs) -> None:
+        self.reports.append((permit_id,kwargs))
+        raise CoordinatorTransportError("authority unavailable")
+
+
+class _PermitRetryClient:
+    def __init__(self, permit: ProviderPermit) -> None:
+        self.permit=permit
+        self.calls=0
+
+    async def provider_permit(self, lease, provider, **kwargs):
+        self.calls+=1
+        if self.calls<=2:
+            raise CoordinatorTransportError("authority unavailable")
+        return self.permit
 
 
 class FabricMultihostTests(unittest.IsolatedAsyncioTestCase):
@@ -79,6 +145,100 @@ class FabricMultihostTests(unittest.IsolatedAsyncioTestCase):
             await client.aclose()
         self.assertEqual(len(reserved),1)
         self.assertGreaterEqual(reserved[0],1538)
+
+    async def test_retryable_authority_http_status_is_transport_failure(self) -> None:
+        def handler(_request: httpx.Request) -> httpx.Response:
+            return httpx.Response(503,text="restarting")
+
+        client=CoordinatorClient(
+            "http://10.77.0.1:8088",
+            worker_id="worker-a",
+            worker_instance_id="instance-a",
+            secret="secret",
+            transport=httpx.MockTransport(handler),
+        )
+        try:
+            with self.assertRaises(CoordinatorTransportError):
+                await client.heartbeat()
+        finally:
+            await client.aclose()
+
+    async def test_lease_keeper_survives_one_transient_renewal_failure(self) -> None:
+        client=_TransientRenewClient()
+        keeper=LeaseKeeper(
+            client,  # type: ignore[arg-type]
+            _lease(time.time()+1.0),
+            lease_seconds=1.0,
+            renew_fraction=0.05,
+            min_renew_interval=0.02,
+        )
+        async with keeper:
+            await asyncio.sleep(0.4)
+            keeper.assert_owned()
+        self.assertGreaterEqual(client.calls,2)
+        self.assertFalse(keeper.lost)
+
+    async def test_provider_settlement_outage_does_not_fail_completed_io(self) -> None:
+        client=_FailingSettlementClient()
+        keeper=_Keeper()
+        gate=DistributedProviderGate(
+            client,  # type: ignore[arg-type]
+            keeper,  # type: ignore[arg-type]
+            "datacite",
+            budget_poll_seconds=0.001,
+            settlement_timeout_seconds=0.05,
+            observation_timeout_seconds=0.05,
+        )
+        permit=ProviderPermit(
+            permit_id="permit-settlement",
+            request_id="request-settlement",
+            provider="datacite",
+            worker_id="worker-a",
+            worker_instance_id="instance-a",
+            task_id="task-a",
+            generation=1,
+            allowed_requests=1,
+            max_inflight=2,
+            expires_at=999999.0,
+        )
+
+        await gate.report(permit,200,httpx.Headers(),123)
+
+        self.assertEqual(len(client.reports),2)
+        self.assertEqual(client.observations,[])
+
+    async def test_provider_gate_backs_off_transport_failures_separately(self) -> None:
+        permit=ProviderPermit(
+            permit_id="permit-retry",
+            request_id="request-retry",
+            provider="datacite",
+            worker_id="worker-a",
+            worker_instance_id="instance-a",
+            task_id="task-a",
+            generation=1,
+            allowed_requests=1,
+            max_inflight=2,
+            expires_at=999999.0,
+        )
+        client=_PermitRetryClient(permit)
+        gate=DistributedProviderGate(
+            client,  # type: ignore[arg-type]
+            _Keeper(),  # type: ignore[arg-type]
+            "datacite",
+            transport_retry_floor_seconds=0.5,
+        )
+        with patch(
+            "creeper.distributed.provider_gate.asyncio.sleep",
+            new=AsyncMock(),
+        ) as sleep:
+            result=await gate.acquire()
+
+        self.assertEqual(result,permit)
+        self.assertEqual(client.calls,3)
+        self.assertEqual(
+            [call.args[0] for call in sleep.await_args_list],
+            [0.5,1.0],
+        )
 
     async def test_provider_gate_records_region_observation_after_settlement(self) -> None:
         client=_ObservationClient()

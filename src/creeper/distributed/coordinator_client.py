@@ -127,6 +127,18 @@ class CoordinatorClient:
             )
         except (httpx.TimeoutException, httpx.TransportError) as exc:
             raise CoordinatorTransportError(type(exc).__name__) from exc
+        # Treat retryable HTTP control-plane failures the same as a
+        # dropped connection. All mutating Fabric endpoints involved here are
+        # fenced/idempotent (BatchID, permit ID, lease generation), so callers
+        # can safely retry without turning a short Authority restart into a
+        # worker-process failure.
+        if (
+            response.status_code in {408, 425, 429}
+            or response.status_code >= 500
+        ):
+            raise CoordinatorTransportError(
+                f"authority HTTP {response.status_code}"
+            )
         try:
             value = response.json()
         except ValueError as exc:
@@ -239,6 +251,7 @@ class CoordinatorClient:
                 "task_id": lease.task_id,
                 "generation": lease.generation,
                 "lease_seconds": float(lease_seconds),
+                "expected_lease_deadline": float(lease.lease_deadline),
             },
         )
         raw = value.get("task")

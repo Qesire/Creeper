@@ -49,6 +49,19 @@ from creeper.sources.archive.host_year import (
 
 PRODUCER_NAME = "BulkShardProducer"
 ALGORITHM_VERSION = "bulk-shard-v1"
+BULK_RESULT_BATCH_TARGET_BYTES = 4 * 1024 * 1024
+BULK_RESULT_BATCH_MAX_TARGET_BYTES = 8 * 1024 * 1024
+
+
+def _wire_size(value: Mapping[str, object]) -> int:
+    return len(
+        json.dumps(
+            dict(value),
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode("utf-8")
+    )
 
 
 def _json_object(value: object) -> dict[str, object]:
@@ -178,6 +191,7 @@ def bulk_shard_work_definition(
     boundary_record_max_bytes: int,
     timeout_seconds: float,
     group_batch_size: int = 256,
+    result_batch_target_bytes: int = BULK_RESULT_BATCH_TARGET_BYTES,
 ) -> WorkDefinition:
     if urlsplit(locator).scheme.lower() not in {"http","https"}:
         raise ValueError("distributed bulk shard requires HTTP(S)")
@@ -190,6 +204,8 @@ def bulk_shard_work_definition(
         boundary_record_max_bytes<1
         or timeout_seconds<=0
         or group_batch_size<1
+        or not 1024 <= result_batch_target_bytes
+            <= BULK_RESULT_BATCH_MAX_TARGET_BYTES
     ):
         raise ValueError("invalid bulk shard execution policy")
     if expected_identity.kind!="remote" or not expected_identity.is_verifiable:
@@ -206,6 +222,7 @@ def bulk_shard_work_definition(
         "boundary_record_max_bytes":int(boundary_record_max_bytes),
         "timeout_seconds":float(timeout_seconds),
         "group_batch_size":int(group_batch_size),
+        "result_batch_target_bytes":int(result_batch_target_bytes),
     }
     return WorkDefinition(
         producer=PRODUCER_NAME,
@@ -272,6 +289,16 @@ class BulkShardProducer:
         boundary_max=int(payload["boundary_record_max_bytes"])
         timeout_seconds=float(payload["timeout_seconds"])
         group_batch_size=int(payload["group_batch_size"])
+        result_batch_target_bytes=int(
+            payload.get(
+                "result_batch_target_bytes",
+                BULK_RESULT_BATCH_TARGET_BYTES,
+            )
+        )
+        if not 1024 <= result_batch_target_bytes <= (
+            BULK_RESULT_BATCH_MAX_TARGET_BYTES
+        ):
+            raise ValueError("invalid bulk result-batch byte target")
 
         start=(
             int(lease.cursor.removeprefix("byte:"))
@@ -314,6 +341,8 @@ class BulkShardProducer:
         sequence=lease.next_sequence_no
         reducer=ContiguousHostYearWitnessReducer()
         pending: list[dict[str,object]]=[]
+        pending_bytes=0
+        pending_cursor_after: int | None=None
         buffer=b""
         boundary_ready=start==0
         prefix_checked=start==0
@@ -428,22 +457,53 @@ class BulkShardProducer:
                         group=reducer.feed(record)
                         if group is None:
                             continue
-                        pending.append(serialize_witness_group(group))
+                        item=serialize_witness_group(group)
+                        item_bytes=_wire_size(item)
+                        # Flush *before* adding an item that would cross the
+                        # byte target. pending_cursor_after belongs to the last
+                        # fully represented hostname already in pending, so a
+                        # crash after this batch resumes at a safe host boundary.
+                        if (
+                            pending
+                            and pending_bytes+item_bytes
+                                > result_batch_target_bytes
+                        ):
+                            assert pending_cursor_after is not None
+                            yield ResultBatch(
+                                task_id=lease.task_id,
+                                generation=lease.generation,
+                                sequence_no=sequence,
+                                results=tuple(pending),
+                                cursor_after=(
+                                    f"byte:{pending_cursor_after}"
+                                ),
+                                final=False,
+                            )
+                            sequence+=1
+                            pending=[]
+                            pending_bytes=0
+                            pending_cursor_after=None
+                        pending.append(item)
+                        pending_bytes+=item_bytes
                         # The reducer already consumed the first record of the
-                        # next hostname. Committing its byte start as cursor is
-                        # the crash-safe replay point for the next generation.
-                        safe_cursor=line_start
+                        # next hostname. Only after this complete group is in
+                        # the batch may the durable cursor advance to that row.
+                        pending_cursor_after=line_start
                         if len(pending)>=group_batch_size:
                             yield ResultBatch(
                                 task_id=lease.task_id,
                                 generation=lease.generation,
                                 sequence_no=sequence,
                                 results=tuple(pending),
-                                cursor_after=f"byte:{safe_cursor}",
+                                cursor_after=(
+                                    f"byte:{pending_cursor_after}"
+                                ),
                                 final=False,
                             )
                             sequence+=1
                             pending=[]
+                            pending_bytes=0
+                            pending_cursor_after=None
 
                 if cursor<end_exclusive and boundary_ready:
                     if returned_end==total_size-1:
@@ -461,7 +521,31 @@ class BulkShardProducer:
                                 parsed_records+=1
                                 group=reducer.feed(record)
                                 if group is not None:
-                                    pending.append(serialize_witness_group(group))
+                                    item=serialize_witness_group(group)
+                                    item_bytes=_wire_size(item)
+                                    if (
+                                        pending
+                                        and pending_bytes+item_bytes
+                                            > result_batch_target_bytes
+                                    ):
+                                        assert pending_cursor_after is not None
+                                        yield ResultBatch(
+                                            task_id=lease.task_id,
+                                            generation=lease.generation,
+                                            sequence_no=sequence,
+                                            results=tuple(pending),
+                                            cursor_after=(
+                                                f"byte:{pending_cursor_after}"
+                                            ),
+                                            final=False,
+                                        )
+                                        sequence+=1
+                                        pending=[]
+                                        pending_bytes=0
+                                        pending_cursor_after=None
+                                    pending.append(item)
+                                    pending_bytes+=item_bytes
+                                    pending_cursor_after=line_start
                     else:
                         raise RegionHarvestError(
                             "bulk shard ends inside a record larger than boundary limit"
@@ -469,7 +553,27 @@ class BulkShardProducer:
 
         final_group=reducer.finish()
         if final_group is not None:
-            pending.append(serialize_witness_group(final_group))
+            item=serialize_witness_group(final_group)
+            item_bytes=_wire_size(item)
+            if (
+                pending
+                and pending_bytes+item_bytes > result_batch_target_bytes
+            ):
+                assert pending_cursor_after is not None
+                yield ResultBatch(
+                    task_id=lease.task_id,
+                    generation=lease.generation,
+                    sequence_no=sequence,
+                    results=tuple(pending),
+                    cursor_after=f"byte:{pending_cursor_after}",
+                    final=False,
+                )
+                sequence+=1
+                pending=[]
+                pending_bytes=0
+                pending_cursor_after=None
+            pending.append(item)
+            pending_bytes+=item_bytes
         elapsed=max(0.0,time.monotonic()-started)
         pending.append(
             {

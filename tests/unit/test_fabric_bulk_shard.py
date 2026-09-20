@@ -139,6 +139,102 @@ class BulkShardTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(first.required_providers,())
 
+    async def test_bulk_batches_flush_on_serialized_byte_target(self) -> None:
+        suffix="x"*700
+        body=(
+            f"com,alpha)/ 19970102123456 http://alpha.com/{suffix} text/html 200 D 1 1 f.arc\n"
+            f"com,beta)/ 19980102123456 http://beta.com/{suffix} text/html 200 D 2 2 f.arc\n"
+            f"com,gamma)/ 19990102123456 http://gamma.com/{suffix} text/html 200 D 3 3 f.arc\n"
+        ).encode()
+        etag='"bulk-byte-target"'
+
+        class AsyncBytes(httpx.AsyncByteStream):
+            async def __aiter__(self):
+                yield body
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            self.assertEqual(request.headers["range"],f"bytes=0-{len(body)-1}")
+            return httpx.Response(
+                206,
+                headers={
+                    "Content-Range":f"bytes 0-{len(body)-1}/{len(body)}",
+                    "ETag":etag,
+                },
+                stream=AsyncBytes(),
+            )
+
+        identity=HistoricalIndexObjectIdentity(
+            kind="remote",
+            content_length=len(body),
+            etag=etag,
+        )
+        work=bulk_shard_work_definition(
+            region_key="region-bytes",
+            index_key="index-bytes",
+            source_key="source-bytes",
+            locator="https://example.test/bytes.cdx",
+            index_format="CDX",
+            byte_start=0,
+            byte_end_exclusive=len(body),
+            expected_identity=identity,
+            boundary_record_max_bytes=4096,
+            timeout_seconds=10,
+            group_batch_size=256,
+            result_batch_target_bytes=1024,
+        )
+        lease=TaskLease(
+            task_id="task-bytes",
+            work_key=work.work_key,
+            worker_id="worker-a",
+            worker_instance_id="instance-a",
+            generation=1,
+            lease_deadline=9999999999.0,
+            attempt=1,
+            work=work,
+        )
+        producer=BulkShardProducer(transport=httpx.MockTransport(handler))
+        context=ProducerContext(
+            client=None,  # type: ignore[arg-type]
+            keeper=_Keeper(),  # type: ignore[arg-type]
+            descriptor=None,  # type: ignore[arg-type]
+        )
+
+        batches=[batch async for batch in producer.run(lease,context)]
+        self.assertGreaterEqual(len(batches),3)
+        nonfinal=[batch for batch in batches if not batch.final]
+        self.assertGreaterEqual(len(nonfinal),2)
+        for batch in nonfinal:
+            groups=[
+                item for item in batch.results
+                if item.get("kind")=="BULK_WITNESS_GROUP"
+            ]
+            self.assertEqual(len(groups),1)
+            self.assertTrue(str(batch.cursor_after).startswith("byte:"))
+        self.assertTrue(batches[-1].final)
+
+
+    def test_bulk_result_byte_target_rejects_authority_ceiling_risk(self) -> None:
+        identity=HistoricalIndexObjectIdentity(
+            kind="remote",
+            content_length=1000,
+            etag='"v1"',
+        )
+        with self.assertRaisesRegex(ValueError,"execution policy"):
+            bulk_shard_work_definition(
+                region_key="r",
+                index_key="i",
+                source_key="s",
+                locator="https://example.test/index.cdxj",
+                index_format="CDXJ",
+                byte_start=0,
+                byte_end_exclusive=100,
+                expected_identity=identity,
+                boundary_record_max_bytes=1024,
+                timeout_seconds=10,
+                result_batch_target_bytes=9*1024*1024,
+            )
+
+
 
 if __name__=="__main__":
     unittest.main()

@@ -580,6 +580,42 @@ class DistributedAuthorityStore:
         self.connection.execute("BEGIN IMMEDIATE")
         try:
             worker = self._worker_row(worker_id, worker_instance_id)
+            active = self.connection.execute(
+                """
+                SELECT *
+                FROM fabric_work
+                WHERE state='LEASED'
+                  AND lease_owner=?
+                  AND lease_owner_instance=?
+                  AND lease_deadline > ?
+                ORDER BY updated_at ASC, task_id ASC
+                LIMIT 1
+                """,
+                (worker_id, worker_instance_id, now),
+            ).fetchone()
+            if active is not None:
+                # Claim replay is idempotent but is NOT a lease renewal. If
+                # requests reach Authority while responses are black-holed,
+                # extending here would let an unobserved task be held forever.
+                # Only /renew may move the ownership deadline forward.
+                deadline = float(active["lease_deadline"])
+                self.connection.rollback()
+                return TaskLease(
+                    task_id=str(active["task_id"]),
+                    work_key=str(active["work_key"]),
+                    worker_id=worker_id,
+                    worker_instance_id=worker_instance_id,
+                    generation=int(active["lease_generation"]),
+                    lease_deadline=deadline,
+                    attempt=int(active["attempt"]),
+                    work=self._work_from_row(active),
+                    cursor=(
+                        None
+                        if active["cursor"] is None
+                        else str(active["cursor"])
+                    ),
+                    next_sequence_no=int(active["next_sequence_no"]),
+                )
             rows = self.connection.execute(
                 """
                 SELECT *
@@ -694,6 +730,7 @@ class DistributedAuthorityStore:
         worker_instance_id: str,
         generation: int,
         lease_seconds: float,
+        expected_lease_deadline: float | None = None,
     ) -> TaskLease:
         if lease_seconds <= 0:
             raise ValueError("lease_seconds must be positive")
@@ -704,15 +741,31 @@ class DistributedAuthorityStore:
                 worker_instance_id=worker_instance_id,
                 generation=generation,
             )
-            deadline = float(self.clock()) + float(lease_seconds)
-            self.connection.execute(
-                """
-                UPDATE fabric_work
-                SET lease_deadline=?, updated_at=?
-                WHERE task_id=?
-                """,
-                (deadline, float(self.clock()), task_id),
-            )
+            current_deadline=float(row["lease_deadline"])
+            if expected_lease_deadline is not None:
+                expected=float(expected_lease_deadline)
+                if current_deadline < expected:
+                    raise StaleLeaseError(
+                        "authority lease deadline regressed below client expectation"
+                    )
+                if current_deadline > expected:
+                    # A prior compare-and-renew request already committed but
+                    # its response was lost. Replay that authoritative lease
+                    # without extending the deadline a second time.
+                    deadline=current_deadline
+                else:
+                    deadline=float(self.clock())+float(lease_seconds)
+            else:
+                deadline=float(self.clock())+float(lease_seconds)
+            if deadline != current_deadline:
+                self.connection.execute(
+                    """
+                    UPDATE fabric_work
+                    SET lease_deadline=?, updated_at=?
+                    WHERE task_id=?
+                    """,
+                    (deadline, float(self.clock()), task_id),
+                )
         return TaskLease(
             task_id=task_id,
             work_key=str(row["work_key"]),
@@ -1435,18 +1488,37 @@ class DistributedAuthorityStore:
                 (worker_id, request_id),
             ).fetchone()
             if prior is not None:
-                self.connection.rollback()
-                return ProviderPermit(
-                    permit_id=str(prior["permit_id"]),
-                    request_id=str(prior["request_id"]),
-                    provider=str(prior["provider"]),
-                    worker_id=str(prior["worker_id"]),
-                    worker_instance_id=str(prior["worker_instance_id"]),
-                    task_id=str(prior["task_id"]),
-                    generation=int(prior["generation"]),
-                    allowed_requests=int(prior["allowed_requests"]),
-                    max_inflight=int(prior["max_inflight"]),
-                    expires_at=float(prior["expires_at"]),
+                if int(prior["active"]) and float(prior["expires_at"]) > now:
+                    if (
+                        str(prior["provider"]) != provider
+                        or str(prior["worker_instance_id"])
+                            != worker_instance_id
+                        or str(prior["task_id"]) != task_id
+                        or int(prior["generation"]) != generation
+                    ):
+                        raise ProviderAccessDeniedError(
+                            "permit request id is bound to different work"
+                        )
+                    self.connection.rollback()
+                    return ProviderPermit(
+                        permit_id=str(prior["permit_id"]),
+                        request_id=str(prior["request_id"]),
+                        provider=str(prior["provider"]),
+                        worker_id=str(prior["worker_id"]),
+                        worker_instance_id=str(prior["worker_instance_id"]),
+                        task_id=str(prior["task_id"]),
+                        generation=int(prior["generation"]),
+                        allowed_requests=int(prior["allowed_requests"]),
+                        max_inflight=int(prior["max_inflight"]),
+                        expires_at=float(prior["expires_at"]),
+                    )
+                # The request ID may be replayed after its first response was
+                # lost for longer than the permit TTL. Never resurrect an
+                # inactive/expired permit. Remove the old idempotency row and
+                # let the normal budget path mint a fresh permit ID.
+                self.connection.execute(
+                    "DELETE FROM fabric_provider_permits WHERE permit_id=?",
+                    (str(prior["permit_id"]),),
                 )
             budget = self.connection.execute(
                 "SELECT * FROM fabric_provider_budgets WHERE provider=?",

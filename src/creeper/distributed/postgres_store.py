@@ -465,6 +465,43 @@ class PostgresAuthorityStore:
         with self.connection.transaction():
             with self.connection.cursor() as cur:
                 worker=self._worker(cur,worker_id,worker_instance_id,lock=True)
+                cur.execute(
+                    """
+                    SELECT *
+                    FROM fabric_work
+                    WHERE state='LEASED'
+                      AND lease_owner=%s
+                      AND lease_owner_instance=%s
+                      AND lease_deadline > %s
+                    ORDER BY updated_at ASC,task_id ASC
+                    FOR UPDATE
+                    LIMIT 1
+                    """,
+                    (worker_id,worker_instance_id,now),
+                )
+                active=cur.fetchone()
+                if active is not None:
+                    # Recover a lease whose claim response may have been lost,
+                    # but do not renew it here. Otherwise an asymmetric outage
+                    # where requests arrive and responses disappear could pin
+                    # this unobserved task indefinitely.
+                    deadline=float(active["lease_deadline"])
+                    return TaskLease(
+                        task_id=str(active["task_id"]),
+                        work_key=str(active["work_key"]),
+                        worker_id=worker_id,
+                        worker_instance_id=worker_instance_id,
+                        generation=int(active["lease_generation"]),
+                        lease_deadline=deadline,
+                        attempt=int(active["attempt"]),
+                        work=self._work(active),
+                        cursor=(
+                            None
+                            if active["cursor"] is None
+                            else str(active["cursor"])
+                        ),
+                        next_sequence_no=int(active["next_sequence_no"]),
+                    )
                 caps=_json(tuple(worker["capabilities_json"]))
                 providers=_json(tuple(worker["allowed_providers_json"]))
                 producers=_json(tuple(worker["producers_json"]))
@@ -606,17 +643,35 @@ class PostgresAuthorityStore:
         worker_instance_id: str,
         generation: int,
         lease_seconds: float,
+        expected_lease_deadline: float | None = None,
     ) -> TaskLease:
         with self.connection.transaction():
             with self.connection.cursor() as cur:
                 row=self._lease(
                     cur,task_id,worker_id,worker_instance_id,generation
                 )
-                deadline=float(self.clock())+float(lease_seconds)
-                cur.execute(
-                    "UPDATE fabric_work SET lease_deadline=%s,updated_at=%s WHERE task_id=%s",
-                    (deadline,float(self.clock()),task_id),
-                )
+                current_deadline=float(row["lease_deadline"])
+                if expected_lease_deadline is not None:
+                    expected=float(expected_lease_deadline)
+                    if current_deadline<expected:
+                        raise StaleLeaseError(
+                            "authority lease deadline regressed below client expectation"
+                        )
+                    if current_deadline>expected:
+                        deadline=current_deadline
+                    else:
+                        deadline=float(self.clock())+float(lease_seconds)
+                else:
+                    deadline=float(self.clock())+float(lease_seconds)
+                if deadline!=current_deadline:
+                    cur.execute(
+                        """
+                        UPDATE fabric_work
+                        SET lease_deadline=%s,updated_at=%s
+                        WHERE task_id=%s
+                        """,
+                        (deadline,float(self.clock()),task_id),
+                    )
                 return TaskLease(
                     task_id=task_id,work_key=str(row["work_key"]),
                     worker_id=worker_id,worker_instance_id=worker_instance_id,
@@ -1212,22 +1267,38 @@ class PostgresAuthorityStore:
                     """
                     SELECT * FROM fabric_provider_permits
                     WHERE worker_id=%s AND request_id=%s
+                    FOR UPDATE
                     """,
                     (worker_id,request_id),
                 )
                 prior=cur.fetchone()
                 if prior is not None:
-                    return ProviderPermit(
-                        permit_id=str(prior["permit_id"]),
-                        request_id=str(prior["request_id"]),
-                        provider=str(prior["provider"]),
-                        worker_id=str(prior["worker_id"]),
-                        worker_instance_id=str(prior["worker_instance_id"]),
-                        task_id=str(prior["task_id"]),
-                        generation=int(prior["generation"]),
-                        allowed_requests=int(prior["allowed_requests"]),
-                        max_inflight=int(prior["max_inflight"]),
-                        expires_at=float(prior["expires_at"]),
+                    if bool(prior["active"]) and float(prior["expires_at"])>now:
+                        if (
+                            str(prior["provider"])!=provider
+                            or str(prior["worker_instance_id"])
+                                !=worker_instance_id
+                            or str(prior["task_id"])!=task_id
+                            or int(prior["generation"])!=generation
+                        ):
+                            raise ProviderAccessDeniedError(
+                                "permit request id is bound to different work"
+                            )
+                        return ProviderPermit(
+                            permit_id=str(prior["permit_id"]),
+                            request_id=str(prior["request_id"]),
+                            provider=str(prior["provider"]),
+                            worker_id=str(prior["worker_id"]),
+                            worker_instance_id=str(prior["worker_instance_id"]),
+                            task_id=str(prior["task_id"]),
+                            generation=int(prior["generation"]),
+                            allowed_requests=int(prior["allowed_requests"]),
+                            max_inflight=int(prior["max_inflight"]),
+                            expires_at=float(prior["expires_at"]),
+                        )
+                    cur.execute(
+                        "DELETE FROM fabric_provider_permits WHERE permit_id=%s",
+                        (str(prior["permit_id"]),),
                     )
                 cur.execute(
                     "SELECT * FROM fabric_provider_budgets WHERE provider=%s FOR UPDATE",

@@ -29,12 +29,18 @@ class DistributedProviderGate:
         permit_ttl_seconds: float = 60.0,
         budget_poll_seconds: float = 0.1,
         throttle_floor_seconds: float = 2.0,
+        settlement_timeout_seconds: float = 3.0,
+        observation_timeout_seconds: float = 2.0,
+        transport_retry_floor_seconds: float = 0.5,
     ) -> None:
         if (
             not provider.strip()
             or permit_ttl_seconds <= 0
             or budget_poll_seconds <= 0
             or throttle_floor_seconds < 0
+            or settlement_timeout_seconds <= 0
+            or observation_timeout_seconds <= 0
+            or transport_retry_floor_seconds <= 0
         ):
             raise ValueError("invalid provider gate configuration")
         self.client = client
@@ -43,10 +49,20 @@ class DistributedProviderGate:
         self.permit_ttl_seconds = float(permit_ttl_seconds)
         self.budget_poll_seconds = float(budget_poll_seconds)
         self.throttle_floor_seconds = float(throttle_floor_seconds)
+        self.settlement_timeout_seconds = float(
+            settlement_timeout_seconds
+        )
+        self.observation_timeout_seconds = float(
+            observation_timeout_seconds
+        )
+        self.transport_retry_floor_seconds = float(
+            transport_retry_floor_seconds
+        )
         self._started_at: dict[str, float] = {}
 
     async def acquire(self) -> ProviderPermit:
         request_id = uuid4().hex
+        transport_failures = 0
         while True:
             self.keeper.assert_owned()
             try:
@@ -57,12 +73,21 @@ class DistributedProviderGate:
                     ttl_seconds=self.permit_ttl_seconds,
                 )
             except CoordinatorTransportError:
+                transport_failures += 1
                 self.keeper.assert_owned()
-                await asyncio.sleep(self.budget_poll_seconds)
+                delay = min(
+                    5.0,
+                    self.transport_retry_floor_seconds
+                    * (2 ** min(transport_failures - 1, 4)),
+                )
+                await asyncio.sleep(delay)
                 continue
+            transport_failures = 0
             if permit is not None:
                 self._started_at[permit.permit_id] = time.monotonic()
                 return permit
+            # A healthy Authority saying BUDGET_WAIT is not a transport
+            # failure; keep this path responsive to the shared RPS scheduler.
             await asyncio.sleep(self.budget_poll_seconds)
 
     @staticmethod
@@ -103,41 +128,61 @@ class DistributedProviderGate:
                 self.throttle_floor_seconds,
                 0.0 if retry_after is None else retry_after,
             )
-        for attempt in range(5):
+        settled=False
+        for attempt in range(2):
             try:
-                await self.client.provider_report(
-                    token.permit_id,
-                    status_code=status_code,
-                    cooldown_seconds=cooldown,
-                    response_bytes=int(response_bytes),
+                await asyncio.wait_for(
+                    self.client.provider_report(
+                        token.permit_id,
+                        status_code=status_code,
+                        cooldown_seconds=cooldown,
+                        response_bytes=int(response_bytes),
+                    ),
+                    timeout=self.settlement_timeout_seconds,
                 )
+                settled=True
                 break
-            except CoordinatorTransportError:
-                if attempt == 4:
-                    raise
-                await asyncio.sleep(min(1.0, self.budget_poll_seconds * (2**attempt)))
+            except (TimeoutError, CoordinatorTransportError):
+                if attempt == 0:
+                    await asyncio.sleep(
+                        min(0.25, self.budget_poll_seconds)
+                    )
+                    continue
+                break
+            except CoordinatorError:
+                break
 
         started = self._started_at.pop(token.permit_id, None)
+        if not settled:
+            # Provider I/O already happened. A control-plane outage must not
+            # turn a successful provider response into an application-level
+            # failure that could trigger a duplicate external request. The
+            # outstanding permit remains conservatively active until its TTL;
+            # the next request still has to obtain a fresh Authority permit.
+            return
         latency_ms = (
             0.0
             if started is None
             else max(0.0, (time.monotonic() - started) * 1000.0)
         )
         try:
-            await self.client.provider_observation(
-                self.keeper.lease,
-                provider=self.provider,
-                connect_success=status_code is not None,
-                status_code=status_code,
-                latency_ms=latency_ms,
-                response_bytes=int(response_bytes),
-                timeout=status_code is None,
-                # 451 explicitly conveys legal/policy unavailability. A 403
-                # is ambiguous (WAF, auth, request semantics) and must not
-                # permanently poison an otherwise usable cloud region.
-                policy_block=status_code == 451,
+            await asyncio.wait_for(
+                self.client.provider_observation(
+                    self.keeper.lease,
+                    provider=self.provider,
+                    connect_success=status_code is not None,
+                    status_code=status_code,
+                    latency_ms=latency_ms,
+                    response_bytes=int(response_bytes),
+                    timeout=status_code is None,
+                    # 451 explicitly conveys legal/policy unavailability. A 403
+                    # is ambiguous (WAF, auth, request semantics) and must not
+                    # permanently poison an otherwise usable cloud region.
+                    policy_block=status_code == 451,
+                ),
+                timeout=self.observation_timeout_seconds,
             )
-        except CoordinatorError:
+        except (TimeoutError, CoordinatorError):
             # Permit settlement is authoritative. Region qualification is
             # routing telemetry and must not turn a completed provider request
             # into a duplicate retry if this best-effort observation is lost.
