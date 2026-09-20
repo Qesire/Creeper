@@ -5,6 +5,7 @@ import tempfile
 import time
 import unittest
 from dataclasses import replace
+from unittest.mock import AsyncMock, patch
 from pathlib import Path
 
 import httpx
@@ -87,6 +88,18 @@ class _FailingSettlementClient(_ObservationClient):
     async def provider_report(self, permit_id, **kwargs) -> None:
         self.reports.append((permit_id,kwargs))
         raise CoordinatorTransportError("authority unavailable")
+
+
+class _PermitRetryClient:
+    def __init__(self, permit: ProviderPermit) -> None:
+        self.permit=permit
+        self.calls=0
+
+    async def provider_permit(self, lease, provider, **kwargs):
+        self.calls+=1
+        if self.calls<=2:
+            raise CoordinatorTransportError("authority unavailable")
+        return self.permit
 
 
 class FabricMultihostTests(unittest.IsolatedAsyncioTestCase):
@@ -193,6 +206,39 @@ class FabricMultihostTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(client.reports),2)
         self.assertEqual(client.observations,[])
+
+    async def test_provider_gate_backs_off_transport_failures_separately(self) -> None:
+        permit=ProviderPermit(
+            permit_id="permit-retry",
+            request_id="request-retry",
+            provider="datacite",
+            worker_id="worker-a",
+            worker_instance_id="instance-a",
+            task_id="task-a",
+            generation=1,
+            allowed_requests=1,
+            max_inflight=2,
+            expires_at=999999.0,
+        )
+        client=_PermitRetryClient(permit)
+        gate=DistributedProviderGate(
+            client,  # type: ignore[arg-type]
+            _Keeper(),  # type: ignore[arg-type]
+            "datacite",
+            transport_retry_floor_seconds=0.5,
+        )
+        with patch(
+            "creeper.distributed.provider_gate.asyncio.sleep",
+            new=AsyncMock(),
+        ) as sleep:
+            result=await gate.acquire()
+
+        self.assertEqual(result,permit)
+        self.assertEqual(client.calls,3)
+        self.assertEqual(
+            [call.args[0] for call in sleep.await_args_list],
+            [0.5,1.0],
+        )
 
     async def test_provider_gate_records_region_observation_after_settlement(self) -> None:
         client=_ObservationClient()
