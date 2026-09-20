@@ -25,6 +25,7 @@ timeout_seconds = 20
 [fabric]
 enabled = true
 database = "postgresql:///creeper"
+outbox_enabled = false
 
 [coordinator]
 triage_parallelism = 4
