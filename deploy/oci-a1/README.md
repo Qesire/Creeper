@@ -211,7 +211,7 @@ sudo systemctl start creeper-email-report.service
 - Local legacy evidence duplication: prevented by
   `[evidence] enabled = false` in the autopilot profile.
 - Disk/RAM pressure: autopilot throttles at 5 GiB RSS, stops its child pipeline at 6 GiB, and systemd enforces a 7 GiB cgroup ceiling; Fabric services have separate bounded cgroups.
-- Fabric database growth: hourly GC removes only replay-safe transient rows older than 24 hours (consumed/quarantined result batches, inactive permits, old nonces/egress counters, and eligible broker events); WorkKey rows remain the idempotency tombstones.
+- Fabric database growth: hourly GC removes replay-safe transient rows older than 24 hours (consumed/quarantined result batches, inactive permits, old nonces/egress counters, and eligible broker events) and compacts eligible COMPLETE work payloads to minimal WorkKey tombstones; task identity/state remains durable.
 - Service or GC failure: systemd queues an alert email; transient SMTP failure leaves
   it durable and the retry timer replays it at least once.
 - SMTP ACK ambiguity can still produce a duplicate email after a process crash;
