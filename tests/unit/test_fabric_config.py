@@ -77,6 +77,42 @@ spool_database = "spool.sqlite3"
             )
             self.assertFalse(loaded.worker_instance_auto)
 
+    def test_remote_upload_budget_is_loaded_without_changing_provider_budget(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp)
+            config=root/"worker.toml"
+            config.write_text(
+                """
+[worker]
+coordinator_url = "http://10.77.0.1:8088"
+worker_id = "gcp-query-01"
+runtime_class = "remote-free-query"
+region = "gcp-uscentral1"
+architecture = "x86_64"
+memory_bytes = 536870912
+cpu_count = 1
+network_class = "wireguard-public-egress"
+capabilities = ["RESIDUAL_QUERY"]
+producers = ["ResidualQueryProducer"]
+allowed_providers = ["datacite"]
+daily_egress_budget_bytes = 12345
+coordinator_upload_budget_bytes_per_month = 700000000
+coordinator_upload_overhead_bytes = 1536
+spool_database = "spool.sqlite3"
+""",
+                encoding="utf-8",
+            )
+            loaded=load_worker_config(config)
+            self.assertEqual(
+                loaded.descriptor.daily_egress_budget_bytes,
+                12345,
+            )
+            self.assertEqual(
+                loaded.coordinator_upload_budget_bytes_per_month,
+                700000000,
+            )
+            self.assertEqual(loaded.coordinator_upload_overhead_bytes,1536)
+
 
 if __name__=="__main__":
     unittest.main()
