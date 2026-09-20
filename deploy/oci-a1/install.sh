@@ -16,7 +16,7 @@ fi
 
 sudo apt-get update
 sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
-  ca-certificates curl git openssl postgresql postgresql-client ufw
+  ca-certificates curl git openssl postgresql postgresql-client ufw wireguard-tools
 
 if ! id -u "$APP_USER" >/dev/null 2>&1; then
   sudo useradd --system --create-home --home-dir "$APP_HOME" \
