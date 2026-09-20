@@ -113,6 +113,7 @@ poll_seconds = 5
 claim_wait_seconds = 25
 lease_seconds = 300
 heartbeat_seconds = 120
+coordinator_timeout_seconds = 45
 EOF
 
 {
