@@ -62,7 +62,7 @@ if [[ ! "$UPLOAD_BUDGET" =~ ^[0-9]+$ || ! "$UPLOAD_OVERHEAD" =~ ^[0-9]+$ ]]; the
 fi
 
 sudo apt-get update
-sudo DEBIAN_FRONTEND=noninteractive apt-get install -y   ca-certificates curl git wireguard-tools ufw
+sudo DEBIAN_FRONTEND=noninteractive apt-get install -y   ca-certificates curl git iproute2 wireguard-tools ufw
 
 if ! id -u "$APP_USER" >/dev/null 2>&1; then
   sudo useradd --system --create-home --home-dir "$APP_HOME"     --shell /usr/sbin/nologin "$APP_USER"
@@ -112,7 +112,7 @@ secret_env = "CREEPER_WORKER_SECRET"
 poll_seconds = 5
 claim_wait_seconds = 25
 lease_seconds = 300
-heartbeat_seconds = 120
+heartbeat_seconds = 60
 coordinator_timeout_seconds = 45
 EOF
 
