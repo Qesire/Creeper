@@ -1,0 +1,88 @@
+# Deterministic source discovery for the OCI A1 single-host profile.
+runtime_data_root = "/srv/creeper/data"
+scrapy_project_dir = "/opt/creeper/tools/scrapy_acquisition"
+
+[pool]
+active_min = 2
+active_target = 3
+warm_min = 10
+warm_target = 20
+cold_min = 50
+cold_target = 100
+max_cold_credit_per_origin = 12
+triage_batch = 8
+scout_parallelism = 2
+max_search_directives = 1
+
+[residual_search]
+enabled = true
+providers = ["datacite", "zenodo", "harvard_dataverse", "internet_archive"]
+results_per_provider = 100
+max_total_results = 300
+min_relevance_score = 0.55
+timeout_seconds = 20
+
+[fabric]
+enabled = true
+database = "postgresql:///creeper"
+
+[coordinator]
+triage_parallelism = 4
+scout_parallelism = 2
+search_parallelism = 1
+failure_retry_seconds = 30
+search_cooldown_seconds = 30
+search_ucb_exploration = 0.35
+stagnation_window = 6
+
+[triage]
+timeout_seconds = 10
+
+[scrapy]
+max_pages = 50
+max_depth = 2
+max_seconds = 90
+max_memory_mb = 384
+follow_query = false
+
+[measurement]
+baseline_index = "/srv/creeper/data/indexes/baseline-fast.sqlite3"
+eed_model = "/srv/creeper/reference/equivalent_english_domain.json"
+max_download_bytes = 8388608
+max_decompressed_bytes = 33554432
+max_records = 5000
+max_line_bytes = 65536
+sample_windows = 4
+min_unique_hosts = 100
+min_novel_hosts = 10
+min_novel_fraction = 0.01
+min_novel_eed = 1.0
+timeout_seconds = 30
+progressive_initial_bytes = 65536
+early_accept_multiplier = 4.0
+early_reject_unseen_fraction = 0.01
+
+[admission]
+target_year_from = 1996
+target_year_to = 2001
+min_expected_volume = 100000
+gateway_min_expected_volume = 50000
+direct_min_expected_volume = 10000
+min_enumerability_prior = 0.50
+gateway_min_enumerability_prior = 0.80
+min_confidence = 0.35
+require_year_bounds = true
+
+# Automatic LLM use remains UNKNOWN_FORMAT -> COMPILE_ADAPTER only.
+# Install/configure the existing wrapper if that exceptional lane is desired.
+[agent]
+command = ["python", "/opt/creeper/scripts/creeper_opencode_subagent.py"]
+backend = "opencode-cli-subagent"
+actor = "opencode:source-intelligence"
+cwd = "/opt/creeper"
+timeout_seconds = 300
+termination_grace_seconds = 2
+max_response_bytes = 2097152
+max_returned_candidates = 2000
+max_returned_hypotheses = 128
+max_motif_expansions = 256
