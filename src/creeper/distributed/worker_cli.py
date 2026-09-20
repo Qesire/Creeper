@@ -9,6 +9,10 @@ from pathlib import Path
 
 from creeper.distributed.config import load_worker_config
 from creeper.distributed.coordinator_client import CoordinatorClient
+from creeper.distributed.bulk_shard import (
+    PRODUCER_NAME as BULK_PRODUCER_NAME,
+    BulkShardProducer,
+)
 from creeper.distributed.evidence_query import (
     PRODUCER_NAME as EVIDENCE_PRODUCER_NAME,
     EvidenceQueryProducer,
@@ -39,6 +43,8 @@ async def _run(config_path: Path) -> None:
             producers[RESIDUAL_PRODUCER_NAME]=ResidualQueryProducer()
         if EVIDENCE_PRODUCER_NAME in descriptor.producers:
             producers[EVIDENCE_PRODUCER_NAME]=EvidenceQueryProducer()
+        if BULK_PRODUCER_NAME in descriptor.producers:
+            producers[BULK_PRODUCER_NAME]=BulkShardProducer()
         unknown=set(descriptor.producers)-set(producers)
         if unknown:
             raise RuntimeError(
