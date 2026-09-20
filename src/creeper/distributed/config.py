@@ -127,6 +127,8 @@ class EmailReportRuntimeConfig:
     subject_prefix: str = "[Creeper]"
     timezone: str = "Asia/Singapore"
     state_file: Path | None = None
+    baseline_manifest: Path | None = None
+    baseline_index: Path | None = None
 
     def __post_init__(self) -> None:
         if not self.smtp_host.strip() or not 1 <= self.smtp_port <= 65535:
@@ -365,6 +367,26 @@ def load_email_report_config(path: Path) -> EmailReportRuntimeConfig:
         if state_value is not None
         else None
     )
+    baseline_manifest_value=section.get("baseline_manifest")
+    baseline_manifest=(
+        _resolve_local_path(
+            baseline_manifest_value,
+            config_path=config_path,
+            name="email_report.baseline_manifest",
+        )
+        if baseline_manifest_value is not None
+        else None
+    )
+    baseline_index_value=section.get("baseline_index")
+    baseline_index=(
+        _resolve_local_path(
+            baseline_index_value,
+            config_path=config_path,
+            name="email_report.baseline_index",
+        )
+        if baseline_index_value is not None
+        else None
+    )
     return EmailReportRuntimeConfig(
         runtime_data_root=runtime_data_root,
         smtp_host=str(section.get("smtp_host","smtp.gmail.com")),
@@ -379,5 +401,7 @@ def load_email_report_config(path: Path) -> EmailReportRuntimeConfig:
         subject_prefix=str(section.get("subject_prefix","[Creeper]")),
         timezone=str(section.get("timezone","Asia/Singapore")),
         state_file=state_file,
+        baseline_manifest=baseline_manifest,
+        baseline_index=baseline_index,
     )
 
