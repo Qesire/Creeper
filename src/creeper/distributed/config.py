@@ -21,6 +21,7 @@ class ProviderBudgetConfig:
     max_global_inflight: int
     require_qualified_region: bool = True
     allow_unknown_region_probe: bool = False
+    region_reprobe_after_seconds: float = 21600.0
 
     def __post_init__(self) -> None:
         if (
@@ -33,6 +34,8 @@ class ProviderBudgetConfig:
             raise ValueError("require_qualified_region must be a boolean")
         if not isinstance(self.allow_unknown_region_probe, bool):
             raise ValueError("allow_unknown_region_probe must be a boolean")
+        if self.region_reprobe_after_seconds <= 0:
+            raise ValueError("region_reprobe_after_seconds must be positive")
 
 
 @dataclass(frozen=True, slots=True)
@@ -254,6 +257,9 @@ def load_authority_config(path: Path) -> AuthorityRuntimeConfig:
                 ),
                 allow_unknown_region_probe=bool(
                     spec.get("allow_unknown_region_probe",False)
+                ),
+                region_reprobe_after_seconds=float(
+                    spec.get("region_reprobe_after_seconds",21600.0)
                 ),
             )
         )
