@@ -1285,6 +1285,11 @@ class PostgresAuthorityStore:
             cur.execute("SELECT COUNT(*) AS n FROM fabric_workers WHERE revoked=FALSE")
             workers=int(cur.fetchone()["n"])
             cur.execute(
+                "SELECT COUNT(*) AS n FROM fabric_work "
+                "WHERE state='COMPLETE' AND payload_json='{}'::jsonb"
+            )
+            compacted=int(cur.fetchone()["n"])
+            cur.execute(
                 "SELECT COUNT(*) AS n FROM fabric_result_batches "
                 "WHERE consumed_at IS NULL AND quarantined=FALSE"
             )
@@ -1309,6 +1314,7 @@ class PostgresAuthorityStore:
             "leased":states.get("LEASED",0),
             "complete":states.get("COMPLETE",0),
             "dead":states.get("DEAD",0),
+            "compacted_work":compacted,
             "unconsumed_batches":unconsumed,
             "quarantined_batches":quarantined,
             "retained_batches":retained,
