@@ -921,6 +921,27 @@ class DistributedAuthorityStore:
             ).fetchall()
         )
 
+    def unconsumed_batches_for_task(
+        self,
+        task_id: str,
+        *,
+        limit: int = 100,
+    ) -> tuple[sqlite3.Row, ...]:
+        if not task_id.strip() or limit < 1:
+            raise ValueError("task_id and positive limit are required")
+        return tuple(
+            self.connection.execute(
+                """
+                SELECT *
+                FROM fabric_result_batches
+                WHERE task_id=? AND consumed_at IS NULL AND quarantined=0
+                ORDER BY sequence_no
+                LIMIT ?
+                """,
+                (task_id, limit),
+            ).fetchall()
+        )
+
     def mark_batch_consumed(self, batch_id: str) -> bool:
         with self.connection:
             return (
