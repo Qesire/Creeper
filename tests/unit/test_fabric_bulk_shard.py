@@ -28,6 +28,10 @@ class BulkShardTests(unittest.IsolatedAsyncioTestCase):
         )
         etag='"bulk-v1"'
 
+        class AsyncBytes(httpx.AsyncByteStream):
+            async def __aiter__(self):
+                yield body
+
         def handler(request: httpx.Request) -> httpx.Response:
             self.assertEqual(request.headers["range"],f"bytes=0-{len(body)-1}")
             return httpx.Response(
@@ -36,7 +40,7 @@ class BulkShardTests(unittest.IsolatedAsyncioTestCase):
                     "Content-Range":f"bytes 0-{len(body)-1}/{len(body)}",
                     "ETag":etag,
                 },
-                content=body,
+                stream=AsyncBytes(),
             )
 
         identity=HistoricalIndexObjectIdentity(
