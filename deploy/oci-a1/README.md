@@ -209,7 +209,7 @@ sudo systemctl start creeper-email-report.service
   Authority.
 - Local legacy evidence duplication: prevented by
   `[evidence] enabled = false` in the autopilot profile.
-- Disk/RAM pressure: autopilot resource governor throttles before hard stop.
+- Disk/RAM pressure: autopilot throttles at 5 GiB RSS, stops its child pipeline at 6 GiB, and systemd enforces a 7 GiB cgroup ceiling; Fabric services have separate bounded cgroups.
 - Service failure: systemd queues an alert email; transient SMTP failure leaves
   it durable and the retry timer replays it at least once.
 - SMTP ACK ambiguity can still produce a duplicate email after a process crash;
