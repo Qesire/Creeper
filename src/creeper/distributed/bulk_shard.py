@@ -50,6 +50,7 @@ from creeper.sources.archive.host_year import (
 PRODUCER_NAME = "BulkShardProducer"
 ALGORITHM_VERSION = "bulk-shard-v1"
 BULK_RESULT_BATCH_TARGET_BYTES = 4 * 1024 * 1024
+BULK_RESULT_BATCH_MAX_TARGET_BYTES = 8 * 1024 * 1024
 
 
 def _wire_size(value: Mapping[str, object]) -> int:
@@ -203,7 +204,8 @@ def bulk_shard_work_definition(
         boundary_record_max_bytes<1
         or timeout_seconds<=0
         or group_batch_size<1
-        or result_batch_target_bytes<1024
+        or not 1024 <= result_batch_target_bytes
+            <= BULK_RESULT_BATCH_MAX_TARGET_BYTES
     ):
         raise ValueError("invalid bulk shard execution policy")
     if expected_identity.kind!="remote" or not expected_identity.is_verifiable:
@@ -293,6 +295,10 @@ class BulkShardProducer:
                 BULK_RESULT_BATCH_TARGET_BYTES,
             )
         )
+        if not 1024 <= result_batch_target_bytes <= (
+            BULK_RESULT_BATCH_MAX_TARGET_BYTES
+        ):
+            raise ValueError("invalid bulk result-batch byte target")
 
         start=(
             int(lease.cursor.removeprefix("byte:"))
