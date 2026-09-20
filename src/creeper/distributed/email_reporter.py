@@ -22,6 +22,7 @@ from creeper.distributed.store_factory import open_authority_store
 from creeper.storage.candidate_store import CandidateStore
 from creeper.storage.control_store import ControlStore
 from creeper.storage.evidence_store import EvidenceStore
+from creeper.storage.telemetry_store import RuntimeTelemetryStore
 
 
 def _error(exc: BaseException) -> dict[str,str]:
@@ -100,6 +101,25 @@ def _runtime(root: Path) -> dict[str,Any]:
     return result
 
 
+def _telemetry(root: Path) -> dict[str,Any]:
+    path=root/"telemetry.sqlite3"
+    if not path.exists():
+        return {"error": f"missing: {path}"}
+    store=None
+    try:
+        store=RuntimeTelemetryStore(path)
+        snapshot=store.snapshot()
+        return {
+            "counters": snapshot.counters,
+            "gauges": snapshot.gauges,
+        }
+    except BaseException as exc:
+        return _error(exc)
+    finally:
+        if store is not None:
+            store.close()
+
+
 def _readiness(root: Path) -> dict[str,Any]:
     path=root/"readiness"/"readiness.json"
     try:
@@ -161,6 +181,7 @@ def collect_snapshot(config_path: Path) -> dict[str,Any]:
         "fabric": _fabric(config_path),
         **_runtime(config.runtime_data_root),
         "readiness": _readiness(config.runtime_data_root),
+        "telemetry": _telemetry(config.runtime_data_root),
         "host": _host(config.runtime_data_root),
     }
 
@@ -225,7 +246,15 @@ def render_report(
     ]
     if message:
         lines.extend(("",f"Event: {message}"))
-    for section in ("readiness","fabric","control","evidence","candidates","host"):
+    for section in (
+        "readiness",
+        "fabric",
+        "telemetry",
+        "control",
+        "evidence",
+        "candidates",
+        "host",
+    ):
         lines.extend(("",section.upper()))
         lines.append(json.dumps(snapshot.get(section,{}),sort_keys=True,indent=2))
     lines.extend(("", "DELTA SINCE PREVIOUS SUMMARY"))
