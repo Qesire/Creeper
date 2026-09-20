@@ -1,3 +1,4 @@
+import hashlib
 import json
 import tempfile
 import tomllib
@@ -53,6 +54,72 @@ class SourceProducerCliTests(unittest.TestCase):
         intent = parse_source_producer_intent(config)
         self.assertEqual(intent.mode, SourceProducerMode.ACTIVATED)
         self.assertNotIn("dataset", config)
+
+    def test_activated_runtime_rejects_baseline_manifest_mismatch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp)
+            task_root=root/"task"
+            baseline_root=task_root/"fixture-baseline"
+            baseline_root.mkdir(parents=True)
+            for year in range(1996,2002):
+                (baseline_root/f"{year}.txt").write_text(
+                    f"{year}.example\n",
+                    encoding="utf-8",
+                )
+            candidate=baseline_root/"candidate_pool.txt"
+            candidate.write_text("candidate.example\n",encoding="utf-8")
+            baseline_path=root/"baseline.sqlite3"
+            BaselineIndex.build(task_root,baseline_path).close()
+
+            annual={
+                f"{year}.txt":hashlib.sha256(
+                    (baseline_root/f"{year}.txt").read_bytes()
+                ).hexdigest()
+                for year in range(1996,2002)
+            }
+            annual["1996.txt"]="f"*64
+            manifest=root/"authority.json"
+            manifest.write_text(
+                json.dumps(
+                    {
+                        "baseline_id":baseline_root.name,
+                        "annual_file_hashes":annual,
+                        "candidate_file_hash":hashlib.sha256(
+                            candidate.read_bytes()
+                        ).hexdigest(),
+                        "model_hash":"0"*64,
+                        "baseline_eed":"0",
+                    }
+                )+"\n",
+                encoding="utf-8",
+            )
+            runtime_root=root/"runtime"
+            runtime_root.mkdir()
+            config={
+                "source_mode":"activated",
+                "baseline_index":str(baseline_path),
+                "authority_manifest":str(manifest),
+                "runtime_data_root":str(runtime_root),
+            }
+            limits={
+                "queue_source_records":4,
+                "queue_observations":4,
+                "queue_evidence_tasks":4,
+                "queue_commits":4,
+                "lease_max_records":4,
+                "lease_max_requests":4,
+                "lease_max_bytes":4096,
+                "lease_max_seconds":30,
+                "evidence_backlog_capacity":16,
+            }
+
+            with self.assertRaisesRegex(ValueError,"authority mismatch"):
+                ActivatedSourceRuntime(
+                    root/"activated.toml",
+                    config=config,
+                    limits=limits,
+                    owner="authority-mismatch-test",
+                )
 
     def test_watch_reuses_durable_once_runner_until_stop(self):
         stop = Event()
