@@ -17,6 +17,10 @@ def _parser()->argparse.ArgumentParser:
     sub=parser.add_subparsers(dest="command",required=True)
     sub.add_parser("status")
 
+    gc=sub.add_parser("gc")
+    gc.add_argument("--retention-hours",type=float,default=24.0)
+    gc.add_argument("--limit",type=int,default=50000)
+
     admit=sub.add_parser("admit")
     admit.add_argument("--producer",required=True)
     admit.add_argument("--task-class",choices=[v.value for v in TaskClass],required=True)
@@ -47,6 +51,13 @@ def main(argv:list[str]|None=None)->int:
             return 0
         if args.command=="revoke-worker":
             store.revoke_worker(args.worker_id)
+            return 0
+        if args.command=="gc":
+            report=store.gc_transient_state(
+                retention_seconds=args.retention_hours*3600.0,
+                limit=args.limit,
+            )
+            print(json.dumps(report,sort_keys=True))
             return 0
         payload=json.loads(args.payload_json)
         if not isinstance(payload,dict):
