@@ -51,7 +51,10 @@ def run_service(config_path: Path, *, once: bool = False) -> int:
             signal.signal(signum,stop_handler)
 
     try:
-        fabric=open_authority_store(authority_config.database)
+        fabric=open_authority_store(
+            authority_config.database,
+            emit_outbox=authority_config.outbox_enabled,
+        )
         control=ControlStore(root/"control.sqlite3")
         evidence=EvidenceStore(root/"evidence.sqlite3")
         bridge=DistributedEvidenceBridge(
