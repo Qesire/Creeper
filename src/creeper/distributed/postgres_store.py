@@ -643,17 +643,35 @@ class PostgresAuthorityStore:
         worker_instance_id: str,
         generation: int,
         lease_seconds: float,
+        expected_lease_deadline: float | None = None,
     ) -> TaskLease:
         with self.connection.transaction():
             with self.connection.cursor() as cur:
                 row=self._lease(
                     cur,task_id,worker_id,worker_instance_id,generation
                 )
-                deadline=float(self.clock())+float(lease_seconds)
-                cur.execute(
-                    "UPDATE fabric_work SET lease_deadline=%s,updated_at=%s WHERE task_id=%s",
-                    (deadline,float(self.clock()),task_id),
-                )
+                current_deadline=float(row["lease_deadline"])
+                if expected_lease_deadline is not None:
+                    expected=float(expected_lease_deadline)
+                    if current_deadline<expected:
+                        raise StaleLeaseError(
+                            "authority lease deadline regressed below client expectation"
+                        )
+                    if current_deadline>expected:
+                        deadline=current_deadline
+                    else:
+                        deadline=float(self.clock())+float(lease_seconds)
+                else:
+                    deadline=float(self.clock())+float(lease_seconds)
+                if deadline!=current_deadline:
+                    cur.execute(
+                        """
+                        UPDATE fabric_work
+                        SET lease_deadline=%s,updated_at=%s
+                        WHERE task_id=%s
+                        """,
+                        (deadline,float(self.clock()),task_id),
+                    )
                 return TaskLease(
                     task_id=task_id,work_key=str(row["work_key"]),
                     worker_id=worker_id,worker_instance_id=worker_instance_id,
