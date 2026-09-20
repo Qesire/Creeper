@@ -20,6 +20,7 @@ import time
 import tomllib
 
 from creeper.authority.baseline_index import BaselineIndex
+from creeper.authority.identity import AuthoritySnapshot
 from creeper.evidence.contract_registry import (
     ReviewedContractRegistry,
     load_reviewed_contract_registry,
@@ -173,6 +174,18 @@ def _strict_bool(value: object, name: str) -> bool:
 
 
 
+def _baseline_authority(
+    config: Mapping[str, object],
+    *,
+    config_path: Path,
+) -> AuthoritySnapshot | None:
+    raw=config.get("authority_manifest")
+    if raw is None:
+        return None
+    path=_path(raw,config_path=config_path,name="authority_manifest")
+    return AuthoritySnapshot.from_manifest_path(path)
+
+
 def _backfill_rdap_shadow(runtime) -> int:
     """Keep RDAP productive from already-discovered Wayback backlog."""
     headroom = runtime.producer.admission.available_capacity(
@@ -294,7 +307,13 @@ class StaticSourceRuntime:
                 "source_year must be omitted or between 1996 and 2001"
             )
 
-        self.baseline = BaselineIndex(baseline_path)
+        self.baseline = BaselineIndex(
+            baseline_path,
+            authority=_baseline_authority(
+                config,
+                config_path=self.config_path,
+            ),
+        )
         self.control = ControlStore(runtime_root / "control.sqlite3")
         self.evidence = EvidenceStore(runtime_root / "evidence.sqlite3")
         self.candidates = CandidateStore(runtime_root / "candidates.sqlite3")
