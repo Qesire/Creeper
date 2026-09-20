@@ -100,6 +100,33 @@ def _runtime(root: Path) -> dict[str,Any]:
     return result
 
 
+def _readiness(root: Path) -> dict[str,Any]:
+    path=root/"readiness"/"readiness.json"
+    try:
+        raw=json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {"error": f"missing: {path}"}
+    except (OSError,json.JSONDecodeError) as exc:
+        return _error(exc)
+    if not isinstance(raw,dict):
+        return {"error": "readiness report is not a JSON object"}
+    keys=(
+        "evidence_cursor",
+        "latest_evidence_sequence",
+        "processed_host_years",
+        "novel_host_years",
+        "novel_eed",
+        "baseline_eed",
+        "growth_rate",
+        "confirmed_fraction_of_five_percent",
+        "prewarm_reached",
+        "formal_gate_reached",
+        "submission_dispatch_ready",
+        "annual",
+    )
+    return {key:raw[key] for key in keys if key in raw}
+
+
 def _host(root: Path) -> dict[str,Any]:
     result:dict[str,Any]={}
     try:
@@ -133,6 +160,7 @@ def collect_snapshot(config_path: Path) -> dict[str,Any]:
     return {
         "fabric": _fabric(config_path),
         **_runtime(config.runtime_data_root),
+        "readiness": _readiness(config.runtime_data_root),
         "host": _host(config.runtime_data_root),
     }
 
@@ -157,6 +185,11 @@ def _numbers(value: object, prefix: str="") -> dict[str,float]:
         return {}
     if isinstance(value,(int,float)):
         return {prefix:float(value)} if prefix else {}
+    if isinstance(value,str):
+        try:
+            return {prefix:float(value)} if prefix else {}
+        except ValueError:
+            return {}
     if not isinstance(value,dict):
         return {}
     result:dict[str,float]={}
@@ -192,7 +225,7 @@ def render_report(
     ]
     if message:
         lines.extend(("",f"Event: {message}"))
-    for section in ("fabric","control","evidence","candidates","host"):
+    for section in ("readiness","fabric","control","evidence","candidates","host"):
         lines.extend(("",section.upper()))
         lines.append(json.dumps(snapshot.get(section,{}),sort_keys=True,indent=2))
     lines.extend(("", "DELTA SINCE PREVIOUS SUMMARY"))
@@ -241,14 +274,15 @@ def main(argv:list[str]|None=None)->int:
         kind=args.kind,
         message=args.message,
     )
-    evidence=snapshot.get("evidence",{})
+    readiness=snapshot.get("readiness",{})
     fabric=snapshot.get("fabric",{})
-    host_years=evidence.get("host_years","?") if isinstance(evidence,dict) else "?"
+    novel_eed=readiness.get("novel_eed","?") if isinstance(readiness,dict) else "?"
+    growth=readiness.get("growth_rate","?") if isinstance(readiness,dict) else "?"
     dead=fabric.get("dead","?") if isinstance(fabric,dict) else "?"
     label="ALERT" if args.kind=="alert" else "daily"
     subject=(
         f"{config.subject_prefix} {label} {generated_at:%Y-%m-%d %H:%M} "
-        f"host-years={host_years} dead={dead}"
+        f"novel-eed={novel_eed} growth={growth} dead={dead}"
     )
     if args.dry_run:
         print(subject)
