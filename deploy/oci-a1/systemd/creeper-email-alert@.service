@@ -10,6 +10,7 @@ Group=creeper
 WorkingDirectory=/opt/creeper
 EnvironmentFile=/etc/creeper/report.env
 ExecStart=/opt/creeper/.venv/bin/creeper-fabric-email-report --config /etc/creeper/fabric.toml --kind alert --message=systemd-unit-failed:%i
+MemoryMax=256M
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=full
