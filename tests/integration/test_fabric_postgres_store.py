@@ -207,6 +207,74 @@ class FabricPostgresAuthorityTests(unittest.TestCase):
         after=len(self.store.pending_outbox(limit=1000))
         self.assertEqual(after,before)
 
+    def test_gc_prunes_consumed_batch_but_retains_workkey_tombstone(self) -> None:
+        now=[1_000_000.0]
+        store=PostgresAuthorityStore(
+            self.dsn,
+            clock=lambda:now[0],
+            emit_outbox=False,
+        )
+        try:
+            suffix=uuid4().hex[:12]
+            worker=WorkerDescriptor(
+                worker_id=f"gc-worker-{suffix}",
+                worker_instance_id=f"gc-instance-{suffix}",
+                runtime_class="full",
+                region="sg",
+                architecture="x86_64",
+                memory_bytes=1024,
+                cpu_count=1,
+                network_class="public",
+                capabilities=(Capability.RESIDUAL_QUERY.value,),
+                producers=("ResidualQueryProducer",),
+                allowed_providers=("datacite",),
+            )
+            store.register_worker(worker)
+            work=self.work("gc-"+suffix)
+            task_id,inserted=store.admit_work(work)
+            self.assertTrue(inserted)
+            lease=store.claim_work(
+                worker.worker_id,
+                worker.worker_instance_id,
+                lease_seconds=60,
+            )
+            self.assertIsNotNone(lease)
+            assert lease is not None
+            batch=ResultBatch(
+                task_id=task_id,
+                generation=lease.generation,
+                sequence_no=0,
+                results=({"value":1},),
+                final=True,
+            )
+            store.commit_result_batch(
+                batch,
+                worker_id=worker.worker_id,
+                worker_instance_id=worker.worker_instance_id,
+            )
+            self.assertTrue(store.mark_batch_consumed(batch.batch_id))
+
+            now[0]+=2*86400
+            report=store.gc_transient_state(
+                retention_seconds=86400,
+                limit=100,
+            )
+
+            self.assertEqual(report["result_batches"],1)
+            with store.connection.cursor() as cur:
+                cur.execute(
+                    "SELECT COUNT(*) AS n FROM fabric_result_batches "
+                    "WHERE batch_id=%s",
+                    (batch.batch_id,),
+                )
+                self.assertEqual(int(cur.fetchone()["n"]),0)
+            self.assertEqual(store.task_row(task_id)["state"],"COMPLETE")
+            replay_id,replay_inserted=store.admit_work(work)
+            self.assertEqual(replay_id,task_id)
+            self.assertFalse(replay_inserted)
+        finally:
+            store.close()
+
     def test_new_worker_incarnation_fences_old_generation(self) -> None:
         task_id, _ = self.store.admit_work(self.work("fence"))
         old = self.store.claim_work(
