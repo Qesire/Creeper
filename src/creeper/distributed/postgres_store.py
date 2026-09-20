@@ -465,6 +465,51 @@ class PostgresAuthorityStore:
         with self.connection.transaction():
             with self.connection.cursor() as cur:
                 worker=self._worker(cur,worker_id,worker_instance_id,lock=True)
+                cur.execute(
+                    """
+                    SELECT *
+                    FROM fabric_work
+                    WHERE state='LEASED'
+                      AND lease_owner=%s
+                      AND lease_owner_instance=%s
+                      AND lease_deadline > %s
+                    ORDER BY updated_at ASC,task_id ASC
+                    FOR UPDATE
+                    LIMIT 1
+                    """,
+                    (worker_id,worker_instance_id,now),
+                )
+                active=cur.fetchone()
+                if active is not None:
+                    # Recover a lease whose claim response may have been lost.
+                    # One worker process executes one task at a time, so a
+                    # second active lease for the same incarnation is never
+                    # desirable communication behavior.
+                    deadline=now+float(lease_seconds)
+                    cur.execute(
+                        """
+                        UPDATE fabric_work
+                        SET lease_deadline=%s,updated_at=%s
+                        WHERE task_id=%s
+                        """,
+                        (deadline,now,str(active["task_id"])),
+                    )
+                    return TaskLease(
+                        task_id=str(active["task_id"]),
+                        work_key=str(active["work_key"]),
+                        worker_id=worker_id,
+                        worker_instance_id=worker_instance_id,
+                        generation=int(active["lease_generation"]),
+                        lease_deadline=deadline,
+                        attempt=int(active["attempt"]),
+                        work=self._work(active),
+                        cursor=(
+                            None
+                            if active["cursor"] is None
+                            else str(active["cursor"])
+                        ),
+                        next_sequence_no=int(active["next_sequence_no"]),
+                    )
                 caps=_json(tuple(worker["capabilities_json"]))
                 providers=_json(tuple(worker["allowed_providers_json"]))
                 producers=_json(tuple(worker["producers_json"]))
