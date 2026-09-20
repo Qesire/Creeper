@@ -20,6 +20,7 @@ class ProviderBudgetConfig:
     requests_per_second: float
     max_global_inflight: int
     require_qualified_region: bool = True
+    allow_unknown_region_probe: bool = False
 
     def __post_init__(self) -> None:
         if (
@@ -28,6 +29,10 @@ class ProviderBudgetConfig:
             or self.max_global_inflight < 1
         ):
             raise ValueError("invalid provider budget")
+        if not isinstance(self.require_qualified_region, bool):
+            raise ValueError("require_qualified_region must be a boolean")
+        if not isinstance(self.allow_unknown_region_probe, bool):
+            raise ValueError("allow_unknown_region_probe must be a boolean")
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,6 +98,8 @@ class WorkerRuntimeConfig:
     claim_wait_seconds: float = 10.0
     lease_seconds: float = 300.0
     heartbeat_seconds: float = 30.0
+    coordinator_upload_budget_bytes_per_month: int = 0
+    coordinator_upload_overhead_bytes: int = 1024
 
     def __post_init__(self) -> None:
         if not self.coordinator_url.strip() or not self.secret_env.strip():
@@ -104,6 +111,12 @@ class WorkerRuntimeConfig:
             or self.heartbeat_seconds <= 0
         ):
             raise ValueError("invalid worker timing configuration")
+        if self.coordinator_upload_budget_bytes_per_month < 0:
+            raise ValueError(
+                "coordinator_upload_budget_bytes_per_month must be non-negative"
+            )
+        if self.coordinator_upload_overhead_bytes < 0:
+            raise ValueError("coordinator_upload_overhead_bytes must be non-negative")
 
     def load_secret(self) -> str:
         value=os.environ.get(self.secret_env,"")
@@ -239,6 +252,9 @@ def load_authority_config(path: Path) -> AuthorityRuntimeConfig:
                 require_qualified_region=bool(
                     spec.get("require_qualified_region",True)
                 ),
+                allow_unknown_region_probe=bool(
+                    spec.get("allow_unknown_region_probe",False)
+                ),
             )
         )
     raw_outbox_enabled=section.get("outbox_enabled",True)
@@ -344,6 +360,12 @@ def load_worker_config(path: Path) -> WorkerRuntimeConfig:
         claim_wait_seconds=float(section.get("claim_wait_seconds",10.0)),
         lease_seconds=float(section.get("lease_seconds",300.0)),
         heartbeat_seconds=float(section.get("heartbeat_seconds",30.0)),
+        coordinator_upload_budget_bytes_per_month=int(
+            section.get("coordinator_upload_budget_bytes_per_month",0)
+        ),
+        coordinator_upload_overhead_bytes=int(
+            section.get("coordinator_upload_overhead_bytes",1024)
+        ),
     )
 
 def load_email_report_config(path: Path) -> EmailReportRuntimeConfig:
