@@ -11,6 +11,7 @@ from creeper.distributed.coordinator_client import (
     CoordinatorClient,
     CoordinatorError,
     CoordinatorTransportError,
+    CoordinatorUploadBudgetExceededError,
     StaleLeaseCoordinatorError,
 )
 from creeper.distributed.lease_keeper import LeaseKeeper, LeaseLostError
@@ -178,6 +179,8 @@ class DistributedWorker:
             return True
         except LeaseLostError:
             return True
+        except CoordinatorUploadBudgetExceededError:
+            raise
         except BaseException as exc:
             try:
                 keeper.assert_owned()
@@ -203,17 +206,39 @@ class DistributedWorker:
 
     async def run_forever(self, stop: asyncio.Event | None = None) -> None:
         stop = stop or asyncio.Event()
-        await self.initialize()
+        while not stop.is_set():
+            try:
+                await self.initialize()
+                break
+            except CoordinatorUploadBudgetExceededError:
+                try:
+                    await asyncio.wait_for(stop.wait(), timeout=60.0)
+                except TimeoutError:
+                    pass
+            except CoordinatorTransportError:
+                try:
+                    await asyncio.wait_for(stop.wait(), timeout=self.poll_seconds)
+                except TimeoutError:
+                    pass
+        if stop.is_set():
+            return
         heartbeat = asyncio.create_task(self._heartbeat_loop(stop))
         try:
             while not stop.is_set():
+                quota_wait = False
                 try:
                     worked = await self.run_once()
+                except CoordinatorUploadBudgetExceededError:
+                    worked = False
+                    quota_wait = True
                 except CoordinatorTransportError:
                     worked = False
                 if not worked:
                     try:
-                        await asyncio.wait_for(stop.wait(), timeout=self.poll_seconds)
+                        await asyncio.wait_for(
+                            stop.wait(),
+                            timeout=60.0 if quota_wait else self.poll_seconds,
+                        )
                     except TimeoutError:
                         pass
         finally:
