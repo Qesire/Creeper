@@ -60,6 +60,13 @@ class DistributedResidualBridgeTests(unittest.TestCase):
                 allowed_providers=self.providers,
             )
         )
+        for provider in self.providers:
+            self.fabric.configure_provider_budget(
+                provider,
+                requests_per_second=10.0,
+                max_global_inflight=4,
+                require_qualified_region=False,
+            )
         self.policy=DeterministicSearchPolicy(
             results_per_provider=10,
             max_total_results=40,
