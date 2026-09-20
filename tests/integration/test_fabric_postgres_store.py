@@ -30,6 +30,7 @@ _REQUIRED_SURFACE = {
     "finish_task",
     "fail_task",
     "unconsumed_batches",
+    "unconsumed_batches_for_task",
     "mark_batch_consumed",
     "mark_batch_consume_failed",
     "pending_outbox",
