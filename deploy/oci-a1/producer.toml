@@ -4,7 +4,7 @@ baseline_index = "/srv/creeper/data/indexes/baseline-fast.sqlite3"
 authority_manifest = "/srv/creeper/baseline/current/authority-manifest.json"
 
 [limits]
-source_workers = 2
+source_workers = 1
 source_extract_workers = 1
 pipeline_batch_size = 1000
 queue_source_records = 512
