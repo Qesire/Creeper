@@ -35,7 +35,9 @@ def _json(value) -> str:
 class PostgresAuthorityStore:
     """Multi-authority backend using row locks and SKIP LOCKED."""
 
-    def __init__(self, dsn: str, *, clock=time.time) -> None:
+    def __init__(self, dsn: str, *, clock=time.time, emit_outbox: bool = True) -> None:
+        if not isinstance(emit_outbox, bool):
+            raise ValueError("emit_outbox must be a boolean")
         if not dsn.startswith(("postgresql://", "postgres://")):
             raise ValueError("PostgreSQL DSN is required")
         try:
@@ -47,6 +49,7 @@ class PostgresAuthorityStore:
             ) from exc
         self.psycopg = psycopg
         self.clock = clock
+        self.emit_outbox = emit_outbox
         self.connection = psycopg.connect(dsn, row_factory=dict_row)
         self._initialize()
 
@@ -218,6 +221,8 @@ class PostgresAuthorityStore:
         self.connection.close()
 
     def _emit(self, cur, event_type: str, aggregate_id: str, payload: dict) -> None:
+        if not self.emit_outbox:
+            return
         cur.execute(
             """
             INSERT INTO fabric_outbox(
