@@ -29,7 +29,8 @@ class FabricRemoteDeploymentTests(unittest.TestCase):
         self.assertIn("CREEPER_WORKER_SECRET",install)
         self.assertIn("coordinator_upload_budget_bytes_per_month",install)
         self.assertIn("daily_egress_budget_bytes = 0",install)
-        self.assertIn("heartbeat_seconds = 120",install)
+        self.assertIn("heartbeat_seconds = 60",install)
+        self.assertIn("iproute2",install)
         self.assertIn("claim_wait_seconds = 25",install)
         self.assertIn("coordinator_timeout_seconds = 45",install)
 
