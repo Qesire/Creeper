@@ -152,6 +152,26 @@ class FabricMultihostTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(worker.replayed)
         self.assertFalse(worker.claimed)
 
+    async def test_generic_403_does_not_poison_region_as_policy_block(self) -> None:
+        client=_ObservationClient()
+        keeper=_Keeper()
+        gate=DistributedProviderGate(client,keeper,"datacite")
+        permit=ProviderPermit(
+            permit_id="permit-403",
+            request_id="request-403",
+            provider="datacite",
+            worker_id="worker-a",
+            worker_instance_id="instance-a",
+            task_id="task-a",
+            generation=1,
+            allowed_requests=1,
+            max_inflight=2,
+            expires_at=999999.0,
+        )
+        await gate.report(permit,403,httpx.Headers(),0)
+        self.assertFalse(client.observations[-1][1]["policy_block"])
+
+
 
 if __name__=="__main__":
     unittest.main()
