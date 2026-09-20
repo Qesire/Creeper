@@ -37,6 +37,7 @@ class AuthorityRuntimeConfig:
     host: str = "127.0.0.1"
     port: int = 8088
     max_clock_skew_seconds: float = 300.0
+    outbox_enabled: bool = True
     provider_budgets: tuple[ProviderBudgetConfig, ...] = ()
 
     def __post_init__(self) -> None:
@@ -46,6 +47,8 @@ class AuthorityRuntimeConfig:
             raise ValueError("invalid authority listen address")
         if self.max_clock_skew_seconds <= 0:
             raise ValueError("max_clock_skew_seconds must be positive")
+        if not isinstance(self.outbox_enabled, bool):
+            raise ValueError("outbox_enabled must be a boolean")
 
 
 @dataclass(frozen=True, slots=True)
@@ -236,6 +239,9 @@ def load_authority_config(path: Path) -> AuthorityRuntimeConfig:
                 ),
             )
         )
+    raw_outbox_enabled=section.get("outbox_enabled",True)
+    if not isinstance(raw_outbox_enabled,bool):
+        raise ValueError("authority.outbox_enabled must be a boolean")
     return AuthorityRuntimeConfig(
         database=_resolve_database(
             section["database"],
@@ -251,6 +257,7 @@ def load_authority_config(path: Path) -> AuthorityRuntimeConfig:
         max_clock_skew_seconds=float(
             section.get("max_clock_skew_seconds",300.0)
         ),
+        outbox_enabled=raw_outbox_enabled,
         provider_budgets=tuple(budgets),
     )
 
