@@ -90,9 +90,10 @@ export CREEPER_SMTP_USERNAME='sender@gmail.com'
 export CREEPER_SMTP_APP_PASSWORD='application-password'
 ```
 
-The default SMTP endpoint is Gmail submission on port 587 with STARTTLS. To
-use another SMTP submission service, change `[email_report]` in
-`fabric.toml`.
+The default SMTP endpoint is Gmail submission on port 587 with STARTTLS. OCI
+blocks outbound TCP/25 by default for newer tenancies; this profile therefore
+does not depend on port 25. To use another SMTP submission service, change
+`[email_report]` in `fabric.toml`.
 
 ## One-time data bootstrap
 
@@ -177,3 +178,13 @@ sudo systemctl start creeper-email-report.service
 - Disk/RAM pressure: autopilot resource governor throttles before hard stop.
 - Service failure: systemd invokes an alert email; no operator polling is
   required for routine health visibility.
+
+
+## Free-tier availability caveat
+
+OCI documents that idle Always Free compute instances may be reclaimed when
+CPU, network and (for A1) memory utilization all remain below the documented
+idle thresholds over seven days. Creeper does not generate artificial keepalive
+load to defeat that policy. A productive crawl/search run should normally be
+non-idle, but Always Free is not an availability SLA. The daily email exposes
+load and resource state so an unexpectedly idle pipeline is visible.
