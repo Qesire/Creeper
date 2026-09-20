@@ -8,6 +8,7 @@ sudo -u creeper -H bash "$APP_DIR/deploy/oci-a1/verify-baseline.sh"
 sudo systemctl enable --now creeper-fabric-authority.service
 sudo systemctl enable --now creeper-fabric-worker@query.service
 sudo systemctl enable --now creeper-fabric-worker@evidence.service
+sudo systemctl enable --now creeper-fabric-worker@bulk.service
 sudo systemctl enable --now creeper-fabric-evidence-bridge.service
 sudo systemctl enable --now creeper-autopilot.service
 sudo systemctl enable --now creeper-email-report.timer
@@ -19,6 +20,7 @@ systemctl --no-pager --full status \
   creeper-fabric-authority.service \
   creeper-fabric-worker@query.service \
   creeper-fabric-worker@evidence.service \
+  creeper-fabric-worker@bulk.service \
   creeper-fabric-evidence-bridge.service \
   creeper-autopilot.service \
   creeper-email-report.timer \
