@@ -123,6 +123,8 @@ Choose a unique /32. Suggested allocation:
 On the remote worker:
 
 ```bash
+sudo apt-get update
+sudo DEBIAN_FRONTEND=noninteractive apt-get install -y ca-certificates git
 git clone https://github.com/Qesire/Creeper.git
 cd Creeper
 
