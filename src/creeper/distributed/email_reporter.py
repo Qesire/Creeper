@@ -37,7 +37,10 @@ def _fabric(config_path: Path) -> dict[str,Any]:
     store=None
     try:
         config=load_authority_config(config_path)
-        store=open_authority_store(config.database)
+        store=open_authority_store(
+            config.database,
+            emit_outbox=config.outbox_enabled,
+        )
         return dict(store.status_snapshot())
     except BaseException as exc:
         return _error(exc)
