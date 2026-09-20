@@ -103,7 +103,26 @@ this does not disable ResultBatch persistence, the worker durable spool, the
 authority inbox, fencing, or domain idempotency. The canonical OCI HTTP-only
 profile does so to keep authority-state growth bounded.
 
-## 7. Creeper domain boundary
+## 7. Retention and garbage collection
+
+Fabric separates durable idempotency identity from high-volume transient
+delivery state.
+
+- `fabric_work.work_key` remains the long-lived admission tombstone.
+- consumed or quarantined ResultBatch payloads may be pruned after a retention
+  window because domain commit has already completed or the batch has been
+  explicitly quarantined;
+- inactive provider permits, expired request nonces, old daily egress rows and
+  published broker events are transient operational state;
+- when broker outbox emission is disabled, historical unpublished outbox rows
+  from an earlier configuration may also be pruned after the same window.
+
+The canonical OCI profile runs bounded GC hourly with a 24-hour retention
+window. GC never deletes live leases, unconsumed non-quarantined ResultBatch
+objects, active provider permits, provider budgets/region history, or WorkKey
+tombstones.
+
+## 8. Creeper domain boundary
 
 Fabric workers execute deterministic expensive I/O. They do not decide:
 
@@ -120,7 +139,7 @@ Automatic LLM work remains restricted to local
 `UNKNOWN_FORMAT -> COMPILE_ADAPTER`; no distributed LLM source-search lane
 exists.
 
-## 8. Deployment topology
+## 9. Deployment topology
 
 Recommended production topology:
 
