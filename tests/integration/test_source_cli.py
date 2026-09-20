@@ -59,7 +59,7 @@ class SourceProducerCliTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp)
             task_root=root/"task"
-            baseline_root=task_root/"fixture-baseline"
+            baseline_root=task_root/"merged-fixture"
             baseline_root.mkdir(parents=True)
             for year in range(1996,2002):
                 (baseline_root/f"{year}.txt").write_text(
