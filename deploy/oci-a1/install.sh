@@ -61,8 +61,14 @@ fi
 
 PG_MAJOR="$(psql --version | sed -E 's/.* ([0-9]+)\..*/\1/')"
 sudo install -d -m 0755 "/etc/postgresql/$PG_MAJOR/main/conf.d"
-printf "listen_addresses = '127.0.0.1'\n" \
-  | sudo tee "/etc/postgresql/$PG_MAJOR/main/conf.d/creeper.conf" >/dev/null
+cat <<'EOF' | sudo tee "/etc/postgresql/$PG_MAJOR/main/conf.d/creeper.conf" >/dev/null
+listen_addresses = '127.0.0.1'
+shared_buffers = '256MB'
+work_mem = '8MB'
+maintenance_work_mem = '128MB'
+effective_cache_size = '4GB'
+max_connections = 30
+EOF
 sudo systemctl restart postgresql
 
 for name in fabric worker-query worker-evidence source-discovery producer autopilot; do
