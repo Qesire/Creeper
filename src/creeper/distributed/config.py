@@ -111,6 +111,60 @@ class WorkerRuntimeConfig:
         return value
 
 
+@dataclass(frozen=True, slots=True)
+class EmailReportRuntimeConfig:
+    runtime_data_root: Path
+    smtp_host: str = "smtp.gmail.com"
+    smtp_port: int = 587
+    starttls: bool = True
+    sender_env: str = "CREEPER_REPORT_FROM"
+    recipient_env: str = "CREEPER_REPORT_TO"
+    username_env: str = "CREEPER_SMTP_USERNAME"
+    password_env: str = "CREEPER_SMTP_APP_PASSWORD"
+    subject_prefix: str = "[Creeper]"
+    timezone: str = "Asia/Singapore"
+    state_file: Path | None = None
+
+    def __post_init__(self) -> None:
+        if not self.smtp_host.strip() or not 1 <= self.smtp_port <= 65535:
+            raise ValueError("invalid email-report SMTP endpoint")
+        for name in (
+            "sender_env",
+            "recipient_env",
+            "username_env",
+            "password_env",
+            "subject_prefix",
+            "timezone",
+        ):
+            if not str(getattr(self,name)).strip():
+                raise ValueError(f"email-report {name} must be non-empty")
+
+    @property
+    def resolved_state_file(self) -> Path:
+        return (
+            self.state_file
+            if self.state_file is not None
+            else self.runtime_data_root/"reporting"/"last-email-snapshot.json"
+        )
+
+    def load_delivery_environment(self) -> tuple[str,str,str,str]:
+        names=(
+            self.sender_env,
+            self.recipient_env,
+            self.username_env,
+            self.password_env,
+        )
+        values=tuple(os.environ.get(name,"").strip() for name in names)
+        missing=[name for name,value in zip(names,values) if not value]
+        if missing:
+            raise RuntimeError(
+                "email-report environment variable(s) missing: "
+                + ",".join(missing)
+            )
+        sender,recipient,username,password=values
+        return sender,recipient,username,password
+
+
 def _resolve_local_path(value: object, *, config_path: Path, name: str) -> Path:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{name} must be a non-empty path")
@@ -282,3 +336,41 @@ def load_worker_config(path: Path) -> WorkerRuntimeConfig:
         lease_seconds=float(section.get("lease_seconds",300.0)),
         heartbeat_seconds=float(section.get("heartbeat_seconds",30.0)),
     )
+
+def load_email_report_config(path: Path) -> EmailReportRuntimeConfig:
+    raw=_load_toml(path)
+    section=raw.get("email_report")
+    if not isinstance(section,Mapping):
+        raise ValueError("[email_report] table is required")
+    config_path=Path(path).resolve()
+    runtime_data_root=_resolve_local_path(
+        section["runtime_data_root"],
+        config_path=config_path,
+        name="email_report.runtime_data_root",
+    )
+    state_value=section.get("state_file")
+    state_file=(
+        _resolve_local_path(
+            state_value,
+            config_path=config_path,
+            name="email_report.state_file",
+        )
+        if state_value is not None
+        else None
+    )
+    return EmailReportRuntimeConfig(
+        runtime_data_root=runtime_data_root,
+        smtp_host=str(section.get("smtp_host","smtp.gmail.com")),
+        smtp_port=int(section.get("smtp_port",587)),
+        starttls=bool(section.get("starttls",True)),
+        sender_env=str(section.get("sender_env","CREEPER_REPORT_FROM")),
+        recipient_env=str(section.get("recipient_env","CREEPER_REPORT_TO")),
+        username_env=str(section.get("username_env","CREEPER_SMTP_USERNAME")),
+        password_env=str(
+            section.get("password_env","CREEPER_SMTP_APP_PASSWORD")
+        ),
+        subject_prefix=str(section.get("subject_prefix","[Creeper]")),
+        timezone=str(section.get("timezone","Asia/Singapore")),
+        state_file=state_file,
+    )
+
