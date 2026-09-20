@@ -598,10 +598,10 @@ class FabricRegionHarvestExecutor(RegionHarvestExecutor):
                 payload=_json_object(row["payload_json"])
                 raw_results=payload.get("results")
                 if not isinstance(raw_results,list):
-                    self.fabric_store.mark_batch_consume_failed(
-                        batch_id,
-                        "Bulk shard results must be an array",
-                    )
+                    # Evidence-grade bulk batches are fail-closed. Do not use
+                    # the generic poison-batch quarantine path here: skipping
+                    # one malformed shard batch and later marking the region
+                    # HARVESTED would silently lose direct-year witnesses.
                     raise RegionHarvestError("invalid Fabric bulk result batch")
                 for item in raw_results:
                     if not isinstance(item,Mapping):
