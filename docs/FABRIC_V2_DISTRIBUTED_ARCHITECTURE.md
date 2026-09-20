@@ -108,7 +108,7 @@ profile does so to keep authority-state growth bounded.
 Fabric separates durable idempotency identity from high-volume transient
 delivery state.
 
-- `fabric_work.work_key` remains the long-lived admission tombstone.
+- `fabric_work.work_key` remains the long-lived admission tombstone; after the retention window, eligible COMPLETE rows keep their identity/state metadata but compact the high-volume `payload_json`, cursor and historical error fields.
 - consumed or quarantined ResultBatch payloads may be pruned after a retention
   window because domain commit has already completed or the batch has been
   explicitly quarantined;
