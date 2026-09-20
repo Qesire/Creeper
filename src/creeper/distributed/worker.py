@@ -204,6 +204,13 @@ class DistributedWorker:
             except TimeoutError:
                 continue
 
+    async def _run_or_replay_once(self) -> bool:
+        """Drain durable result state before accepting any new lease."""
+        if self.spool.pending_count():
+            await self._replay_spool()
+            return True
+        return await self.run_once()
+
     async def run_forever(self, stop: asyncio.Event | None = None) -> None:
         stop = stop or asyncio.Event()
         while not stop.is_set():
@@ -232,11 +239,7 @@ class DistributedWorker:
                     # outage: once connectivity/budget returns, replay the old
                     # generation first (or discard it if Authority fences it)
                     # before doing any new provider/source I/O.
-                    if self.spool.pending_count():
-                        await self._replay_spool()
-                        worked = True
-                    else:
-                        worked = await self.run_once()
+                    worked = await self._run_or_replay_once()
                 except CoordinatorUploadBudgetExceededError:
                     worked = False
                     quota_wait = True
