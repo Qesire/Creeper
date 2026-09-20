@@ -107,6 +107,7 @@ class OciA1DeploymentConfigTests(unittest.TestCase):
         self.assertEqual(authority.database,"postgresql:///creeper")
         self.assertEqual(authority.host,"127.0.0.1")
         self.assertEqual(authority.port,8088)
+        self.assertEqual(authority.max_request_body_bytes,32*1024*1024)
         self.assertFalse(authority.outbox_enabled)
         self.assertTrue(authority.provider_budgets)
         self.assertTrue(
