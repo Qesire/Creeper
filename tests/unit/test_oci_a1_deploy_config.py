@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import subprocess
 import tempfile
 import tomllib
 import unittest
@@ -114,6 +115,14 @@ class OciA1DeploymentConfigTests(unittest.TestCase):
         self.assertEqual(bridge.runtime_data_root,Path("/srv/creeper/data"))
         self.assertEqual(report.timezone,"Asia/Singapore")
         self.assertTrue(report.starttls)
+        self.assertEqual(
+            report.baseline_manifest,
+            Path("/srv/creeper/baseline/current/authority-manifest.json"),
+        )
+        self.assertEqual(
+            report.baseline_index,
+            Path("/srv/creeper/data/indexes/baseline-fast.sqlite3"),
+        )
 
         raw=tomllib.loads(
             (self.root/"source-discovery.toml").read_text(encoding="utf-8")
@@ -219,6 +228,16 @@ class OciA1DeploymentConfigTests(unittest.TestCase):
         self.assertIn("OnUnitActiveSec=1h",timer)
         self.assertIn("Persistent=true",timer)
         self.assertIn("enable --now creeper-fabric-gc.timer",install)
+
+    def test_deployment_shell_scripts_pass_bash_syntax_check(self) -> None:
+        for path in self.root.glob("*.sh"):
+            with self.subTest(path=path.name):
+                subprocess.run(
+                    ["bash","-n",str(path)],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
 
     def test_all_deployment_toml_files_parse(self) -> None:
         for path in self.root.glob("*.toml"):
