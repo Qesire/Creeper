@@ -446,6 +446,68 @@ class FabricPostgresAuthorityTests(unittest.TestCase):
             store.close()
 
 
+    def test_renew_replay_does_not_extend_deadline_twice(self) -> None:
+        now=[1000.0]
+        store=PostgresAuthorityStore(
+            self.dsn,
+            clock=lambda:now[0],
+            emit_outbox=False,
+        )
+        try:
+            suffix=uuid4().hex[:12]
+            worker=WorkerDescriptor(
+                worker_id=f"renew-worker-{suffix}",
+                worker_instance_id=f"renew-instance-{suffix}",
+                runtime_class="full",
+                region="sg",
+                architecture="x86_64",
+                memory_bytes=1024,
+                cpu_count=1,
+                network_class="public",
+                capabilities=(Capability.RESIDUAL_QUERY.value,),
+                producers=("ResidualQueryProducer",),
+                allowed_providers=("datacite",),
+            )
+            store.register_worker(worker)
+            store.configure_provider_budget(
+                "datacite",
+                requests_per_second=10.0,
+                max_global_inflight=4,
+                require_qualified_region=False,
+            )
+            task_id,_=store.admit_work(self.work("renew-"+suffix))
+            lease=store.claim_work(
+                worker.worker_id,
+                worker.worker_instance_id,
+                lease_seconds=300,
+            )
+            self.assertIsNotNone(lease)
+            assert lease is not None
+            expected=lease.lease_deadline
+            now[0]+=150.0
+            first=store.renew_task(
+                task_id,
+                worker_id=worker.worker_id,
+                worker_instance_id=worker.worker_instance_id,
+                generation=lease.generation,
+                lease_seconds=300,
+                expected_lease_deadline=expected,
+            )
+            self.assertEqual(first.lease_deadline,1450.0)
+            now[0]+=40.0
+            replay=store.renew_task(
+                task_id,
+                worker_id=worker.worker_id,
+                worker_instance_id=worker.worker_instance_id,
+                generation=lease.generation,
+                lease_seconds=300,
+                expected_lease_deadline=expected,
+            )
+            self.assertEqual(replay.lease_deadline,first.lease_deadline)
+        finally:
+            store.close()
+
+
 
 if __name__ == "__main__":
     unittest.main()
