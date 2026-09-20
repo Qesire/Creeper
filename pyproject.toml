@@ -18,9 +18,6 @@ dependencies = [
 s3 = [
     "s3fs>=2024.10,<2027",
 ]
-postgres = [
-    "psycopg[binary]>=3.2,<4",
-]
 
 [project.scripts]
 creeper = "creeper.cli:main"
@@ -37,6 +34,7 @@ creeper-fabric-authority = "creeper.distributed.authority_cli:main"
 creeper-fabric-worker = "creeper.distributed.worker_cli:main"
 creeper-fabric-control = "creeper.distributed.control_cli:main"
 creeper-fabric-evidence-bridge = "creeper.distributed.evidence_bridge_cli:main"
+creeper-fabric-email-report = "creeper.distributed.email_reporter:main"
 
 [build-system]
 requires = ["setuptools>=68"]
