@@ -170,5 +170,33 @@ class WorkerSpoolRecoveryTests(unittest.IsolatedAsyncioTestCase):
             spool.close()
 
 
+    def test_monthly_coordinator_upload_budget_is_persistent_and_fail_closed(self) -> None:
+        now=[1_704_067_200.0]
+        spool=WorkerResultSpool(self.path,clock=lambda:now[0])
+        try:
+            self.assertTrue(
+                spool.reserve_coordinator_upload(600,budget_bytes=1000)
+            )
+            self.assertEqual(spool.coordinator_upload_usage(),600)
+            self.assertFalse(
+                spool.reserve_coordinator_upload(401,budget_bytes=1000)
+            )
+            self.assertEqual(spool.coordinator_upload_usage(),600)
+        finally:
+            spool.close()
+
+        reopened=WorkerResultSpool(self.path,clock=lambda:now[0])
+        try:
+            self.assertEqual(reopened.coordinator_upload_usage(),600)
+            now[0]+=32*86400
+            self.assertEqual(reopened.coordinator_upload_usage(),0)
+            self.assertTrue(
+                reopened.reserve_coordinator_upload(700,budget_bytes=1000)
+            )
+            self.assertEqual(reopened.coordinator_upload_usage(),700)
+        finally:
+            reopened.close()
+
+
 if __name__ == "__main__":
     unittest.main()
