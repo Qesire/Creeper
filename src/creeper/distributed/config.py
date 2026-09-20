@@ -204,6 +204,12 @@ def _resolve_database(value: object, *, config_path: Path) -> str:
     return str(_resolve_local_path(text,config_path=config_path,name="authority.database"))
 
 
+def _strict_bool(value: object, *, name: str) -> bool:
+    if not isinstance(value,bool):
+        raise ValueError(f"{name} must be a boolean")
+    return value
+
+
 def _load_toml(path: Path) -> dict[str,Any]:
     with Path(path).open("rb") as source:
         value=tomllib.load(source)
@@ -252,11 +258,13 @@ def load_authority_config(path: Path) -> AuthorityRuntimeConfig:
                 name=str(name),
                 requests_per_second=float(spec["requests_per_second"]),
                 max_global_inflight=int(spec["max_global_inflight"]),
-                require_qualified_region=bool(
-                    spec.get("require_qualified_region",True)
+                require_qualified_region=_strict_bool(
+                    spec.get("require_qualified_region",True),
+                    name=f"provider_budgets.{name}.require_qualified_region",
                 ),
-                allow_unknown_region_probe=bool(
-                    spec.get("allow_unknown_region_probe",False)
+                allow_unknown_region_probe=_strict_bool(
+                    spec.get("allow_unknown_region_probe",False),
+                    name=f"provider_budgets.{name}.allow_unknown_region_probe",
                 ),
                 region_reprobe_after_seconds=float(
                     spec.get("region_reprobe_after_seconds",21600.0)
