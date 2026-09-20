@@ -594,20 +594,12 @@ class DistributedAuthorityStore:
                 (worker_id, worker_instance_id, now),
             ).fetchone()
             if active is not None:
-                # Claim is idempotent per worker incarnation. If the previous
-                # HTTP response was lost after Authority committed the lease,
-                # return that same generation instead of orphaning it and
-                # leasing a second task to this single-concurrency worker.
-                deadline = now + float(lease_seconds)
-                self.connection.execute(
-                    """
-                    UPDATE fabric_work
-                    SET lease_deadline=?, updated_at=?
-                    WHERE task_id=?
-                    """,
-                    (deadline, now, str(active["task_id"])),
-                )
-                self.connection.commit()
+                # Claim replay is idempotent but is NOT a lease renewal. If
+                # requests reach Authority while responses are black-holed,
+                # extending here would let an unobserved task be held forever.
+                # Only /renew may move the ownership deadline forward.
+                deadline = float(active["lease_deadline"])
+                self.connection.rollback()
                 return TaskLease(
                     task_id=str(active["task_id"]),
                     work_key=str(active["work_key"]),
