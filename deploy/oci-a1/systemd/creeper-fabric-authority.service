@@ -1,4 +1,6 @@
 [Unit]
+StartLimitIntervalSec=300
+StartLimitBurst=10
 Description=Creeper Fabric Authority
 After=network-online.target postgresql.service
 Wants=network-online.target
@@ -13,8 +15,6 @@ WorkingDirectory=/opt/creeper
 ExecStart=/opt/creeper/.venv/bin/creeper-fabric-authority --config /etc/creeper/fabric.toml
 Restart=on-failure
 RestartSec=5
-StartLimitIntervalSec=300
-StartLimitBurst=10
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=full
