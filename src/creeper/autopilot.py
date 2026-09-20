@@ -529,12 +529,21 @@ def load_autopilot_config(config_path: Path) -> AutopilotConfig:
                     base=config_path.parent,
                     name="readiness.eed_model",
                 )
-            baseline_eed = _decimal_string(
-                readiness_raw.get("baseline_eed"),
-                name="readiness.baseline_eed",
-            )
             authority_manifest = None
             raw_manifest = readiness_raw.get("authority_manifest")
+            raw_baseline_eed = readiness_raw.get("baseline_eed")
+            if raw_manifest is None and raw_baseline_eed is None:
+                raise ValueError(
+                    "readiness requires baseline_eed or authority_manifest"
+                )
+            baseline_eed = (
+                _decimal_string(
+                    raw_baseline_eed,
+                    name="readiness.baseline_eed",
+                )
+                if raw_baseline_eed is not None
+                else ""
+            )
             if raw_manifest is not None:
                 authority_manifest = _resolve(
                     raw_manifest,
@@ -544,10 +553,7 @@ def load_autopilot_config(config_path: Path) -> AutopilotConfig:
                 from creeper.authority.identity import AuthoritySnapshot
 
                 authority = AuthoritySnapshot.from_manifest_path(authority_manifest)
-                if (
-                    "baseline_eed" in readiness_raw
-                    and baseline_eed != authority.baseline_eed
-                ):
+                if raw_baseline_eed is not None and baseline_eed != authority.baseline_eed:
                     raise ValueError(
                         "readiness.baseline_eed conflicts with authority_manifest"
                     )
