@@ -142,6 +142,7 @@ sudo systemctl enable --now creeper-fabric-evidence-bridge.service
 sudo systemctl enable --now creeper-email-report.timer
 sudo systemctl enable --now creeper-email-outbox.timer
 sudo systemctl enable --now creeper-fabric-gc.timer
+sudo systemctl enable --now creeper-fabric-worker-health.timer
 
 if sudo -u "$APP_USER" -H bash "$APP_DIR/deploy/oci-a1/verify-baseline.sh" \
     >/dev/null 2>&1; then
