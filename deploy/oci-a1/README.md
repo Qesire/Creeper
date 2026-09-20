@@ -95,6 +95,24 @@ blocks outbound TCP/25 by default for newer tenancies; this profile therefore
 does not depend on port 25. To use another SMTP submission service, change
 `[email_report]` in `fabric.toml`.
 
+
+## Out-of-band host-death email
+
+An in-guest reporter cannot send mail after the VM itself disappears. Keep the
+operator surface email-only by adding one OCI Monitoring absence alarm whose
+destination is an OCI Notifications email subscription.
+
+Use the Compute metric namespace and an advanced query equivalent to:
+
+```
+CpuUtilization[1m]{resourceId = "<INSTANCE_OCID>"}.groupBy(resourceId).absent()
+```
+
+This is control-plane monitoring, not a second Creeper host. It covers VM
+shutdown, metric disappearance and host-level failure while the in-guest
+reporter covers application progress and systemd service failures. Do not add
+synthetic workload merely to avoid Always Free idle reclamation.
+
 ## One-time data bootstrap
 
 The production pipeline will not start until these two authority inputs exist:
