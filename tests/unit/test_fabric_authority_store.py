@@ -37,6 +37,12 @@ class FabricAuthorityStoreTests(unittest.TestCase):
             allowed_providers=("datacite",),
         )
         self.store.register_worker(self.worker)
+        self.store.configure_provider_budget(
+            "datacite",
+            requests_per_second=10.0,
+            max_global_inflight=4,
+            require_qualified_region=False,
+        )
 
     def tearDown(self) -> None:
         self.store.close()
@@ -155,6 +161,12 @@ class FabricAuthorityStoreTests(unittest.TestCase):
         )
         try:
             store.register_worker(self.worker)
+            store.configure_provider_budget(
+                "datacite",
+                requests_per_second=10.0,
+                max_global_inflight=4,
+                require_qualified_region=False,
+            )
             task_id,inserted=store.admit_work(self.work("no-outbox"))
             self.assertTrue(inserted)
             lease=store.claim_work(
@@ -187,6 +199,12 @@ class FabricAuthorityStoreTests(unittest.TestCase):
         )
         try:
             store.register_worker(self.worker)
+            store.configure_provider_budget(
+                "datacite",
+                requests_per_second=10.0,
+                max_global_inflight=4,
+                require_qualified_region=False,
+            )
             task_id,inserted=store.admit_work(self.work("gc"))
             self.assertTrue(inserted)
             lease=store.claim_work(
@@ -269,6 +287,192 @@ class FabricAuthorityStoreTests(unittest.TestCase):
         self.assertEqual(status["unconsumed_batches"],0)
         self.assertEqual(status["quarantined_batches"],1)
         self.assertEqual(status["retained_batches"],1)
+
+
+    def test_unknown_region_probe_converges_to_blocked_and_stops_claims(self) -> None:
+        self.store.configure_provider_budget(
+            "datacite",
+            requests_per_second=10.0,
+            max_global_inflight=4,
+            require_qualified_region=True,
+            allow_unknown_region_probe=True,
+        )
+        first_id,_=self.store.admit_work(self.work("region-1"))
+        lease=self.store.claim_work("worker-a","instance-1",lease_seconds=60)
+        self.assertIsNotNone(lease)
+        assert lease is not None
+        permit=self.store.issue_provider_permit(
+            "datacite",
+            worker_id="worker-a",
+            worker_instance_id="instance-1",
+            task_id=lease.task_id,
+            generation=lease.generation,
+            request_id="probe-1",
+        )
+        self.assertIsNotNone(permit)
+        second_permit=self.store.issue_provider_permit(
+            "datacite",
+            worker_id="worker-a",
+            worker_instance_id="instance-1",
+            task_id=lease.task_id,
+            generation=lease.generation,
+            request_id="probe-2",
+        )
+        self.assertIsNone(second_permit)
+
+        state=self.store.record_provider_region_observation(
+            "datacite",
+            worker_id="worker-a",
+            worker_instance_id="instance-1",
+            task_id=lease.task_id,
+            generation=lease.generation,
+            connect_success=True,
+            status_code=451,
+            latency_ms=5.0,
+            response_bytes=10,
+            policy_block=True,
+        )
+        self.assertEqual(state,"BLOCKED")
+        assert permit is not None
+        self.store.report_provider_permit(
+            permit.permit_id,
+            worker_id="worker-a",
+            worker_instance_id="instance-1",
+            status_code=451,
+        )
+        self.store.fail_task(
+            first_id,
+            worker_id="worker-a",
+            worker_instance_id="instance-1",
+            generation=lease.generation,
+            error="blocked",
+            retryable=True,
+        )
+        self.store.admit_work(self.work("region-2"))
+        self.assertIsNone(
+            self.store.claim_work("worker-a","instance-1",lease_seconds=60)
+        )
+
+    def test_status_snapshot_exposes_stale_worker_identity(self) -> None:
+        now=[1000.0]
+        store=DistributedAuthorityStore(
+            self.root/"fabric-health.sqlite3",
+            clock=lambda:now[0],
+        )
+        try:
+            store.register_worker(self.worker)
+            healthy=store.status_snapshot(stale_after_seconds=180)
+            self.assertEqual(healthy["stale_workers"],0)
+            now[0]+=181
+            stale=store.status_snapshot(stale_after_seconds=180)
+            self.assertEqual(stale["stale_workers"],1)
+            self.assertEqual(
+                stale["worker_health"][0]["worker_id"],
+                "worker-a",
+            )
+            self.assertTrue(stale["worker_health"][0]["stale"])
+        finally:
+            store.close()
+
+    def test_strict_unknown_region_does_not_claim_when_probe_is_disabled(self) -> None:
+        self.store.configure_provider_budget(
+            "datacite",
+            requests_per_second=10.0,
+            max_global_inflight=4,
+            require_qualified_region=True,
+            allow_unknown_region_probe=False,
+        )
+        self.store.admit_work(self.work("strict-unknown"))
+        self.assertIsNone(
+            self.store.claim_work(
+                "worker-a","instance-1",lease_seconds=60
+            )
+        )
+
+    def test_blocked_region_is_reprobed_after_configured_ttl(self) -> None:
+        now=[1000.0]
+        store=DistributedAuthorityStore(
+            self.root/"fabric-region-reprobe.sqlite3",
+            clock=lambda:now[0],
+        )
+        try:
+            store.register_worker(self.worker)
+            store.configure_provider_budget(
+                "datacite",
+                requests_per_second=10.0,
+                max_global_inflight=4,
+                require_qualified_region=True,
+                allow_unknown_region_probe=True,
+                region_reprobe_after_seconds=60.0,
+            )
+            task_id,_=store.admit_work(self.work("region-reprobe"))
+            first=store.claim_work(
+                "worker-a","instance-1",lease_seconds=60
+            )
+            self.assertIsNotNone(first)
+            assert first is not None
+            permit=store.issue_provider_permit(
+                "datacite",
+                worker_id="worker-a",
+                worker_instance_id="instance-1",
+                task_id=task_id,
+                generation=first.generation,
+                request_id="policy-block",
+            )
+            self.assertIsNotNone(permit)
+            state=store.record_provider_region_observation(
+                "datacite",
+                worker_id="worker-a",
+                worker_instance_id="instance-1",
+                task_id=task_id,
+                generation=first.generation,
+                connect_success=True,
+                status_code=451,
+                latency_ms=5.0,
+                response_bytes=10,
+                policy_block=True,
+            )
+            self.assertEqual(state,"BLOCKED")
+            assert permit is not None
+            store.report_provider_permit(
+                permit.permit_id,
+                worker_id="worker-a",
+                worker_instance_id="instance-1",
+                status_code=451,
+            )
+            store.fail_task(
+                task_id,
+                worker_id="worker-a",
+                worker_instance_id="instance-1",
+                generation=first.generation,
+                error="policy block",
+                retryable=True,
+            )
+
+            self.assertIsNone(
+                store.claim_work(
+                    "worker-a","instance-1",lease_seconds=60
+                )
+            )
+            now[0]+=61.0
+            second=store.claim_work(
+                "worker-a","instance-1",lease_seconds=60
+            )
+            self.assertIsNotNone(second)
+            assert second is not None
+            self.assertIsNotNone(
+                store.issue_provider_permit(
+                    "datacite",
+                    worker_id="worker-a",
+                    worker_instance_id="instance-1",
+                    task_id=task_id,
+                    generation=second.generation,
+                    request_id="reprobe",
+                )
+            )
+        finally:
+            store.close()
+
 
 
 if __name__=="__main__":

@@ -163,16 +163,29 @@ class OciA1DeploymentConfigTests(unittest.TestCase):
     def test_workers_are_colocated_and_have_disjoint_execution_roles(self) -> None:
         query=load_worker_config(self.root/"worker-query.toml")
         evidence=load_worker_config(self.root/"worker-evidence.toml")
+        bulk=load_worker_config(self.root/"worker-bulk.toml")
 
-        self.assertEqual(query.coordinator_url,"http://127.0.0.1:8088")
-        self.assertEqual(evidence.coordinator_url,"http://127.0.0.1:8088")
-        self.assertEqual(query.descriptor.architecture,"aarch64")
-        self.assertEqual(evidence.descriptor.architecture,"aarch64")
-        self.assertEqual(query.descriptor.memory_bytes,1024**3)
-        self.assertEqual(evidence.descriptor.memory_bytes,1024**3)
+        for worker in (query,evidence,bulk):
+            self.assertEqual(worker.coordinator_url,"http://127.0.0.1:8088")
+            self.assertEqual(worker.descriptor.architecture,"aarch64")
+            self.assertEqual(worker.descriptor.memory_bytes,1024**3)
         self.assertEqual(query.descriptor.producers,("ResidualQueryProducer",))
         self.assertEqual(evidence.descriptor.producers,("EvidenceQueryProducer",))
-        self.assertNotEqual(query.descriptor.worker_id,evidence.descriptor.worker_id)
+        self.assertEqual(bulk.descriptor.producers,("BulkShardProducer",))
+        self.assertEqual(
+            bulk.descriptor.capabilities,
+            ("STREAMING_BULK","ARTIFACT_FETCH"),
+        )
+        self.assertEqual(
+            len(
+                {
+                    query.descriptor.worker_id,
+                    evidence.descriptor.worker_id,
+                    bulk.descriptor.worker_id,
+                }
+            ),
+            3,
+        )
 
     def test_autopilot_resource_envelope_precedes_systemd_ceiling(self) -> None:
         raw=tomllib.loads(
@@ -257,6 +270,42 @@ class OciA1DeploymentConfigTests(unittest.TestCase):
                 with path.open("rb") as source:
                     value=tomllib.load(source)
                 self.assertIsInstance(value,dict)
+
+
+    def test_worker_health_is_edge_alerted_and_multihost_is_explicit(self) -> None:
+        service=(self.root/"systemd"/"creeper-fabric-worker-health.service").read_text(
+            encoding="utf-8"
+        )
+        timer=(self.root/"systemd"/"creeper-fabric-worker-health.timer").read_text(
+            encoding="utf-8"
+        )
+        install=(self.root/"install.sh").read_text(encoding="utf-8")
+        enable=(self.root/"enable-multihost-authority.sh").read_text(
+            encoding="utf-8"
+        )
+        provision=(self.root/"add-remote-worker.sh").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("worker-health --stale-seconds 180",service)
+        self.assertIn("OnFailure=creeper-email-alert@%n.service",service)
+        self.assertIn("OnUnitActiveSec=5m",timer)
+        self.assertIn("creeper-fabric-worker-health.timer",install)
+        self.assertIn("allow_unknown_region_probe = true",enable)
+        self.assertIn("ufw allow in on creeper to any port 8088",enable)
+        self.assertIn("worker id already exists",provision)
+
+
+    def test_historical_harvest_uses_fabric_with_local_bulk_fallback(self) -> None:
+        raw=tomllib.loads(
+            (self.root/"producer.toml").read_text(encoding="utf-8")
+        )
+        self.assertTrue(raw["historical_index"]["distributed_harvest"])
+        self.assertEqual(raw["fabric"]["database"],"postgresql:///creeper")
+        install=(self.root/"install.sh").read_text(encoding="utf-8")
+        start=(self.root/"start-production.sh").read_text(encoding="utf-8")
+        self.assertIn("oci-a1-bulk",install)
+        self.assertIn("creeper-fabric-worker@bulk.service",install)
+        self.assertIn("creeper-fabric-worker@bulk.service",start)
 
 
 if __name__=="__main__":

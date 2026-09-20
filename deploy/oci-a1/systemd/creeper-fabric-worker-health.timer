@@ -1,0 +1,11 @@
+[Unit]
+Description=Periodically check Creeper Fabric worker heartbeat health
+
+[Timer]
+OnBootSec=10m
+OnUnitActiveSec=5m
+Persistent=true
+RandomizedDelaySec=30
+
+[Install]
+WantedBy=timers.target

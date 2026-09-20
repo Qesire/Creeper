@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+from collections.abc import Callable
 from secrets import token_hex
 from typing import Any, Mapping
 
@@ -34,6 +35,10 @@ class CoordinatorTransportError(CoordinatorError):
     pass
 
 
+class CoordinatorUploadBudgetExceededError(CoordinatorError):
+    pass
+
+
 class CoordinatorClient:
     def __init__(
         self,
@@ -45,16 +50,22 @@ class CoordinatorClient:
         timeout: float = 30.0,
         clock=time.time,
         transport: httpx.AsyncBaseTransport | None = None,
+        upload_reserver: Callable[[int], bool] | None = None,
+        upload_overhead_bytes: int = 0,
     ) -> None:
         if not all((base_url.strip(), worker_id.strip(), worker_instance_id.strip())):
             raise ValueError("coordinator URL and worker identities are required")
         if timeout <= 0:
             raise ValueError("timeout must be positive")
+        if upload_overhead_bytes < 0:
+            raise ValueError("upload_overhead_bytes must be non-negative")
         self.base_url = base_url.rstrip("/")
         self.worker_id = worker_id
         self.worker_instance_id = worker_instance_id
         self.secret = secret
         self.clock = clock
+        self.upload_reserver = upload_reserver
+        self.upload_overhead_bytes = int(upload_overhead_bytes)
         self.client = httpx.AsyncClient(
             base_url=self.base_url,
             timeout=timeout,
@@ -93,6 +104,14 @@ class CoordinatorClient:
             timestamp=timestamp,
             nonce=nonce,
         )
+        if self.upload_reserver is not None:
+            reserved = self.upload_reserver(
+                len(body) + self.upload_overhead_bytes
+            )
+            if not reserved:
+                raise CoordinatorUploadBudgetExceededError(
+                    "monthly coordinator upload budget exhausted"
+                )
         try:
             response = await self.client.post(
                 path,

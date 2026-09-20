@@ -16,7 +16,7 @@ fi
 
 sudo apt-get update
 sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
-  ca-certificates curl git openssl postgresql postgresql-client ufw
+  ca-certificates curl git openssl postgresql postgresql-client ufw wireguard-tools
 
 if ! id -u "$APP_USER" >/dev/null 2>&1; then
   sudo useradd --system --create-home --home-dir "$APP_HOME" \
@@ -71,26 +71,60 @@ max_connections = 30
 EOF
 sudo systemctl restart postgresql
 
-for name in fabric worker-query worker-evidence source-discovery producer autopilot; do
+for name in fabric worker-query worker-evidence worker-bulk source-discovery producer autopilot; do
   sudo install -o root -g "$APP_GROUP" -m 0640 \
     "$APP_DIR/deploy/oci-a1/$name.toml" "$ETC_DIR/$name.toml"
 done
 
 if [[ ! -f "$ETC_DIR/workers.json" ]]; then
-  query_secret="$(openssl rand -hex 32)"
-  evidence_secret="$(openssl rand -hex 32)"
-  printf '{"oci-a1-query":"%s","oci-a1-evidence":"%s"}\n' \
-    "$query_secret" "$evidence_secret" \
-    | sudo tee "$ETC_DIR/workers.json" >/dev/null
-  printf 'CREEPER_WORKER_QUERY_SECRET=%s\n' "$query_secret" \
-    | sudo tee "$ETC_DIR/worker-query.env" >/dev/null
-  printf 'CREEPER_WORKER_EVIDENCE_SECRET=%s\n' "$evidence_secret" \
-    | sudo tee "$ETC_DIR/worker-evidence.env" >/dev/null
-  sudo chown root:"$APP_GROUP" "$ETC_DIR/workers.json" \
-    "$ETC_DIR/worker-query.env" "$ETC_DIR/worker-evidence.env"
-  sudo chmod 0640 "$ETC_DIR/workers.json" \
-    "$ETC_DIR/worker-query.env" "$ETC_DIR/worker-evidence.env"
+  printf '{}\n' | sudo tee "$ETC_DIR/workers.json" >/dev/null
 fi
+
+ensure_worker_secret() {
+  local worker_id="$1"
+  local env_name="$2"
+  local env_file="$3"
+  local secret
+  secret="$(sudo python3 - "$ETC_DIR/workers.json" "$worker_id" <<'PY'
+import json
+from pathlib import Path
+import secrets
+import sys
+
+path=Path(sys.argv[1])
+worker_id=sys.argv[2]
+raw=json.loads(path.read_text(encoding="utf-8"))
+if not isinstance(raw,dict):
+    raise SystemExit("workers.json is not an object")
+secret=raw.get(worker_id)
+if not isinstance(secret,str) or not secret:
+    secret=secrets.token_hex(32)
+    raw[worker_id]=secret
+    temporary=path.with_suffix(path.suffix+".tmp")
+    temporary.write_text(
+        json.dumps(raw,sort_keys=True,indent=2)+"\n",
+        encoding="utf-8",
+    )
+    temporary.replace(path)
+print(secret)
+PY
+)"
+  printf '%s=%s\n' "$env_name" "$secret" | sudo tee "$env_file" >/dev/null
+}
+
+ensure_worker_secret "oci-a1-query" \
+  "CREEPER_WORKER_QUERY_SECRET" "$ETC_DIR/worker-query.env"
+ensure_worker_secret "oci-a1-evidence" \
+  "CREEPER_WORKER_EVIDENCE_SECRET" "$ETC_DIR/worker-evidence.env"
+ensure_worker_secret "oci-a1-bulk" \
+  "CREEPER_WORKER_BULK_SECRET" "$ETC_DIR/worker-bulk.env"
+
+sudo chown root:"$APP_GROUP" "$ETC_DIR/workers.json" \
+  "$ETC_DIR/worker-query.env" "$ETC_DIR/worker-evidence.env" \
+  "$ETC_DIR/worker-bulk.env"
+sudo chmod 0640 "$ETC_DIR/workers.json" \
+  "$ETC_DIR/worker-query.env" "$ETC_DIR/worker-evidence.env" \
+  "$ETC_DIR/worker-bulk.env"
 
 if [[ ! -f "$ETC_DIR/report.env" ]]; then
   required=(
@@ -138,10 +172,12 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now creeper-fabric-authority.service
 sudo systemctl enable --now creeper-fabric-worker@query.service
 sudo systemctl enable --now creeper-fabric-worker@evidence.service
+sudo systemctl enable --now creeper-fabric-worker@bulk.service
 sudo systemctl enable --now creeper-fabric-evidence-bridge.service
 sudo systemctl enable --now creeper-email-report.timer
 sudo systemctl enable --now creeper-email-outbox.timer
 sudo systemctl enable --now creeper-fabric-gc.timer
+sudo systemctl enable --now creeper-fabric-worker-health.timer
 
 if sudo -u "$APP_USER" -H bash "$APP_DIR/deploy/oci-a1/verify-baseline.sh" \
     >/dev/null 2>&1; then

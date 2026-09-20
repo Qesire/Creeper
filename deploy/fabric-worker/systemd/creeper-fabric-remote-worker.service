@@ -1,0 +1,26 @@
+[Unit]
+Description=Creeper Fabric remote outbound worker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=creeper
+Group=creeper
+WorkingDirectory=/opt/creeper
+EnvironmentFile=/etc/creeper/remote-worker.env
+ExecStartPre=/opt/creeper/deploy/fabric-worker/preflight.sh
+ExecStart=/opt/creeper/.venv/bin/creeper-fabric-worker --config /etc/creeper/remote-worker.toml
+Restart=always
+RestartSec=15
+MemoryHigh=512M
+MemoryMax=768M
+OOMPolicy=stop
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/srv/creeper /var/lib/creeper
+
+[Install]
+WantedBy=multi-user.target

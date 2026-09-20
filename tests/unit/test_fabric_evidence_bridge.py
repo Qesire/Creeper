@@ -61,6 +61,12 @@ class FabricEvidenceBridgeTests(unittest.TestCase):
             allowed_providers=("rdap",),
         )
         self.fabric.register_worker(self.worker)
+        self.fabric.configure_provider_budget(
+            "rdap",
+            requests_per_second=10.0,
+            max_global_inflight=4,
+            require_qualified_region=False,
+        )
 
     def tearDown(self) -> None:
         self.evidence.close()

@@ -1,0 +1,18 @@
+[Unit]
+Description=Creeper Fabric worker health transition check
+After=creeper-fabric-authority.service
+Requires=creeper-fabric-authority.service
+OnFailure=creeper-email-alert@%n.service
+
+[Service]
+Type=oneshot
+User=creeper
+Group=creeper
+WorkingDirectory=/opt/creeper
+ExecStart=/opt/creeper/.venv/bin/creeper-fabric-control --config /etc/creeper/fabric.toml worker-health --stale-seconds 180 --state-file /srv/creeper/data/reporting/fabric-worker-health.json
+MemoryMax=256M
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/srv/creeper /var/lib/creeper

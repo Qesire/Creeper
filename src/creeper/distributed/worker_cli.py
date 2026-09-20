@@ -9,6 +9,10 @@ from pathlib import Path
 
 from creeper.distributed.config import load_worker_config
 from creeper.distributed.coordinator_client import CoordinatorClient
+from creeper.distributed.bulk_shard import (
+    PRODUCER_NAME as BULK_PRODUCER_NAME,
+    BulkShardProducer,
+)
 from creeper.distributed.evidence_query import (
     PRODUCER_NAME as EVIDENCE_PRODUCER_NAME,
     EvidenceQueryProducer,
@@ -39,17 +43,31 @@ async def _run(config_path: Path) -> None:
             producers[RESIDUAL_PRODUCER_NAME]=ResidualQueryProducer()
         if EVIDENCE_PRODUCER_NAME in descriptor.producers:
             producers[EVIDENCE_PRODUCER_NAME]=EvidenceQueryProducer()
+        if BULK_PRODUCER_NAME in descriptor.producers:
+            producers[BULK_PRODUCER_NAME]=BulkShardProducer()
         unknown=set(descriptor.producers)-set(producers)
         if unknown:
             raise RuntimeError(
                 "no installed Fabric producer for: "+",".join(sorted(unknown))
             )
 
+        upload_reserver = None
+        if config.coordinator_upload_budget_bytes_per_month > 0:
+            upload_reserver = lambda amount: spool.reserve_coordinator_upload(
+                amount,
+                budget_bytes=config.coordinator_upload_budget_bytes_per_month,
+            )
         async with CoordinatorClient(
             config.coordinator_url,
             worker_id=descriptor.worker_id,
             worker_instance_id=descriptor.worker_instance_id,
             secret=secret,
+            upload_reserver=upload_reserver,
+            upload_overhead_bytes=(
+                config.coordinator_upload_overhead_bytes
+                if upload_reserver is not None
+                else 0
+            ),
         ) as client:
             worker=DistributedWorker(
                 client,

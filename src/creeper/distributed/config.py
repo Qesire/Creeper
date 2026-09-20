@@ -20,6 +20,8 @@ class ProviderBudgetConfig:
     requests_per_second: float
     max_global_inflight: int
     require_qualified_region: bool = True
+    allow_unknown_region_probe: bool = False
+    region_reprobe_after_seconds: float = 21600.0
 
     def __post_init__(self) -> None:
         if (
@@ -28,6 +30,12 @@ class ProviderBudgetConfig:
             or self.max_global_inflight < 1
         ):
             raise ValueError("invalid provider budget")
+        if not isinstance(self.require_qualified_region, bool):
+            raise ValueError("require_qualified_region must be a boolean")
+        if not isinstance(self.allow_unknown_region_probe, bool):
+            raise ValueError("allow_unknown_region_probe must be a boolean")
+        if self.region_reprobe_after_seconds <= 0:
+            raise ValueError("region_reprobe_after_seconds must be positive")
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,6 +101,8 @@ class WorkerRuntimeConfig:
     claim_wait_seconds: float = 10.0
     lease_seconds: float = 300.0
     heartbeat_seconds: float = 30.0
+    coordinator_upload_budget_bytes_per_month: int = 0
+    coordinator_upload_overhead_bytes: int = 1024
 
     def __post_init__(self) -> None:
         if not self.coordinator_url.strip() or not self.secret_env.strip():
@@ -104,6 +114,12 @@ class WorkerRuntimeConfig:
             or self.heartbeat_seconds <= 0
         ):
             raise ValueError("invalid worker timing configuration")
+        if self.coordinator_upload_budget_bytes_per_month < 0:
+            raise ValueError(
+                "coordinator_upload_budget_bytes_per_month must be non-negative"
+            )
+        if self.coordinator_upload_overhead_bytes < 0:
+            raise ValueError("coordinator_upload_overhead_bytes must be non-negative")
 
     def load_secret(self) -> str:
         value=os.environ.get(self.secret_env,"")
@@ -188,6 +204,12 @@ def _resolve_database(value: object, *, config_path: Path) -> str:
     return str(_resolve_local_path(text,config_path=config_path,name="authority.database"))
 
 
+def _strict_bool(value: object, *, name: str) -> bool:
+    if not isinstance(value,bool):
+        raise ValueError(f"{name} must be a boolean")
+    return value
+
+
 def _load_toml(path: Path) -> dict[str,Any]:
     with Path(path).open("rb") as source:
         value=tomllib.load(source)
@@ -236,8 +258,16 @@ def load_authority_config(path: Path) -> AuthorityRuntimeConfig:
                 name=str(name),
                 requests_per_second=float(spec["requests_per_second"]),
                 max_global_inflight=int(spec["max_global_inflight"]),
-                require_qualified_region=bool(
-                    spec.get("require_qualified_region",True)
+                require_qualified_region=_strict_bool(
+                    spec.get("require_qualified_region",True),
+                    name=f"provider_budgets.{name}.require_qualified_region",
+                ),
+                allow_unknown_region_probe=_strict_bool(
+                    spec.get("allow_unknown_region_probe",False),
+                    name=f"provider_budgets.{name}.allow_unknown_region_probe",
+                ),
+                region_reprobe_after_seconds=float(
+                    spec.get("region_reprobe_after_seconds",21600.0)
                 ),
             )
         )
@@ -344,6 +374,12 @@ def load_worker_config(path: Path) -> WorkerRuntimeConfig:
         claim_wait_seconds=float(section.get("claim_wait_seconds",10.0)),
         lease_seconds=float(section.get("lease_seconds",300.0)),
         heartbeat_seconds=float(section.get("heartbeat_seconds",30.0)),
+        coordinator_upload_budget_bytes_per_month=int(
+            section.get("coordinator_upload_budget_bytes_per_month",0)
+        ),
+        coordinator_upload_overhead_bytes=int(
+            section.get("coordinator_upload_overhead_bytes",1024)
+        ),
     )
 
 def load_email_report_config(path: Path) -> EmailReportRuntimeConfig:

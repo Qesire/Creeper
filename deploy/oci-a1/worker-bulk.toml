@@ -1,0 +1,22 @@
+[worker]
+coordinator_url = "http://127.0.0.1:8088"
+worker_id = "oci-a1-bulk"
+worker_instance_id = "auto"
+runtime_class = "oci-a1-single-host"
+region = "oci-home"
+architecture = "aarch64"
+memory_bytes = 1073741824
+cpu_count = 1
+network_class = "public-egress"
+capabilities = ["STREAMING_BULK", "ARTIFACT_FETCH"]
+producers = ["BulkShardProducer"]
+allowed_providers = []
+daily_egress_budget_bytes = 0
+spool_database = "/srv/creeper/spool/bulk.sqlite3"
+secret_env = "CREEPER_WORKER_BULK_SECRET"
+# Deliberately slower than remote workers: this node is a fallback so remote
+# free-cloud egress/CPU is consumed first when available.
+poll_seconds = 30
+claim_wait_seconds = 0
+lease_seconds = 900
+heartbeat_seconds = 30

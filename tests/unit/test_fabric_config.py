@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from creeper.distributed.config import load_worker_config
+from creeper.distributed.config import load_authority_config, load_worker_config
 
 
 class FabricWorkerConfigTests(unittest.TestCase):
@@ -76,6 +76,81 @@ spool_database = "spool.sqlite3"
                 "fixture-instance",
             )
             self.assertFalse(loaded.worker_instance_auto)
+
+    def test_remote_upload_budget_is_loaded_without_changing_provider_budget(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp)
+            config=root/"worker.toml"
+            config.write_text(
+                """
+[worker]
+coordinator_url = "http://10.77.0.1:8088"
+worker_id = "gcp-query-01"
+runtime_class = "remote-free-query"
+region = "gcp-uscentral1"
+architecture = "x86_64"
+memory_bytes = 536870912
+cpu_count = 1
+network_class = "wireguard-public-egress"
+capabilities = ["RESIDUAL_QUERY"]
+producers = ["ResidualQueryProducer"]
+allowed_providers = ["datacite"]
+daily_egress_budget_bytes = 12345
+coordinator_upload_budget_bytes_per_month = 700000000
+coordinator_upload_overhead_bytes = 1536
+spool_database = "spool.sqlite3"
+""",
+                encoding="utf-8",
+            )
+            loaded=load_worker_config(config)
+            self.assertEqual(
+                loaded.descriptor.daily_egress_budget_bytes,
+                12345,
+            )
+            self.assertEqual(
+                loaded.coordinator_upload_budget_bytes_per_month,
+                700000000,
+            )
+            self.assertEqual(loaded.coordinator_upload_overhead_bytes,1536)
+
+    def test_authority_region_flags_are_strict_and_reprobe_ttl_loads(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp)
+            credentials=root/"workers.json"
+            credentials.write_text("{}\n",encoding="utf-8")
+            config=root/"fabric.toml"
+            config.write_text(
+                f"""
+[authority]
+database = "fabric.sqlite3"
+credentials_file = "{credentials}"
+outbox_enabled = false
+
+[provider_budgets.datacite]
+requests_per_second = 1.0
+max_global_inflight = 2
+require_qualified_region = true
+allow_unknown_region_probe = true
+region_reprobe_after_seconds = 1234
+""",
+                encoding="utf-8",
+            )
+            loaded=load_authority_config(config)
+            budget=loaded.provider_budgets[0]
+            self.assertTrue(budget.require_qualified_region)
+            self.assertTrue(budget.allow_unknown_region_probe)
+            self.assertEqual(budget.region_reprobe_after_seconds,1234)
+
+            config.write_text(
+                config.read_text(encoding="utf-8").replace(
+                    "allow_unknown_region_probe = true",
+                    'allow_unknown_region_probe = "false"',
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError,"must be a boolean"):
+                load_authority_config(config)
+
 
 
 if __name__=="__main__":

@@ -11,6 +11,7 @@ from creeper.distributed.coordinator_client import (
     CoordinatorClient,
     CoordinatorError,
     CoordinatorTransportError,
+    CoordinatorUploadBudgetExceededError,
     StaleLeaseCoordinatorError,
 )
 from creeper.distributed.lease_keeper import LeaseKeeper, LeaseLostError
@@ -178,6 +179,8 @@ class DistributedWorker:
             return True
         except LeaseLostError:
             return True
+        except CoordinatorUploadBudgetExceededError:
+            raise
         except BaseException as exc:
             try:
                 keeper.assert_owned()
@@ -201,19 +204,53 @@ class DistributedWorker:
             except TimeoutError:
                 continue
 
+    async def _run_or_replay_once(self) -> bool:
+        """Drain durable result state before accepting any new lease."""
+        if self.spool.pending_count():
+            await self._replay_spool()
+            return True
+        return await self.run_once()
+
     async def run_forever(self, stop: asyncio.Event | None = None) -> None:
         stop = stop or asyncio.Event()
-        await self.initialize()
+        while not stop.is_set():
+            try:
+                await self.initialize()
+                break
+            except CoordinatorUploadBudgetExceededError:
+                try:
+                    await asyncio.wait_for(stop.wait(), timeout=60.0)
+                except TimeoutError:
+                    pass
+            except CoordinatorTransportError:
+                try:
+                    await asyncio.wait_for(stop.wait(), timeout=self.poll_seconds)
+                except TimeoutError:
+                    pass
+        if stop.is_set():
+            return
         heartbeat = asyncio.create_task(self._heartbeat_loop(stop))
         try:
             while not stop.is_set():
+                quota_wait = False
                 try:
-                    worked = await self.run_once()
+                    # Durable result batches always outrank new claims. This is
+                    # essential after a coordinator-upload quota or network
+                    # outage: once connectivity/budget returns, replay the old
+                    # generation first (or discard it if Authority fences it)
+                    # before doing any new provider/source I/O.
+                    worked = await self._run_or_replay_once()
+                except CoordinatorUploadBudgetExceededError:
+                    worked = False
+                    quota_wait = True
                 except CoordinatorTransportError:
                     worked = False
                 if not worked:
                     try:
-                        await asyncio.wait_for(stop.wait(), timeout=self.poll_seconds)
+                        await asyncio.wait_for(
+                            stop.wait(),
+                            timeout=60.0 if quota_wait else self.poll_seconds,
+                        )
                     except TimeoutError:
                         pass
         finally:

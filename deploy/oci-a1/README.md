@@ -9,12 +9,16 @@ host must own the complete runtime and the operator wants email-only reporting.
 - Shape: `VM.Standard.A1.Flex`.
 - CPU/RAM: 2 OCPU, 12 GiB RAM.
 - OS: Ubuntu 24.04 LTS aarch64.
-- Storage: one 200 GB boot volume.
+- Storage: size the Authority boot volume for the chosen topology.
 
-A single 200 GB filesystem is preferred over a 50 GB boot + 150 GB attached
-volume. It stays inside the same Always Free block-volume allowance while
-removing an attach/mount/fstab failure mode. Creeper still separates data by
-path under `/srv/creeper`.
+For the simplest one-VM deployment, a single large boot filesystem remains the
+lowest-risk layout. **Do not allocate the entire Always Free block-volume quota
+to that VM when you intend to use OCI micro workers.** A multi-host free-tier
+layout should reserve enough quota for the minimum boot volumes of those
+workers (for example, roughly 100--106 GB for the A1 Authority plus two ~47 GB
+micro-worker boot volumes). The baseline and runtime index still live only on
+the Authority under `/srv/creeper`; remote workers need only code and a small
+durable spool.
 
 ## Runtime ownership
 
@@ -62,10 +66,58 @@ publisher. Generic Fabric deployments keep that capability enabled by default.
 
 ## Network boundary
 
-PostgreSQL and Fabric Authority listen only on loopback. Workers are colocated
-and use `http://127.0.0.1:8088`. UFW permits SSH and denies other inbound
-traffic. No dashboard, metrics listener, webhook, Slack integration, or public
-control API is part of this profile.
+The default single-host installation keeps PostgreSQL and Fabric Authority on
+loopback and colocated workers use `http://127.0.0.1:8088`. UFW permits SSH
+and denies other inbound traffic.
+
+For multi-host execution, install `/etc/wireguard/creeper.conf` and run
+`enable-multihost-authority.sh`. That mode binds Fabric on all local
+interfaces only because UFW permits TCP/8088 **on the WireGuard interface
+alone**. Never add a public 8088 allow rule. PostgreSQL remains loopback-only.
+Remote workers use the generic `deploy/fabric-worker` profile and never need
+baseline files or database access.
+
+## Optional free-cloud worker expansion
+
+Fabric v2.1 keeps one authoritative core and adds replaceable outbound workers:
+
+```
+OCI Authority
+  baseline / index / PostgreSQL / evidence / readiness
+  query worker + evidence worker + local bulk fallback
+            |
+        WireGuard
+      /      |       \
+OCI micro   GCP     temporary Azure/credit nodes
+ query      query      query/evidence/bulk
+```
+
+Provision each remote worker with a globally unique worker id:
+
+```bash
+sudo bash /opt/creeper/deploy/oci-a1/add-remote-worker.sh \
+  gcp-uscentral1-query-01
+```
+
+The command prints the HMAC secret once. Install the worker using
+`deploy/fabric-worker/install.sh`. The remote profile requires NTP
+synchronization and an active WireGuard interface before it starts. Central
+heartbeat monitoring reports newly stale workers through the existing email
+alert path.
+
+Provider response accounting and cloud upload accounting are intentionally
+separate. `daily_egress_budget_bytes` is the historical Fabric provider-byte
+budget; a remote worker's
+`coordinator_upload_budget_bytes_per_month` is a persistent local ceiling on
+worker-to-Authority HTTP request bytes. The latter is the guard used for cloud
+plans with small internet-egress allowances.
+
+Historical CDX/CDXJ regions can use `BulkShardProducer`. Workers stream finite
+HTTP ranges, reduce contiguous captures to one real witness per host-year, and
+return only compact witness batches. Annual-baseline subtraction and all
+EvidenceStore/ControlStore commits remain on the Authority. A local
+`oci-a1-bulk` worker is installed as a fallback, so enabling distributed
+harvest does not depend on a remote worker being online.
 
 ## Email is the operator surface
 
@@ -234,11 +286,13 @@ systemctl --no-pager --full status \
   creeper-fabric-authority.service \
   creeper-fabric-worker@query.service \
   creeper-fabric-worker@evidence.service \
+  creeper-fabric-worker@bulk.service \
   creeper-fabric-evidence-bridge.service \
   creeper-autopilot.service \
   creeper-email-report.timer \
   creeper-email-outbox.timer \
-  creeper-fabric-gc.timer
+  creeper-fabric-gc.timer \
+  creeper-fabric-worker-health.timer
 
 sudo -u creeper /opt/creeper/.venv/bin/creeper-fabric-control \
   --config /etc/creeper/fabric.toml status

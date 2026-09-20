@@ -31,6 +31,8 @@ from creeper.authority.identity import (
     baseline_authority_signature,
     eed_model_authority_signature,
 )
+from creeper.distributed.bulk_shard import FabricRegionHarvestExecutor
+from creeper.distributed.store_factory import open_authority_store
 from creeper.runtime.http import configured_http_proxy
 from creeper.runtime.exposure import ProductionExposure
 from creeper.source_discovery.activation import (
@@ -91,6 +93,11 @@ class HistoricalIndexOptimizerConfig:
     tomography: RegionTomographyPolicy = RegionTomographyPolicy()
     portfolio: RegionPortfolioPolicy = RegionPortfolioPolicy()
     harvest: RegionHarvestPolicy = RegionHarvestPolicy()
+    distributed_harvest: bool = False
+    fabric_database: str | None = None
+    fabric_outbox_enabled: bool = True
+    fabric_poll_seconds: float = 0.25
+    fabric_wait_seconds: float | None = None
 
     def __post_init__(self) -> None:
         if self.max_indexes_per_cycle < 1:
@@ -105,6 +112,14 @@ class HistoricalIndexOptimizerConfig:
             raise ValueError("harvest_byte_budget must be positive when supplied")
         if self.busy_poll_seconds <= 0 or self.idle_poll_seconds <= 0:
             raise ValueError("optimizer poll intervals must be positive")
+        if self.fabric_poll_seconds <= 0:
+            raise ValueError("fabric_poll_seconds must be positive")
+        if self.fabric_wait_seconds is not None and self.fabric_wait_seconds <= 0:
+            raise ValueError("fabric_wait_seconds must be positive when supplied")
+        if self.distributed_harvest and not (self.fabric_database or "").strip():
+            raise ValueError(
+                "distributed historical harvest requires fabric_database"
+            )
 
 
 @dataclass(frozen=True)
@@ -252,6 +267,24 @@ def load_historical_index_optimizer_config(
     portfolio_default = RegionPortfolioPolicy()
     harvest_default = RegionHarvestPolicy()
     byte_budget_raw = raw.get("harvest_byte_budget", 256 * 1024 * 1024)
+    distributed_harvest = _strict_bool(
+        raw.get("distributed_harvest", False),
+        name="historical_index.distributed_harvest",
+    )
+    fabric_raw = root.get("fabric", {})
+    if not isinstance(fabric_raw, dict):
+        raise ValueError("[fabric] must be a TOML table")
+    fabric_database = fabric_raw.get("database")
+    if fabric_database is not None:
+        if not isinstance(fabric_database, str) or not fabric_database.strip():
+            raise ValueError("fabric.database must be a non-empty string")
+        if "://" not in fabric_database:
+            fabric_database = str(
+                (producer_config_path.parent / fabric_database).resolve()
+            )
+    fabric_outbox_enabled = fabric_raw.get("outbox_enabled", True)
+    if not isinstance(fabric_outbox_enabled, bool):
+        raise ValueError("fabric.outbox_enabled must be a boolean")
 
     return HistoricalIndexOptimizerConfig(
         runtime_data_root=runtime_root,
@@ -293,6 +326,23 @@ def load_historical_index_optimizer_config(
         idle_poll_seconds=_positive_float(
             raw.get("idle_poll_seconds", 5.0),
             name="historical_index.idle_poll_seconds",
+        ),
+        distributed_harvest=distributed_harvest,
+        fabric_database=(
+            None if fabric_database is None else str(fabric_database)
+        ),
+        fabric_outbox_enabled=fabric_outbox_enabled,
+        fabric_poll_seconds=_positive_float(
+            raw.get("fabric_poll_seconds", 0.25),
+            name="historical_index.fabric_poll_seconds",
+        ),
+        fabric_wait_seconds=(
+            None
+            if raw.get("fabric_wait_seconds") is None
+            else _positive_float(
+                raw.get("fabric_wait_seconds"),
+                name="historical_index.fabric_wait_seconds",
+            )
         ),
         probe=RegionProbePolicy(
             max_sample_bytes=_positive_int(
@@ -523,7 +573,15 @@ class HistoricalIndexOptimizerRuntime:
             policy=config.portfolio,
         )
         self._harvest_source_leases: dict[str, object] = {}
-        self.harvest_executor = RegionHarvestExecutor(
+        self.fabric_store = (
+            open_authority_store(
+                config.fabric_database,
+                emit_outbox=config.fabric_outbox_enabled,
+            )
+            if config.distributed_harvest and config.fabric_database is not None
+            else None
+        )
+        harvest_kwargs = dict(
             registry=self.index_registry,
             baseline=self.baseline,
             evidence_store=self.evidence,
@@ -537,6 +595,16 @@ class HistoricalIndexOptimizerRuntime:
                     self._harvest_source_leases[source_key],
                 ).exposure_id
             ),
+        )
+        self.harvest_executor = (
+            FabricRegionHarvestExecutor(
+                fabric_store=self.fabric_store,
+                fabric_poll_seconds=config.fabric_poll_seconds,
+                fabric_wait_seconds=config.fabric_wait_seconds,
+                **harvest_kwargs,
+            )
+            if self.fabric_store is not None
+            else RegionHarvestExecutor(**harvest_kwargs)
         )
         self.harvest_service = RegionHarvestService(
             self.index_registry,
@@ -643,6 +711,8 @@ class HistoricalIndexOptimizerRuntime:
         if self._owns_client:
             await self.client.aclose()
         self.telemetry.close()
+        if self.fabric_store is not None:
+            self.fabric_store.close()
         self.evidence.close()
         self.baseline.close()
         self.control.close()

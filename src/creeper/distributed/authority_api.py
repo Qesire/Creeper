@@ -174,7 +174,10 @@ def create_authority_app(
                 return web.json_response(
                     {"task": None if lease is None else _lease_payload(lease)}
                 )
-            await asyncio.sleep(min(0.25, max(0.0, deadline - loop.time())))
+            # Long-poll workers can remain connected while idle; one
+            # PostgreSQL claim scan per second is sufficient and avoids
+            # multiplying 4 Hz idle DB traffic by every free-cloud worker.
+            await asyncio.sleep(min(1.0, max(0.0, deadline - loop.time())))
 
     async def renew(request: web.Request) -> web.Response:
         data = await request.json()

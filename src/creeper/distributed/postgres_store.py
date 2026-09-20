@@ -167,6 +167,9 @@ class PostgresAuthorityStore:
             max_global_inflight INTEGER NOT NULL
                 CHECK(max_global_inflight >= 1),
             require_qualified_region BOOLEAN NOT NULL DEFAULT TRUE,
+            allow_unknown_region_probe BOOLEAN NOT NULL DEFAULT FALSE,
+            region_reprobe_after_seconds DOUBLE PRECISION NOT NULL DEFAULT 21600
+                CHECK(region_reprobe_after_seconds > 0),
             next_request_at DOUBLE PRECISION NOT NULL DEFAULT 0,
             cooldown_until DOUBLE PRECISION NOT NULL DEFAULT 0,
             updated_at DOUBLE PRECISION NOT NULL
@@ -213,6 +216,12 @@ class PostgresAuthorityStore:
             updated_at DOUBLE PRECISION NOT NULL,
             PRIMARY KEY(worker_id, day_key)
         );
+        ALTER TABLE fabric_provider_budgets
+            ADD COLUMN IF NOT EXISTS allow_unknown_region_probe
+            BOOLEAN NOT NULL DEFAULT FALSE;
+        ALTER TABLE fabric_provider_budgets
+            ADD COLUMN IF NOT EXISTS region_reprobe_after_seconds
+            DOUBLE PRECISION NOT NULL DEFAULT 21600;
         """
         with self.connection.transaction():
             with self.connection.cursor() as cur:
@@ -475,11 +484,53 @@ class PostgresAuthorityStore:
                             %s::jsonb = '[]'::jsonb
                             OR %s::jsonb ? producer
                           )
+                      AND NOT EXISTS (
+                            SELECT 1
+                            FROM jsonb_array_elements_text(
+                                required_providers_json
+                            ) AS rp(provider)
+                            LEFT JOIN fabric_provider_budgets AS pb
+                              ON pb.provider=rp.provider
+                            LEFT JOIN fabric_provider_regions AS pr
+                              ON pr.provider=rp.provider
+                             AND pr.region=%s
+                            WHERE pb.provider IS NULL
+                               OR (
+                                    pb.require_qualified_region=TRUE
+                                    AND (
+                                        (
+                                            pr.state IN ('BLOCKED','UNQUALIFIED')
+                                            AND NOT (
+                                                pb.allow_unknown_region_probe=TRUE
+                                                AND pr.updated_at
+                                                    + pb.region_reprobe_after_seconds
+                                                    <= %s
+                                            )
+                                        )
+                                        OR (
+                                            (
+                                                pr.state IS NULL
+                                                OR (
+                                                    pr.state IN ('BLOCKED','UNQUALIFIED')
+                                                    AND pr.updated_at
+                                                        + pb.region_reprobe_after_seconds
+                                                        <= %s
+                                                )
+                                                OR pr.state='UNKNOWN'
+                                            )
+                                            AND pb.allow_unknown_region_probe=FALSE
+                                        )
+                                    )
+                                  )
+                          )
                     ORDER BY priority DESC,created_at ASC
                     FOR UPDATE SKIP LOCKED
                     LIMIT 1
                     """,
-                    (now,now,caps,providers,producers,producers),
+                    (
+                        now,now,caps,providers,producers,producers,
+                        str(worker["region"]),now,now,
+                    ),
                 )
                 row=cur.fetchone()
                 if row is None:
@@ -746,6 +797,27 @@ class PostgresAuthorityStore:
             )
             return tuple(cur.fetchall())
 
+    def unconsumed_batches_for_task(
+        self,
+        task_id:str,
+        *,
+        limit:int=100,
+    ):
+        if not task_id.strip() or limit<1:
+            raise ValueError("task_id and positive limit are required")
+        with self.connection.cursor() as cur:
+            cur.execute(
+                """
+                SELECT *
+                FROM fabric_result_batches
+                WHERE task_id=%s AND consumed_at IS NULL AND quarantined=FALSE
+                ORDER BY sequence_no
+                LIMIT %s
+                """,
+                (task_id,limit),
+            )
+            return tuple(cur.fetchall())
+
     def mark_batch_consumed(self,batch_id:str)->bool:
         with self.connection.transaction():
             with self.connection.cursor() as cur:
@@ -1009,7 +1081,16 @@ class PostgresAuthorityStore:
     def configure_provider_budget(
         self,provider:str,*,requests_per_second:float,
         max_global_inflight:int,require_qualified_region:bool=True,
+        allow_unknown_region_probe:bool=False,
+        region_reprobe_after_seconds:float=21600.0,
     )->None:
+        if (
+            not provider.strip()
+            or requests_per_second<=0
+            or max_global_inflight<1
+            or region_reprobe_after_seconds<=0
+        ):
+            raise ValueError("invalid provider budget")
         now=float(self.clock())
         with self.connection.transaction():
             with self.connection.cursor() as cur:
@@ -1017,17 +1098,21 @@ class PostgresAuthorityStore:
                     """
                     INSERT INTO fabric_provider_budgets(
                         provider,requests_per_second,max_global_inflight,
-                        require_qualified_region,updated_at
-                    ) VALUES (%s,%s,%s,%s,%s)
+                        require_qualified_region,allow_unknown_region_probe,
+                        region_reprobe_after_seconds,updated_at
+                    ) VALUES (%s,%s,%s,%s,%s,%s,%s)
                     ON CONFLICT(provider) DO UPDATE SET
                         requests_per_second=EXCLUDED.requests_per_second,
                         max_global_inflight=EXCLUDED.max_global_inflight,
                         require_qualified_region=EXCLUDED.require_qualified_region,
+                        allow_unknown_region_probe=EXCLUDED.allow_unknown_region_probe,
+                        region_reprobe_after_seconds=EXCLUDED.region_reprobe_after_seconds,
                         updated_at=EXCLUDED.updated_at
                     """,
                     (
                         provider,requests_per_second,max_global_inflight,
-                        require_qualified_region,now,
+                        require_qualified_region,allow_unknown_region_probe,
+                        region_reprobe_after_seconds,now,
                     ),
                 )
 
@@ -1044,7 +1129,10 @@ class PostgresAuthorityStore:
                 self._lease(cur,task_id,worker_id,worker_instance_id,generation)
                 region=str(worker["region"])
                 success=bool(
-                    connect_success and status_code is not None and status_code<500
+                    connect_success
+                    and status_code is not None
+                    and status_code<500
+                    and not policy_block
                 )
                 throttle=status_code in {429,503}
                 cur.execute(
@@ -1076,7 +1164,7 @@ class PostgresAuthorityStore:
                 successes=int(row["successes"])
                 blocked=int(row["policy_blocks"])
                 failures=int(row["timeouts"])+int(row["throttles"])+blocked
-                if blocked:
+                if policy_block:
                     state="BLOCKED"
                 elif samples>=3 and successes>=2 and failures<=samples//2:
                     state="QUALIFIED"
@@ -1158,16 +1246,44 @@ class PostgresAuthorityStore:
                     (provider,now),
                 )
                 if bool(budget["require_qualified_region"]):
+                    worker_region=str(worker["region"])
                     cur.execute(
                         """
-                        SELECT state FROM fabric_provider_regions
+                        SELECT state,updated_at FROM fabric_provider_regions
                         WHERE provider=%s AND region=%s
                         """,
-                        (provider,str(worker["region"])),
+                        (provider,worker_region),
                     )
                     region=cur.fetchone()
-                    if region is None or str(region["state"])!="QUALIFIED":
+                    region_state=(
+                        "UNKNOWN" if region is None else str(region["state"])
+                    )
+                    if (
+                        region_state in {"BLOCKED","UNQUALIFIED"}
+                        and bool(budget["allow_unknown_region_probe"])
+                        and region is not None
+                        and now-float(region["updated_at"])
+                            >= float(budget["region_reprobe_after_seconds"])
+                    ):
+                        region_state="UNKNOWN"
+                    if region_state in {"BLOCKED","UNQUALIFIED"}:
                         return None
+                    if region_state!="QUALIFIED":
+                        if not bool(budget["allow_unknown_region_probe"]):
+                            return None
+                        cur.execute(
+                            """
+                            SELECT COUNT(*) AS n
+                            FROM fabric_provider_permits AS p
+                            JOIN fabric_workers AS w
+                              ON w.worker_id=p.worker_id
+                            WHERE p.provider=%s AND p.active=TRUE
+                              AND w.region=%s
+                            """,
+                            (provider,worker_region),
+                        )
+                        if int(cur.fetchone()["n"])>=1:
+                            return None
                 cur.execute(
                     """
                     SELECT COUNT(*) AS n FROM fabric_provider_permits
@@ -1278,12 +1394,40 @@ class PostgresAuthorityStore:
                 raise KeyError(task_id)
             return row
 
-    def status_snapshot(self)->dict[str,int]:
+    def status_snapshot(
+        self,
+        *,
+        stale_after_seconds: float = 180.0,
+    )->dict[str,object]:
+        if stale_after_seconds<=0:
+            raise ValueError("stale_after_seconds must be positive")
+        now=float(self.clock())
         with self.connection.cursor() as cur:
             cur.execute("SELECT state,COUNT(*) AS n FROM fabric_work GROUP BY state")
             states={str(row["state"]):int(row["n"]) for row in cur.fetchall()}
-            cur.execute("SELECT COUNT(*) AS n FROM fabric_workers WHERE revoked=FALSE")
-            workers=int(cur.fetchone()["n"])
+            cur.execute(
+                """
+                SELECT worker_id,worker_instance_id,runtime_class,region,
+                       last_heartbeat
+                FROM fabric_workers
+                WHERE revoked=FALSE
+                ORDER BY worker_id
+                """
+            )
+            worker_health=[]
+            for row in cur.fetchall():
+                age=max(0.0,now-float(row["last_heartbeat"]))
+                worker_health.append(
+                    {
+                        "worker_id":str(row["worker_id"]),
+                        "worker_instance_id":str(row["worker_instance_id"]),
+                        "runtime_class":str(row["runtime_class"]),
+                        "region":str(row["region"]),
+                        "last_heartbeat":float(row["last_heartbeat"]),
+                        "heartbeat_age_seconds":age,
+                        "stale":age>stale_after_seconds,
+                    }
+                )
             cur.execute(
                 "SELECT COUNT(*) AS n FROM fabric_work "
                 "WHERE state='COMPLETE' AND payload_json='{}'::jsonb"
@@ -1309,7 +1453,11 @@ class PostgresAuthorityStore:
             )
             outbox=int(cur.fetchone()["n"])
         return {
-            "workers":workers,
+            "workers":len(worker_health),
+            "stale_workers":sum(
+                int(bool(item["stale"])) for item in worker_health
+            ),
+            "worker_health":worker_health,
             "pending":states.get("PENDING",0)+states.get("RETRY",0),
             "leased":states.get("LEASED",0),
             "complete":states.get("COMPLETE",0),
