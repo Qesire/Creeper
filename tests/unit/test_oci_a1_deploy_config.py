@@ -82,6 +82,20 @@ class OciA1DeploymentConfigTests(unittest.TestCase):
                 self.assertIn("MemoryMax=",text)
                 self.assertIn("OOMPolicy=stop",text)
 
+    def test_transient_gc_is_scheduled_and_alerted(self) -> None:
+        service=(self.root/"systemd"/"creeper-fabric-gc.service").read_text(
+            encoding="utf-8"
+        )
+        timer=(self.root/"systemd"/"creeper-fabric-gc.timer").read_text(
+            encoding="utf-8"
+        )
+        install=(self.root/"install.sh").read_text(encoding="utf-8")
+        self.assertIn("gc --retention-hours 24 --limit 50000",service)
+        self.assertIn("OnFailure=creeper-email-alert@%n.service",service)
+        self.assertIn("OnUnitActiveSec=1h",timer)
+        self.assertIn("Persistent=true",timer)
+        self.assertIn("enable --now creeper-fabric-gc.timer",install)
+
     def test_all_deployment_toml_files_parse(self) -> None:
         for path in self.root.glob("*.toml"):
             with self.subTest(path=path.name):
