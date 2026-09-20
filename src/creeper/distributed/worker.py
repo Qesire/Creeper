@@ -227,7 +227,16 @@ class DistributedWorker:
             while not stop.is_set():
                 quota_wait = False
                 try:
-                    worked = await self.run_once()
+                    # Durable result batches always outrank new claims. This is
+                    # essential after a coordinator-upload quota or network
+                    # outage: once connectivity/budget returns, replay the old
+                    # generation first (or discard it if Authority fences it)
+                    # before doing any new provider/source I/O.
+                    if self.spool.pending_count():
+                        await self._replay_spool()
+                        worked = True
+                    else:
+                        worked = await self.run_once()
                 except CoordinatorUploadBudgetExceededError:
                     worked = False
                     quota_wait = True
