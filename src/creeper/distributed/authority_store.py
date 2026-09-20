@@ -62,10 +62,13 @@ def _json(value) -> str:
 class DistributedAuthorityStore:
     """SQLite-WAL reference authority with fencing and transactional outbox."""
 
-    def __init__(self, path: Path, *, clock=time.time) -> None:
+    def __init__(self, path: Path, *, clock=time.time, emit_outbox: bool = True) -> None:
+        if not isinstance(emit_outbox, bool):
+            raise ValueError("emit_outbox must be a boolean")
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.clock = clock
+        self.emit_outbox = emit_outbox
         self.connection = sqlite3.connect(self.path, timeout=30.0)
         self.connection.row_factory = sqlite3.Row
         self.connection.execute("PRAGMA journal_mode=WAL")
@@ -250,6 +253,8 @@ class DistributedAuthorityStore:
         self.connection.close()
 
     def _emit_locked(self, event_type: str, aggregate_id: str, payload: dict) -> None:
+        if not self.emit_outbox:
+            return
         now = float(self.clock())
         self.connection.execute(
             """
