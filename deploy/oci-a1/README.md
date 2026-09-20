@@ -161,7 +161,7 @@ The installer:
 4. generates independent HMAC secrets for the two workers;
 5. installs systemd units and UFW rules;
 6. enables Authority, both Fabric workers, the evidence bridge, daily email
-   timer and 15-minute durable-email replay timer;
+   timer, 15-minute durable-email replay timer, and hourly Fabric transient-state GC;
 7. enables autopilot only when both authority input files are present;
 8. prints a dry-run email report without transmitting it.
 
@@ -181,7 +181,8 @@ systemctl --no-pager --full status \
   creeper-fabric-evidence-bridge.service \
   creeper-autopilot.service \
   creeper-email-report.timer \
-  creeper-email-outbox.timer
+  creeper-email-outbox.timer \
+  creeper-fabric-gc.timer
 
 sudo -u creeper /opt/creeper/.venv/bin/creeper-fabric-control \
   --config /etc/creeper/fabric.toml status
@@ -210,7 +211,8 @@ sudo systemctl start creeper-email-report.service
 - Local legacy evidence duplication: prevented by
   `[evidence] enabled = false` in the autopilot profile.
 - Disk/RAM pressure: autopilot throttles at 5 GiB RSS, stops its child pipeline at 6 GiB, and systemd enforces a 7 GiB cgroup ceiling; Fabric services have separate bounded cgroups.
-- Service failure: systemd queues an alert email; transient SMTP failure leaves
+- Fabric database growth: hourly GC removes only replay-safe transient rows older than 24 hours (consumed/quarantined result batches, inactive permits, old nonces/egress counters, and eligible broker events); WorkKey rows remain the idempotency tombstones.
+- Service or GC failure: systemd queues an alert email; transient SMTP failure leaves
   it durable and the retry timer replays it at least once.
 - SMTP ACK ambiguity can still produce a duplicate email after a process crash;
   delivery is intentionally at-least-once rather than loss-prone exactly-once.
