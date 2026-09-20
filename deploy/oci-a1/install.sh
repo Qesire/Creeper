@@ -25,6 +25,7 @@ fi
 
 sudo install -d -o "$APP_USER" -g "$APP_GROUP" -m 0750 \
   "$APP_DIR" "$DATA_DIR/data" "$DATA_DIR/data/indexes" \
+  "$DATA_DIR/data/indexes/baseline" "$DATA_DIR/baseline" \
   "$DATA_DIR/reference" "$DATA_DIR/spool" "$DATA_DIR/backups" \
   "$APP_HOME"
 sudo install -d -o root -g "$APP_GROUP" -m 0750 "$ETC_DIR"
@@ -136,14 +137,16 @@ sudo systemctl enable --now creeper-email-report.timer
 sudo systemctl enable --now creeper-email-outbox.timer
 sudo systemctl enable --now creeper-fabric-gc.timer
 
-if [[ -f "$DATA_DIR/data/indexes/baseline-fast.sqlite3" \
-   && -f "$DATA_DIR/reference/equivalent_english_domain.json" ]]; then
+if sudo -u "$APP_USER" -H bash "$APP_DIR/deploy/oci-a1/verify-baseline.sh" \
+    >/dev/null 2>&1; then
   sudo systemctl enable --now creeper-autopilot.service
 else
   echo "Fabric is online, but autopilot is not started yet." >&2
-  echo "Place baseline-fast.sqlite3 under $DATA_DIR/data/indexes/ and" >&2
-  echo "equivalent_english_domain.json under $DATA_DIR/reference/," >&2
-  echo "then run: sudo bash $APP_DIR/deploy/oci-a1/start-production.sh" >&2
+  echo "Upload the raw baseline + authority-manifest.json and the EED model," >&2
+  echo "then install them with:" >&2
+  echo "  sudo bash $APP_DIR/deploy/oci-a1/bootstrap-baseline.sh <baseline-dir> <eed-model>" >&2
+  echo "Finally run:" >&2
+  echo "  sudo bash $APP_DIR/deploy/oci-a1/start-production.sh" >&2
 fi
 
 sudo -u "$APP_USER" -H "$APP_DIR/.venv/bin/creeper-fabric-email-report" \
