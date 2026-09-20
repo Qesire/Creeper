@@ -54,3 +54,9 @@ Small 1 GiB micro instances should normally use role `query`.
 The installer intentionally does not invent a worker ID, WireGuard private key,
 or cloud-specific egress quota. Those are authority/account identities and must
 be explicit.
+## Cloud-specific provisioning
+
+For current OCI/GCP/Azure/AWS server characteristics, provider-safe dry-run
+provisioning helpers, WireGuard enrollment, and copy-paste command sequences,
+see `deploy/cloud-fleet/README.md` and `deploy/cloud-fleet/COMMANDS.md`.
+
