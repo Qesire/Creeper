@@ -553,6 +553,7 @@ def load_autopilot_config(config_path: Path) -> AutopilotConfig:
                 from creeper.authority.identity import AuthoritySnapshot
 
                 authority = AuthoritySnapshot.from_manifest_path(authority_manifest)
+                authority.verify_model(eed_model)
                 if raw_baseline_eed is not None and baseline_eed != authority.baseline_eed:
                     raise ValueError(
                         "readiness.baseline_eed conflicts with authority_manifest"
