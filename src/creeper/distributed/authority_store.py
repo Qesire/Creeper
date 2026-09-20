@@ -531,7 +531,8 @@ class DistributedAuthorityStore:
         for provider in required_providers:
             budget = self.connection.execute(
                 """
-                SELECT require_qualified_region,allow_unknown_region_probe
+                SELECT require_qualified_region,allow_unknown_region_probe,
+                       region_reprobe_after_seconds
                 FROM fabric_provider_budgets
                 WHERE provider=?
                 """,
@@ -543,13 +544,21 @@ class DistributedAuthorityStore:
                 continue
             observed = self.connection.execute(
                 """
-                SELECT state
+                SELECT state,updated_at
                 FROM fabric_provider_regions
                 WHERE provider=? AND region=?
                 """,
                 (provider, region),
             ).fetchone()
             state = "UNKNOWN" if observed is None else str(observed["state"])
+            if (
+                state in {"BLOCKED", "UNQUALIFIED"}
+                and int(budget["allow_unknown_region_probe"])
+                and observed is not None
+                and float(self.clock()) - float(observed["updated_at"])
+                    >= float(budget["region_reprobe_after_seconds"])
+            ):
+                state = "UNKNOWN"
             if state in {"BLOCKED", "UNQUALIFIED"}:
                 return False
             if state != "QUALIFIED" and not int(
