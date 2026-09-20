@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import tomllib
 import unittest
+
+from creeper.autopilot import load_autopilot_config
 from pathlib import Path
 
 from creeper.distributed.config import (
@@ -54,6 +56,31 @@ class OciA1DeploymentConfigTests(unittest.TestCase):
         self.assertEqual(query.descriptor.producers,("ResidualQueryProducer",))
         self.assertEqual(evidence.descriptor.producers,("EvidenceQueryProducer",))
         self.assertNotEqual(query.descriptor.worker_id,evidence.descriptor.worker_id)
+
+    def test_autopilot_resource_envelope_precedes_systemd_ceiling(self) -> None:
+        config=load_autopilot_config(self.root/"autopilot.toml")
+        self.assertFalse(config.evidence.enabled)
+        self.assertFalse(config.evidence.platform_harvest_enabled)
+        self.assertIsNotNone(config.resource_governor)
+        assert config.resource_governor is not None
+        gib=1024**3
+        self.assertEqual(config.resource_governor.rss_throttle_bytes,5*gib)
+        self.assertEqual(config.resource_governor.rss_stop_bytes,6*gib)
+
+        unit=(self.root/"systemd"/"creeper-autopilot.service").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("MemoryHigh=5G",unit)
+        self.assertIn("MemoryMax=7G",unit)
+        for name in (
+            "creeper-fabric-authority.service",
+            "creeper-fabric-worker@.service",
+            "creeper-fabric-evidence-bridge.service",
+        ):
+            with self.subTest(unit=name):
+                text=(self.root/"systemd"/name).read_text(encoding="utf-8")
+                self.assertIn("MemoryMax=",text)
+                self.assertIn("OOMPolicy=stop",text)
 
     def test_all_deployment_toml_files_parse(self) -> None:
         for path in self.root.glob("*.toml"):
