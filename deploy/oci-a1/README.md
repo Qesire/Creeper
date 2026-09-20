@@ -127,17 +127,72 @@ shutdown, metric disappearance and host-level failure while the in-guest
 reporter covers application progress and systemd service failures. Do not add
 synthetic workload merely to avoid Always Free idle reclamation.
 
-## One-time data bootstrap
+## Server-resident baseline authority
 
-The production pipeline will not start until these two authority inputs exist:
+The production host owns both the immutable raw baseline authority and the
+runtime lookup index. The workstation is used only to transfer the files once;
+it is not part of the running topology.
+
+Canonical layout after bootstrap:
 
 ```
-/srv/creeper/data/indexes/baseline-fast.sqlite3
+/srv/creeper/baseline/<baseline_id>/
+  1996.txt
+  1997.txt
+  1998.txt
+  1999.txt
+  2000.txt
+  2001.txt
+  candidate_pool.txt
+  authority-manifest.json
+
+/srv/creeper/baseline/current -> <baseline_id>
 /srv/creeper/reference/equivalent_english_domain.json
+/srv/creeper/data/indexes/baseline/<baseline_id>.sqlite3
+/srv/creeper/data/indexes/baseline-fast.sqlite3 -> baseline/<baseline_id>.sqlite3
 ```
 
-They must be copied to the server once. After that, the workstation is not part
-of the runtime topology.
+The six annual files are the competition baseline. `candidate_pool.txt` is
+kept separately in the same authority package because baseline lookup and
+official-candidate membership share one runtime index but retain distinct table
+semantics.
+
+Before transfer, the staged baseline directory must contain a matching
+`authority-manifest.json`. The manifest binds the six annual hashes,
+candidate-pool hash, EED-model hash and baseline EED denominator. The server
+will refuse startup if any one of raw baseline, manifest, EED model or SQLite
+index disagrees.
+
+A practical first upload is:
+
+```bash
+# local machine
+rsync -avP /path/to/<baseline_id>/ ubuntu@SERVER:~/creeper-baseline-stage/
+scp /path/to/equivalent_english_domain.json ubuntu@SERVER:~/
+```
+
+The uploaded directory must itself be the baseline directory and must contain
+`authority-manifest.json`. Then on the OCI host:
+
+```bash
+sudo bash /opt/creeper/deploy/oci-a1/bootstrap-baseline.sh \
+  /home/ubuntu/creeper-baseline-stage \
+  /home/ubuntu/equivalent_english_domain.json
+
+sudo bash /opt/creeper/deploy/oci-a1/start-production.sh
+```
+
+`bootstrap-baseline.sh` verifies all hashes before adoption, moves the raw
+baseline into `/srv/creeper/baseline/<baseline_id>`, persists the EED model,
+builds/resumes the authority-bound SQLite index from the server-resident raw
+files, verifies the result, then switches the `current` and
+`baseline-fast.sqlite3` symlinks. It refuses to switch to a different
+baseline while an existing runtime authority is active; changing baseline
+identity requires an explicit runtime rebase rather than silently mixing old
+results with a new denominator.
+
+`verify-baseline.sh` is also run by the installer/start gate, so autopilot
+cannot start from an unverified standalone index.
 
 ## Install
 
