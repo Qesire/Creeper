@@ -30,7 +30,8 @@ sudo install -d -o "$APP_USER" -g "$APP_GROUP" -m 0750 \
 sudo install -d -o root -g "$APP_GROUP" -m 0750 "$ETC_DIR"
 
 if [[ ! -d "$APP_DIR/.git" ]]; then
-  sudo rm -rf "$APP_DIR"
+  sudo find "$APP_DIR" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
+  sudo chown "$APP_USER:$APP_GROUP" "$APP_DIR"
   sudo -u "$APP_USER" -H git clone --filter=blob:none --branch "$GIT_REF" \
     "$REPO_URL" "$APP_DIR"
 else
@@ -140,7 +141,7 @@ else
   echo "Fabric is online, but autopilot is not started yet." >&2
   echo "Place baseline-fast.sqlite3 under $DATA_DIR/data/indexes/ and" >&2
   echo "equivalent_english_domain.json under $DATA_DIR/reference/," >&2
-  echo "then run: sudo $APP_DIR/deploy/oci-a1/start-production.sh" >&2
+  echo "then run: sudo bash $APP_DIR/deploy/oci-a1/start-production.sh" >&2
 fi
 
 sudo -u "$APP_USER" -H "$APP_DIR/.venv/bin/creeper-fabric-email-report" \
