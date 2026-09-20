@@ -37,7 +37,10 @@ def _parser()->argparse.ArgumentParser:
 def main(argv:list[str]|None=None)->int:
     args=_parser().parse_args(argv)
     config=load_authority_config(args.config)
-    store=open_authority_store(config.database)
+    store=open_authority_store(
+        config.database,
+        emit_outbox=config.outbox_enabled,
+    )
     try:
         if args.command=="status":
             print(json.dumps(store.status_snapshot(),sort_keys=True,indent=2))
