@@ -199,6 +199,8 @@ class DistributedAuthorityStore:
                     CHECK(require_qualified_region IN (0,1)),
                 allow_unknown_region_probe INTEGER NOT NULL DEFAULT 0
                     CHECK(allow_unknown_region_probe IN (0,1)),
+                region_reprobe_after_seconds REAL NOT NULL DEFAULT 21600
+                    CHECK(region_reprobe_after_seconds > 0),
                 next_request_at REAL NOT NULL DEFAULT 0,
                 cooldown_until REAL NOT NULL DEFAULT 0,
                 updated_at REAL NOT NULL
@@ -263,6 +265,13 @@ class DistributedAuthorityStore:
                     "ALTER TABLE fabric_provider_budgets "
                     "ADD COLUMN allow_unknown_region_probe INTEGER NOT NULL "
                     "DEFAULT 0 CHECK(allow_unknown_region_probe IN (0,1))"
+                )
+        if "region_reprobe_after_seconds" not in budget_columns:
+            with self.connection:
+                self.connection.execute(
+                    "ALTER TABLE fabric_provider_budgets "
+                    "ADD COLUMN region_reprobe_after_seconds REAL NOT NULL "
+                    "DEFAULT 21600 CHECK(region_reprobe_after_seconds > 0)"
                 )
 
     def close(self) -> None:
