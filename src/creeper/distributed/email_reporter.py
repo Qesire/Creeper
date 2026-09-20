@@ -18,6 +18,7 @@ from typing import Any
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
+from creeper.authority.identity import AuthoritySnapshot
 from creeper.distributed.config import (
     load_authority_config,
     load_email_report_config,
@@ -47,6 +48,44 @@ def _fabric(config_path: Path) -> dict[str,Any]:
     finally:
         if store is not None:
             store.close()
+
+
+def _baseline(config) -> dict[str,Any]:
+    manifest_path=config.baseline_manifest
+    index_path=config.baseline_index
+    if manifest_path is None:
+        return {"configured":False}
+    try:
+        raw=json.loads(manifest_path.read_text(encoding="utf-8"))
+        if not isinstance(raw,dict):
+            raise ValueError("authority manifest is not an object")
+        authority=AuthoritySnapshot.from_manifest(raw)
+        result:dict[str,Any]={
+            "configured":True,
+            "baseline_id":authority.baseline_id,
+            "authority_digest":authority.authority_digest,
+            "baseline_eed":authority.baseline_eed,
+            "annual_line_counts":raw.get("annual_line_counts",{}),
+            "candidate_line_count":raw.get("candidate_line_count"),
+            "manifest_path":str(manifest_path),
+            "baseline_dir":str(manifest_path.parent.resolve()),
+        }
+        if index_path is not None:
+            try:
+                stat=index_path.stat()
+                result.update(
+                    index_path=str(index_path),
+                    index_bytes=stat.st_size,
+                )
+            except OSError as exc:
+                result["index_error"]=f"{type(exc).__name__}: {exc}"
+        return result
+    except BaseException as exc:
+        return {
+            "configured":True,
+            "manifest_path":str(manifest_path),
+            **_error(exc),
+        }
 
 
 def _runtime(root: Path) -> dict[str,Any]:
@@ -185,6 +224,7 @@ def _host(root: Path) -> dict[str,Any]:
 def collect_snapshot(config_path: Path) -> dict[str,Any]:
     config=load_email_report_config(config_path)
     return {
+        "baseline": _baseline(config),
         "fabric": _fabric(config_path),
         **_runtime(config.runtime_data_root),
         "readiness": _readiness(config.runtime_data_root),
@@ -254,6 +294,7 @@ def render_report(
     if message:
         lines.extend(("",f"Event: {message}"))
     for section in (
+        "baseline",
         "readiness",
         "fabric",
         "telemetry",
