@@ -839,6 +839,7 @@ class PostgresAuthorityStore:
             "outbox_events":0,
             "request_nonces":0,
             "egress_days":0,
+            "work_payloads_compacted":0,
         }
         with self.connection.transaction():
             with self.connection.cursor() as cur:
@@ -967,6 +968,42 @@ class PostgresAuthorityStore:
                         egress_days,
                     )
                     report["egress_days"]=len(egress_days)
+
+                cur.execute(
+                    """
+                    SELECT w.task_id
+                    FROM fabric_work AS w
+                    WHERE w.state='COMPLETE'
+                      AND w.updated_at<=%s
+                      AND w.payload_json<>'{}'::jsonb
+                      AND NOT EXISTS (
+                          SELECT 1 FROM fabric_result_batches AS b
+                          WHERE b.task_id=w.task_id
+                            AND b.consumed_at IS NULL
+                            AND b.quarantined=FALSE
+                      )
+                      AND NOT EXISTS (
+                          SELECT 1 FROM fabric_provider_permits AS p
+                          WHERE p.task_id=w.task_id AND p.active=TRUE
+                      )
+                    ORDER BY w.updated_at,w.task_id
+                    LIMIT %s
+                    """,
+                    (cutoff,limit),
+                )
+                compactable=[str(row["task_id"]) for row in cur.fetchall()]
+                if compactable:
+                    cur.execute(
+                        """
+                        UPDATE fabric_work
+                        SET payload_json='{}'::jsonb,
+                            cursor=NULL,
+                            last_error=NULL
+                        WHERE task_id=ANY(%s)
+                        """,
+                        (compactable,),
+                    )
+                    report["work_payloads_compacted"]=cur.rowcount
         return report
 
     def configure_provider_budget(
