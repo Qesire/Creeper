@@ -520,6 +520,18 @@ class DistributedAuthorityStore:
             return True
         region = str(worker["region"])
         for provider in required_providers:
+            budget = self.connection.execute(
+                """
+                SELECT require_qualified_region,allow_unknown_region_probe
+                FROM fabric_provider_budgets
+                WHERE provider=?
+                """,
+                (provider,),
+            ).fetchone()
+            if budget is None:
+                return False
+            if not int(budget["require_qualified_region"]):
+                continue
             observed = self.connection.execute(
                 """
                 SELECT state
@@ -528,9 +540,11 @@ class DistributedAuthorityStore:
                 """,
                 (provider, region),
             ).fetchone()
-            if (
-                observed is not None
-                and str(observed["state"]) in {"BLOCKED", "UNQUALIFIED"}
+            state = "UNKNOWN" if observed is None else str(observed["state"])
+            if state in {"BLOCKED", "UNQUALIFIED"}:
+                return False
+            if state != "QUALIFIED" and not int(
+                budget["allow_unknown_region_probe"]
             ):
                 return False
         return True
