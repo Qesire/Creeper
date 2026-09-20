@@ -1199,7 +1199,6 @@ class ExactRegionHarvestTests(unittest.TestCase):
 
         fabric_path=self.root/"fabric-bulk.sqlite3"
         central=DistributedAuthorityStore(fabric_path,emit_outbox=False)
-        worker_store=DistributedAuthorityStore(fabric_path,emit_outbox=False)
         worker=WorkerDescriptor(
             worker_id="bulk-worker",
             worker_instance_id="bulk-instance",
@@ -1212,11 +1211,15 @@ class ExactRegionHarvestTests(unittest.TestCase):
             capabilities=("STREAMING_BULK","ARTIFACT_FETCH"),
             producers=("BulkShardProducer",),
         )
-        worker_store.register_worker(worker)
         errors: list[BaseException]=[]
 
         def run_worker() -> None:
+            worker_store=DistributedAuthorityStore(
+                fabric_path,
+                emit_outbox=False,
+            )
             try:
+                worker_store.register_worker(worker)
                 deadline=time.time()+5.0
                 lease=None
                 while lease is None and time.time()<deadline:
@@ -1285,6 +1288,8 @@ class ExactRegionHarvestTests(unittest.TestCase):
                 )
             except BaseException as exc:
                 errors.append(exc)
+            finally:
+                worker_store.close()
 
         thread=threading.Thread(target=run_worker,daemon=True)
         thread.start()
@@ -1322,7 +1327,6 @@ class ExactRegionHarvestTests(unittest.TestCase):
             self.assertEqual(central.unconsumed_batches(),())
         finally:
             central.close()
-            worker_store.close()
 
 
 
