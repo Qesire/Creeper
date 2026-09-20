@@ -134,6 +134,7 @@ sudo systemctl enable --now creeper-fabric-worker@evidence.service
 sudo systemctl enable --now creeper-fabric-evidence-bridge.service
 sudo systemctl enable --now creeper-email-report.timer
 sudo systemctl enable --now creeper-email-outbox.timer
+sudo systemctl enable --now creeper-fabric-gc.timer
 
 if [[ -f "$DATA_DIR/data/indexes/baseline-fast.sqlite3" \
    && -f "$DATA_DIR/reference/equivalent_english_domain.json" ]]; then
