@@ -78,6 +78,7 @@ outbox lock, so one queued message is not sent concurrently by two senders.
 
 The summary includes:
 
+- active baseline id/digest/EED denominator, raw authority record counts and runtime-index size;
 - Novel EED, growth rate, five-percent target progress and readiness gates;
 - Fabric pending / leased / complete / dead work;
 - runtime counters/gauges, including throughput and yield telemetry already
@@ -265,7 +266,7 @@ sudo systemctl start creeper-email-report.service
   Authority.
 - Local legacy evidence duplication: prevented by
   `[evidence] enabled = false` in the autopilot profile.
-- Disk/RAM pressure: autopilot throttles at 5 GiB RSS, stops its child pipeline at 6 GiB, and systemd enforces a 7 GiB cgroup ceiling; Fabric services have separate bounded cgroups.
+- Disk/RAM pressure: autopilot throttles at 4 GiB RSS, stops its child pipeline at 5 GiB, and systemd enforces a 6 GiB cgroup ceiling; each Fabric worker advertises and is capped around a 1 GiB execution envelope, while PostgreSQL uses a small-memory profile.
 - Fabric database growth: hourly GC removes replay-safe transient rows older than 24 hours (consumed/quarantined result batches, inactive permits, old nonces/egress counters, and eligible broker events) and compacts eligible COMPLETE work payloads to minimal WorkKey tombstones; task identity/state remains durable.
 - Service or GC failure: systemd queues an alert email; transient SMTP failure leaves
   it durable and the retry timer replays it at least once.
