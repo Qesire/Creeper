@@ -14,6 +14,7 @@ sudo systemctl enable --now creeper-fabric-evidence-bridge.service
 sudo systemctl enable --now creeper-autopilot.service
 sudo systemctl enable --now creeper-email-report.timer
 sudo systemctl enable --now creeper-email-outbox.timer
+sudo systemctl enable --now creeper-fabric-gc.timer
 
 systemctl --no-pager --full status \
   creeper-fabric-authority.service \
@@ -22,4 +23,5 @@ systemctl --no-pager --full status \
   creeper-fabric-evidence-bridge.service \
   creeper-autopilot.service \
   creeper-email-report.timer \
-  creeper-email-outbox.timer
+  creeper-email-outbox.timer \
+  creeper-fabric-gc.timer
