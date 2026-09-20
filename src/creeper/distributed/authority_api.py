@@ -193,7 +193,11 @@ def create_authority_app(
             worker_instance_id=str(request["worker_instance_id"]),
             generation=int(data["generation"]),
             lease_seconds=float(data.get("lease_seconds", 300.0)),
-            expected_lease_deadline=float(data["expected_lease_deadline"]),
+            expected_lease_deadline=(
+                None
+                if data.get("expected_lease_deadline") is None
+                else float(data["expected_lease_deadline"])
+            ),
         )
         return web.json_response({"task": _lease_payload(lease)})
 
