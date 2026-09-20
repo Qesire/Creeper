@@ -136,3 +136,26 @@ Recommended production topology:
 Object storage is separate from the control database. Authority API should be
 behind TLS; HMAC worker authentication is supported now and may be replaced by
 mTLS without changing task ownership semantics.
+
+
+## 9. Canonical free single-host profile
+
+The canonical unattended free-tier deployment is under `deploy/oci-a1/`.
+It intentionally colocates PostgreSQL, Authority, two fenced Fabric workers,
+the evidence bridge and the existing domain pipeline on one machine while
+preserving the Fabric protocol boundary.
+
+For this profile:
+
+- Authority and PostgreSQL are loopback-only;
+- the query worker owns deterministic residual metadata I/O;
+- the evidence worker owns ordinary CDX/RDAP I/O;
+- autopilot runs with `evidence.enabled=false`, preventing duplicate legacy
+  evidence execution;
+- source production, historical-index harvest and readiness stay local because
+  there is no second physical host to justify shipping source shards;
+- email is the only proactive operator-reporting surface.
+
+This is logical distribution on one failure domain, not physical high
+availability. Adding remote workers later does not change WorkKey, lease
+generation, ResultBatch or provider-permit semantics.
