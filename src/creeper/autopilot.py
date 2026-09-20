@@ -754,7 +754,7 @@ def build_child_specs(config: AutopilotConfig) -> tuple[ChildSpec, ...]:
                     str(evidence.lease_seconds),
                     "--max-inflight",
                     str(evidence.max_inflight),
-                    "--requests-per_second",
+                    "--requests-per-second",
                     str(evidence.requests_per_second),
                     "--max-connections",
                     str(evidence.max_connections),
