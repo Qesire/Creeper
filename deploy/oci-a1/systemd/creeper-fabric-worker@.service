@@ -1,0 +1,29 @@
+[Unit]
+StartLimitIntervalSec=300
+StartLimitBurst=20
+Description=Creeper Fabric worker (%i)
+After=network-online.target creeper-fabric-authority.service
+Wants=network-online.target
+Requires=creeper-fabric-authority.service
+OnFailure=creeper-email-alert@%n.service
+
+[Service]
+Type=simple
+User=creeper
+Group=creeper
+WorkingDirectory=/opt/creeper
+EnvironmentFile=/etc/creeper/worker-%i.env
+ExecStart=/opt/creeper/.venv/bin/creeper-fabric-worker --config /etc/creeper/worker-%i.toml
+Restart=always
+RestartSec=3
+MemoryHigh=640M
+MemoryMax=1G
+OOMPolicy=stop
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/srv/creeper /var/lib/creeper
+
+[Install]
+WantedBy=multi-user.target

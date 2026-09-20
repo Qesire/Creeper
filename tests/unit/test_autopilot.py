@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from threading import Event
+import hashlib
 import json
 import tempfile
 import unittest
@@ -88,6 +89,23 @@ class AutopilotTests(unittest.TestCase):
         self.assertIn("30.0", evidence)
         self.assertIn("--requests-per-second", evidence)
         self.assertIn("0.5", evidence)
+
+    def test_fabric_profile_can_disable_local_evidence_worker(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = AutopilotConfig(
+                source_discovery_config=root / "discovery.toml",
+                source_producer_config=root / "producer.toml",
+                runtime_data_root=root / "runtime",
+                supervisor=SupervisorPolicy(),
+                evidence=EvidenceServicePolicy(enabled=False),
+            )
+            specs = build_child_specs(config)
+
+        self.assertEqual(
+            [spec.name for spec in specs],
+            ["source-discovery", "source-producer"],
+        )
 
     def test_evidence_worker_receives_all_physical_cdx_providers(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -662,6 +680,88 @@ class AutopilotTests(unittest.TestCase):
                 )
 
         self.assertEqual(discovery_spawns[0], 2)
+
+    def test_readiness_can_derive_denominator_from_authority_manifest(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp)
+            scrapy=root/"scrapy"
+            scrapy.mkdir()
+            runtime=root/"runtime"
+            baseline=root/"baseline.sqlite3"
+            baseline.write_bytes(b"fixture")
+            model=root/"eed-model.json"
+            model.write_text("{}\n",encoding="utf-8")
+            model_hash=hashlib.sha256(model.read_bytes()).hexdigest()
+            manifest=root/"authority.json"
+            manifest.write_text(
+                json.dumps(
+                    {
+                        "baseline_id":"fixture-baseline",
+                        "annual_file_hashes":{
+                            f"{year}.txt":"0"*64
+                            for year in range(1996,2002)
+                        },
+                        "candidate_file_hash":"1"*64,
+                        "model_hash":model_hash,
+                        "baseline_eed":"123.5",
+                    }
+                )+"\n",
+                encoding="utf-8",
+            )
+            discovery=root/"discovery.toml"
+            discovery.write_text(
+                "\n".join(
+                    [
+                        f'runtime_data_root = "{runtime}"',
+                        f'scrapy_project_dir = "{scrapy}"',
+                        "",
+                        "[agent]",
+                        'command = ["python", "agent.py"]',
+                        'backend = "fixture"',
+                        'actor = "agent:test"',
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            producer=root/"producer.toml"
+            producer.write_text(
+                "\n".join(
+                    [
+                        'source_mode = "activated"',
+                        f'runtime_data_root = "{runtime}"',
+                        f'baseline_index = "{baseline}"',
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            config=root/"autopilot.toml"
+            config.write_text(
+                "\n".join(
+                    [
+                        f'source_discovery_config = "{discovery}"',
+                        f'source_producer_config = "{producer}"',
+                        "",
+                        "[readiness]",
+                        "enabled = true",
+                        f'eed_model = "{model}"',
+                        f'authority_manifest = "{manifest}"',
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            loaded=load_autopilot_config(config)
+
+            assert loaded.readiness is not None
+            self.assertEqual(loaded.readiness.baseline_eed,"123.5")
+            self.assertEqual(
+                loaded.readiness.authority_manifest,
+                manifest.resolve(),
+            )
+
+            model.write_text('{"changed":true}\n',encoding="utf-8")
+            with self.assertRaisesRegex(ValueError,"hash mismatch"):
+                load_autopilot_config(config)
 
     def test_config_parses_optional_readiness_worker(self):
         with tempfile.TemporaryDirectory() as tmp:

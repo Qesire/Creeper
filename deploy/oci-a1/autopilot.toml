@@ -1,0 +1,39 @@
+source_discovery_config = "/etc/creeper/source-discovery.toml"
+source_producer_config = "/etc/creeper/producer.toml"
+
+[supervisor]
+poll_seconds = 1
+restart_base_seconds = 2
+restart_max_seconds = 60
+max_restarts = 8
+stable_reset_seconds = 300
+shutdown_grace_seconds = 15
+
+# Exact/range CDX and RDAP are owned by Fabric in this profile.
+[evidence]
+enabled = false
+platform_harvest_enabled = false
+
+[platform_admission]
+# Fabric v2 does not yet own complete platform-year enumeration. Keep both
+# platform admission and platform harvest off in the single-host profile so
+# no durable queue is created without a consumer.
+enabled = false
+platform_year_budget = 1
+poll_seconds = 2
+
+[readiness]
+enabled = true
+eed_model = "/srv/creeper/reference/equivalent_english_domain.json"
+authority_manifest = "/srv/creeper/baseline/current/authority-manifest.json"
+batch_size = 25000
+max_batches_per_cycle = 10
+poll_seconds = 30
+
+[resource_governor]
+enabled = true
+rss_throttle_gib = 4
+rss_stop_gib = 5
+disk_throttle_gib = 25
+disk_stop_gib = 10
+recovery_samples = 5

@@ -1,0 +1,11 @@
+[Unit]
+Description=Send Creeper daily production report
+
+[Timer]
+OnCalendar=*-*-* 20:00:00
+Persistent=true
+RandomizedDelaySec=120
+Unit=creeper-email-report.service
+
+[Install]
+WantedBy=timers.target

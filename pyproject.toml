@@ -30,6 +30,11 @@ creeper-readiness-worker = "creeper.readiness_cli:main"
 creeper-submission-export = "creeper.submission_cli:main"
 creeper-historical-index = "creeper.historical_index_service:main"
 creeper-validation = "creeper.validation_cli:main"
+creeper-fabric-authority = "creeper.distributed.authority_cli:main"
+creeper-fabric-worker = "creeper.distributed.worker_cli:main"
+creeper-fabric-control = "creeper.distributed.control_cli:main"
+creeper-fabric-evidence-bridge = "creeper.distributed.evidence_bridge_cli:main"
+creeper-fabric-email-report = "creeper.distributed.email_reporter:main"
 
 [build-system]
 requires = ["setuptools>=68"]

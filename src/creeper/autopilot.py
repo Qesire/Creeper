@@ -53,6 +53,7 @@ class SupervisorPolicy:
 
 @dataclass(frozen=True)
 class EvidenceServicePolicy:
+    enabled: bool = True
     endpoint: str = "https://web.archive.org/cdx/search/cdx"
     claim_batch_size: int = 64
     lease_seconds: float = 300.0
@@ -324,6 +325,10 @@ def load_autopilot_config(config_path: Path) -> AutopilotConfig:
     if not isinstance(endpoint, str) or not endpoint.strip():
         raise ValueError("evidence.endpoint must be a non-empty string")
     evidence = EvidenceServicePolicy(
+        enabled=_strict_bool(
+            ev_raw.get("enabled", ev_default.enabled),
+            name="evidence.enabled",
+        ),
         endpoint=endpoint,
         claim_batch_size=_positive_int(
             ev_raw.get("claim_batch_size", ev_default.claim_batch_size),
@@ -524,12 +529,21 @@ def load_autopilot_config(config_path: Path) -> AutopilotConfig:
                     base=config_path.parent,
                     name="readiness.eed_model",
                 )
-            baseline_eed = _decimal_string(
-                readiness_raw.get("baseline_eed"),
-                name="readiness.baseline_eed",
-            )
             authority_manifest = None
             raw_manifest = readiness_raw.get("authority_manifest")
+            raw_baseline_eed = readiness_raw.get("baseline_eed")
+            if raw_manifest is None and raw_baseline_eed is None:
+                raise ValueError(
+                    "readiness requires baseline_eed or authority_manifest"
+                )
+            baseline_eed = (
+                _decimal_string(
+                    raw_baseline_eed,
+                    name="readiness.baseline_eed",
+                )
+                if raw_baseline_eed is not None
+                else ""
+            )
             if raw_manifest is not None:
                 authority_manifest = _resolve(
                     raw_manifest,
@@ -539,10 +553,8 @@ def load_autopilot_config(config_path: Path) -> AutopilotConfig:
                 from creeper.authority.identity import AuthoritySnapshot
 
                 authority = AuthoritySnapshot.from_manifest_path(authority_manifest)
-                if (
-                    "baseline_eed" in readiness_raw
-                    and baseline_eed != authority.baseline_eed
-                ):
+                authority.verify_model(eed_model)
+                if raw_baseline_eed is not None and baseline_eed != authority.baseline_eed:
                     raise ValueError(
                         "readiness.baseline_eed conflicts with authority_manifest"
                     )
@@ -734,57 +746,58 @@ def build_child_specs(config: AutopilotConfig) -> tuple[ChildSpec, ...]:
                 ),
             )
         )
-    specs.append(
-        ChildSpec(
-            "evidence-worker",
-            (
-                py,
-                "-m",
-                "creeper.evidence_cli",
-                str(config.runtime_data_root),
-                "--claim-batch-size",
-                str(evidence.claim_batch_size),
-                "--lease-seconds",
-                str(evidence.lease_seconds),
-                "--max-inflight",
-                str(evidence.max_inflight),
-                "--requests-per-second",
-                str(evidence.requests_per_second),
-                "--max-connections",
-                str(evidence.max_connections),
-                "--max-keepalive-connections",
-                str(evidence.max_keepalive_connections),
-                "--keepalive-expiry-seconds",
-                str(evidence.keepalive_expiry_seconds),
-                "--throttle-floor-seconds",
-                str(evidence.throttle_floor_seconds),
-                "--timeout",
-                str(evidence.timeout),
-                "--max-retries",
-                str(evidence.max_retries),
-                "--retry-base-seconds",
-                str(evidence.retry_base_seconds),
-                "--retry-max-seconds",
-                str(evidence.retry_max_seconds),
-                "--poll-min-seconds",
-                str(evidence.poll_min_seconds),
-                "--poll-max-seconds",
-                str(evidence.poll_max_seconds),
-                *tuple(
-                    argument
-                    for provider in evidence.cdx_providers
-                    for argument in (
-                        "--cdx-provider-json",
-                        json.dumps(
-                            provider.as_dict(),
-                            sort_keys=True,
-                            separators=(",", ":"),
-                        ),
-                    )
+    if evidence.enabled:
+        specs.append(
+            ChildSpec(
+                "evidence-worker",
+                (
+                    py,
+                    "-m",
+                    "creeper.evidence_cli",
+                    str(config.runtime_data_root),
+                    "--claim-batch-size",
+                    str(evidence.claim_batch_size),
+                    "--lease-seconds",
+                    str(evidence.lease_seconds),
+                    "--max-inflight",
+                    str(evidence.max_inflight),
+                    "--requests-per-second",
+                    str(evidence.requests_per_second),
+                    "--max-connections",
+                    str(evidence.max_connections),
+                    "--max-keepalive-connections",
+                    str(evidence.max_keepalive_connections),
+                    "--keepalive-expiry-seconds",
+                    str(evidence.keepalive_expiry_seconds),
+                    "--throttle-floor-seconds",
+                    str(evidence.throttle_floor_seconds),
+                    "--timeout",
+                    str(evidence.timeout),
+                    "--max-retries",
+                    str(evidence.max_retries),
+                    "--retry-base-seconds",
+                    str(evidence.retry_base_seconds),
+                    "--retry-max-seconds",
+                    str(evidence.retry_max_seconds),
+                    "--poll-min-seconds",
+                    str(evidence.poll_min_seconds),
+                    "--poll-max-seconds",
+                    str(evidence.poll_max_seconds),
+                    *tuple(
+                        argument
+                        for provider in evidence.cdx_providers
+                        for argument in (
+                            "--cdx-provider-json",
+                            json.dumps(
+                                provider.as_dict(),
+                                sort_keys=True,
+                                separators=(",", ":"),
+                            ),
+                        )
+                    ),
                 ),
-            ),
+            )
         )
-    )
     if evidence.platform_harvest_enabled:
         specs.append(
             ChildSpec(
@@ -1002,6 +1015,7 @@ def _write_runtime_topology(config: AutopilotConfig) -> None:
         "historical_index_enabled": bool(config.historical_index_enabled),
         "source_worker_count": int(config.source_producer_workers),
         "discovery_enabled": True,
+        "local_evidence_worker_enabled": bool(config.evidence.enabled),
         "platform_year_harvest_enabled": bool(
             config.evidence.platform_harvest_enabled
         ),

@@ -1,0 +1,18 @@
+[Unit]
+Description=Creeper Fabric transient-state garbage collection
+After=postgresql.service creeper-fabric-authority.service
+Requires=postgresql.service
+OnFailure=creeper-email-alert@%n.service
+
+[Service]
+Type=oneshot
+User=creeper
+Group=creeper
+WorkingDirectory=/opt/creeper
+ExecStart=/opt/creeper/.venv/bin/creeper-fabric-control --config /etc/creeper/fabric.toml gc --retention-hours 24 --limit 50000
+MemoryMax=256M
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/srv/creeper /var/lib/creeper

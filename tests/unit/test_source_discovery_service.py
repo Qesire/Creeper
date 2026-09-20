@@ -183,6 +183,33 @@ timeout_seconds = 9.0
         with self.assertRaisesRegex(ValueError, "unsupported residual_search.providers"):
             load_source_discovery_config(path)
 
+    def test_fabric_residual_config_is_explicit_and_fail_closed(self) -> None:
+        path = self.write_config()
+        with path.open("a", encoding="utf-8") as stream:
+            stream.write(
+                """
+[fabric]
+enabled = true
+database = "fabric.sqlite3"
+"""
+            )
+
+        config = load_source_discovery_config(path)
+
+        self.assertTrue(config.fabric.enabled)
+        self.assertEqual(
+            config.fabric.database,
+            str((self.root / "fabric.sqlite3").resolve()),
+        )
+
+        text = path.read_text(encoding="utf-8").replace(
+            'database = "fabric.sqlite3"',
+            'database = ""',
+        )
+        path.write_text(text, encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "fabric.database is required"):
+            load_source_discovery_config(path)
+
     def test_follow_query_rejects_string_truthiness(self) -> None:
         with self.assertRaisesRegex(ValueError, "scrapy.follow_query must be a boolean"):
             load_source_discovery_config(self.write_config(follow_query='"false"'))

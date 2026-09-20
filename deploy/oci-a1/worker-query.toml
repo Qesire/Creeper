@@ -1,0 +1,20 @@
+[worker]
+coordinator_url = "http://127.0.0.1:8088"
+worker_id = "oci-a1-query"
+worker_instance_id = "auto"
+runtime_class = "oci-a1-single-host"
+region = "oci-home"
+architecture = "aarch64"
+memory_bytes = 1073741824
+cpu_count = 1
+network_class = "public-egress"
+capabilities = ["RESIDUAL_QUERY"]
+producers = ["ResidualQueryProducer"]
+allowed_providers = ["datacite", "zenodo", "harvard_dataverse", "internet_archive"]
+daily_egress_budget_bytes = 21474836480
+spool_database = "/srv/creeper/spool/query.sqlite3"
+secret_env = "CREEPER_WORKER_QUERY_SECRET"
+poll_seconds = 1
+claim_wait_seconds = 10
+lease_seconds = 300
+heartbeat_seconds = 30

@@ -1,0 +1,18 @@
+[Unit]
+Description=Replay queued Creeper email reports
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=creeper
+Group=creeper
+WorkingDirectory=/opt/creeper
+EnvironmentFile=/etc/creeper/report.env
+ExecStart=/opt/creeper/.venv/bin/creeper-fabric-email-report --config /etc/creeper/fabric.toml --flush-only
+MemoryMax=256M
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/srv/creeper /var/lib/creeper

@@ -1,0 +1,12 @@
+[Unit]
+Description=Retry queued Creeper email delivery
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=15min
+Persistent=true
+RandomizedDelaySec=30
+Unit=creeper-email-outbox.service
+
+[Install]
+WantedBy=timers.target

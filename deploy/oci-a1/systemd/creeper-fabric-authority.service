@@ -1,0 +1,28 @@
+[Unit]
+StartLimitIntervalSec=300
+StartLimitBurst=10
+Description=Creeper Fabric Authority
+After=network-online.target postgresql.service
+Wants=network-online.target
+Requires=postgresql.service
+OnFailure=creeper-email-alert@%n.service
+
+[Service]
+Type=simple
+User=creeper
+Group=creeper
+WorkingDirectory=/opt/creeper
+ExecStart=/opt/creeper/.venv/bin/creeper-fabric-authority --config /etc/creeper/fabric.toml
+Restart=on-failure
+RestartSec=5
+MemoryHigh=384M
+MemoryMax=512M
+OOMPolicy=stop
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/srv/creeper /var/lib/creeper
+
+[Install]
+WantedBy=multi-user.target
