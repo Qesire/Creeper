@@ -1479,18 +1479,37 @@ class DistributedAuthorityStore:
                 (worker_id, request_id),
             ).fetchone()
             if prior is not None:
-                self.connection.rollback()
-                return ProviderPermit(
-                    permit_id=str(prior["permit_id"]),
-                    request_id=str(prior["request_id"]),
-                    provider=str(prior["provider"]),
-                    worker_id=str(prior["worker_id"]),
-                    worker_instance_id=str(prior["worker_instance_id"]),
-                    task_id=str(prior["task_id"]),
-                    generation=int(prior["generation"]),
-                    allowed_requests=int(prior["allowed_requests"]),
-                    max_inflight=int(prior["max_inflight"]),
-                    expires_at=float(prior["expires_at"]),
+                if int(prior["active"]) and float(prior["expires_at"]) > now:
+                    if (
+                        str(prior["provider"]) != provider
+                        or str(prior["worker_instance_id"])
+                            != worker_instance_id
+                        or str(prior["task_id"]) != task_id
+                        or int(prior["generation"]) != generation
+                    ):
+                        raise ProviderAccessDeniedError(
+                            "permit request id is bound to different work"
+                        )
+                    self.connection.rollback()
+                    return ProviderPermit(
+                        permit_id=str(prior["permit_id"]),
+                        request_id=str(prior["request_id"]),
+                        provider=str(prior["provider"]),
+                        worker_id=str(prior["worker_id"]),
+                        worker_instance_id=str(prior["worker_instance_id"]),
+                        task_id=str(prior["task_id"]),
+                        generation=int(prior["generation"]),
+                        allowed_requests=int(prior["allowed_requests"]),
+                        max_inflight=int(prior["max_inflight"]),
+                        expires_at=float(prior["expires_at"]),
+                    )
+                # The request ID may be replayed after its first response was
+                # lost for longer than the permit TTL. Never resurrect an
+                # inactive/expired permit. Remove the old idempotency row and
+                # let the normal budget path mint a fresh permit ID.
+                self.connection.execute(
+                    "DELETE FROM fabric_provider_permits WHERE permit_id=?",
+                    (str(prior["permit_id"]),),
                 )
             budget = self.connection.execute(
                 "SELECT * FROM fabric_provider_budgets WHERE provider=?",
