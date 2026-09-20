@@ -265,7 +265,7 @@ def load_source_discovery_config(config_path: Path) -> SourceDiscoveryServiceCon
         ),
         triage_batch=_positive_int(pool_raw.get("triage_batch", pool_defaults.triage_batch), name="pool.triage_batch"),
         scout_parallelism=_positive_int(pool_raw.get("scout_parallelism", pool_defaults.scout_parallelism), name="pool.scout_parallelism"),
-        max_search_directives=_positive_int(
+        max_search_directives=_nonnegative_int(
             pool_raw.get("max_search_directives", pool_defaults.max_search_directives),
             name="pool.max_search_directives",
         ),
