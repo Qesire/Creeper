@@ -89,6 +89,23 @@ class AutopilotTests(unittest.TestCase):
         self.assertIn("--requests-per-second", evidence)
         self.assertIn("0.5", evidence)
 
+    def test_fabric_profile_can_disable_local_evidence_worker(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = AutopilotConfig(
+                source_discovery_config=root / "discovery.toml",
+                source_producer_config=root / "producer.toml",
+                runtime_data_root=root / "runtime",
+                supervisor=SupervisorPolicy(),
+                evidence=EvidenceServicePolicy(enabled=False),
+            )
+            specs = build_child_specs(config)
+
+        self.assertEqual(
+            [spec.name for spec in specs],
+            ["source-discovery", "source-producer"],
+        )
+
     def test_evidence_worker_receives_all_physical_cdx_providers(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
