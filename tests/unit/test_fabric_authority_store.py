@@ -37,6 +37,12 @@ class FabricAuthorityStoreTests(unittest.TestCase):
             allowed_providers=("datacite",),
         )
         self.store.register_worker(self.worker)
+        self.store.configure_provider_budget(
+            "datacite",
+            requests_per_second=10.0,
+            max_global_inflight=4,
+            require_qualified_region=False,
+        )
 
     def tearDown(self) -> None:
         self.store.close()
@@ -355,6 +361,21 @@ class FabricAuthorityStoreTests(unittest.TestCase):
             self.assertTrue(stale["worker_health"][0]["stale"])
         finally:
             store.close()
+
+    def test_strict_unknown_region_does_not_claim_when_probe_is_disabled(self) -> None:
+        self.store.configure_provider_budget(
+            "datacite",
+            requests_per_second=10.0,
+            max_global_inflight=4,
+            require_qualified_region=True,
+            allow_unknown_region_probe=False,
+        )
+        self.store.admit_work(self.work("strict-unknown"))
+        self.assertIsNone(
+            self.store.claim_work(
+                "worker-a","instance-1",lease_seconds=60
+            )
+        )
 
 
 if __name__=="__main__":
