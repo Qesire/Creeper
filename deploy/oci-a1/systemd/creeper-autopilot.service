@@ -1,4 +1,6 @@
 [Unit]
+StartLimitIntervalSec=600
+StartLimitBurst=10
 Description=Creeper deterministic production supervisor
 After=network-online.target creeper-fabric-authority.service
 Wants=network-online.target
@@ -14,8 +16,6 @@ EnvironmentFile=-/etc/creeper/agent.env
 ExecStart=/opt/creeper/.venv/bin/creeper-autopilot /etc/creeper/autopilot.toml
 Restart=on-failure
 RestartSec=10
-StartLimitIntervalSec=600
-StartLimitBurst=10
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=full
