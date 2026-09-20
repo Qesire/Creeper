@@ -31,6 +31,7 @@ class DistributedProviderGate:
         throttle_floor_seconds: float = 2.0,
         settlement_timeout_seconds: float = 3.0,
         observation_timeout_seconds: float = 2.0,
+        transport_retry_floor_seconds: float = 0.5,
     ) -> None:
         if (
             not provider.strip()
@@ -39,6 +40,7 @@ class DistributedProviderGate:
             or throttle_floor_seconds < 0
             or settlement_timeout_seconds <= 0
             or observation_timeout_seconds <= 0
+            or transport_retry_floor_seconds <= 0
         ):
             raise ValueError("invalid provider gate configuration")
         self.client = client
@@ -53,10 +55,14 @@ class DistributedProviderGate:
         self.observation_timeout_seconds = float(
             observation_timeout_seconds
         )
+        self.transport_retry_floor_seconds = float(
+            transport_retry_floor_seconds
+        )
         self._started_at: dict[str, float] = {}
 
     async def acquire(self) -> ProviderPermit:
         request_id = uuid4().hex
+        transport_failures = 0
         while True:
             self.keeper.assert_owned()
             try:
@@ -67,12 +73,21 @@ class DistributedProviderGate:
                     ttl_seconds=self.permit_ttl_seconds,
                 )
             except CoordinatorTransportError:
+                transport_failures += 1
                 self.keeper.assert_owned()
-                await asyncio.sleep(self.budget_poll_seconds)
+                delay = min(
+                    5.0,
+                    self.transport_retry_floor_seconds
+                    * (2 ** min(transport_failures - 1, 4)),
+                )
+                await asyncio.sleep(delay)
                 continue
+            transport_failures = 0
             if permit is not None:
                 self._started_at[permit.permit_id] = time.monotonic()
                 return permit
+            # A healthy Authority saying BUDGET_WAIT is not a transport
+            # failure; keep this path responsive to the shared RPS scheduler.
             await asyncio.sleep(self.budget_poll_seconds)
 
     @staticmethod
