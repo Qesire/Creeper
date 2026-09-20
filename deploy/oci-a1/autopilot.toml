@@ -32,8 +32,8 @@ poll_seconds = 30
 
 [resource_governor]
 enabled = true
-rss_throttle_gib = 5
-rss_stop_gib = 6
+rss_throttle_gib = 4
+rss_stop_gib = 5
 disk_throttle_gib = 25
 disk_stop_gib = 10
 recovery_samples = 5
