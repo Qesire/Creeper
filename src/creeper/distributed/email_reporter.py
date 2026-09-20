@@ -11,7 +11,9 @@ from pathlib import Path
 import shutil
 import smtplib
 import ssl
+import time
 from typing import Any
+from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 from creeper.distributed.config import (
@@ -281,15 +283,90 @@ def send_email(config, *, subject: str, body: str) -> None:
         smtp.send_message(message)
 
 
+def _outbox_dir(config) -> Path:
+    return config.resolved_state_file.parent/"outbox"
+
+
+def queue_email(
+    config,
+    *,
+    subject: str,
+    body: str,
+    kind: str,
+    snapshot: dict[str,Any] | None,
+) -> Path:
+    outbox=_outbox_dir(config)
+    outbox.mkdir(parents=True,exist_ok=True,mode=0o700)
+    target=outbox/f"{time.time_ns():020d}-{uuid4().hex}.json"
+    payload={
+        "subject":subject,
+        "body":body,
+        "kind":kind,
+        "snapshot":snapshot if kind=="summary" else None,
+    }
+    temporary=target.with_suffix(".tmp")
+    temporary.write_text(
+        json.dumps(payload,sort_keys=True,ensure_ascii=False)+"\n",
+        encoding="utf-8",
+    )
+    os.chmod(temporary,0o600)
+    os.replace(temporary,target)
+    return target
+
+
+def flush_outbox(config, *, limit: int=100) -> int:
+    if limit < 1:
+        raise ValueError("outbox flush limit must be positive")
+    outbox=_outbox_dir(config)
+    if not outbox.exists():
+        return 0
+    sent=0
+    for path in sorted(outbox.glob("*.json"))[:limit]:
+        try:
+            raw=json.loads(path.read_text(encoding="utf-8"))
+        except (OSError,json.JSONDecodeError) as exc:
+            raise RuntimeError(f"invalid email outbox entry {path}: {exc}") from exc
+        if not isinstance(raw,dict):
+            raise RuntimeError(f"invalid email outbox entry {path}: not an object")
+        subject=raw.get("subject")
+        body=raw.get("body")
+        kind=raw.get("kind")
+        if (
+            not isinstance(subject,str)
+            or not subject
+            or not isinstance(body,str)
+            or not body
+            or kind not in {"summary","alert"}
+        ):
+            raise RuntimeError(f"invalid email outbox entry {path}: bad fields")
+        send_email(config,subject=subject,body=body)
+        snapshot=raw.get("snapshot")
+        if kind=="summary":
+            if not isinstance(snapshot,dict):
+                raise RuntimeError(
+                    f"invalid email outbox entry {path}: missing summary snapshot"
+                )
+            _save(config.resolved_state_file,snapshot)
+        path.unlink()
+        sent+=1
+    return sent
+
+
 def main(argv:list[str]|None=None)->int:
     parser=argparse.ArgumentParser(prog="creeper-fabric-email-report")
     parser.add_argument("--config",type=Path,required=True)
     parser.add_argument("--kind",choices=("summary","alert"),default="summary")
     parser.add_argument("--message",default="")
     parser.add_argument("--dry-run",action="store_true")
+    parser.add_argument("--flush-only",action="store_true")
     args=parser.parse_args(argv)
 
     config=load_email_report_config(args.config)
+    if args.flush_only:
+        if args.dry_run or args.message or args.kind!="summary":
+            parser.error("--flush-only cannot be combined with report options")
+        flush_outbox(config)
+        return 0
     try:
         generated_at=datetime.now(ZoneInfo(config.timezone))
     except Exception as exc:
@@ -317,9 +394,14 @@ def main(argv:list[str]|None=None)->int:
         print(subject)
         print(body,end="")
         return 0
-    send_email(config,subject=subject,body=body)
-    if args.kind=="summary":
-        _save(config.resolved_state_file,snapshot)
+    queue_email(
+        config,
+        subject=subject,
+        body=body,
+        kind=args.kind,
+        snapshot=snapshot,
+    )
+    flush_outbox(config)
     return 0
 
 
