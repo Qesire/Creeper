@@ -13,6 +13,7 @@ sudo systemctl enable --now creeper-autopilot.service
 sudo systemctl enable --now creeper-email-report.timer
 sudo systemctl enable --now creeper-email-outbox.timer
 sudo systemctl enable --now creeper-fabric-gc.timer
+sudo systemctl enable --now creeper-fabric-worker-health.timer
 
 systemctl --no-pager --full status \
   creeper-fabric-authority.service \
