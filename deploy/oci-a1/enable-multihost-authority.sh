@@ -52,6 +52,7 @@ PY
 ufw default deny incoming
 ufw default allow outgoing
 ufw allow OpenSSH
+ufw allow "${CREEPER_WG_PORT:-51820}/udp"
 ufw allow in on creeper to any port 8088 proto tcp
 ufw --force enable
 
