@@ -10,8 +10,9 @@ from creeper.distributed.coordinator_client import (
     CoordinatorClient,
     CoordinatorUploadBudgetExceededError,
 )
-from creeper.distributed.models import ProviderPermit
+from creeper.distributed.models import ProviderPermit, WorkerDescriptor
 from creeper.distributed.provider_gate import DistributedProviderGate
+from creeper.distributed.worker import DistributedWorker
 
 
 class _Keeper:
@@ -110,6 +111,46 @@ class FabricMultihostTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(observation["timeout"])
         self.assertFalse(observation["policy_block"])
         self.assertEqual(observation["response_bytes"],321)
+
+    async def test_pending_spool_is_replayed_before_any_new_claim(self) -> None:
+        class Spool:
+            def pending_count(self) -> int:
+                return 1
+
+        class Worker(DistributedWorker):
+            def __init__(self) -> None:
+                descriptor=WorkerDescriptor(
+                    worker_id="worker-a",
+                    worker_instance_id="instance-a",
+                    runtime_class="test",
+                    region="test-region",
+                    architecture="x86_64",
+                    memory_bytes=1024,
+                    cpu_count=1,
+                    network_class="test",
+                    capabilities=("TEST",),
+                    producers=("test-producer",),
+                )
+                super().__init__(
+                    client=object(),  # type: ignore[arg-type]
+                    descriptor=descriptor,
+                    producers={"test-producer":object()},  # type: ignore[dict-item]
+                    spool=Spool(),  # type: ignore[arg-type]
+                )
+                self.replayed=False
+                self.claimed=False
+
+            async def _replay_spool(self) -> None:
+                self.replayed=True
+
+            async def run_once(self) -> bool:
+                self.claimed=True
+                return True
+
+        worker=Worker()
+        self.assertTrue(await worker._run_or_replay_once())
+        self.assertTrue(worker.replayed)
+        self.assertFalse(worker.claimed)
 
 
 if __name__=="__main__":
