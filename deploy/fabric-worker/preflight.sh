@@ -8,11 +8,7 @@ if [[ "$(timedatectl show -p NTPSynchronized --value 2>/dev/null || true)" != "y
   exit 3
 fi
 
-if ! command -v wg >/dev/null 2>&1; then
-  echo "wireguard tooling is not installed" >&2
-  exit 3
-fi
-if ! wg show creeper >/dev/null 2>&1; then
+if [[ ! -d /sys/class/net/creeper ]]; then
   echo "WireGuard interface 'creeper' is not active" >&2
   exit 3
 fi
