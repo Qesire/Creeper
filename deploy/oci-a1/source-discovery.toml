@@ -49,6 +49,7 @@ follow_query = false
 [measurement]
 baseline_index = "/srv/creeper/data/indexes/baseline-fast.sqlite3"
 eed_model = "/srv/creeper/reference/equivalent_english_domain.json"
+authority_manifest = "/srv/creeper/baseline/current/authority-manifest.json"
 max_download_bytes = 8388608
 max_decompressed_bytes = 33554432
 max_records = 5000
