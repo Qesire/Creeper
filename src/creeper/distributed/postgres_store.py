@@ -763,6 +763,27 @@ class PostgresAuthorityStore:
             )
             return tuple(cur.fetchall())
 
+    def unconsumed_batches_for_task(
+        self,
+        task_id:str,
+        *,
+        limit:int=100,
+    ):
+        if not task_id.strip() or limit<1:
+            raise ValueError("task_id and positive limit are required")
+        with self.connection.cursor() as cur:
+            cur.execute(
+                """
+                SELECT *
+                FROM fabric_result_batches
+                WHERE task_id=%s AND consumed_at IS NULL AND quarantined=FALSE
+                ORDER BY sequence_no
+                LIMIT %s
+                """,
+                (task_id,limit),
+            )
+            return tuple(cur.fetchall())
+
     def mark_batch_consumed(self,batch_id:str)->bool:
         with self.connection.transaction():
             with self.connection.cursor() as cur:
