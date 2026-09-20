@@ -220,7 +220,7 @@ sudo systemctl status creeper-fabric-authority --no-pager
 sudo systemctl status creeper-fabric-worker-health.timer --no-pager
 sudo -u creeper /var/lib/creeper/.local/bin/uv run \
   --directory /opt/creeper \
-  creeper-fabric-control status --config /etc/creeper/fabric.toml
+  creeper-fabric-control --config /etc/creeper/fabric.toml status
 ```
 
 Run the repository connectivity smoke before production changes:
