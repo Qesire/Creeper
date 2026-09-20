@@ -51,18 +51,15 @@ fi
 curl --fail --silent --show-error --max-time 5 \
   "${CREEPER_COORDINATOR_URL%/}/healthz" >/dev/null
 
-META="$(
-  curl --fail --silent --show-error --max-time 5 \
-    "${CREEPER_COORDINATOR_URL%/}/meta"
-)"
-python3 - "$META" <<'PY'
+curl --fail --silent --show-error --max-time 5 \
+  "${CREEPER_COORDINATOR_URL%/}/meta" | python3 -c '
 import json
 import sys
 
 try:
-    value=json.loads(sys.argv[1])
+    value=json.load(sys.stdin)
 except json.JSONDecodeError as exc:
     raise SystemExit("Fabric /meta returned invalid JSON") from exc
 if value.get("protocol_version")!="creeper-fabric-v2":
     raise SystemExit("Fabric /meta protocol mismatch")
-PY
+'
