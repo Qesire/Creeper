@@ -148,6 +148,36 @@ class FabricAuthorityStoreTests(unittest.TestCase):
         row=self.store.task_row(task_id)
         self.assertEqual(row["next_sequence_no"],1)
 
+    def test_outbox_can_be_disabled_for_brokerless_http_profile(self) -> None:
+        store=DistributedAuthorityStore(
+            self.root/"fabric-no-outbox.sqlite3",
+            emit_outbox=False,
+        )
+        try:
+            store.register_worker(self.worker)
+            task_id,inserted=store.admit_work(self.work("no-outbox"))
+            self.assertTrue(inserted)
+            lease=store.claim_work(
+                "worker-a","instance-1",lease_seconds=60
+            )
+            self.assertIsNotNone(lease)
+            assert lease is not None
+            store.commit_result_batch(
+                ResultBatch(
+                    task_id=task_id,
+                    generation=lease.generation,
+                    sequence_no=0,
+                    results=({"value":1},),
+                    final=True,
+                ),
+                worker_id="worker-a",
+                worker_instance_id="instance-1",
+            )
+            self.assertEqual(store.pending_outbox(),())
+            self.assertEqual(store.status_snapshot()["pending_outbox"],0)
+        finally:
+            store.close()
+
     def test_poison_domain_batch_is_quarantined_without_blocking_inbox(self) -> None:
         task_id,_=self.store.admit_work(self.work())
         lease=self.store.claim_work("worker-a","instance-1",lease_seconds=60)
