@@ -178,6 +178,62 @@ class FabricAuthorityStoreTests(unittest.TestCase):
         finally:
             store.close()
 
+    def test_gc_prunes_consumed_batch_but_retains_workkey_tombstone(self) -> None:
+        now=[1_000_000.0]
+        store=DistributedAuthorityStore(
+            self.root/"fabric-gc.sqlite3",
+            clock=lambda:now[0],
+            emit_outbox=False,
+        )
+        try:
+            store.register_worker(self.worker)
+            task_id,inserted=store.admit_work(self.work("gc"))
+            self.assertTrue(inserted)
+            lease=store.claim_work(
+                "worker-a","instance-1",lease_seconds=60
+            )
+            self.assertIsNotNone(lease)
+            assert lease is not None
+            batch=ResultBatch(
+                task_id=task_id,
+                generation=lease.generation,
+                sequence_no=0,
+                results=({"value":1},),
+                final=True,
+            )
+            store.commit_result_batch(
+                batch,
+                worker_id="worker-a",
+                worker_instance_id="instance-1",
+            )
+            self.assertTrue(store.mark_batch_consumed(batch.batch_id))
+            self.assertEqual(
+                store.connection.execute(
+                    "SELECT COUNT(*) FROM fabric_result_batches"
+                ).fetchone()[0],
+                1,
+            )
+
+            now[0]+=2*86400
+            report=store.gc_transient_state(
+                retention_seconds=86400,
+                limit=100,
+            )
+
+            self.assertEqual(report["result_batches"],1)
+            self.assertEqual(
+                store.connection.execute(
+                    "SELECT COUNT(*) FROM fabric_result_batches"
+                ).fetchone()[0],
+                0,
+            )
+            self.assertEqual(store.task_row(task_id)["state"],"COMPLETE")
+            replay_id,replay_inserted=store.admit_work(self.work("gc"))
+            self.assertEqual(replay_id,task_id)
+            self.assertFalse(replay_inserted)
+        finally:
+            store.close()
+
     def test_poison_domain_batch_is_quarantined_without_blocking_inbox(self) -> None:
         task_id,_=self.store.admit_work(self.work())
         lease=self.store.claim_work("worker-a","instance-1",lease_seconds=60)
