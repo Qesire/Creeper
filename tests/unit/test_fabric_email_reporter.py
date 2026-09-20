@@ -69,6 +69,14 @@ timezone = "Asia/Singapore"
             ControlStore(root/"control.sqlite3").close()
             EvidenceStore(root/"evidence.sqlite3").close()
             CandidateStore(root/"candidates.sqlite3").close()
+            readiness=root/"readiness"
+            readiness.mkdir()
+            (readiness/"readiness.json").write_text(
+                '{"novel_eed":"12.5","growth_rate":"0.001",'
+                '"novel_host_years":7,"evidence_cursor":4,'
+                '"latest_evidence_sequence":4}\n',
+                encoding="utf-8",
+            )
 
             snapshot=collect_snapshot(config)
 
@@ -77,10 +85,13 @@ timezone = "Asia/Singapore"
             self.assertEqual(snapshot["evidence"]["host_years"],0)
             self.assertEqual(snapshot["evidence"]["capsules"],0)
             self.assertEqual(snapshot["candidates"]["records"],0)
+            self.assertEqual(snapshot["readiness"]["novel_eed"],"12.5")
+            self.assertEqual(snapshot["readiness"]["novel_host_years"],7)
             self.assertIn("disk_free_bytes",snapshot["host"])
 
     def test_render_report_includes_delta_since_previous_summary(self) -> None:
         current={
+            "readiness":{"novel_eed":"12.5","growth_rate":"0.001"},
             "fabric":{"complete":8,"dead":0},
             "control":{},
             "evidence":{"host_years":12},
@@ -88,6 +99,7 @@ timezone = "Asia/Singapore"
             "host":{"disk_free_bytes":100},
         }
         previous={
+            "readiness":{"novel_eed":"10.0","growth_rate":"0.0008"},
             "fabric":{"complete":5,"dead":0},
             "control":{},
             "evidence":{"host_years":10},
@@ -99,6 +111,7 @@ timezone = "Asia/Singapore"
             generated_at=datetime(2026,9,20,20,0,tzinfo=ZoneInfo("Asia/Singapore")),
             previous=previous,
         )
+        self.assertIn('"readiness.novel_eed": 2.5',report)
         self.assertIn('"fabric.complete": 3.0',report)
         self.assertIn('"evidence.host_years": 2.0',report)
         self.assertIn('"host.disk_free_bytes": -20.0',report)
