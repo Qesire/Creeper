@@ -369,6 +369,83 @@ class FabricPostgresAuthorityTests(unittest.TestCase):
         self.assertEqual(str(self.store.task_row(other)["state"]),"PENDING")
 
 
+    def test_expired_lost_response_permit_is_reissued_not_resurrected(self) -> None:
+        now=[1000.0]
+        store=PostgresAuthorityStore(
+            self.dsn,
+            clock=lambda:now[0],
+            emit_outbox=False,
+        )
+        try:
+            suffix=uuid4().hex[:12]
+            worker=WorkerDescriptor(
+                worker_id=f"permit-worker-{suffix}",
+                worker_instance_id=f"permit-instance-{suffix}",
+                runtime_class="full",
+                region="sg",
+                architecture="x86_64",
+                memory_bytes=1024,
+                cpu_count=1,
+                network_class="public",
+                capabilities=(Capability.RESIDUAL_QUERY.value,),
+                producers=("ResidualQueryProducer",),
+                allowed_providers=("datacite",),
+            )
+            store.register_worker(worker)
+            store.configure_provider_budget(
+                "datacite",
+                requests_per_second=10.0,
+                max_global_inflight=4,
+                require_qualified_region=False,
+            )
+            task_id,_=store.admit_work(self.work("permit-"+suffix))
+            lease=store.claim_work(
+                worker.worker_id,
+                worker.worker_instance_id,
+                lease_seconds=300,
+            )
+            self.assertIsNotNone(lease)
+            assert lease is not None
+            first=store.issue_provider_permit(
+                "datacite",
+                worker_id=worker.worker_id,
+                worker_instance_id=worker.worker_instance_id,
+                task_id=task_id,
+                generation=lease.generation,
+                request_id="lost-response",
+                ttl_seconds=10,
+            )
+            self.assertIsNotNone(first)
+            assert first is not None
+            now[0]+=11.0
+            second=store.issue_provider_permit(
+                "datacite",
+                worker_id=worker.worker_id,
+                worker_instance_id=worker.worker_instance_id,
+                task_id=task_id,
+                generation=lease.generation,
+                request_id="lost-response",
+                ttl_seconds=10,
+            )
+            self.assertIsNotNone(second)
+            assert second is not None
+            self.assertNotEqual(second.permit_id,first.permit_id)
+            self.assertGreater(second.expires_at,first.expires_at)
+            with store.connection.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT permit_id,active FROM fabric_provider_permits
+                    WHERE worker_id=%s AND request_id=%s
+                    """,
+                    (worker.worker_id,"lost-response"),
+                )
+                row=cur.fetchone()
+            self.assertEqual(str(row["permit_id"]),second.permit_id)
+            self.assertTrue(bool(row["active"]))
+        finally:
+            store.close()
+
+
 
 if __name__ == "__main__":
     unittest.main()
