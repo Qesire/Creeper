@@ -228,6 +228,13 @@ def bulk_shard_work_definition(
 class BulkShardProducer:
     """Stream one immutable HTTP range and return reduced real witnesses."""
 
+    def __init__(
+        self,
+        *,
+        transport: httpx.AsyncBaseTransport | None = None,
+    ) -> None:
+        self.transport=transport
+
     @staticmethod
     def _parse_record(
         *,
@@ -320,6 +327,7 @@ class BulkShardProducer:
             timeout=httpx.Timeout(timeout_seconds),
             trust_env=False,
             headers={"User-Agent":"Creeper-fabric-bulk/1.0"},
+            transport=self.transport,
         ) as client:
             async with client.stream(
                 "GET",
