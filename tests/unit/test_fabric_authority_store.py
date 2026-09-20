@@ -221,13 +221,16 @@ class FabricAuthorityStoreTests(unittest.TestCase):
             )
 
             self.assertEqual(report["result_batches"],1)
+            self.assertEqual(report["work_payloads_compacted"],1)
             self.assertEqual(
                 store.connection.execute(
                     "SELECT COUNT(*) FROM fabric_result_batches"
                 ).fetchone()[0],
                 0,
             )
-            self.assertEqual(store.task_row(task_id)["state"],"COMPLETE")
+            task_row=store.task_row(task_id)
+            self.assertEqual(task_row["state"],"COMPLETE")
+            self.assertEqual(task_row["payload_json"],"{}")
             replay_id,replay_inserted=store.admit_work(self.work("gc"))
             self.assertEqual(replay_id,task_id)
             self.assertFalse(replay_inserted)
