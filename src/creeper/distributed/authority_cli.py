@@ -27,6 +27,7 @@ def main(argv: list[str]|None=None)->int:
             requests_per_second=budget.requests_per_second,
             max_global_inflight=budget.max_global_inflight,
             require_qualified_region=budget.require_qualified_region,
+            allow_unknown_region_probe=budget.allow_unknown_region_probe,
         )
     credentials=load_worker_credentials(config.credentials_file)
     app=create_authority_app(
