@@ -17,7 +17,10 @@ def main(argv: list[str]|None=None)->int:
     parser.add_argument("--config",type=Path,required=True)
     args=parser.parse_args(argv)
     config=load_authority_config(args.config)
-    store=open_authority_store(config.database)
+    store=open_authority_store(
+        config.database,
+        emit_outbox=config.outbox_enabled,
+    )
     for budget in config.provider_budgets:
         store.configure_provider_budget(
             budget.name,
