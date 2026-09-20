@@ -481,19 +481,11 @@ class PostgresAuthorityStore:
                 )
                 active=cur.fetchone()
                 if active is not None:
-                    # Recover a lease whose claim response may have been lost.
-                    # One worker process executes one task at a time, so a
-                    # second active lease for the same incarnation is never
-                    # desirable communication behavior.
-                    deadline=now+float(lease_seconds)
-                    cur.execute(
-                        """
-                        UPDATE fabric_work
-                        SET lease_deadline=%s,updated_at=%s
-                        WHERE task_id=%s
-                        """,
-                        (deadline,now,str(active["task_id"])),
-                    )
+                    # Recover a lease whose claim response may have been lost,
+                    # but do not renew it here. Otherwise an asymmetric outage
+                    # where requests arrive and responses disappear could pin
+                    # this unobserved task indefinitely.
+                    deadline=float(active["lease_deadline"])
                     return TaskLease(
                         task_id=str(active["task_id"]),
                         work_key=str(active["work_key"]),
