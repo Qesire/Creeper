@@ -1257,22 +1257,38 @@ class PostgresAuthorityStore:
                     """
                     SELECT * FROM fabric_provider_permits
                     WHERE worker_id=%s AND request_id=%s
+                    FOR UPDATE
                     """,
                     (worker_id,request_id),
                 )
                 prior=cur.fetchone()
                 if prior is not None:
-                    return ProviderPermit(
-                        permit_id=str(prior["permit_id"]),
-                        request_id=str(prior["request_id"]),
-                        provider=str(prior["provider"]),
-                        worker_id=str(prior["worker_id"]),
-                        worker_instance_id=str(prior["worker_instance_id"]),
-                        task_id=str(prior["task_id"]),
-                        generation=int(prior["generation"]),
-                        allowed_requests=int(prior["allowed_requests"]),
-                        max_inflight=int(prior["max_inflight"]),
-                        expires_at=float(prior["expires_at"]),
+                    if bool(prior["active"]) and float(prior["expires_at"])>now:
+                        if (
+                            str(prior["provider"])!=provider
+                            or str(prior["worker_instance_id"])
+                                !=worker_instance_id
+                            or str(prior["task_id"])!=task_id
+                            or int(prior["generation"])!=generation
+                        ):
+                            raise ProviderAccessDeniedError(
+                                "permit request id is bound to different work"
+                            )
+                        return ProviderPermit(
+                            permit_id=str(prior["permit_id"]),
+                            request_id=str(prior["request_id"]),
+                            provider=str(prior["provider"]),
+                            worker_id=str(prior["worker_id"]),
+                            worker_instance_id=str(prior["worker_instance_id"]),
+                            task_id=str(prior["task_id"]),
+                            generation=int(prior["generation"]),
+                            allowed_requests=int(prior["allowed_requests"]),
+                            max_inflight=int(prior["max_inflight"]),
+                            expires_at=float(prior["expires_at"]),
+                        )
+                    cur.execute(
+                        "DELETE FROM fabric_provider_permits WHERE permit_id=%s",
+                        (str(prior["permit_id"]),),
                     )
                 cur.execute(
                     "SELECT * FROM fabric_provider_budgets WHERE provider=%s FOR UPDATE",
