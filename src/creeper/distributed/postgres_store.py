@@ -484,10 +484,22 @@ class PostgresAuthorityStore:
                             FROM jsonb_array_elements_text(
                                 required_providers_json
                             ) AS rp(provider)
-                            JOIN fabric_provider_regions AS pr
+                            LEFT JOIN fabric_provider_budgets AS pb
+                              ON pb.provider=rp.provider
+                            LEFT JOIN fabric_provider_regions AS pr
                               ON pr.provider=rp.provider
                              AND pr.region=%s
-                            WHERE pr.state IN ('BLOCKED','UNQUALIFIED')
+                            WHERE pb.provider IS NULL
+                               OR (
+                                    pb.require_qualified_region=TRUE
+                                    AND (
+                                        pr.state IN ('BLOCKED','UNQUALIFIED')
+                                        OR (
+                                            COALESCE(pr.state,'UNKNOWN')<>'QUALIFIED'
+                                            AND pb.allow_unknown_region_probe=FALSE
+                                        )
+                                    )
+                                  )
                           )
                     ORDER BY priority DESC,created_at ASC
                     FOR UPDATE SKIP LOCKED
