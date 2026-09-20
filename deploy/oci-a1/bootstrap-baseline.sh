@@ -70,6 +70,13 @@ chown -R "$APP_USER:$APP_GROUP" "$TARGET"
 chmod 0750 "$TARGET"
 find "$TARGET" -type f -exec chmod 0640 {} +
 
+MIN_FREE_BYTES=$((25 * 1024 * 1024 * 1024))
+FREE_BYTES="$(df --output=avail -B1 /srv/creeper | tail -n 1 | tr -d ' ')"
+if (( FREE_BYTES < MIN_FREE_BYTES )); then
+  echo "insufficient free space to build baseline index: free=$FREE_BYTES required=$MIN_FREE_BYTES" >&2
+  exit 4
+fi
+
 WAS_ACTIVE=0
 if systemctl is-active --quiet creeper-autopilot.service; then
   WAS_ACTIVE=1
