@@ -474,6 +474,28 @@ class FabricAuthorityStoreTests(unittest.TestCase):
             store.close()
 
 
+    def test_repeated_claim_returns_existing_active_lease(self) -> None:
+        first_id,_=self.store.admit_work(self.work("claim-replay-1"))
+        second_id,_=self.store.admit_work(self.work("claim-replay-2"))
+        first=self.store.claim_work(
+            "worker-a","instance-1",lease_seconds=60
+        )
+        self.assertIsNotNone(first)
+        assert first is not None
+        replay=self.store.claim_work(
+            "worker-a","instance-1",lease_seconds=120
+        )
+        self.assertIsNotNone(replay)
+        assert replay is not None
+        self.assertEqual(replay.task_id,first.task_id)
+        self.assertEqual(replay.generation,first.generation)
+        self.assertEqual(replay.attempt,first.attempt)
+        self.assertGreater(replay.lease_deadline,first.lease_deadline)
+        self.assertIn(replay.task_id,{first_id,second_id})
+        other=second_id if replay.task_id==first_id else first_id
+        self.assertEqual(self.store.task_row(other)["state"],"PENDING")
+
+
 
 if __name__=="__main__":
     unittest.main()
