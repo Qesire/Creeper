@@ -554,6 +554,51 @@ class FabricAuthorityStoreTests(unittest.TestCase):
             store.close()
 
 
+    def test_renew_replay_does_not_extend_deadline_twice(self) -> None:
+        now=[1000.0]
+        store=DistributedAuthorityStore(
+            self.root/"fabric-renew-replay.sqlite3",
+            clock=lambda:now[0],
+        )
+        try:
+            store.register_worker(self.worker)
+            store.configure_provider_budget(
+                "datacite",
+                requests_per_second=10.0,
+                max_global_inflight=4,
+                require_qualified_region=False,
+            )
+            task_id,_=store.admit_work(self.work("renew-replay"))
+            lease=store.claim_work(
+                "worker-a","instance-1",lease_seconds=300
+            )
+            self.assertIsNotNone(lease)
+            assert lease is not None
+            expected=lease.lease_deadline
+            now[0]+=150.0
+            first=store.renew_task(
+                task_id,
+                worker_id="worker-a",
+                worker_instance_id="instance-1",
+                generation=lease.generation,
+                lease_seconds=300,
+                expected_lease_deadline=expected,
+            )
+            self.assertEqual(first.lease_deadline,1450.0)
+            now[0]+=40.0
+            replay=store.renew_task(
+                task_id,
+                worker_id="worker-a",
+                worker_instance_id="instance-1",
+                generation=lease.generation,
+                lease_seconds=300,
+                expected_lease_deadline=expected,
+            )
+            self.assertEqual(replay.lease_deadline,first.lease_deadline)
+        finally:
+            store.close()
+
+
 
 if __name__=="__main__":
     unittest.main()
