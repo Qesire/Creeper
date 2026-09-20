@@ -1515,6 +1515,12 @@ class DistributedAuthorityStore:
             "leased": states.get("LEASED", 0),
             "complete": states.get("COMPLETE", 0),
             "dead": states.get("DEAD", 0),
+            "compacted_work": int(
+                self.connection.execute(
+                    "SELECT COUNT(*) AS n FROM fabric_work "
+                    "WHERE state='COMPLETE' AND payload_json='{}'"
+                ).fetchone()["n"]
+            ),
             "unconsumed_batches": int(
                 self.connection.execute(
                     "SELECT COUNT(*) AS n FROM fabric_result_batches "
