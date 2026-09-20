@@ -132,7 +132,10 @@ class DistributedProviderGate:
                 latency_ms=latency_ms,
                 response_bytes=int(response_bytes),
                 timeout=status_code is None,
-                policy_block=status_code in {403, 451},
+                # 451 explicitly conveys legal/policy unavailability. A 403
+                # is ambiguous (WAF, auth, request semantics) and must not
+                # permanently poison an otherwise usable cloud region.
+                policy_block=status_code == 451,
             )
         except CoordinatorError:
             # Permit settlement is authoritative. Region qualification is
