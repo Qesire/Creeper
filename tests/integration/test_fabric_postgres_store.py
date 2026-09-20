@@ -364,7 +364,7 @@ class FabricPostgresAuthorityTests(unittest.TestCase):
         self.assertEqual(replay.task_id,first.task_id)
         self.assertEqual(replay.generation,first.generation)
         self.assertEqual(replay.attempt,first.attempt)
-        self.assertGreater(replay.lease_deadline,first.lease_deadline)
+        self.assertEqual(replay.lease_deadline,first.lease_deadline)
         other=second_id if replay.task_id==first_id else first_id
         self.assertEqual(str(self.store.task_row(other)["state"]),"PENDING")
 
