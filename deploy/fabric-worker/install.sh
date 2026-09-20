@@ -42,6 +42,11 @@ case "$ROLE" in
     PRODUCERS='["EvidenceQueryProducer"]'
     PROVIDERS='["internet_archive","arquivo_pt","rdap"]'
     ;;
+  bulk)
+    CAPABILITIES='["STREAMING_BULK","ARTIFACT_FETCH"]'
+    PRODUCERS='["BulkShardProducer"]'
+    PROVIDERS='[]'
+    ;;
   *)
     echo "unsupported CREEPER_WORKER_ROLE: $ROLE" >&2
     exit 2
