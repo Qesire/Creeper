@@ -35,7 +35,8 @@ class FabricRemoteDeploymentTests(unittest.TestCase):
     def test_preflight_requires_ntp_wireguard_and_private_coordinator(self) -> None:
         preflight=(self.root/"preflight.sh").read_text(encoding="utf-8")
         self.assertIn("NTPSynchronized",preflight)
-        self.assertIn("wg show creeper",preflight)
+        self.assertIn("/sys/class/net/creeper",preflight)
+        self.assertNotIn("wg show creeper",preflight)
         self.assertIn("/healthz",preflight)
         self.assertIn("http://10.*",preflight)
 
