@@ -1,6 +1,7 @@
 source_mode = "activated"
 runtime_data_root = "/srv/creeper/data"
 baseline_index = "/srv/creeper/data/indexes/baseline-fast.sqlite3"
+authority_manifest = "/srv/creeper/baseline/current/authority-manifest.json"
 
 [limits]
 source_workers = 2
