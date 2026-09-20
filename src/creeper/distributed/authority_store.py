@@ -1252,8 +1252,14 @@ class DistributedAuthorityStore:
         max_global_inflight: int,
         require_qualified_region: bool = True,
         allow_unknown_region_probe: bool = False,
+        region_reprobe_after_seconds: float = 21600.0,
     ) -> None:
-        if not provider.strip() or requests_per_second <= 0 or max_global_inflight < 1:
+        if (
+            not provider.strip()
+            or requests_per_second <= 0
+            or max_global_inflight < 1
+            or region_reprobe_after_seconds <= 0
+        ):
             raise ValueError("invalid provider budget")
         now = float(self.clock())
         with self.connection:
@@ -1262,13 +1268,14 @@ class DistributedAuthorityStore:
                 INSERT INTO fabric_provider_budgets(
                     provider, requests_per_second, max_global_inflight,
                     require_qualified_region, allow_unknown_region_probe,
-                    updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?)
+                    region_reprobe_after_seconds, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(provider) DO UPDATE SET
                     requests_per_second=excluded.requests_per_second,
                     max_global_inflight=excluded.max_global_inflight,
                     require_qualified_region=excluded.require_qualified_region,
                     allow_unknown_region_probe=excluded.allow_unknown_region_probe,
+                    region_reprobe_after_seconds=excluded.region_reprobe_after_seconds,
                     updated_at=excluded.updated_at
                 """,
                 (
@@ -1277,6 +1284,7 @@ class DistributedAuthorityStore:
                     int(max_global_inflight),
                     int(require_qualified_region),
                     int(allow_unknown_region_probe),
+                    float(region_reprobe_after_seconds),
                     now,
                 ),
             )
@@ -1350,7 +1358,7 @@ class DistributedAuthorityStore:
             successes = int(row["successes"])
             blocked = int(row["policy_blocks"])
             failures = int(row["timeouts"]) + int(row["throttles"]) + blocked
-            if blocked:
+            if policy_block:
                 state = "BLOCKED"
             elif samples >= 3 and successes >= 2 and failures <= samples // 2:
                 state = "QUALIFIED"
@@ -1455,7 +1463,7 @@ class DistributedAuthorityStore:
                 worker_region = str(worker["region"])
                 region = self.connection.execute(
                     """
-                    SELECT state FROM fabric_provider_regions
+                    SELECT state,updated_at FROM fabric_provider_regions
                     WHERE provider=? AND region=?
                     """,
                     (provider, worker_region),
@@ -1463,6 +1471,14 @@ class DistributedAuthorityStore:
                 region_state = (
                     "UNKNOWN" if region is None else str(region["state"])
                 )
+                if (
+                    region_state in {"BLOCKED", "UNQUALIFIED"}
+                    and int(budget["allow_unknown_region_probe"])
+                    and region is not None
+                    and now - float(region["updated_at"])
+                        >= float(budget["region_reprobe_after_seconds"])
+                ):
+                    region_state = "UNKNOWN"
                 if region_state in {"BLOCKED", "UNQUALIFIED"}:
                     self.connection.rollback()
                     return None
