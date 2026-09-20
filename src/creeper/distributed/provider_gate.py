@@ -4,12 +4,17 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timezone
+import time
 from email.utils import parsedate_to_datetime
 from uuid import uuid4
 
 import httpx
 
-from creeper.distributed.coordinator_client import CoordinatorClient, CoordinatorTransportError
+from creeper.distributed.coordinator_client import (
+    CoordinatorClient,
+    CoordinatorError,
+    CoordinatorTransportError,
+)
 from creeper.distributed.lease_keeper import LeaseKeeper
 from creeper.distributed.models import ProviderPermit
 
@@ -38,6 +43,7 @@ class DistributedProviderGate:
         self.permit_ttl_seconds = float(permit_ttl_seconds)
         self.budget_poll_seconds = float(budget_poll_seconds)
         self.throttle_floor_seconds = float(throttle_floor_seconds)
+        self._started_at: dict[str, float] = {}
 
     async def acquire(self) -> ProviderPermit:
         request_id = uuid4().hex
@@ -55,6 +61,7 @@ class DistributedProviderGate:
                 await asyncio.sleep(self.budget_poll_seconds)
                 continue
             if permit is not None:
+                self._started_at[permit.permit_id] = time.monotonic()
                 return permit
             await asyncio.sleep(self.budget_poll_seconds)
 
@@ -104,8 +111,31 @@ class DistributedProviderGate:
                     cooldown_seconds=cooldown,
                     response_bytes=int(response_bytes),
                 )
-                return
+                break
             except CoordinatorTransportError:
                 if attempt == 4:
                     raise
                 await asyncio.sleep(min(1.0, self.budget_poll_seconds * (2**attempt)))
+
+        started = self._started_at.pop(token.permit_id, None)
+        latency_ms = (
+            0.0
+            if started is None
+            else max(0.0, (time.monotonic() - started) * 1000.0)
+        )
+        try:
+            await self.client.provider_observation(
+                self.keeper.lease,
+                provider=self.provider,
+                connect_success=status_code is not None,
+                status_code=status_code,
+                latency_ms=latency_ms,
+                response_bytes=int(response_bytes),
+                timeout=status_code is None,
+                policy_block=status_code in {403, 451},
+            )
+        except CoordinatorError:
+            # Permit settlement is authoritative. Region qualification is
+            # routing telemetry and must not turn a completed provider request
+            # into a duplicate retry if this best-effort observation is lost.
+            pass
