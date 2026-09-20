@@ -538,7 +538,13 @@ class ActivatedSourceRuntime:
             config_path=self.config_path,
             name="runtime_data_root",
         )
-        self.baseline = BaselineIndex(baseline_path)
+        self.baseline = BaselineIndex(
+            baseline_path,
+            authority=_baseline_authority(
+                config,
+                config_path=self.config_path,
+            ),
+        )
         self.control = ControlStore(runtime_root / "control.sqlite3")
         self.evidence = EvidenceStore(runtime_root / "evidence.sqlite3")
         self.candidate_store = CandidateStore(runtime_root / "candidates.sqlite3")
