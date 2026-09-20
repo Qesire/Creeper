@@ -95,6 +95,12 @@ class FabricPostgresAuthorityTests(unittest.TestCase):
             allowed_providers=("datacite",),
         )
         self.store.register_worker(self.worker)
+        self.store.configure_provider_budget(
+            "datacite",
+            requests_per_second=10.0,
+            max_global_inflight=4,
+            require_qualified_region=False,
+        )
 
     def tearDown(self) -> None:
         self.store.close()
@@ -183,6 +189,12 @@ class FabricPostgresAuthorityTests(unittest.TestCase):
                 allowed_providers=("datacite",),
             )
             quiet.register_worker(worker)
+            quiet.configure_provider_budget(
+                "datacite",
+                requests_per_second=10.0,
+                max_global_inflight=4,
+                require_qualified_region=False,
+            )
             task_id,_=quiet.admit_work(self.work("quiet-"+suffix))
             lease=quiet.claim_work(
                 worker.worker_id,
@@ -230,6 +242,12 @@ class FabricPostgresAuthorityTests(unittest.TestCase):
                 allowed_providers=("datacite",),
             )
             store.register_worker(worker)
+            store.configure_provider_budget(
+                "datacite",
+                requests_per_second=10.0,
+                max_global_inflight=4,
+                require_qualified_region=False,
+            )
             work=self.work("gc-"+suffix)
             task_id,inserted=store.admit_work(work)
             self.assertTrue(inserted)
