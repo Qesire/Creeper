@@ -168,6 +168,8 @@ class OciA1DeploymentConfigTests(unittest.TestCase):
         self.assertEqual(evidence.coordinator_url,"http://127.0.0.1:8088")
         self.assertEqual(query.descriptor.architecture,"aarch64")
         self.assertEqual(evidence.descriptor.architecture,"aarch64")
+        self.assertEqual(query.descriptor.memory_bytes,1024**3)
+        self.assertEqual(evidence.descriptor.memory_bytes,1024**3)
         self.assertEqual(query.descriptor.producers,("ResidualQueryProducer",))
         self.assertEqual(evidence.descriptor.producers,("EvidenceQueryProducer",))
         self.assertNotEqual(query.descriptor.worker_id,evidence.descriptor.worker_id)
@@ -178,8 +180,8 @@ class OciA1DeploymentConfigTests(unittest.TestCase):
         )
         self.assertFalse(raw["evidence"]["enabled"])
         self.assertFalse(raw["evidence"]["platform_harvest_enabled"])
-        self.assertEqual(raw["resource_governor"]["rss_throttle_gib"],5)
-        self.assertEqual(raw["resource_governor"]["rss_stop_gib"],6)
+        self.assertEqual(raw["resource_governor"]["rss_throttle_gib"],4)
+        self.assertEqual(raw["resource_governor"]["rss_stop_gib"],5)
         self.assertNotIn("baseline_eed",raw["readiness"])
         self.assertEqual(
             raw["readiness"]["authority_manifest"],
@@ -189,8 +191,8 @@ class OciA1DeploymentConfigTests(unittest.TestCase):
         unit=(self.root/"systemd"/"creeper-autopilot.service").read_text(
             encoding="utf-8"
         )
-        self.assertIn("MemoryHigh=5G",unit)
-        self.assertIn("MemoryMax=7G",unit)
+        self.assertIn("MemoryHigh=4G",unit)
+        self.assertIn("MemoryMax=6G",unit)
         for name in (
             "creeper-fabric-authority.service",
             "creeper-fabric-worker@.service",
@@ -200,6 +202,13 @@ class OciA1DeploymentConfigTests(unittest.TestCase):
                 text=(self.root/"systemd"/name).read_text(encoding="utf-8")
                 self.assertIn("MemoryMax=",text)
                 self.assertIn("OOMPolicy=stop",text)
+
+    def test_postgres_profile_preserves_host_memory_reserve(self) -> None:
+        install=(self.root/"install.sh").read_text(encoding="utf-8")
+        self.assertIn("shared_buffers = '256MB'",install)
+        self.assertIn("work_mem = '8MB'",install)
+        self.assertIn("maintenance_work_mem = '128MB'",install)
+        self.assertIn("max_connections = 30",install)
 
     def test_server_baseline_bootstrap_is_required_before_production(self) -> None:
         bootstrap=(self.root/"bootstrap-baseline.sh").read_text(encoding="utf-8")
