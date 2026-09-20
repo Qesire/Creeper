@@ -19,6 +19,7 @@ class FabricRemoteDeploymentTests(unittest.TestCase):
             encoding="utf-8"
         )
         self.assertNotIn("Requires=creeper-fabric-authority.service",unit)
+        self.assertIn("ConditionPathExists=/etc/wireguard/creeper.conf",unit)
         self.assertIn("ExecStartPre=/opt/creeper/deploy/fabric-worker/preflight.sh",unit)
         self.assertIn("EnvironmentFile=/etc/creeper/remote-worker.env",unit)
 
