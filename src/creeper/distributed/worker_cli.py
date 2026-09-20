@@ -50,6 +50,11 @@ async def _run(config_path: Path) -> None:
             worker_id=descriptor.worker_id,
             worker_instance_id=descriptor.worker_instance_id,
             secret=secret,
+            upload_reserver=lambda amount: spool.reserve_coordinator_upload(
+                amount,
+                budget_bytes=config.coordinator_upload_budget_bytes_per_month,
+            ),
+            upload_overhead_bytes=config.coordinator_upload_overhead_bytes,
         ) as client:
             worker=DistributedWorker(
                 client,
