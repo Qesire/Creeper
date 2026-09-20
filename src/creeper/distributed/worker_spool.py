@@ -40,9 +40,79 @@ class WorkerResultSpool:
             ) WITHOUT ROWID
             """
         )
+        self.connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS coordinator_upload_usage (
+                period_key TEXT PRIMARY KEY,
+                bytes_reserved INTEGER NOT NULL DEFAULT 0
+                    CHECK(bytes_reserved >= 0),
+                updated_at REAL NOT NULL
+            ) WITHOUT ROWID
+            """
+        )
 
     def close(self) -> None:
         self.connection.close()
+
+    def _upload_period_key(self) -> str:
+        return time.strftime("%Y-%m", time.gmtime(float(self.clock())))
+
+    def coordinator_upload_usage(self, period_key: str | None = None) -> int:
+        key = self._upload_period_key() if period_key is None else str(period_key)
+        row = self.connection.execute(
+            "SELECT bytes_reserved FROM coordinator_upload_usage WHERE period_key=?",
+            (key,),
+        ).fetchone()
+        return 0 if row is None else int(row["bytes_reserved"])
+
+    def reserve_coordinator_upload(
+        self,
+        size_bytes: int,
+        *,
+        budget_bytes: int = 0,
+    ) -> bool:
+        if (
+            isinstance(size_bytes, bool)
+            or not isinstance(size_bytes, int)
+            or size_bytes < 0
+        ):
+            raise ValueError("size_bytes must be a non-negative integer")
+        if (
+            isinstance(budget_bytes, bool)
+            or not isinstance(budget_bytes, int)
+            or budget_bytes < 0
+        ):
+            raise ValueError("budget_bytes must be a non-negative integer")
+        key = self._upload_period_key()
+        now = float(self.clock())
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            row = self.connection.execute(
+                "SELECT bytes_reserved FROM coordinator_upload_usage WHERE period_key=?",
+                (key,),
+            ).fetchone()
+            used = 0 if row is None else int(row["bytes_reserved"])
+            if budget_bytes and used + size_bytes > budget_bytes:
+                self.connection.rollback()
+                return False
+            self.connection.execute(
+                """
+                INSERT INTO coordinator_upload_usage(
+                    period_key, bytes_reserved, updated_at
+                ) VALUES (?, ?, ?)
+                ON CONFLICT(period_key) DO UPDATE SET
+                    bytes_reserved=coordinator_upload_usage.bytes_reserved
+                        + excluded.bytes_reserved,
+                    updated_at=excluded.updated_at
+                """,
+                (key, size_bytes, now),
+            )
+            self.connection.commit()
+            return True
+        except BaseException:
+            if self.connection.in_transaction:
+                self.connection.rollback()
+            raise
 
     def pending_count(self) -> int:
         row = self.connection.execute(
