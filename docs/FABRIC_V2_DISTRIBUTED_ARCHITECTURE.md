@@ -96,6 +96,13 @@ A future NATS/JetStream adapter may publish outbox events and wake workers, but
 workers must still claim/fence work in PostgreSQL and commit ResultBatch through
 Authority. Broker delivery semantics cannot override database ownership.
 
+`outbox_enabled` controls only that optional broker-event stream. It defaults to
+true for generic Fabric deployments. A deployment that has no outbox publisher
+must set it false consistently for every process opening the Authority store;
+this does not disable ResultBatch persistence, the worker durable spool, the
+authority inbox, fencing, or domain idempotency. The canonical OCI HTTP-only
+profile does so to keep authority-state growth bounded.
+
 ## 7. Creeper domain boundary
 
 Fabric workers execute deterministic expensive I/O. They do not decide:
