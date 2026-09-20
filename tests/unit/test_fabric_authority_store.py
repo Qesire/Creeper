@@ -161,6 +161,12 @@ class FabricAuthorityStoreTests(unittest.TestCase):
         )
         try:
             store.register_worker(self.worker)
+            store.configure_provider_budget(
+                "datacite",
+                requests_per_second=10.0,
+                max_global_inflight=4,
+                require_qualified_region=False,
+            )
             task_id,inserted=store.admit_work(self.work("no-outbox"))
             self.assertTrue(inserted)
             lease=store.claim_work(
@@ -193,6 +199,12 @@ class FabricAuthorityStoreTests(unittest.TestCase):
         )
         try:
             store.register_worker(self.worker)
+            store.configure_provider_budget(
+                "datacite",
+                requests_per_second=10.0,
+                max_global_inflight=4,
+                require_qualified_region=False,
+            )
             task_id,inserted=store.admit_work(self.work("gc"))
             self.assertTrue(inserted)
             lease=store.claim_work(
