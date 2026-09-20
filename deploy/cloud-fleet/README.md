@@ -29,6 +29,17 @@ Official references:
 - AWS EC2 Free Tier details: https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ec2-free-tier-usage.html
 - Koyeb free instance limits: https://www.koyeb.com/docs/reference/instances
 
+## Optional academic Azure account
+
+Eligible full-time university students can currently use Azure for Students:
+USD 100 credit for 12 months, no credit card required, with annual renewal while
+student eligibility continues. Microsoft limits the offer to education,
+teaching, non-commercial research, and related software development/testing;
+verify that the intended use fits the current offer terms before deploying
+competition workloads.
+
+Official reference: https://azure.microsoft.com/en-us/free/students
+
 ## Role assignment
 
 Use the network/data characteristics, not just CPU count:
