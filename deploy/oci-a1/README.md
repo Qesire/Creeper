@@ -67,7 +67,11 @@ control API is part of this profile.
 ## Email is the operator surface
 
 A systemd timer sends one summary around 20:00 Asia/Singapore every day.
-Core service failures invoke the same reporter in alert mode.
+Core service failures invoke the same reporter in alert mode. Every generated
+message is written to a local durable outbox before SMTP is attempted; a
+separate 15-minute retry timer replays pending mail after transient SMTP or
+network failures. Concurrent report/alert/retry processes share an advisory
+outbox lock, so one queued message is not sent concurrently by two senders.
 
 The summary includes:
 
@@ -194,8 +198,10 @@ sudo systemctl start creeper-email-report.service
 - Local legacy evidence duplication: prevented by
   `[evidence] enabled = false` in the autopilot profile.
 - Disk/RAM pressure: autopilot resource governor throttles before hard stop.
-- Service failure: systemd invokes an alert email; no operator polling is
-  required for routine health visibility.
+- Service failure: systemd queues an alert email; transient SMTP failure leaves
+  it durable and the retry timer replays it at least once.
+- SMTP ACK ambiguity can still produce a duplicate email after a process crash;
+  delivery is intentionally at-least-once rather than loss-prone exactly-once.
 
 
 ## Free-tier availability caveat
