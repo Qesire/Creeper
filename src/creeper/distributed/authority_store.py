@@ -1480,7 +1480,25 @@ class DistributedAuthorityStore:
             "dead": states.get("DEAD", 0),
             "unconsumed_batches": int(
                 self.connection.execute(
-                    "SELECT COUNT(*) AS n FROM fabric_result_batches WHERE consumed_at IS NULL"
+                    "SELECT COUNT(*) AS n FROM fabric_result_batches "
+                    "WHERE consumed_at IS NULL AND quarantined=0"
+                ).fetchone()["n"]
+            ),
+            "quarantined_batches": int(
+                self.connection.execute(
+                    "SELECT COUNT(*) AS n FROM fabric_result_batches "
+                    "WHERE quarantined=1"
+                ).fetchone()["n"]
+            ),
+            "retained_batches": int(
+                self.connection.execute(
+                    "SELECT COUNT(*) AS n FROM fabric_result_batches"
+                ).fetchone()["n"]
+            ),
+            "inactive_provider_permits": int(
+                self.connection.execute(
+                    "SELECT COUNT(*) AS n FROM fabric_provider_permits "
+                    "WHERE active=0"
                 ).fetchone()["n"]
             ),
             "pending_outbox": int(
