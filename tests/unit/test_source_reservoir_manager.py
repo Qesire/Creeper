@@ -772,6 +772,46 @@ class SourceReservoirManagerTests(unittest.TestCase):
         self.assertEqual(directive.subject, candidate.canonical_entrypoint)
         self.assertEqual(plan.search_call_budget, 1)
 
+    def test_zero_search_budget_disables_unknown_format_llm_work(self) -> None:
+        reason = make_unknown_format_reason(
+            b'{"host":"a.example"}\n{"host":"b.example"}\n',
+            content_type="application/octet-stream",
+            truncated=False,
+        )
+        self.assertIsNotNone(reason)
+        candidate = SourceCandidate(
+            canonical_entrypoint="https://repo.example/opaque-download",
+            source_family="BULK_ARTIFACT",
+            level=SourceLevel.SOURCE,
+            discovered_by="deterministic:test",
+            discovery_strategy="FIXTURE",
+            expected_year_from=1996,
+            expected_year_to=2001,
+            expected_volume=1000,
+            enumerability_prior=1.0,
+            confidence=0.8,
+            state=SourceState.HOLD,
+            state_reason=str(reason),
+        )
+        self.registry.register_proposal(candidate)
+        manager = SourceReservoirManager(
+            self.registry,
+            targets=SourcePoolTargets(
+                active_min=0,
+                active_target=0,
+                warm_min=0,
+                warm_target=0,
+                cold_min=3,
+                cold_target=6,
+                max_search_directives=0,
+            ),
+        )
+
+        plan=manager.plan()
+
+        self.assertEqual(plan.search_directives,())
+        self.assertEqual(plan.search_call_budget,0)
+
     def test_exhausted_residual_program_does_not_trigger_recovery_llm(self) -> None:
         coverage = ResidualSearchLedger(self.registry.connection)
         cell = SearchCell(
