@@ -1059,30 +1059,51 @@ class DistributedAuthorityStore:
                     outbox,
                 ).rowcount
 
-            report["request_nonces"]=self.connection.execute(
-                """
-                DELETE FROM fabric_request_nonces
-                WHERE rowid IN (
-                    SELECT rowid FROM fabric_request_nonces
+            nonces=[
+                (str(row["worker_id"]),str(row["nonce"]))
+                for row in self.connection.execute(
+                    """
+                    SELECT worker_id,nonce
+                    FROM fabric_request_nonces
                     WHERE seen_at<=?
-                    ORDER BY seen_at
+                    ORDER BY seen_at,worker_id,nonce
                     LIMIT ?
+                    """,
+                    (cutoff,limit),
                 )
-                """,
-                (cutoff,limit),
-            ).rowcount
-            report["egress_days"]=self.connection.execute(
-                """
-                DELETE FROM fabric_worker_egress_daily
-                WHERE rowid IN (
-                    SELECT rowid FROM fabric_worker_egress_daily
+            ]
+            if nonces:
+                self.connection.executemany(
+                    """
+                    DELETE FROM fabric_request_nonces
+                    WHERE worker_id=? AND nonce=?
+                    """,
+                    nonces,
+                )
+                report["request_nonces"]=len(nonces)
+
+            egress_days=[
+                (str(row["worker_id"]),int(row["day_key"]))
+                for row in self.connection.execute(
+                    """
+                    SELECT worker_id,day_key
+                    FROM fabric_worker_egress_daily
                     WHERE updated_at<=?
-                    ORDER BY updated_at
+                    ORDER BY updated_at,worker_id,day_key
                     LIMIT ?
+                    """,
+                    (cutoff,limit),
                 )
-                """,
-                (cutoff,limit),
-            ).rowcount
+            ]
+            if egress_days:
+                self.connection.executemany(
+                    """
+                    DELETE FROM fabric_worker_egress_daily
+                    WHERE worker_id=? AND day_key=?
+                    """,
+                    egress_days,
+                )
+                report["egress_days"]=len(egress_days)
         return report
 
     def configure_provider_budget(
