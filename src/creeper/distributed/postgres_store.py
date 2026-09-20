@@ -1129,7 +1129,10 @@ class PostgresAuthorityStore:
                 self._lease(cur,task_id,worker_id,worker_instance_id,generation)
                 region=str(worker["region"])
                 success=bool(
-                    connect_success and status_code is not None and status_code<500
+                    connect_success
+                    and status_code is not None
+                    and status_code<500
+                    and not policy_block
                 )
                 throttle=status_code in {429,503}
                 cur.execute(
