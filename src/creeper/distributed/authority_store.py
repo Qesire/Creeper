@@ -730,6 +730,7 @@ class DistributedAuthorityStore:
         worker_instance_id: str,
         generation: int,
         lease_seconds: float,
+        expected_lease_deadline: float | None = None,
     ) -> TaskLease:
         if lease_seconds <= 0:
             raise ValueError("lease_seconds must be positive")
@@ -740,15 +741,31 @@ class DistributedAuthorityStore:
                 worker_instance_id=worker_instance_id,
                 generation=generation,
             )
-            deadline = float(self.clock()) + float(lease_seconds)
-            self.connection.execute(
-                """
-                UPDATE fabric_work
-                SET lease_deadline=?, updated_at=?
-                WHERE task_id=?
-                """,
-                (deadline, float(self.clock()), task_id),
-            )
+            current_deadline=float(row["lease_deadline"])
+            if expected_lease_deadline is not None:
+                expected=float(expected_lease_deadline)
+                if current_deadline < expected:
+                    raise StaleLeaseError(
+                        "authority lease deadline regressed below client expectation"
+                    )
+                if current_deadline > expected:
+                    # A prior compare-and-renew request already committed but
+                    # its response was lost. Replay that authoritative lease
+                    # without extending the deadline a second time.
+                    deadline=current_deadline
+                else:
+                    deadline=float(self.clock())+float(lease_seconds)
+            else:
+                deadline=float(self.clock())+float(lease_seconds)
+            if deadline != current_deadline:
+                self.connection.execute(
+                    """
+                    UPDATE fabric_work
+                    SET lease_deadline=?, updated_at=?
+                    WHERE task_id=?
+                    """,
+                    (deadline, float(self.clock()), task_id),
+                )
         return TaskLease(
             task_id=task_id,
             work_key=str(row["work_key"]),
